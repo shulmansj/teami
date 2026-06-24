@@ -1,0 +1,28 @@
+.env
+.env.*
+*.local
+
+logs/
+outputs/
+.linear-cache/
+.agent-shell/
+.agentic-factory/
+
+node_modules/
+__pycache__/
+.pytest_cache/
+supabase/.temp/
+
+.DS_Store
+Thumbs.db
+
+LEDGER.md
+MORNING-REPORT.md
+PHOENIX-CAPABILITIES.md
+CONSTRAINTS.md
+
+# Local agent-session guidance for this working copy.
+# These files are builder/adopter-specific and should not ship as public artifacts.
+AGENTS.md
+CLAUDE.md
+.claude/

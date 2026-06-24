@@ -1,0 +1,50 @@
+# Public trust and support surfaces.
+.github/workflows/** @shulmansj
+.github/ISSUE_TEMPLATE/** @shulmansj
+CODEOWNERS @shulmansj
+package.json @shulmansj
+deno.lock @shulmansj
+.gitleaks.toml @shulmansj
+scripts/security-scan.mjs @shulmansj
+scripts/edge-deps.mjs @shulmansj
+SOURCE-VISIBLE.md @shulmansj
+SECURITY.md @shulmansj
+CONTRIBUTING.md @shulmansj
+maintainers/contracts/** @shulmansj
+
+# Public setup and trust-boundary docs.
+README.md @shulmansj
+docs/adoption.md @shulmansj
+docs/operating-model.md @shulmansj
+docs/self-improvement.md @shulmansj
+execution/README.md @shulmansj
+execution/integrations/linear/README.md @shulmansj
+execution/integrations/linear/config.example.json @shulmansj
+supabase/README.md @shulmansj
+
+# Hosted setup and behavior-repo GitHub broker surfaces.
+supabase/config.toml @shulmansj
+supabase/functions/** @shulmansj
+supabase/migrations/** @shulmansj
+execution/integrations/linear/src/broker-credential.mjs @shulmansj
+execution/integrations/linear/src/github-setup.mjs @shulmansj
+execution/integrations/linear/src/github-token-broker-client.mjs @shulmansj
+execution/integrations/linear/src/hosted-inbox-client.mjs @shulmansj
+execution/integrations/linear/src/inbox-store.mjs @shulmansj
+execution/integrations/linear/src/linear-setup-auth.mjs @shulmansj
+execution/integrations/linear/src/linear-webhook-inbox.mjs @shulmansj
+execution/integrations/linear/src/runner-inbox-credential.mjs @shulmansj
+execution/integrations/linear/src/cli/github-command-options.mjs @shulmansj
+execution/integrations/linear/src/cli/linear-setup-command.mjs @shulmansj
+
+# Local repo and resource execution surfaces.
+execution/engine/** @shulmansj
+execution/integrations/git/** @shulmansj
+execution/integrations/linear/src/domain-*.mjs @shulmansj
+execution/integrations/linear/src/runtime-adapters.mjs @shulmansj
+execution/integrations/linear/src/runtime-command.mjs @shulmansj
+execution/integrations/linear/src/cli/domain-bind-repo-command.mjs @shulmansj
+execution/integrations/linear/src/cli/doctor-command.mjs @shulmansj
+execution/integrations/linear/src/workflows/decomposition/artifact-apply.mjs @shulmansj
+execution/integrations/linear/src/workflows/decomposition/run-service.mjs @shulmansj
+execution/integrations/linear/test/** @shulmansj

@@ -1,0 +1,77 @@
+name: Public trust suite
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trust-suite:
+    name: Public trust suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      # Actions decision: this workflow uses only GitHub-maintained actions.
+      # No third-party actions or repository/org secrets are used.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.11"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Edge dependency check
+        run: npm run edge:check
+
+      - name: Edge dependency audit
+        run: npm run edge:audit
+
+      - name: Secret scan
+        run: |
+          npm run security:secrets
+          npm run security:secrets:history
+
+      - name: Public export hygiene and audit checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f maintainers/publication/export-public-artifact.mjs ]]; then
+            node --check maintainers/publication/export-public-artifact.mjs
+            node maintainers/publication/export-public-artifact.mjs --self-test
+            node --check maintainers/publication/verify-public-artifact.mjs
+            node maintainers/publication/verify-public-artifact.mjs --self-test
+            node --check maintainers/publication/run-public-export-audit.mjs
+            node maintainers/publication/run-public-export-audit.mjs --self-test
+          else
+            forbidden_path_regex='^(docs/(plans|reviews|breakdowns)|maintainers/(plans|reviews|publication)|\.agentic-factory/)'
+            if git ls-files | grep -E "$forbidden_path_regex"; then
+              echo "::error::Private planning, publication, or runtime-state paths are present in the public artifact."
+              exit 1
+            fi
+
+            if git log --all --name-only --pretty=format: -- \
+              docs/plans docs/reviews docs/breakdowns \
+              maintainers/plans maintainers/reviews maintainers/publication \
+              | grep -q .; then
+              echo "::error::Private planning or publication paths are present in public artifact history."
+              exit 1
+            fi
+          fi

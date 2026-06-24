@@ -1,0 +1,27 @@
+{
+  "schema_version": "agentic-factory-workspace-eval-policy/v1",
+  "_note": "Repo-owned workspace eval policy (plan ~1107-1117). Every value here is HUMAN-SET and has no automatic transition logic in MVP: change it by editing this file in a reviewed commit. Rich dataset promotion reads this artifact at promotion time to stamp workspace_maturity / project_category / project_impact_level metadata and to assign train/test split membership deterministically. JSON, not YAML, per decision D2 (zero-dependency repo).",
+  "workspace_maturity": "new",
+  "project_category": {
+    "default": "code",
+    "overrides": {},
+    "_note": "Default example.schema.json project_category for promoted examples. overrides maps a Linear project id (preferred, stable) or exact project name to a category for that project's runs."
+  },
+  "project_impact_level": {
+    "default": "low",
+    "overrides": {},
+    "_note": "Default example.schema.json project_impact_level. Same override keying as project_category."
+  },
+  "split_assignment": {
+    "method": "sha256_of_example_id_mod_total_buckets",
+    "test_buckets": 1,
+    "total_buckets": 5,
+    "flag_only_splits": ["calibration", "regression"],
+    "_note": "Deterministic train/test assignment at promotion time: bucket = first 8 bytes of sha256(example_id) interpreted as an unsigned integer, modulo total_buckets; bucket < test_buckets => test, else train. Default 1/5 test (4:1 train:test). The same example id always lands in the same split, on any machine, with no stored counter. calibration and regression are NEVER hash-assigned: they require the explicit --split flag at promotion time (flag_only_splits)."
+  },
+  "human_label_regression": {
+    "any_label_degradation_blocks": true,
+    "max_mean_test_score_drop": 0.05,
+    "_note": "Decision D5 default for the process-change gate (step 9 consumer): block when any human-labeled example's label degrades, or when the mean human-comparable score on test-split examples drops by more than this absolute amount."
+  }
+}

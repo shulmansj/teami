@@ -1,0 +1,37 @@
+name: General feedback
+description: Share feedback about the product, docs, setup flow, or current limits.
+title: "[Feedback]: "
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Best-effort feedback is welcome. External pull requests are not supported yet, and security-sensitive reports should use GitHub private vulnerability reporting instead of public issues.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feedback area
+      options:
+        - Product concept
+        - Setup experience
+        - Documentation
+        - Demo or examples
+        - Security or permissions posture
+        - Other public surface
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Feedback
+      description: What worked, what was confusing, or what changed your confidence?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Tell us what you were trying to evaluate or accomplish.
+    validations:
+      required: false
+

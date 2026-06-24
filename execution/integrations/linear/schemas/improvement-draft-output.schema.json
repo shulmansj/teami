@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "improvement-draft-output/v1",
+  "title": "Agentic Factory improvement draft output",
+  "description": "Structured-output generation schema for the local-only improvement drafter. The wrapper additionally checks target echo, content gates, byte bounds, and promotion-marker sentinel containment before any draft is kept.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "target_key", "draft_content"],
+  "properties": {
+    "schema_version": {
+      "const": "improvement-draft-output/v1"
+    },
+    "target_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "draft_content": {
+      "type": "string",
+      "minLength": 1
+    },
+    "change_summary": {
+      "type": "string",
+      "maxLength": 2000
+    }
+  }
+}

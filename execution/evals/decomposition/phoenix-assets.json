@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "_note": "Accepted Phoenix asset manifest. The repo owns which Phoenix prompt/evaluator/dataset versions are ACCEPTED; Phoenix owns the assets themselves. Null pins mean the asset is not yet registered or accepted in Phoenix; until a pin is filled, the repo snapshot/code referenced here is the accepted behavior. Pins change only through accepted process-change proposals (HITL PRs). JSON has no comments, so _note fields carry inline documentation; see README.md for the full rules.",
+  "phoenix": {
+    "expected_origin": "http://127.0.0.1:6006",
+    "server_package_pin": "arize-phoenix==14.13.0",
+    "project_name": "agentic-factory"
+  },
+  "prompts": [
+    {
+      "role": "decomposition_quality_judge",
+      "target_key": "prompt/decomposition/decomposition_quality_judge",
+      "human_name": "Decomposition quality judge",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": "UHJvbXB0VmVyc2lvbjox",
+      "accepted_tag": "agentic_factory_accepted",
+      "snapshot_path": "execution/evals/decomposition/accepted-prompts/decomposition-quality-judge.md",
+      "snapshot_sha256": "ebd68b2a9e2a1af4b80714582ce195ed88d3e0c560b66d2c5d2ce83c3abdb3bb",
+      "prompt_version": "UHJvbXB0VmVyc2lvbjox",
+      "rubric_version": "1.0.0",
+      "failure_taxonomy_version": "1.0.0",
+      "_note": "The decomposition quality judge is the maintainer-owned evaluator: the adopter self-improvement loop must never propose changes to it (no candidate_tag, excluded by isAdopterSelfImprovementTarget). Its prompt/evaluator entries are KEPT so the judge still runs as a live evaluator. Phoenix pins (prompt_name/prompt_id/accepted_prompt_version_id) are filled when this judge prompt is first registered in Phoenix. snapshot_sha256 is the sha256 of the exact bytes of snapshot_path and content-addresses the ACCEPTED baseline now: until accepted_prompt_version_id is non-null, accepted_baseline_id for this prompt is sha256:<snapshot_sha256>. Editing the snapshot is a process change: update snapshot_sha256 in the same proposal or CI fails on the drift test."
+    },
+    {
+      "role": "pm",
+      "target_key": "prompt/decomposition/pm_product_sufficiency_pass",
+      "human_name": "PM product sufficiency prompt",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "agentic_factory_accepted",
+      "candidate_tag": "agentic_factory_promotion_candidate",
+      "snapshot_path": "execution/evals/decomposition/accepted-prompts/pm-product-sufficiency-pass.md",
+      "snapshot_sha256": "41fceb1ee15b9aa2c6905fe06e7acfa08eb0c4401e8431a26d7e0e980666bca1",
+      "prompt_version": "unpinned-initial"
+    },
+    {
+      "role": "sr_eng",
+      "target_key": "prompt/decomposition/sr_eng_grounding_pass",
+      "human_name": "Sr-eng grounding prompt",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "agentic_factory_accepted",
+      "candidate_tag": "agentic_factory_promotion_candidate",
+      "snapshot_path": "execution/evals/decomposition/accepted-prompts/sr-eng-grounding-pass.md",
+      "snapshot_sha256": "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843",
+      "prompt_version": "unpinned-initial"
+    },
+    {
+      "role": "pm",
+      "target_key": "prompt/decomposition/pm_synthesis",
+      "human_name": "PM synthesis prompt",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "agentic_factory_accepted",
+      "candidate_tag": "agentic_factory_promotion_candidate",
+      "snapshot_path": "execution/evals/decomposition/accepted-prompts/pm-synthesis.md",
+      "snapshot_sha256": "7655171d4b764f74138b6b9f6d9160a086c7aeb695917daf00f25c04bb280e64",
+      "prompt_version": "unpinned-initial"
+    },
+    {
+      "role": "sr_eng",
+      "target_key": "prompt/decomposition/sr_eng_blocker_check",
+      "human_name": "Sr-eng blocker check prompt",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "agentic_factory_accepted",
+      "candidate_tag": "agentic_factory_promotion_candidate",
+      "snapshot_path": "execution/evals/decomposition/accepted-prompts/sr-eng-blocker-check.md",
+      "snapshot_sha256": "49b008b257f93f889e5d3931eb0c06c090c5444346840ed1b36b8bc31b35a917",
+      "prompt_version": "unpinned-initial"
+    },
+    {
+      "role": "orchestrator",
+      "target_key": "prompt/decomposition/orchestrator_governing",
+      "human_name": "Orchestrator governing prompt",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "agentic_factory_accepted",
+      "candidate_tag": "agentic_factory_promotion_candidate",
+      "snapshot_path": "execution/evals/decomposition/accepted-prompts/orchestrator-governing.md",
+      "snapshot_sha256": "34b57bcf5ae41321a636b0fd71bd5ef89d2fb71c9173b38697c8276da6e89bb8",
+      "prompt_version": "unpinned-initial"
+    }
+  ],
+  "evaluators": [
+    {
+      "id": "decomposition_quality_judge_v1",
+      "kind": "llm",
+      "prompt_role": "decomposition_quality_judge",
+      "prompt_version_id": null,
+      "model": null,
+      "_note": "Evaluator identity is repo-owned; the pinned Phoenix REST surface has no evaluator resolver. prompt_version_id and model are pinned when the judge is first registered and run."
+    },
+    {
+      "id": "decomposition_quality_offline_v1",
+      "kind": "code",
+      "code_path": "execution/integrations/linear/src/quality.mjs#evaluateDecompositionQualityOffline"
+    },
+    {
+      "id": "accepted_packet_sufficiency_offline_v1",
+      "kind": "code",
+      "code_path": "execution/integrations/linear/src/quality.mjs#evaluateAcceptedPacketSufficiencyOffline"
+    },
+    {
+      "id": "pause_state_correctness_offline_v1",
+      "kind": "code",
+      "code_path": "execution/integrations/linear/src/quality.mjs#evaluatePauseState",
+      "_note": "The three code evaluator ids above are the STABLE identifiers deterministic check emission (eval:emit-checks / deterministic-check-emission.mjs) writes as the Phoenix annotation identifier with annotator_kind CODE; Phoenix upserts by (name, target, identifier)."
+    }
+  ],
+  "rules": [
+    {
+      "target_key": "rule/decomposition/runtime_role_assignments",
+      "human_name": "Runtime role assignments",
+      "artifact_kind": "runtime_role_defaults",
+      "materializer": "eval_variant_to_runtime_role_defaults",
+      "artifact_path": "execution/evals/decomposition/accepted-runtime-roles.json",
+      "snapshot_sha256": "6dfe02393ec63076cfb3a2166984cf1b3951f16792c9edf1ae3b9b7ca26bea53"
+    }
+  ],
+  "datasets": [
+    {
+      "name": "agentic-factory-decomposition-examples",
+      "dataset_id": "RGF0YXNldDox",
+      "accepted_dataset_version_id": "RGF0YXNldFZlcnNpb246Mg==",
+      "splits": {
+        "train": {
+          "name": "train",
+          "split_id": null
+        },
+        "test": {
+          "name": "test",
+          "split_id": null
+        }
+      },
+      "split_representation": "native",
+      "_note": "Curated decomposition example dataset (rich promotion track). dataset_id and version pins are captured at write time from the Phoenix upload response. split_representation records native vs metadata_fallback; native Phoenix split membership always wins over metadata.dataset_split."
+    }
+  ],
+  "experiments": [
+    {
+      "purpose": "baseline",
+      "candidate_target_key": "prompt/decomposition/sr_eng_grounding_pass",
+      "experiment_id": "RXhwZXJpbWVudDo1",
+      "dataset_id": "RGF0YXNldDox",
+      "dataset_version_id": "RGF0YXNldFZlcnNpb246Mg==",
+      "project_name": null,
+      "accepted_artifact_hash_vector": {
+        "snapshot_sha256": "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843",
+        "accepted_prompt_version_id": null
+      },
+      "_note": "Post-extraction baseline for the sr_eng grounding prompt: RXhwZXJpbWVudDo1, the first REAL evaluation run (re-executable example RGF0YXNldEV4YW1wbGU6Mg== on dataset version 2; judge mean 0.900; one legacy ineligible example fails per-run and is excluded)."
+    },
+    {
+      "purpose": "baseline",
+      "experiment_id": "RXhwZXJpbWVudDo1",
+      "dataset_id": "RGF0YXNldDox",
+      "dataset_version_id": "RGF0YXNldFZlcnNpb246Mg==",
+      "project_name": "Experiment-7cf2a684e812e741c360e605"
+    }
+  ],
+  "evidence": {
+    "annotation_ids": [
+      "VHJhY2VBbm5vdGF0aW9uOjM="
+    ],
+    "receipt_run_ids": [
+      "run-live-proof-20260610t224045569z"
+    ],
+    "pr_urls": []
+  }
+}

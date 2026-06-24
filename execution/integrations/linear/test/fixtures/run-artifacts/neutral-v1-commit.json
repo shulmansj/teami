@@ -1,0 +1,25 @@
+{
+  "schema_version": "agentic-factory-run-artifact/v1",
+  "engine_version": "0.2.0",
+  "function_version": "0.0.1",
+  "workflow_version": "0.0.1",
+  "run_id": "probe-1",
+  "domain_id": "d",
+  "workspace_id": "w",
+  "team_id": "t",
+  "kind": "commit",
+  "runtime_assignments": {},
+  "runtime_metadata": {},
+  "bounds": {
+    "rounds_used": 1,
+    "max_rounds": 1000
+  },
+  "evidence": {
+    "perspectives_run": []
+  },
+  "payload_schema_id": "probe-run-payload/v1",
+  "payload": {
+    "terminal_output": {},
+    "probe_result": "ok"
+  }
+}

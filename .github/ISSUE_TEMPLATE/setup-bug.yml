@@ -1,0 +1,48 @@
+name: Setup bug
+description: Report a problem with installing, configuring, or running Agentic Factory.
+title: "[Setup bug]: "
+labels: ["setup", "feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, tokens, private repository URLs, tenant data, or vulnerability details. Use GitHub private vulnerability reporting for sensitive security reports.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the setup problem and the result you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact commands or setup steps that led to the problem.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Node version, package manager, and any relevant setup mode.
+      placeholder: |
+        OS:
+        Node:
+        Package manager:
+        Setup path:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste non-sensitive logs or error messages.
+      render: shell
+    validations:
+      required: false
+

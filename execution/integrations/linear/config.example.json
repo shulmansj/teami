@@ -1,0 +1,101 @@
+{
+  "linear": {
+    "cache_path": ".agentic-factory/linear.json",
+    "oauth": {
+      "client_id": "00117f8c7dba0a3adf8d2a7398f5f64f",
+      "redirect_uri": "http://127.0.0.1:8723/linear/oauth/callback",
+      "scopes": ["read", "write", "admin"],
+      "actor": "user",
+      "credential_storage": "os"
+    },
+    "team": {
+      "key": "AF",
+      "name": "Agentic Factory",
+      "description": "Linear team for agent-executed work from Linear projects."
+    },
+    "project": {
+      "labels": {
+        "has_open_questions": "Has Open Questions"
+      },
+      "status_types": {
+        "backlog": "backlog",
+        "planned": "planned",
+        "started": "started"
+      },
+      "template_name": "Agentic Factory Roadmap Item"
+    },
+    "issue": {
+      "labels": {
+        "discovery": "Discovery"
+      },
+      "statuses": {
+        "unstarted": {
+          "name": "Backlog"
+        }
+      }
+    }
+  },
+  "inbox": {
+    "base_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-inbox",
+    "webhook_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-inbox/v1/webhooks/linear",
+    "dashboard_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-inbox/status",
+    "credential_storage": "os",
+    "credential_file": ".agentic-factory/inbox-runner-credential.json",
+    "linear": {
+      "webhook_label": "Agentic Factory hosted inbox",
+      "resource_types": ["Project"]
+    },
+    "runner": {
+      "required_capabilities": ["linear.project.planned", "decomposition.trigger_runner.v1"],
+      "heartbeat_stale_ms": 120000,
+      "lease_duration_ms": 300000
+    }
+  },
+  "github": {
+    "behavior_repo": {
+      "owner": null,
+      "name": "agentic-factory",
+      "visibility": "private"
+    },
+    "starter_remote_urls": ["https://github.com/shulmansj/agentic-factory"],
+    "app_slug": "agentik-factory",
+    "app_id": "4046750",
+    "token_broker": {
+      "base_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-github-broker",
+      "token_file": ".agentic-factory/github-broker-token.env"
+    }
+  },
+  "runtime": {
+    "default_invocation": "session_start",
+    "adapters": {
+      "codex": {
+        "command": "codex",
+        "cli_args_prefix": ["-c", "service_tier=\"fast\""],
+        "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+        "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.strict-generation.schema.json",
+        "tool_policy": {
+          "linear_write": false
+        }
+      },
+      "claude": {
+        "command": "claude",
+        "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+        "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+        "tool_policy": {
+          "linear_write": false
+        }
+      }
+    }
+  },
+  "workflows": {
+    "decomposition": {
+      "roles": {
+        "pm": {},
+        "sr_eng": {},
+        "judge": {},
+        "drafter": {},
+        "orchestrator": {}
+      }
+    }
+  }
+}

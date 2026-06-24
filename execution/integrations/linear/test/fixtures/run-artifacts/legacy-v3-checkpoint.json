@@ -1,0 +1,25 @@
+{
+  "schema_version": "linear-decomposition-run-artifact/v3",
+  "workflow_version": "0.2.0",
+  "kind": "checkpoint",
+  "run_id": "run-legacy-v3-checkpoint",
+  "domain_id": "support-ops",
+  "workspace_id": "workspace-1",
+  "team_id": "team-1",
+  "runtime_assignments": {
+    "pm": {
+      "runtime": "claude"
+    },
+    "sr_eng": {
+      "runtime": "codex"
+    }
+  },
+  "runtime_metadata": {
+    "pm": {
+      "runtime_name": "claude"
+    },
+    "sr_eng": {
+      "runtime_name": "codex"
+    }
+  }
+}

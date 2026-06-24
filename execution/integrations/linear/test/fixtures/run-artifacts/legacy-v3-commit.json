@@ -1,0 +1,89 @@
+{
+  "schema_version": "linear-decomposition-run-artifact/v3",
+  "workflow_version": "0.2.0",
+  "kind": "commit",
+  "run_id": "run-legacy-v3-replay",
+  "domain_id": "support-ops",
+  "workspace_id": "workspace-1",
+  "team_id": "team-1",
+  "linear_project_id": "project-1",
+  "terminal_output": {
+    "schema_version": "agentic-factory-orchestrator-turn-output/v1",
+    "run_id": "run-legacy-v3-replay",
+    "workflow_version": "0.2.0",
+    "outcome": "commit",
+    "reason": "synthesis_complete",
+    "context_digest": "Legacy completed context.",
+    "source_refs": [
+      {
+        "kind": "linear_project",
+        "id": "project-1"
+      }
+    ],
+    "assumptions": [],
+    "constraints": [],
+    "risks": []
+  },
+  "evidence": {
+    "perspectives_run": [
+      {
+        "role": "sr_eng",
+        "outcome": "technical_context_grounded"
+      },
+      {
+        "role": "pm",
+        "outcome": "synthesis_complete"
+      }
+    ]
+  },
+  "bounds": {
+    "rounds_used": 2,
+    "max_rounds": 6
+  },
+  "environment": {
+    "agent_write_credentials_present": false
+  },
+  "runtime_assignments": {
+    "pm": {
+      "runtime": "claude"
+    },
+    "sr_eng": {
+      "runtime": "codex"
+    }
+  },
+  "runtime_metadata": {
+    "pm": {
+      "runtime_name": "claude"
+    },
+    "sr_eng": {
+      "runtime_name": "codex"
+    }
+  },
+  "final_issues": [
+    {
+      "decomposition_key": "project-plan",
+      "title": "Prepare execution setup",
+      "depends_on": [],
+      "assignment": "Create the minimal execution setup needed for the Linear project.",
+      "output": "A setup artifact that lets the next implementation issue start.",
+      "acceptance_criteria": [
+        "Setup artifact exists."
+      ],
+      "issue_body_markdown": "## Assignment\n\nCreate the minimal execution setup needed for the Linear project.\n\n## Acceptance Criteria\n\n- Setup artifact exists."
+    },
+    {
+      "decomposition_key": "project-build",
+      "title": "Implement execution slice",
+      "depends_on": [
+        "project-plan"
+      ],
+      "assignment": "Implement the first executable slice.",
+      "output": "A tested implementation slice ready for review.",
+      "acceptance_criteria": [
+        "Tests pass."
+      ],
+      "issue_body_markdown": "## Assignment\n\nImplement the first executable slice.\n\n## Acceptance Criteria\n\n- Tests pass."
+    }
+  ],
+  "project_update_markdown": "run_id: run-legacy-v3-replay\n\nDecomposition completed with fixture issues.\n\n## What I did with each part of your project\n- The relevant project sections were accounted for in this decomposition result."
+}

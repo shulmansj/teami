@@ -1,0 +1,26 @@
+{
+  "schema_version": "agentic-factory-accepted-runtime-roles/v1",
+  "_note": "Repo-owned accepted defaults for decomposition runtime role assignments. Stampable runs use these runtime/model fields; tunable adopter overrides require the unpinned-runtime dev flag and are recorded as unpinned_runtime.",
+  "roles": {
+    "pm": {
+      "runtime": "claude",
+      "model": "claude-opus-4-8"
+    },
+    "sr_eng": {
+      "runtime": "codex",
+      "model": "gpt-5.5"
+    },
+    "judge": {
+      "runtime": "claude",
+      "model": "claude-opus-4-8"
+    },
+    "drafter": {
+      "runtime": "claude",
+      "model": "claude-opus-4-8"
+    },
+    "orchestrator": {
+      "runtime": "claude",
+      "model": "claude-opus-4-8"
+    }
+  }
+}

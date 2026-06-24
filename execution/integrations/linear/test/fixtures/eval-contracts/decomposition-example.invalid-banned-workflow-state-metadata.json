@@ -1,0 +1,51 @@
+{
+  "_invalid_because": "Example metadata is Phoenix-bound, and Agentic Factory workflow/queue state keys are banned there (wipe test). pending_promotion is on the schema-level denylist, so this otherwise-valid example is rejected.",
+  "schema_version": "decomposition-eval-example/v1",
+  "input": {
+    "source_type": "linear_project_snapshot",
+    "project": {
+      "id": "fixture-project-banned-metadata",
+      "name": "Banned workflow-state metadata fixture",
+      "content": "## Goal\nProve the metadata denylist rejects queue state.",
+      "status": "Planned",
+      "labels": [],
+      "existing_issues": []
+    },
+    "run_envelope": {
+      "workflow_version": "0.2.0",
+      "allowed_source_boundaries": [],
+      "runtime_assignments": {
+        "pm": "claude/claude-opus-4-8",
+        "sr_eng": "codex/gpt-5.5"
+      }
+    },
+    "source_refs": []
+  },
+  "output": {
+    "terminal_status": "completed",
+    "terminal_reason": "synthesis_complete",
+    "phase_packets": [],
+    "final_issues": [],
+    "discovery_issues": [],
+    "dependency_relations": [],
+    "project_update_markdown": "run_id: fixture-run-0002\nFixture update."
+  },
+  "reference": {
+    "human_annotations": [],
+    "expected_properties": {}
+  },
+  "metadata": {
+    "workspace_maturity": "new",
+    "project_category": "ops",
+    "project_impact_level": "low",
+    "lifecycle_state": "active",
+    "dataset_split": "train",
+    "process_version": "0.2.0",
+    "rubric_version": "1.0.0",
+    "failure_taxonomy_version": "1.0.0",
+    "source_trace_id": null,
+    "source_run_id": null,
+    "content_retention": "sanitized_fixture",
+    "pending_promotion": true
+  }
+}

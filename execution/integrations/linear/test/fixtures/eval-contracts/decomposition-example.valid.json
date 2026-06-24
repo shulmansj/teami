@@ -1,0 +1,89 @@
+{
+  "schema_version": "decomposition-eval-example/v1",
+  "input": {
+    "source_type": "linear_project_snapshot",
+    "project": {
+      "id": "fixture-project-onboarding-email-refresh",
+      "name": "Onboarding email sequence refresh",
+      "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking domains.",
+      "status": "Planned",
+      "labels": [],
+      "existing_issues": []
+    },
+    "run_envelope": {
+      "workflow_version": "0.2.0",
+      "allowed_source_boundaries": [],
+      "runtime_assignments": {
+        "pm": "claude/claude-opus-4-8",
+        "sr_eng": "codex/gpt-5.5"
+      }
+    },
+    "source_refs": []
+  },
+  "output": {
+    "terminal_status": "completed",
+    "terminal_reason": "synthesis_complete",
+    "phase_packets": [],
+    "final_issues": [
+      {
+        "title": "Draft refreshed copy for onboarding emails 1-3",
+        "assignment": "Write replacement copy for the three onboarding emails.",
+        "output": "Three approved email drafts checked into the content folder.",
+        "acceptanceCriteria": [
+          "Each email names the single next action the user should take",
+          "Copy fits the existing template slots without layout changes"
+        ],
+        "decompositionKey": "onboarding-email-refresh/copy"
+      },
+      {
+        "title": "Wire refreshed copy into the email provider templates",
+        "assignment": "Update the provider templates with the approved drafts.",
+        "output": "Updated templates live behind the existing send schedule.",
+        "acceptanceCriteria": [
+          "Test sends render correctly in the provider preview",
+          "No new tracking domains are introduced"
+        ],
+        "decompositionKey": "onboarding-email-refresh/templates",
+        "dependsOn": ["onboarding-email-refresh/copy"]
+      }
+    ],
+    "discovery_issues": [],
+    "dependency_relations": [
+      {
+        "blocking": "onboarding-email-refresh/copy",
+        "blocked": "onboarding-email-refresh/templates"
+      }
+    ],
+    "project_update_markdown": "run_id: fixture-run-0001\nDecomposed the onboarding email refresh into two sequenced issues: copy first, template wiring second."
+  },
+  "reference": {
+    "human_annotations": [
+      {
+        "name": "decomposition_quality",
+        "label": "pass",
+        "score": 0.9,
+        "failure_modes": [],
+        "explanation": "Both issues are independently executable, the dependency is a native relation, and acceptance criteria are observable."
+      }
+    ],
+    "expected_properties": {
+      "preserves_project_intent": true,
+      "uses_structural_dependencies": true,
+      "acceptance_criteria_observable": true,
+      "escalates_product_questions": true
+    }
+  },
+  "metadata": {
+    "workspace_maturity": "new",
+    "project_category": "marketing",
+    "project_impact_level": "low",
+    "lifecycle_state": "active",
+    "dataset_split": "train",
+    "process_version": "0.2.0",
+    "rubric_version": "1.0.0",
+    "failure_taxonomy_version": "1.0.0",
+    "source_trace_id": null,
+    "source_run_id": null,
+    "content_retention": "sanitized_fixture"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "schema_version": "decomposition-eval-example/v1",
+  "_invalid_because": "metadata.rubric_version is missing; every example must record the rubric version it was judged against so process-change gates can compare only version-compatible examples.",
+  "input": {
+    "source_type": "linear_project_snapshot",
+    "project": {
+      "id": "fixture-project-onboarding-email-refresh",
+      "name": "Onboarding email sequence refresh",
+      "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking domains.",
+      "status": "Planned",
+      "labels": [],
+      "existing_issues": []
+    },
+    "run_envelope": {
+      "workflow_version": "0.2.0",
+      "allowed_source_boundaries": [],
+      "runtime_assignments": {
+        "pm": "claude/claude-opus-4-8",
+        "sr_eng": "codex/gpt-5.5"
+      }
+    },
+    "source_refs": []
+  },
+  "output": {
+    "terminal_status": "completed",
+    "terminal_reason": "synthesis_complete",
+    "phase_packets": [],
+    "final_issues": [],
+    "discovery_issues": [],
+    "dependency_relations": [],
+    "project_update_markdown": "run_id: fixture-run-0003\nDecomposition fixture missing the rubric version stamp."
+  },
+  "reference": {
+    "human_annotations": [],
+    "expected_properties": {
+      "preserves_project_intent": true,
+      "uses_structural_dependencies": true,
+      "acceptance_criteria_observable": true,
+      "escalates_product_questions": true
+    }
+  },
+  "metadata": {
+    "workspace_maturity": "new",
+    "project_category": "marketing",
+    "project_impact_level": "low",
+    "lifecycle_state": "active",
+    "dataset_split": "train",
+    "process_version": "0.2.0",
+    "failure_taxonomy_version": "1.0.0",
+    "source_trace_id": null,
+    "source_run_id": null,
+    "content_retention": "sanitized_fixture"
+  }
+}

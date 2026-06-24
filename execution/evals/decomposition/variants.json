@@ -1,0 +1,13 @@
+{
+  "schema_version": "decomposition-eval-variants/v2",
+  "_note": "Repo-owned candidate variants for non-mutating eval-mode decomposition runs (npm run eval:decomposition -- --variant <id>). A variant is an EXPERIMENT identity only: selecting one never changes accepted behavior; accepting a variant as the new baseline is a repo process change. default_variant must stay the no-override accepted baseline. Variant entry contract: role_overrides maps pm|sr_eng|judge to {runtime?, model?} overrides merged over workflows.decomposition.roles at eval time; prompt_overrides maps prompt target_key to {candidate_prompt_version_id}; judge_candidate_prompt_version_id remains the explicit --judge chain override (labeled phoenix_candidate_version in judge output metadata). Unknown keys, roles, target keys, or override fields fail closed.",
+  "default_variant": "accepted_baseline",
+  "variants": {
+    "accepted_baseline": {
+      "description": "Current accepted behavior: config-resolved role runtimes/models and the repo-accepted judge prompt snapshot. No overrides.",
+      "role_overrides": {},
+      "prompt_overrides": {},
+      "judge_candidate_prompt_version_id": null
+    }
+  }
+}

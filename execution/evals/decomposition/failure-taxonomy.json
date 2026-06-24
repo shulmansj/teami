@@ -1,0 +1,61 @@
+{
+  "schema_version": "agentic-factory-failure-taxonomy/v1",
+  "failure_taxonomy_version": "1.0.0",
+  "_note": "Canonical versioned failure taxonomy shared by human annotation, model judges, and deterministic checks. The workflows sections are judgment failure modes seeded from the taxonomy previously embedded in docs/self-improvement.md; the structural section mirrors the deterministic CODE evaluators. Expand only when real traces reveal recurring gaps; expansion is a process change and bumps failure_taxonomy_version. Annotations record the failure_taxonomy_version they were judged against so cross-version comparisons can be gated.",
+  "structural": {
+    "_note": "Structural failure modes emitted by the deterministic CODE evaluators in execution/integrations/linear/src/quality.mjs. This list must contain exactly the ids in the STRUCTURAL_FAILURE_MODES export from that module (existing code reality, not invention); eval-contracts.test.mjs fails when either side drifts. Parameterized emissions (for example missing_context_digest:<phase>) store only the BASE id here; the parameter detail (the phase) goes in annotation metadata as failure_mode_details, and normalizeFailureMode() in quality.mjs strips the :<param> suffix so CODE emissions always normalize to these ids.",
+    "failure_modes": [
+      "missing_agent_ready_issues",
+      "issue_not_independently_executable",
+      "missing_acceptance_criteria",
+      "missing_decomposition_key",
+      "prose_dependency_instead_of_relation",
+      "product_question_not_escalated",
+      "missing_terminal_output",
+      "missing_context_digest",
+      "missing_source_refs",
+      "missing_assumptions",
+      "missing_constraints",
+      "missing_risks",
+      "missing_pause_open_questions",
+      "missing_project_update",
+      "missing_discovery_issue_body",
+      "missing_has_open_questions_label",
+      "pause_project_not_backlog",
+      "missing_open_questions_section",
+      "incomplete_pause_artifact"
+    ]
+  },
+  "workflows": {
+    "roadmap_decomposition": {
+      "failure_modes": [
+        "duplicated_project_truth",
+        "missing_acceptance_criteria",
+        "prose_dependency_instead_of_relation",
+        "wrong_agent_routing",
+        "issue_not_independently_executable",
+        "product_question_not_escalated",
+        "architecture_constraint_missed",
+        "missing_exact_project_update_markdown",
+        "missing_exact_open_questions_markdown",
+        "warm_continuation_missing"
+      ]
+    },
+    "code_review": {
+      "failure_modes": [
+        "review_missed_regression",
+        "review_missed_scope_change",
+        "review_missed_missing_tests",
+        "review_overfocused_on_style",
+        "review_failed_to_explain_user_risk"
+      ]
+    },
+    "documentation": {
+      "failure_modes": [
+        "docs_not_reconciled_after_release",
+        "docs_changed_without_source_context",
+        "docs_duplicate_runtime_truth"
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "_fixture_note": "FROZEN snapshot of a representative planning-swarm project, copied here on 2026-06-20 so the orchestrator machinery E2E is self-contained. NOT linked to maintainers/plans/*.md — doc cleanup must never affect this test. The body is realistic ballast: it flows into the orchestrator prompt, but the machinery E2E scripts the runtime output deterministically, so the exact prose does not drive assertions.",
+  "input": {
+    "project": {
+      "id": "project-webhook-inbox",
+      "name": "Event Trigger Webhook Inbox",
+      "description": "Design the event trigger pattern for Agentic Factory so decomposition can be the first automated trigger without making decomposition a one-off special case.",
+      "status": "Planned",
+      "labels": ["platform", "triggers"],
+      "existing_issues": [],
+      "content": "# Event Trigger Webhook Inbox Plan\n\n## Objective\n\nDesign the event trigger pattern for Agentic Factory so decomposition can be the first automated trigger without making decomposition a one-off special case.\n\nThe product goal is: a human finishes the source-of-truth action in Linear or GitHub, and Agentic Factory visibly starts the right workflow or visibly explains why it did not. For decomposition, the first source-of-truth action is: a human moves an Agentic Factory Linear project to `Planned`.\n\n## Product Principle\n\nTriggers are wake-up signals, not decision-makers. A trigger should never decide whether product intent is good enough, summarize or rewrite prose, choose issue decomposition, make authoritative workflow mutations in Linear or GitHub, bypass Workflow Runner gates, or silently ignore a meaningful event. A trigger may verify event authenticity, dedupe delivery noise, normalize the event into an internal envelope, enqueue a workflow wake-up, and expose visible status for operators and adopters.\n\nThe hosted inbox does not write to Linear. The Workflow Runner is the first component allowed to mutate Linear: it re-reads current state through the supported GraphQL/API integration, evaluates deterministic gates, persists artifacts before mutation, and either runs the workflow or records a visible refusal.\n\n## Scope\n\n- A hosted webhook inbox that authenticates, dedupes, and normalizes Linear and GitHub events into an internal wake envelope.\n- A durable queue the Workflow Runner drains.\n- Operator-visible status for every event (accepted, deduped, refused, enqueued).\n\n## Out of scope\n\n- The Workflow Runner's own gates and Linear writes (owned elsewhere).\n- Trigger execution for workflows beyond decomposition."
+    }
+  }
+}

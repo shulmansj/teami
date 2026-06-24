@@ -1,0 +1,13 @@
+{
+  "_invalid_because": "Canonical annotations require a non-empty identifier. Phoenix upserts by (name, target, identifier) and defaults it to the empty string, so an omitted identifier can overwrite or merge human/model/code judgments that share a name and target. This one omits identifier, so it matches neither the logical nor the Phoenix wire shape.",
+  "name": "decomposition_quality",
+  "annotator_kind": "HUMAN",
+  "label": "pass",
+  "score": 0.9,
+  "explanation": "Issues are executable and dependencies are native relations.",
+  "metadata": {
+    "failure_modes": [],
+    "rubric_version": "1.0.0",
+    "failure_taxonomy_version": "1.0.0"
+  }
+}

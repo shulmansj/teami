@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "decomposition-eval-example/v1",
+  "title": "Decomposition eval dataset example",
+  "description": "Canonical contract for one decomposition eval dataset example. The repo owns this contract; Phoenix stores promoted example records that must conform to it. Examples preserve enough context for a human or model judge to decide whether the output is good; they do not require an exact golden issue split.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["input", "output", "reference", "metadata"],
+  "properties": {
+    "schema_version": {
+      "description": "Optional example contract version stamp. When present it must match this schema's $id.",
+      "const": "decomposition-eval-example/v1"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source_type", "project", "run_envelope", "source_refs"],
+      "properties": {
+        "source_type": {
+          "const": "linear_project_snapshot"
+        },
+        "project": {
+          "description": "Captured or sanitized Linear project snapshot. Never captured from live Linear state at promotion time.",
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["id", "name", "content", "status", "labels", "existing_issues"],
+          "properties": {
+            "id": {
+              "description": "Stable or sanitized project id.",
+              "type": "string",
+              "minLength": 1
+            },
+            "name": { "type": "string", "minLength": 1 },
+            "content": {
+              "description": "Sanitized Linear project body. Subject to the field-level content allowlist/denylist; never token-shaped content.",
+              "type": "string"
+            },
+            "status": {
+              "description": "Semantic project status at capture time.",
+              "type": "string",
+              "minLength": 1
+            },
+            "labels": { "type": "array" },
+            "existing_issues": { "type": "array" }
+          }
+        },
+        "run_envelope": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["workflow_version", "allowed_source_boundaries", "runtime_assignments"],
+          "properties": {
+            "workflow_version": { "type": "string", "minLength": 1 },
+            "allowed_source_boundaries": { "type": "array" },
+            "runtime_assignments": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["pm", "sr_eng"],
+              "properties": {
+                "pm": {
+                  "description": "PM role runtime/model identity, for example codex/<model> or claude/<model>.",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sr_eng": {
+                  "description": "Senior engineer role runtime/model identity.",
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "source_refs": { "type": "array" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "terminal_status",
+        "terminal_reason",
+        "phase_packets",
+        "final_issues",
+        "discovery_issues",
+        "dependency_relations"
+      ],
+      "properties": {
+        "terminal_status": {
+          "enum": ["completed", "paused", "failed_closed", "ineligible"]
+        },
+        "terminal_reason": { "type": "string", "minLength": 1 },
+        "phase_packets": { "type": "array" },
+        "final_issues": { "type": "array" },
+        "discovery_issues": { "type": "array" },
+        "dependency_relations": { "type": "array" },
+        "project_update_markdown": {
+          "description": "Exact authored project update. Required when terminal_status is completed or paused.",
+          "type": "string"
+        },
+        "open_questions_markdown": {
+          "description": "Exact authored blockers prose. Required when terminal_status is paused.",
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "terminal_status": { "const": "completed" } },
+            "required": ["terminal_status"]
+          },
+          "then": { "required": ["project_update_markdown"] }
+        },
+        {
+          "if": {
+            "properties": { "terminal_status": { "const": "paused" } },
+            "required": ["terminal_status"]
+          },
+          "then": { "required": ["project_update_markdown", "open_questions_markdown"] }
+        }
+      ]
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "human_annotations": {
+          "description": "Human judgments captured for this example. Empty until a human annotates. In MVP human-label authenticity is asserted, not authenticated, because local Phoenix is unauthenticated.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["name", "label", "score", "failure_modes", "explanation"],
+            "properties": {
+              "name": { "$ref": "#/$defs/annotation_name" },
+              "label": { "$ref": "#/$defs/quality_label" },
+              "score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "failure_modes": {
+                "description": "Failure mode ids from the versioned taxonomy in failure-taxonomy.json.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "explanation": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "expected_properties": {
+          "description": "Property-level expectations a judge can check without an exact golden issue split.",
+          "type": "object",
+          "properties": {
+            "preserves_project_intent": { "type": "boolean" },
+            "uses_structural_dependencies": { "type": "boolean" },
+            "acceptance_criteria_observable": { "type": "boolean" },
+            "escalates_product_questions": { "type": "boolean" }
+          },
+          "additionalProperties": { "type": "boolean" }
+        }
+      }
+    },
+    "metadata": {
+      "description": "Example metadata is Phoenix-bound: Agentic Factory workflow/queue state keys are banned (see $defs/no_workflow_state_keys and the wipe test in README.md); other extensibility stays open.",
+      "type": "object",
+      "additionalProperties": true,
+      "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+      "required": [
+        "workspace_maturity",
+        "project_category",
+        "project_impact_level",
+        "lifecycle_state",
+        "dataset_split",
+        "process_version",
+        "rubric_version",
+        "failure_taxonomy_version",
+        "source_trace_id",
+        "source_run_id",
+        "content_retention"
+      ],
+      "properties": {
+        "workspace_maturity": {
+          "description": "Human-set from the repo-owned workspace eval policy; no automatic transition logic in MVP.",
+          "enum": ["new", "calibrating", "stable"]
+        },
+        "project_category": {
+          "enum": ["code", "docs", "marketing", "ops", "mixed"]
+        },
+        "project_impact_level": {
+          "enum": ["low", "medium", "high"]
+        },
+        "lifecycle_state": {
+          "description": "active examples are eligible for default experiments and process-change gates; deprecated examples are retained for audit only.",
+          "enum": ["active", "deprecated"]
+        },
+        "dataset_split": {
+          "description": "Mirror of split membership for filtering, compatibility, or fallback reporting only. When the pinned Phoenix exposes native splits, native split membership wins; a mismatch is a reconciliation/evidence-quality problem, never silently merged.",
+          "enum": ["train", "test", "calibration", "regression"]
+        },
+        "process_version": { "type": "string", "minLength": 1 },
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "source_trace_id": {
+          "description": "Originating trace id; null for synthetic or sanitized fixtures with no captured trace.",
+          "type": ["string", "null"]
+        },
+        "source_run_id": {
+          "description": "Originating run id; null for synthetic or sanitized fixtures with no captured run.",
+          "type": ["string", "null"]
+        },
+        "content_retention": {
+          "enum": ["bounded", "rich_local", "sanitized_fixture"]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "no_workflow_state_keys": {
+      "description": "Denylist for Phoenix-bound metadata: no Agentic Factory workflow/queue state may be stored in Phoenix (wipe test: losing Phoenix must never lose which behavior is accepted or what queue is pending). These known banned keys are schema-level rejections; other extensibility stays open.",
+      "properties": {
+        "needs_relabel": false,
+        "pending_promotion": false,
+        "accepted_by_factory": false,
+        "propose_repo_change": false,
+        "proposal_state": false,
+        "queue_state": false,
+        "workflow_status": false,
+        "assigned": false,
+        "resolved": false
+      }
+    },
+    "quality_label": {
+      "description": "Default-judge label set. This set must not drift.",
+      "enum": ["pass", "needs_revision", "blocking_failure"]
+    },
+    "annotation_name": {
+      "description": "Canonical decomposition annotation names. decomposition_quality is the roll-up used for default gates; the narrower dimensions explain why the roll-up passed or failed; accepted_packet_sufficiency and pause_state_correctness are deterministic-check names.",
+      "enum": [
+        "decomposition_quality",
+        "project_intent_preservation",
+        "issue_executability",
+        "dependency_structure",
+        "acceptance_criteria_quality",
+        "escalation_judgment",
+        "discovery_judgment",
+        "human_decision_load",
+        "accepted_packet_sufficiency",
+        "pause_state_correctness"
+      ]
+    }
+  }
+}

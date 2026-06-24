@@ -1,0 +1,15 @@
+{
+  "_invalid_because": "Phoenix-bound annotation metadata must never carry Agentic Factory workflow/queue state (wipe test). needs_relabel is on the schema-level denylist, so this annotation is rejected even though everything else is valid.",
+  "name": "decomposition_quality",
+  "annotator_kind": "HUMAN",
+  "label": "needs_revision",
+  "score": 0.55,
+  "explanation": "One dependency is prose-only; flagged for another labeling pass.",
+  "metadata": {
+    "failure_modes": ["prose_dependency_instead_of_relation"],
+    "rubric_version": "1.0.0",
+    "failure_taxonomy_version": "1.0.0",
+    "needs_relabel": true
+  },
+  "identifier": "workspace-owner"
+}

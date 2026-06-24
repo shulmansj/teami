@@ -1,0 +1,38 @@
+name: Product idea
+description: Suggest a product direction or workflow improvement.
+title: "[Idea]: "
+labels: ["product-idea", "feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Product ideas are reviewed as best-effort feedback. External pull requests are not supported yet.
+  - type: textarea
+    id: user
+    attributes:
+      label: Who is this for?
+      description: Describe the user, team, or workflow that would benefit.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would it solve?
+      description: Explain the current pain or missed opportunity.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What should be easier, safer, clearer, or more credible if this exists?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround
+      description: How would someone handle this today?
+    validations:
+      required: false
+

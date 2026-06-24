@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentic-factory-orchestrator-control-action/v1",
+  "title": "decomposition orchestrator control action",
+  "description": "Structured-output generation schema for ONE orchestrator decision turn. The free orchestrator agent emits exactly one control action per turn: invoke_library (run a named library subagent), invoke_one_off (run an improvised inline subagent), or terminate (end the run). The harness validates this control envelope ONLY — never a per-turn payload; the orchestrator's authored output rides on the turn result as producedContent and is gated only at the single commit. This schema is the generation-time guardrail; orchestrator-control-action.mjs parseControlAction is the contract of record (it enforces the per-action field + enum rules, e.g. the one-off runtime_role whitelist and the terminate outcome/reason pairs).",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "enum": ["invoke_library", "invoke_one_off", "terminate"]
+    },
+    "target_key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "invoke_library only: the accepted-prompt manifest target_key of the library subagent to run."
+    },
+    "role_label": {
+      "type": "string",
+      "minLength": 1,
+      "description": "invoke_one_off only: a short human label for the improvised subagent's perspective."
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "description": "invoke_one_off only: what the one-off subagent should do."
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "invoke_one_off only: the full system prompt body for the improvised subagent."
+    },
+    "runtime_role": {
+      "enum": ["pm", "sr_eng", "judge", "drafter"],
+      "description": "invoke_one_off only: which invocable runtime role the one-off runs on. The orchestrator's own 'orchestrator' role is the driver and is never a one-off target."
+    },
+    "outcome": {
+      "enum": ["commit", "pause"],
+      "description": "terminate only: the terminal outcome the orchestrator chose. failed_closed is NOT here — the harness emits it on a bounds/environment breach."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "terminate only: the terminal reason (commit -> synthesis_complete; pause -> product_questions | discovery_needed | needs_pm_review)."
+    }
+  }
+}

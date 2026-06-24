@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "decomposition-eval-annotation/v1",
+  "title": "Decomposition eval annotation",
+  "description": "Canonical contract for decomposition quality annotations. A document validates as either the logical annotation shape (repo/runtime objects) or the Phoenix wire shape (REST annotation payload entries, which nest label/score/explanation under result and add trace_id/span_id). Both shapes require a non-empty identifier because Phoenix upserts by (name, target, identifier). Human, model, and code signals share one failure taxonomy; human and model judges share the quality rubric in rubrics/decomposition-quality.md. Controller promotion outcome annotations use the separate minimal $defs/promotion_outcome_annotation contract, not this oneOf.",
+  "oneOf": [
+    { "$ref": "#/$defs/logical_annotation" },
+    { "$ref": "#/$defs/phoenix_wire_annotation" }
+  ],
+  "$defs": {
+    "annotation_name": {
+      "description": "Canonical decomposition annotation names. Each dimension is a separate annotation name. decomposition_quality is the roll-up used for default gates and must not drift. accepted_packet_sufficiency and pause_state_correctness are deterministic-check names stored with annotator_kind CODE.",
+      "enum": [
+        "decomposition_quality",
+        "project_intent_preservation",
+        "issue_executability",
+        "dependency_structure",
+        "acceptance_criteria_quality",
+        "escalation_judgment",
+        "discovery_judgment",
+        "human_decision_load",
+        "accepted_packet_sufficiency",
+        "pause_state_correctness"
+      ]
+    },
+    "annotator_kind": {
+      "description": "CODE is only for deterministic-check storage. Deterministic checks stored as CODE are a wire format detail, not a third peer judge, and must never be spoofed as HUMAN or LLM.",
+      "enum": ["HUMAN", "LLM", "CODE"]
+    },
+    "quality_label": {
+      "description": "Default-judge label set: pass | needs_revision | blocking_failure. This set must not drift. Default score bands for HUMAN and LLM quality annotations: pass 0.80-1.00, needs_revision 0.40-0.79, blocking_failure 0.00-0.39 (or any critical failure mode that invalidates the output). Bands are documented defaults, not hard validation: a label/score band mismatch is a low-confidence worklist flag, not a schema rejection, and CODE deterministic checks may use binary scores (0 or 1) for structural invariants.",
+      "enum": ["pass", "needs_revision", "blocking_failure"]
+    },
+    "quality_score": {
+      "description": "Quality score in [0, 1]. See quality_label for default per-label score bands; see pass_band/needs_revision_band/blocking_failure_band for the machine-readable band definitions.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "pass_band": {
+      "description": "Default score band for the pass label (HUMAN/LLM quality annotations).",
+      "type": "number",
+      "minimum": 0.8,
+      "maximum": 1
+    },
+    "needs_revision_band": {
+      "description": "Default score band for the needs_revision label (HUMAN/LLM quality annotations).",
+      "type": "number",
+      "minimum": 0.4,
+      "exclusiveMaximum": 0.8
+    },
+    "blocking_failure_band": {
+      "description": "Default score band for the blocking_failure label (HUMAN/LLM quality annotations). A blocking_failure may carry a score above this band when a critical failure mode invalidates the output.",
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMaximum": 0.4
+    },
+    "no_workflow_state_keys": {
+      "description": "Denylist for Phoenix-bound metadata: no Agentic Factory workflow/queue state may be stored in Phoenix (wipe test: losing Phoenix must never lose which behavior is accepted or what queue is pending). These known banned keys are schema-level rejections; other extensibility stays open.",
+      "properties": {
+        "needs_relabel": false,
+        "pending_promotion": false,
+        "accepted_by_factory": false,
+        "propose_repo_change": false,
+        "proposal_state": false,
+        "queue_state": false,
+        "workflow_status": false,
+        "assigned": false,
+        "resolved": false
+      }
+    },
+    "annotation_metadata": {
+      "description": "Shared annotation metadata. rubric_version and failure_taxonomy_version are required for HUMAN and LLM quality annotations (enforced by the parent shapes); CODE deterministic checks should carry them once wired into Phoenix-compatible storage. failure_mode_details preserves raw parameterized CODE diagnostics (<base_id>:<param>) whose base ids appear in failure_modes. Workflow/queue state keys are banned (see no_workflow_state_keys).",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["failure_modes"],
+      "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+      "properties": {
+        "failure_modes": {
+          "description": "Failure mode ids drawn from the versioned taxonomy in failure-taxonomy.json. CODE emissions are normalized to taxonomy base ids (parameter detail moves to failure_mode_details).",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "failure_mode_details": {
+          "description": "Raw parameterized CODE diagnostics, for example missing_context_digest:<phase>. Each entry's base id (before the first colon) must appear in failure_modes.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "workspace_maturity": { "enum": ["new", "calibrating", "stable"] }
+      }
+    },
+    "identifier": {
+      "description": "Human/user id, judge id, or code evaluator id. Required and non-empty for canonical annotations: Phoenix upserts by (name, target, identifier) and defaults the identifier to the empty string, so an omitted or empty identifier can overwrite or merge human/model/code judgments that share a name and target. In MVP, human identifiers are asserted, not authenticated, because local Phoenix is unauthenticated.",
+      "type": "string",
+      "minLength": 1
+    },
+    "human_or_llm_metadata_requirement": {
+      "description": "HUMAN and LLM quality annotations must record the rubric and failure taxonomy versions they were judged against.",
+      "if": {
+        "properties": { "annotator_kind": { "enum": ["HUMAN", "LLM"] } },
+        "required": ["annotator_kind"]
+      },
+      "then": {
+        "properties": {
+          "metadata": {
+            "required": ["failure_modes", "rubric_version", "failure_taxonomy_version"]
+          }
+        },
+        "required": ["metadata"]
+      }
+    },
+    "logical_annotation": {
+      "title": "Logical annotation shape",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "label", "score", "explanation", "metadata", "identifier"],
+      "properties": {
+        "name": { "$ref": "#/$defs/annotation_name" },
+        "annotator_kind": { "$ref": "#/$defs/annotator_kind" },
+        "label": { "$ref": "#/$defs/quality_label" },
+        "score": { "$ref": "#/$defs/quality_score" },
+        "explanation": {
+          "description": "Why this judgment was made.",
+          "type": "string",
+          "minLength": 1
+        },
+        "metadata": { "$ref": "#/$defs/annotation_metadata" },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      },
+      "allOf": [{ "$ref": "#/$defs/human_or_llm_metadata_requirement" }]
+    },
+    "phoenix_wire_annotation": {
+      "title": "Phoenix wire annotation shape",
+      "description": "One entry of the data array sent to the Phoenix REST annotation endpoints. trace_id targets trace annotations; span_id targets span annotations only. At least one target id is required. Quality annotations must carry result.label, result.score, and result.explanation; CODE deterministic checks may use binary scores (0 or 1) but still report a score and an explanation.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "result", "identifier"],
+      "anyOf": [{ "required": ["trace_id"] }, { "required": ["span_id"] }],
+      "properties": {
+        "name": { "$ref": "#/$defs/annotation_name" },
+        "annotator_kind": { "$ref": "#/$defs/annotator_kind" },
+        "trace_id": { "type": "string", "minLength": 1 },
+        "span_id": {
+          "description": "For span annotations only.",
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label", "score", "explanation"],
+          "properties": {
+            "label": { "$ref": "#/$defs/quality_label" },
+            "score": { "$ref": "#/$defs/quality_score" },
+            "explanation": { "type": "string", "minLength": 1 }
+          }
+        },
+        "metadata": { "$ref": "#/$defs/annotation_metadata" },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      },
+      "allOf": [{ "$ref": "#/$defs/human_or_llm_metadata_requirement" }]
+    },
+    "promotion_outcome_annotation": {
+      "title": "Promotion outcome annotation (controller outcomes)",
+      "description": "Separate minimal contract for the promotion controller's Phoenix outcome annotations. These record only actual controller outcomes and are observability, never authority: no queue or workflow state, no caller-granted routing. They are deliberately NOT part of the root oneOf (which is the quality contract); validate controller outcome payloads against this $def directly. Label-only by design - outcome annotations carry no quality score.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "result", "metadata", "identifier"],
+      "properties": {
+        "name": { "const": "agentic_factory_promotion_outcome" },
+        "annotator_kind": { "const": "CODE" },
+        "trace_id": { "type": "string", "minLength": 1 },
+        "span_id": { "type": "string", "minLength": 1 },
+        "result": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label"],
+          "properties": {
+            "label": {
+              "description": "Actual controller outcome only. route_to_hitl means a HITL PR was proposed; blocked and superseded are controller outcomes, never caller-granted authority.",
+              "enum": ["route_to_hitl", "blocked", "superseded"]
+            }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true,
+          "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+          "required": [
+            "proposal_instance_id",
+            "candidate_target_key",
+            "repo_review_url",
+            "normalized_envelope_hash",
+            "repair_state"
+          ],
+          "properties": {
+            "proposal_instance_id": { "type": "string", "minLength": 1 },
+            "candidate_target_key": {
+              "description": "Canonical grammar: <candidate_kind>/<scope>/<artifact_slot>. See templates/process-change-proposal.md.",
+              "type": "string",
+              "minLength": 1
+            },
+            "repo_review_url": {
+              "description": "HITL PR URL; null when the outcome produced no repo review artifact (for example blocked).",
+              "type": ["string", "null"]
+            },
+            "normalized_envelope_hash": { "type": "string", "minLength": 1 },
+            "repair_state": {
+              "description": "Durable repair marker, for example none or phoenix_audit_retry_needed.",
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      }
+    }
+  }
+}

@@ -1,0 +1,236 @@
+title = "Agentic Factory public secret scanner"
+
+# SEC-U1 allowlist IDs are intentionally narrow and documented here because
+# placeholder examples should never become silent scanner exceptions.
+#
+# SEC-U1-SCANNER-CONFIG: the scanner config and implementation may contain
+#   detection regexes and synthetic examples needed to test the rules.
+# SEC-U1-SOURCE-PRIVATE-BUILD-TRAIL: the private build repo still contains
+#   planning, review, breakdown, and publication-control files that are
+#   excluded from the public artifact by the manifest. This allowlist is active
+#   only while the private publication manifest exists.
+# SEC-U1-SOURCE-PRELAUNCH-HOSTED-HANDLE: the private build repo may temporarily
+#   contain pre-CFG-U1 hosted handles in config.example.json. The public export
+#   does not contain the private manifest marker, so this source-only exception
+#   is not active in the public artifact.
+# SEC-U1-TEST-CREDENTIAL-PLACEHOLDER: deterministic unit tests may use short
+#   fake setup grants and broker credentials that do not meet live-token shape.
+# SEC-U1-TEST-LOCAL-PATH-PLACEHOLDER: deterministic unit tests may use local
+#   path examples to prove path sanitization behavior.
+# SEC-U1-DOC-LOCAL-PATH-PLACEHOLDER: docs may use obvious placeholders such as
+#   C:/abs/repo or <existing checkout>; real local paths are not allowed.
+
+[allowlist]
+description = "Scanner config and helper source contain rule patterns, not committed secrets."
+paths = [
+  '''^\.gitleaks\.toml$''',
+  '''^scripts/security-scan\.mjs$''',
+]
+
+[agentic_factory.source_mode]
+marker_path = "maintainers/publication/public-surface-manifest.csv"
+allowlist_id = "SEC-U1-SOURCE-PRIVATE-BUILD-TRAIL"
+description = "Private source-only planning and publication-control surfaces are excluded from the public artifact."
+paths = [
+  '''^docs/(?:plans|reviews|breakdowns)/''',
+  '''^maintainers/(?:plans|reviews|publication|scripts)/''',
+  '''^execution/integrations/linear/spikes/''',
+]
+
+[[agentic_factory.source_rule_allowlists]]
+allowlist_id = "SEC-U1-SOURCE-PRELAUNCH-HOSTED-HANDLE"
+description = "Temporary source-only exception for CFG-U1-owned prelaunch hosted defaults."
+rules = [
+  "agentic-factory-private-service-handle",
+]
+paths = [
+  '''^CHANGELOG\.md$''',
+  '''^execution/integrations/linear/config\.example\.json$''',
+]
+
+[[rules]]
+id = "agentic-factory-setup-token"
+description = "Agentic Factory setup grants must never be committed."
+regex = '''\b(af_setup_v1_[A-Za-z0-9][A-Za-z0-9_-]{12,}_[A-Za-z0-9][A-Za-z0-9_-]{24,})\b'''
+secretGroup = 1
+history = true
+history_regex = '''af_setup_v1_[A-Za-z0-9][A-Za-z0-9_-]{12,}_[A-Za-z0-9][A-Za-z0-9_-]{24,}'''
+keywords = [
+  "af_setup_v1_",
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-TEST-CREDENTIAL-PLACEHOLDER"
+description = "Short synthetic setup grants in tests are placeholders, not live setup grants."
+paths = [
+  '''^execution/integrations/linear/test/''',
+]
+regexes = [
+  '''af_setup_v1_(?:grant_secret|init_grant|github_resume|for_broker|local)''',
+]
+
+[[rules]]
+id = "agentic-factory-runner-credential"
+description = "Runner inbox credentials using the ri_ prefix must never be committed."
+regex = '''\b(ri_[A-Za-z0-9_-]{24,}(?:\.[A-Za-z0-9_-]{24,})?)\b'''
+secretGroup = 1
+history = true
+history_regex = '''ri_[A-Za-z0-9_-]{24,}(\.[A-Za-z0-9_-]{24,})?'''
+keywords = [
+  "ri_",
+]
+
+[[rules]]
+id = "agentic-factory-broker-credential"
+description = "Agentic Factory GitHub broker credentials must never be committed."
+regex = '''\b(af_broker_v1\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,})\b'''
+secretGroup = 1
+history = true
+history_regex = '''af_broker_v1\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,}'''
+keywords = [
+  "af_broker_v1.",
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-TEST-CREDENTIAL-PLACEHOLDER"
+description = "Short synthetic broker credentials in tests are placeholders, not live broker credentials."
+paths = [
+  '''^execution/integrations/linear/test/''',
+]
+regexes = [
+  '''af_broker_v1\.(?:segment|env|config|repo)\.sig''',
+]
+
+[[rules]]
+id = "agentic-factory-token-env-assignment"
+description = "AGENTIC_FACTORY_*TOKEN assignments with secret-shaped values must never be committed."
+regex = '''\bAGENTIC_FACTORY_[A-Z0-9_]*TOKEN\b\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{20,})'''
+secretGroup = 1
+entropy = 3.5
+history = true
+history_regex = '''AGENTIC_FACTORY_[A-Z0-9_]*TOKEN[[:space:]]*[:=][[:space:]]*["'']?[A-Za-z0-9_./+=-]{32,}'''
+keywords = [
+  "AGENTIC_FACTORY_",
+  "TOKEN",
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-TEST-CREDENTIAL-PLACEHOLDER"
+description = "Tests use explicit fake token phrases to prove environment scrubbing behavior."
+paths = [
+  '''^execution/integrations/linear/test/''',
+]
+regexes = [
+  '''(?:github-installation-token|github-broker-token|env-u1-github-token)''',
+]
+
+[[rules]]
+id = "agentic-factory-broker-signing-key"
+description = "AGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY values must never be committed."
+regex = '''\bAGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY\b\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{24,})'''
+secretGroup = 1
+entropy = 3.5
+history = true
+history_regex = '''AGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY[[:space:]]*[:=][[:space:]]*["'']?[A-Za-z0-9_./+=-]{32,}'''
+keywords = [
+  "AGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY",
+]
+
+[[rules]]
+id = "supabase-service-role-key"
+description = "Supabase service role keys, legacy JWTs, and sb_secret keys must never be committed."
+regex = '''(?:(?:SUPABASE_SERVICE_ROLE_KEY|service[_ -]?role(?:[_ -]?key)?)[^\r\n]{0,80}(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|sb_secret_[A-Za-z0-9_-]{20,})|\b(sb_secret_[A-Za-z0-9_-]{20,})\b)'''
+secretGroup = 1
+entropy = 3.5
+history = true
+history_regex = '''(SUPABASE_SERVICE_ROLE_KEY|service[_ -]?role)[^[:cntrl:]]{0,80}(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|sb_secret_[A-Za-z0-9_-]{20,})'''
+keywords = [
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "service_role",
+  "sb_secret_",
+]
+
+[[rules]]
+id = "github-app-private-key-pem"
+description = "GitHub App private-key PEM material must never be committed."
+regex = '''(-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----)'''
+secretGroup = 1
+history = true
+history_regex = '''-----BEGIN (RSA |EC |OPENSSH |)?PRIVATE KEY-----'''
+keywords = [
+  "PRIVATE KEY",
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-TEST-CREDENTIAL-PLACEHOLDER"
+description = "Tests may contain a PEM header fixture to prove private-key content gating."
+paths = [
+  '''^execution/integrations/linear/test/''',
+]
+regexes = [
+  '''-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----''',
+]
+
+[[rules]]
+id = "agentic-factory-private-service-handle"
+description = "Private or prelaunch service handles must not leak into public surfaces."
+regex = '''(?:https://ayhmwtwjthnjziwybtsu\.supabase\.co/[A-Za-z0-9_./?=&%-]*|https://github\.com/shulmansj/zanzibar\b|shulmansj/zanzibar\b)'''
+history = false
+keywords = [
+  "ayhmwtwjthnjziwybtsu",
+  "shulmansj/zanzibar",
+]
+
+[[rules]]
+id = "local-filesystem-path"
+description = "Real local filesystem paths must not be committed to public surfaces."
+regex = '''(?:\b[A-Za-z]:[\\/](?:Users[\\/][^\s`"'<>|]+|[^\\/\s`"'<>|]+[\\/][^\s`"'<>|]+)|\\\\[A-Za-z0-9_.-]{2,}\\[A-Za-z0-9_.-][^\s`"'<>|]+|/(?:Users|home)/[A-Za-z0-9._-][^\s`"'<>]*)'''
+history = false
+keywords = [
+  "C:",
+  "/Users/",
+  "/home/",
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-TEST-LOCAL-PATH-PLACEHOLDER"
+description = "Tests use local path placeholders to prove path and markdown sanitization behavior."
+paths = [
+  '''^execution/integrations/linear/test/''',
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-DOC-LOCAL-PATH-PLACEHOLDER"
+description = "Documentation may use obvious placeholder local paths, never real user paths."
+regexes = [
+  '''(?:\b[A-Za-z]:[\\/]abs[\\/][^\s`"'<>|]+|<existing checkout>|<local checkout>|<path>)''',
+]
+
+[[rules]]
+id = "agentic-factory-domain-state-path"
+description = "Committed .agentic-factory domain state is local runtime state and must never ship."
+regex = '''^\.agentic-factory/(?:domains\.json|domains/)'''
+path_regex = '''^\.agentic-factory/(?:domains\.json|domains/)'''
+history = false
+keywords = [
+  ".agentic-factory/domains",
+]
+
+[[rules]]
+id = "local-checkout-path-value"
+description = "local_checkout_path values must be placeholders, not real local paths."
+regex = '''\blocal_checkout_path\b\s*[:=]\s*["']?(?:[A-Za-z]:[\\/]|/(?:Users|home)/|\\\\)[^\s"',}]+'''
+history = false
+keywords = [
+  "local_checkout_path",
+]
+
+[[rules]]
+id = "domain-bind-repo-real-path"
+description = "domain:bind-repo examples must not include real local paths."
+regex = '''domain:bind-repo[^\r\n]*--path\s+["']?(?:[A-Za-z]:[\\/]|/(?:Users|home)/|\\\\)[^\s`"']+'''
+history = false
+keywords = [
+  "domain:bind-repo",
+  "--path",
+]

@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "linear-decomposition-orchestrator-subagent-turn/strict-generation/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "reason",
+    "context_digest",
+    "source_refs",
+    "assumptions",
+    "constraints",
+    "risks",
+    "open_questions_markdown",
+    "project_update_markdown",
+    "technical_explanation_markdown",
+    "discovery_issues",
+    "final_issues",
+    "discovery_issue_updates",
+    "draft_issues",
+    "product_source_count",
+    "unresolved_product_question_count",
+    "technical_source_count",
+    "technical_source_categories",
+    "runtime_session_handle"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "linear-decomposition-orchestrator-subagent-turn/v2"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "continue",
+        "blocked"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "product_context_sufficient",
+        "technical_context_grounded",
+        "synthesis_complete",
+        "no_blockers",
+        "needs_product_input",
+        "needs_discovery",
+        "needs_constraint_decision"
+      ]
+    },
+    "context_digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "open_questions_markdown": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project_update_markdown": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "technical_explanation_markdown": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "discovery_issues": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "discovery_key",
+          "title",
+          "body_markdown",
+          "in_session_research",
+          "evidence_gap"
+        ],
+        "properties": {
+          "discovery_key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body_markdown": {
+            "type": "string"
+          },
+          "in_session_research": {
+            "type": "string"
+          },
+          "evidence_gap": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "final_issues": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "decomposition_key",
+          "title",
+          "issue_body_markdown",
+          "depends_on",
+          "assignment",
+          "output",
+          "acceptance_criteria"
+        ],
+        "properties": {
+          "decomposition_key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "issue_body_markdown": {
+            "type": "string"
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "assignment": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "discovery_issue_updates": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issue_id",
+          "discovery_key",
+          "body_markdown"
+        ],
+        "properties": {
+          "issue_id": {
+            "type": "string"
+          },
+          "discovery_key": {
+            "type": "string"
+          },
+          "body_markdown": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "draft_issues": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "decomposition_key",
+          "title"
+        ],
+        "properties": {
+          "decomposition_key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "product_source_count": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "unresolved_product_question_count": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "technical_source_count": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "technical_source_categories": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "runtime_session_handle": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "run_id",
+        "runtime"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "pm",
+            "sr_eng"
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "runtime": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        }
+      }
+    }
+  }
+}
