@@ -19,6 +19,8 @@ title = "Agentic Factory public secret scanner"
 #   path examples to prove path sanitization behavior.
 # SEC-U1-DOC-LOCAL-PATH-PLACEHOLDER: docs may use obvious placeholders such as
 #   C:/abs/repo or <existing checkout>; real local paths are not allowed.
+# SEC-U1-PUBLIC-HOSTED-BETA-ENDPOINT: the public beta setup endpoint is a
+#   deliberate public service handle, allowed only in setup-facing public files.
 
 [allowlist]
 description = "Scanner config and helper source contain rule patterns, not committed secrets."
@@ -173,12 +175,24 @@ regexes = [
 
 [[rules]]
 id = "agentic-factory-private-service-handle"
-description = "Private or prelaunch service handles must not leak into public surfaces."
+description = "Private, prelaunch, or non-setup service handles must not leak into public surfaces."
 regex = '''(?:https://ayhmwtwjthnjziwybtsu\.supabase\.co/[A-Za-z0-9_./?=&%-]*|https://github\.com/shulmansj/zanzibar\b|shulmansj/zanzibar\b)'''
 history = false
 keywords = [
   "ayhmwtwjthnjziwybtsu",
   "shulmansj/zanzibar",
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-PUBLIC-HOSTED-BETA-ENDPOINT"
+description = "Setup-facing public docs and config intentionally name the hosted public beta endpoint."
+condition = "AND"
+paths = [
+  '''^execution/integrations/linear/config\.example\.json$''',
+  '''^supabase/README\.md$''',
+]
+regexes = [
+  '''https://ayhmwtwjthnjziwybtsu\.supabase\.co/functions/v1/agentic-factory-(?:inbox|github-broker)(?:/[A-Za-z0-9_./?=&%-]*)?''',
 ]
 
 [[rules]]

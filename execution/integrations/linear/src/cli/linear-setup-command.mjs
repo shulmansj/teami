@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 
+import { assertRunnableHostedSetupConfig } from "../config.mjs";
 import { writeLinearCache } from "../cache.mjs";
 import {
   emptyDomainRegistry,
@@ -142,6 +143,9 @@ export async function runLinearSetupCommand({ context, command, args }) {
         output.info(`Previous setup stopped at: ${domainNameResolution.resumeDomain.setup_incomplete_cause}`);
       }
     }
+    explicitWorkspaceExpectation(initFlags, process.env);
+    const domainName = domainNameHint || await resolveInitDomainName(initArgs, { command });
+    assertRunnableHostedSetupConfig(config, "Linear setup config");
     const linearProgress = createLinearSetupProgress(output);
     const workspaceAuthorization = await authorizeLinearSetupWorkspace({
       config,
@@ -157,7 +161,6 @@ export async function runLinearSetupCommand({ context, command, args }) {
     output.success(`Workspace: ${workspaceLabel(workspaceAuthorization.workspace)}`);
     output.detail(`workspace_id=${workspaceAuthorization.workspace.id}`);
     output.detail("Linear setup authorization verified.");
-    const domainName = domainNameHint || await resolveInitDomainName(initArgs, { command });
     const setupGrantDomainId = resolveSetupGrantDomainId({ registry, domainName });
 
     const result = await setupLinearDomain({

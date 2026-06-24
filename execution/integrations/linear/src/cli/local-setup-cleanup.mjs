@@ -188,6 +188,7 @@ async function removeLocalLinearSetup(
             repoRoot,
             inboxClient,
             domain,
+            allowMissingWebhookId: fullReset && domain.status === "setup_incomplete",
             log,
           });
     ok = ok && removed.ok;
@@ -306,6 +307,7 @@ async function removeOneDomainSetup({
   repoRoot,
   inboxClient,
   domain,
+  allowMissingWebhookId = false,
   createSetupAuth = createLinearSetupGraphqlClient,
   createOAuthCredentialStore = createLinearCredentialStore,
   createRunnerCredentialStore = createRunnerInboxCredentialStore,
@@ -323,31 +325,36 @@ async function removeOneDomainSetup({
   let ok = true;
 
   if (!context.linear.webhookId) {
+    if (!allowMissingWebhookId) {
+      log(
+        `could not remove domain ${domain.id} Linear webhook inbox registration: missing webhook_id in the domain registry; run npm run doctor and delete the webhook manually in Linear if needed.`,
+      );
+      return { ok: false, reason: "missing_webhook_id" };
+    }
     log(
-      `could not remove domain ${domain.id} Linear webhook inbox registration: missing webhook_id in the domain registry; run npm run doctor and delete the webhook manually in Linear if needed.`,
+      `skipped: domain ${domain.id} has no webhook_id; no Linear webhook deletion was attempted.`,
     );
-    return { ok: false, reason: "missing_webhook_id" };
-  }
-
-  try {
-    const setupAuth = createSetupAuth({
-      config,
-      repoRoot,
-      credentialStore,
-      allowBrowserAuth: false,
-      allowRefresh: true,
-    });
-    await removeLinearWebhookRegistration({
-      linearClient: setupAuth.client,
-      inboxClient,
-      workspaceId: context.linear.workspaceId,
-      teamId: context.linear.teamId,
-      webhookId: context.linear.webhookId,
-    });
-    log(`removed: domain ${domain.id} Linear webhook inbox registration`);
-  } catch (error) {
-    log(`could not remove domain ${domain.id} Linear webhook inbox registration: ${redactOAuthSecrets(error.message)}`);
-    return { ok: false };
+  } else {
+    try {
+      const setupAuth = createSetupAuth({
+        config,
+        repoRoot,
+        credentialStore,
+        allowBrowserAuth: false,
+        allowRefresh: true,
+      });
+      await removeLinearWebhookRegistration({
+        linearClient: setupAuth.client,
+        inboxClient,
+        workspaceId: context.linear.workspaceId,
+        teamId: context.linear.teamId,
+        webhookId: context.linear.webhookId,
+      });
+      log(`removed: domain ${domain.id} Linear webhook inbox registration`);
+    } catch (error) {
+      log(`could not remove domain ${domain.id} Linear webhook inbox registration: ${redactOAuthSecrets(error.message)}`);
+      return { ok: false };
+    }
   }
 
   try {

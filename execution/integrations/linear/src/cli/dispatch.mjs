@@ -162,6 +162,18 @@ const COMMAND_TABLE = new Map([
   ["trigger-status", runTriggerStatusCommand],
 ]);
 
+const COMMAND_HELP = new Map([
+  ["init", "Usage: npm run init -- --domain <name> [--workspace <name-or-id>] [--github-dry-run] [--verbose]"],
+  ["domain:add", "Usage: npm run domain:add -- --domain <name> [--workspace <name-or-id>] [--verbose]"],
+  ["domain:bind-repo", "Usage: npm run domain:bind-repo -- --domain <id> --path <existing checkout>"],
+  ["github:init", "Usage: npm run github:init -- [--github-dry-run] [--github-owner <owner>] [--github-repo <repo>]"],
+  ["doctor", "Usage: npm run doctor -- [--domain <id>] [--verbose]"],
+  ["doctor:linear", "Usage: npm run doctor:linear -- [--domain <id>] [--verbose]"],
+  ["runtime-smoke", "Usage: npm run runtime-smoke -- [--domain <id>] [--verbose]"],
+  ["reset", "Usage: npm run reset -- [--domain <id>] [--verbose]"],
+  ["uninstall", "Usage: npm run uninstall -- --domain <id> [--verbose]"],
+]);
+
 const EVAL_REGISTER_PROMPT_COMMAND_OPTIONS = Object.freeze({
   "eval:register-judge-prompt": {
     defaultTargetKey: "prompt/decomposition/decomposition_quality_judge",
@@ -205,12 +217,17 @@ export async function runCliCommand({ repoRoot = process.cwd(), command, args = 
     color: outputFlags.noColor ? false : undefined,
     unicode: outputFlags.ascii ? false : undefined,
   });
-  const context = createCliContext({ repoRoot, output });
   const handler = COMMAND_TABLE.get(command);
+  if (isHelpRequest(command, outputFlags.args)) {
+    printCliHelp(output, command);
+    process.exitCode = 0;
+    return;
+  }
   if (!handler) {
     printCliUsage(output);
     return;
   }
+  const context = createCliContext({ repoRoot, output });
   await handler({ context, command, args: outputFlags.args });
 }
 
@@ -248,6 +265,18 @@ function printCliUsage(output = createCliOutput()) {
     what: CLI_USAGE,
   });
   process.exitCode = 2;
+}
+
+function isHelpRequest(command, args = []) {
+  return command === "--help" || command === "-h" || args.includes("--help") || args.includes("-h");
+}
+
+function printCliHelp(output = createCliOutput(), command = null) {
+  if (COMMAND_TABLE.has(command)) {
+    output.raw(`${COMMAND_HELP.get(command) || `Usage: npm run ${command} -- [options]`}\n`);
+    return;
+  }
+  output.raw(`${CLI_USAGE}\n`);
 }
 
 export async function runGithubInitCommand({ context, command, args }) {

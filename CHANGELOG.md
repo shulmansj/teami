@@ -4,6 +4,24 @@ All notable changes to agentic-factory are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/) flavored; versions are
 the `version` field in `package.json`.
 
+## [Unreleased]
+
+### Changed
+
+- Public setup defaults and setup docs now target the Agentic Factory-operated
+  hosted public beta endpoint instead of the reserved launch-gated host.
+
+### Fixed
+
+- CLI help flags now return usage before setup configuration, credential, OAuth,
+  or external mutation work.
+- Setup validates reserved hosted URLs before Linear OAuth, team creation, or
+  webhook registration.
+- Reset cleanup now removes local setup-incomplete state when webhook creation
+  failed before a webhook id was recorded.
+- The lockfile includes the root `UNLICENSED` metadata that npm writes during a
+  fresh install.
+
 ## [0.3.20] - 2026-06-17
 
 GitHub App install/configure callbacks no longer hang setup when the App is

@@ -12,16 +12,9 @@ npm run init
 npm run domain:bind-repo -- --domain main --path ../product-app
 ```
 
-The hosted part of that path is launch-gated. The checked-in public config
-currently points at the reserved host
-`public-hosted-setup.agentic-factory.invalid`, so a public evaluator should not
-treat the default config as a working hosted endpoint today. Hosted setup
-becomes runnable only after the public hosted gates close: launch key rotation,
-GitHub App metadata/settings verification, abuse and rate monitoring evidence,
-and external setup proof.
-
-When those gates close, `npm run init` authorizes Linear in the browser with
-the Agentic Factory OAuth app, then uses Linear GraphQL to provision the
+The checked-in public config points at the Agentic Factory-operated hosted
+public beta endpoint. `npm run init` authorizes Linear in the browser with the
+Agentic Factory OAuth app, then uses Linear GraphQL to provision the
 workspace: browser authorization, dedicated team, required labels, project
 status mappings, project template, hosted webhook inbox registration,
 runner-to-inbox credential, managed or reused local Phoenix, and local cache. No
@@ -77,11 +70,11 @@ credential hashes; retention details are owned in
 ## Current Technical Commands
 
 This is technical/operator detail for the hosted setup slice. It is not a
-raw-command-free setup promise, and the hosted path is not runnable against the
-checked-in `.invalid` defaults.
+raw-command-free setup promise. The checked-in public config targets the hosted
+public beta endpoint, and setup commands can create or update Linear workspace
+objects and the dedicated Agentic Factory behavior repo connection.
 
-Sandbox operation, required when decomposition work is exercised with a
-launch-approved hosted config:
+Sandbox operation after setup, required when decomposition work is exercised:
 
 ```text
 npm run runtime-smoke
@@ -101,11 +94,11 @@ npm run uninstall
 npm run doctor:linear
 ```
 
-With a launch-approved hosted config, `npm run init` is the runnable setup path.
-The GitHub phase connects the Agentic Factory behavior repo: create or verify
-the dedicated behavior repo, preserve starter/upstream remotes only as template
-state, verify selected-repo access, and check PR-generation readiness. Init
-does not bind product repos through that behavior-repo connection.
+`npm run init` is the runnable setup path. The GitHub phase connects the Agentic
+Factory behavior repo: create or verify the dedicated behavior repo, preserve
+starter/upstream remotes only as template state, verify selected-repo access,
+and check PR-generation readiness. Init does not bind product repos through
+that behavior-repo connection.
 Product repos are bound explicitly per domain with
 `npm run domain:bind-repo -- --domain <id> --path <path>`, which records the
 one existing checkout path, `owner/repo`, and default branch for that domain.
