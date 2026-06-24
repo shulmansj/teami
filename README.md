@@ -41,11 +41,12 @@ Start with the portfolio demo before connecting an account:
 
 ## Quickstart
 
-Use this path for a local technical evaluation after the public hosted setup
-endpoint is enabled for the artifact you are running. The checked-in public
-config intentionally uses a reserved `.invalid` hosted host until launch
-configuration is applied, so the portfolio demo is the runnable path before
-that gate closes.
+Use this path for a public beta technical evaluation with the Agentic
+Factory-operated hosted setup endpoint. Use disposable evaluation Linear and
+GitHub resources for a first run; setup creates or reuses Linear workspace
+objects and can connect a dedicated Agentic Factory behavior repo. Hosted setup
+is best-effort public beta infrastructure, not an enterprise support, uptime,
+or recovery promise.
 
 ```bash
 npm install
@@ -72,9 +73,9 @@ npm run runner
 npm run trigger-status
 ```
 
-If setup still fails closed on the reserved `.invalid` host, treat that as a
-launch/configuration gate, not as a reason to paste private credentials into the
-public setup path.
+If setup reports a hosted HTTP or authorization error, treat that as a public
+beta setup failure to report through the public issue templates, not as a
+reason to paste private credentials into the public setup path.
 
 ## Tests
 

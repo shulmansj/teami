@@ -2139,6 +2139,83 @@ test("uninstall with missing registry webhook_id fails loudly without deletion c
   assert.equal(fs.existsSync(otherDomainCache), true);
 });
 
+test("reset removes setup_incomplete local state when webhook_id was never recorded", async () => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-reset-setup-incomplete-no-webhook-"));
+  const cachePath = cachePathForConfig(config, tempRoot);
+  const setupStatePath = setupStatePathForCache(cachePath);
+  const domainCachePath = path.join(tempRoot, ".agentic-factory", "domains", "clean-adopter", "linear.json");
+  const registry = upsertDomainRecord(
+    emptyDomainRegistry(),
+    makeDomainRecord({
+      domainId: "clean-adopter",
+      status: "setup_incomplete",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace",
+      teamId: "team-clean",
+      teamKey: "CLE",
+      teamName: "clean-adopter",
+      webhookId: null,
+    }),
+  );
+  writeDomainRegistry({ repoRoot: tempRoot }, registry);
+  writeLinearCache(domainCachePath, { domainId: "clean-adopter", workspaceId: "workspace-1" });
+  fs.writeFileSync(setupStatePath, "{}\n", "utf8");
+
+  const oauthStore = createLinearCredentialStore({
+    config,
+    repoRoot: tempRoot,
+    domainId: "clean-adopter",
+    workspaceId: "workspace-1",
+  });
+  const runnerStore = createRunnerInboxCredentialStore({
+    config,
+    repoRoot: tempRoot,
+    domainId: "clean-adopter",
+    workspaceId: "workspace-1",
+  });
+  await oauthStore.writeTokenSet({ refreshToken: "refresh-clean" });
+  await runnerStore.writeCredential({
+    schema_version: 1,
+    workspaceId: "workspace-1",
+    credentialId: "runner-clean",
+    token: "runner-token",
+    capabilities: ["linear.project.planned"],
+  });
+
+  const calls = [];
+  const { result, logs } = await captureConsoleLogs(() =>
+    removeLocalLinearSetup(cachePath, setupStatePath, {
+      config,
+      repoRoot: tempRoot,
+      inboxClient: {
+        async revokeRunnerCredential(input) {
+          calls.push(["runner-revoke", input]);
+          return { ok: true };
+        },
+      },
+      fullReset: true,
+      createSetupAuth: () => {
+        throw new Error("webhook deletion should be skipped when webhook_id is absent");
+      },
+    }));
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.map((call) => call[0]), ["runner-revoke"]);
+  assert.equal(await oauthStore.readTokenSet(), null);
+  assert.equal(await runnerStore.readCredential(), null);
+  assert.equal(fs.existsSync(cachePath), false);
+  assert.equal(fs.existsSync(setupStatePath), false);
+  assert.equal(fs.existsSync(domainRegistryPath(tempRoot)), false);
+  assert.equal(fs.existsSync(path.dirname(domainCachePath)), false);
+  assert.equal(
+    logs.includes("skipped: domain clean-adopter has no webhook_id; no Linear webhook deletion was attempted."),
+    true,
+  );
+  assert.equal(logs.includes("removed: domain clean-adopter Linear setup OAuth credential"), true);
+  assert.equal(logs.includes("removed: domain registry"), true);
+});
+
 test("uninstall with no domain registry runs the full legacy cleanup path", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-pre-domain-uninstall-"));

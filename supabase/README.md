@@ -6,19 +6,22 @@ GitHub App install callback, and behavior-repo token broker.
 
 This is source and trust-boundary documentation. It is not adopter-primary setup copy
 and does not create maintainer support authority. Public launch does not ask
-evaluators to deploy their own Supabase project. The checked-in public config currently points at
-`public-hosted-setup.agentic-factory.invalid`, so the hosted setup path is not a
-working public endpoint until the launch gates close.
+evaluators to deploy their own Supabase project. The checked-in public config
+points at the Agentic Factory-operated hosted public beta endpoint:
+`https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-inbox`
+for inbox/setup coordination and
+`https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-github-broker`
+for behavior-repo GitHub token brokering.
 
 The hosted service is a best-effort public beta boundary, not an enterprise
 support, uptime, or recovery promise. It coordinates webhooks and setup grants;
 it is not a maintainer support backdoor into an adopter's Linear workspace,
 local Phoenix instance, or product repository.
 
-The public hosted gates that must close before runnable setup copy is final are
-tracked outside the public artifact: public-launch key rotation, GitHub App
-visible metadata/settings verification, deploy-side abuse and rate monitoring
-evidence, and external setup proof.
+Maintainer operations evidence for key rotation, GitHub App metadata/settings,
+abuse review, and external setup proof is tracked outside the public artifact.
+Those records do not create an adopter support, uptime, durable monitoring, or
+hosted recovery promise.
 
 The function is deployed with Supabase JWT verification disabled because Linear
 webhooks cannot present Supabase JWTs. The function still performs custom

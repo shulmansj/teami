@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { loadLinearConfig } from "../src/config.mjs";
+import { assertRunnableHostedSetupConfig, loadLinearConfig } from "../src/config.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const configExamplePath = path.join(
@@ -13,8 +13,9 @@ const configExamplePath = path.join(
   "linear",
   "config.example.json",
 );
-const publicHostedSetupHost = "public-hosted-setup.agentic-factory.invalid";
-const privateProjectRef = ["ayhmwtwj", "thnjziwybtsu"].join("");
+const publicHostedSetupProjectRef = ["ayhmwtwj", "thnjziwybtsu"].join("");
+const publicHostedSetupHost = [publicHostedSetupProjectRef, "supabase", "co"].join(".");
+const reservedHostedSetupHost = "public-hosted-setup.agentic-factory.invalid";
 const privateProductHandle = ["zan", "zibar"].join("");
 const privateRepoDefault = ["shulmansj", privateProductHandle].join("/");
 const privateRepoUrlDefault = `https://github.com/${privateRepoDefault}`;
@@ -30,10 +31,6 @@ const publicConfigSurfaces = Object.freeze([
 ]);
 
 const forbiddenPublicConfigPatterns = Object.freeze([
-  Object.freeze({
-    id: "private_supabase_project_ref",
-    pattern: new RegExp(escapeRegExp(privateProjectRef), "i"),
-  }),
   Object.freeze({
     id: "private_repo_default",
     pattern: new RegExp(escapeRegExp(privateRepoDefault), "i"),
@@ -56,16 +53,15 @@ const forbiddenPublicConfigPatterns = Object.freeze([
   }),
 ]);
 
-test("public config surfaces do not include private hosted or repo defaults", () => {
+test("public config surfaces do not include private repo defaults", () => {
   for (const surface of publicConfigSurfaces) {
     const text = fs.readFileSync(surface.path, "utf8");
     assertPublicConfigTextIsClean(surface.label, text);
   }
 });
 
-test("public config leak gate rejects known private hosted and repo handles", () => {
+test("public config leak gate rejects known private repo and local handles", () => {
   for (const [label, value] of [
-    ["private hosted project ref", privateProjectRef],
     ["private repo shorthand", privateRepoDefault],
     ["private repo URL", privateRepoUrlDefault],
     ["private product handle", privateProductHandle],
@@ -81,13 +77,49 @@ test("public config leak gate rejects known private hosted and repo handles", ()
   }
 });
 
-test("public config uses the launch-gated hosted setup draft host", () => {
+test("public config uses the live hosted setup public beta endpoint", () => {
   const config = loadLinearConfig({ repoRoot });
 
   assertHostedUrl(config.inbox.base_url, "/functions/v1/agentic-factory-inbox");
   assertHostedUrl(config.inbox.webhook_url, "/functions/v1/agentic-factory-inbox/v1/webhooks/linear");
   assertHostedUrl(config.inbox.dashboard_url, "/functions/v1/agentic-factory-inbox/status");
   assertHostedUrl(config.github.token_broker.base_url, "/functions/v1/agentic-factory-github-broker");
+});
+
+test("public hosted setup preflight accepts the checked-in live endpoint", () => {
+  const config = loadLinearConfig({ repoRoot });
+
+  assert.equal(assertRunnableHostedSetupConfig(config, "public config"), true);
+});
+
+test("reserved hosted URLs are rejected before setup side effects", () => {
+  const config = loadLinearConfig({ repoRoot });
+  const reserved = JSON.parse(JSON.stringify(config));
+  reserved.inbox.base_url = `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-inbox`;
+  reserved.inbox.webhook_url =
+    `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-inbox/v1/webhooks/linear`;
+  reserved.inbox.dashboard_url = `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-inbox/status`;
+  reserved.github.token_broker.base_url =
+    `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-github-broker`;
+
+  assert.throws(
+    () => assertRunnableHostedSetupConfig(reserved, "reserved config"),
+    /hosted_setup_url_not_runnable: reserved config uses reserved \.invalid hosted setup URL/,
+  );
+});
+
+test("runnable hosted setup preflight accepts real HTTPS hosts", () => {
+  const config = loadLinearConfig({ repoRoot });
+  const runnable = JSON.parse(JSON.stringify(config));
+  runnable.inbox.base_url = "https://setup.agentic-factory.example/functions/v1/agentic-factory-inbox";
+  runnable.inbox.webhook_url =
+    "https://setup.agentic-factory.example/functions/v1/agentic-factory-inbox/v1/webhooks/linear";
+  runnable.inbox.dashboard_url =
+    "https://setup.agentic-factory.example/functions/v1/agentic-factory-inbox/status";
+  runnable.github.token_broker.base_url =
+    "https://setup.agentic-factory.example/functions/v1/agentic-factory-github-broker";
+
+  assert.equal(assertRunnableHostedSetupConfig(runnable, "runnable config"), true);
 });
 
 test("public config separates behavior-repo GitHub setup from domain git repo binding", () => {

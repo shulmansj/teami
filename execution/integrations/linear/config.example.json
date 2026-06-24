@@ -36,9 +36,9 @@
     }
   },
   "inbox": {
-    "base_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-inbox",
-    "webhook_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-inbox/v1/webhooks/linear",
-    "dashboard_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-inbox/status",
+    "base_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-inbox",
+    "webhook_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-inbox/v1/webhooks/linear",
+    "dashboard_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-inbox/status",
     "credential_storage": "os",
     "credential_file": ".agentic-factory/inbox-runner-credential.json",
     "linear": {
@@ -61,7 +61,7 @@
     "app_slug": "agentik-factory",
     "app_id": "4046750",
     "token_broker": {
-      "base_url": "https://public-hosted-setup.agentic-factory.invalid/functions/v1/agentic-factory-github-broker",
+      "base_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-github-broker",
       "token_file": ".agentic-factory/github-broker-token.env"
     }
   },

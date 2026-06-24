@@ -8,6 +8,8 @@ import test from "node:test";
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const cliPath = path.join(repoRoot, "execution", "integrations", "linear", "cli.mjs");
 const exampleConfigPath = path.join(repoRoot, "execution", "integrations", "linear", "config.example.json");
+const LIVE_HOSTED_SETUP_PROJECT_REF = ["ayhmwtwj", "thnjziwybtsu"].join("");
+const LIVE_HOSTED_SETUP_HOST = [LIVE_HOSTED_SETUP_PROJECT_REF, "supabase", "co"].join(".");
 const DISPATCH_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
 
@@ -54,6 +56,13 @@ const DISPATCH_CASES = Object.freeze([
   { command: "worklist", args: [], expected: /Agentic Factory [·-] worklist[\s\S]*Behavior proposal decisions[\s\S]*Repair and setup blockers[\s\S]*Local evidence[\s\S]*Local evidence status could not be read/ },
 ]);
 
+const HELP_CASES = Object.freeze([
+  { command: "init", args: ["--help"], expected: /Usage: npm run init -- --domain <name>/ },
+  { command: "doctor", args: ["--help"], expected: /Usage: npm run doctor --/ },
+  { command: "domain:bind-repo", args: ["--help"], expected: /Usage: npm run domain:bind-repo -- --domain <id> --path <existing checkout>/ },
+  { command: "--help", args: [], expected: /Usage: node execution\/integrations\/linear\/cli\.mjs/ },
+]);
+
 const JAVASCRIPT_CRASH_PATTERN =
   /\b(?:ReferenceError|TypeError|SyntaxError)\b|Cannot access .* before initialization|Cannot read properties of| is not defined|\n\s+at .*cli\.mjs:/i;
 
@@ -92,6 +101,22 @@ test("CLI dispatch commands fail closed or print help without JavaScript initial
           resultSummary(dispatchCase, result),
         );
       }
+    });
+  }
+});
+
+test("CLI help flags do not load config or enter command side effects", async (t) => {
+  for (const helpCase of HELP_CASES) {
+    await t.test(helpCase.command, async () => {
+      const result = await runCliDispatchWithoutConfig(helpCase);
+      assert.ifError(result.spawnError);
+
+      const combinedOutput = `${result.stdout}\n${result.stderr}`.trim();
+      assert.equal(result.timedOut, false, resultSummary(helpCase, result));
+      assert.equal(result.outputTooLarge, false, resultSummary(helpCase, result));
+      assert.equal(result.code, 0, resultSummary(helpCase, result));
+      assert.match(combinedOutput, helpCase.expected, resultSummary(helpCase, result));
+      assert.doesNotMatch(combinedOutput, /Linear config not found|Opening Linear authorization|Authorizing grants/i);
     });
   }
 });
@@ -163,13 +188,78 @@ async function runCliDispatch({ command, args }) {
   });
 }
 
+async function runCliDispatchWithoutConfig({ command, args }) {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-cli-help-"));
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(process.execPath, [cliPath, command, ...args], {
+        cwd: tempRoot,
+        env: {
+          ...process.env,
+          AGENTIC_FACTORY_LINEAR_CONFIG: path.join(tempRoot, "missing-config.json"),
+          NO_COLOR: "1",
+        },
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolve({ command, args, stdout: "", stderr: "", code: null, signal: null, spawnError: error });
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let outputTooLarge = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, DISPATCH_TIMEOUT_MS);
+    const append = (stream, chunk) => {
+      const next = stream + chunk.toString("utf8");
+      if (Buffer.byteLength(next, "utf8") > MAX_OUTPUT_BYTES) {
+        outputTooLarge = true;
+        child.kill();
+      }
+      return next;
+    };
+
+    child.stdout.on("data", (chunk) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = append(stderr, chunk);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ command, args, stdout, stderr, code: null, signal: null, spawnError: error });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({
+        command,
+        args,
+        stdout,
+        stderr,
+        code,
+        signal,
+        timedOut,
+        outputTooLarge,
+        spawnError: null,
+      });
+    });
+  });
+}
+
 function writeDispatchConfig(tempRoot) {
   // This smoke matrix tests command dispatch wiring, not real downstream calls,
   // so keep it on a non-resolvable fixture host while still passing the clients'
   // fail-closed placeholder guard covered directly by the client unit tests.
   const config = JSON.parse(
     fs.readFileSync(exampleConfigPath, "utf8")
-      .replaceAll("public-hosted-setup.agentic-factory.invalid", "dispatch-fixture.agentic-factory.invalid"),
+      .replaceAll(LIVE_HOSTED_SETUP_HOST, "dispatch-fixture.agentic-factory.invalid"),
   );
   config.linear.oauth.credential_storage = "file";
   config.inbox.credential_storage = "file";

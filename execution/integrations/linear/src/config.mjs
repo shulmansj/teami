@@ -238,6 +238,24 @@ export function formatRuntimeRoleAssignmentsSection(config) {
   return lines;
 }
 
+export function assertRunnableHostedSetupConfig(config, source = "config") {
+  const urls = {
+    "inbox.base_url": config?.inbox?.base_url,
+    "inbox.webhook_url": config?.inbox?.webhook_url,
+    "inbox.dashboard_url": config?.inbox?.dashboard_url,
+    "github.token_broker.base_url": config?.github?.token_broker?.base_url,
+  };
+  const reserved = Object.entries(urls)
+    .filter(([, value]) => typeof value === "string" && isReservedInvalidHost(value))
+    .map(([field]) => field);
+  if (reserved.length > 0) {
+    throw new Error(
+      `hosted_setup_url_not_runnable: ${source} uses reserved .invalid hosted setup URL(s) for ${reserved.join(", ")}; configure a real hosted setup endpoint before running setup.`,
+    );
+  }
+  return true;
+}
+
 export function cachePathForConfig(config, repoRoot = process.cwd()) {
   return path.resolve(repoRoot, config.linear.cache_path || ".agentic-factory/linear.json");
 }
@@ -522,5 +540,13 @@ function parseRedirectUri(redirectUri) {
     return new URL(redirectUri);
   } catch {
     throw new Error("Linear OAuth redirect_uri must be a valid URL.");
+  }
+}
+
+function isReservedInvalidHost(value) {
+  try {
+    return new URL(value).hostname.endsWith(".invalid");
+  } catch {
+    return false;
   }
 }
