@@ -2,162 +2,435 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { readLinearCache } from "../cache.mjs";
+import { emptyDomainRegistry, readDomainRegistry } from "../domain-registry.mjs";
+import { readLocalEvalInputs } from "../eval-status.mjs";
 import {
-  configWithDomainLinearTeam,
-  listWakeViewsForDomains,
-} from "../domain-command-context.mjs";
-import {
-  emptyDomainRegistry,
-  readDomainRegistry,
-} from "../domain-registry.mjs";
-import { buildDomainContext, resolveWakeDomainContext } from "../domain-resolver.mjs";
-import {
-  emitDeterministicChecksBestEffort,
-} from "../deterministic-check-emission.mjs";
-import { createHostedWakeQueueStore } from "../hosted-wake-queue-store.mjs";
-import { createLinearCredentialStore } from "../linear-credential-store.mjs";
-import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
-import { createLocalPhoenixTraceSink } from "../local-phoenix-trace-sink.mjs";
-import {
-  collectNextResumeReconciliation,
-} from "../local-supervisor.mjs";
+  runGatewayLoop,
+  runGatewayOnce,
+  selectGatewayDomains,
+} from "../gateway-loop.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
-import { createRunnerInboxCredentialStore } from "../runner-inbox-credential.mjs";
 import {
-  readRuntimeSmokeCache,
-  runtimeSmokeCachePath,
   runRuntimeSmokeChecks,
-  smokeTestsFromRuntimeSmokeCache,
 } from "../runtime-smoke.mjs";
-import { readTraceReceipt } from "../trace-status-store.mjs";
-import { createProcessRuntimeExecutor, runTriggeredDecomposition } from "../trigger-runner.mjs";
-import { flagValue } from "./flags.mjs";
+import { flagValue, parseCliFlags } from "./flags.mjs";
 import {
   agenticFactoryHeading,
   compactPairs,
   humanizeToken,
   printVerboseHint,
-  yesNo,
 } from "./operator-output.mjs";
 
 const DEFAULT_DOMAIN_RUNNER_LOCK_STALE_MS = 30 * 60 * 1000;
-async function runOneTriggerWake({
-  config,
-  repoRoot,
-  inboxClient,
-  cachePath,
-  domainId = null,
-  createSetupGraphqlClient = createLinearSetupGraphqlClient,
-}) {
-  const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
-  const domains = selectRunnerDomains({ registry, domainId });
-  if (domains.length === 0) throw new Error("no_active_domains: no active domains are configured. Run npm run init.");
-  const messages = [];
-  let lastIdle = null;
-  for (const domain of domains) {
-    const lock = acquireDomainRunnerLock({
-      repoRoot,
-      domainId: domain.id,
-      log: (line) => messages.push(line),
+const GATEWAY_SUCCESS_STATUSES = new Set(["completed", "stopped"]);
+const ATTENTION_STATES = new Set(["rate_limited", "wedged", "degraded", "resume_attention"]);
+const ACTIVE_STATES = new Set(["replaying", "working", "resume_working"]);
+
+export async function runGatewayCommand({ context, command, args }) {
+  const { output } = context;
+  const [subcommand, ...rest] = args;
+  if (command === "trigger-status" || subcommand === "status") {
+    return runGatewayStatusCommand({
+      context,
+      command,
+      args: command === "trigger-status" ? args : rest,
     });
-    if (!lock.ok) {
-      messages.push(lock.message || `already running for domain ${domain.id}`);
-      lastIdle = { status: "idle", reason: "already_running_for_domain", domainId: domain.id };
-      continue;
+  }
+  if (subcommand && !subcommand.startsWith("--")) {
+    output.error({
+      what: "Usage: npm run gateway -- [status] [--domain <id>]",
+      why: `Unknown gateway subcommand: ${subcommand}`,
+    });
+    process.exitCode = 2;
+    return;
+  }
+  return runGatewayLoopCommand({ context, command, args });
+}
+
+export async function runRunnerCommand(input) {
+  return runGatewayCommand(input);
+}
+
+export async function runTriggerStatusCommand(input) {
+  return runGatewayStatusCommand(input);
+}
+
+async function runGatewayLoopCommand({ context, args }) {
+  const { config, repoRoot, output } = context;
+  agenticFactoryHeading(output, "gateway");
+  let selection;
+  let result;
+  const { flags } = parseCliFlags(args);
+  const maxIterations = flags["max-iterations"] === undefined ? null : Number(flags["max-iterations"]);
+  const controller = new AbortController();
+  const onSigint = () => controller.abort();
+  const onSigterm = () => controller.abort();
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  try {
+    selection = resolveGatewaySelection({
+      repoRoot,
+      config,
+      domainId: flags.domain || null,
+    });
+    output.info(`Gateway running; polling Linear every ${config.poll?.interval_ms || 10_000}ms.`);
+    result = await runGatewayLoop({
+      repoRoot,
+      config,
+      registry: selection.registry,
+      domains: selection.domains,
+      signal: controller.signal,
+      maxIterations,
+      onStatus: (event) => renderGatewayStatusEvent(event, output),
+    });
+  } catch (error) {
+    output.error({
+      what: "Gateway could not start",
+      why: redactOAuthSecrets(error.message),
+      fix: "run npm run init or pass --domain for an active domain, then retry.",
+    });
+    process.exitCode = 1;
+    return;
+  } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  }
+
+  renderGatewayCompletion(result, output);
+  if (result.ok) printVerboseHint(output);
+  process.exitCode = gatewayExitCode(result);
+}
+
+async function runGatewayStatusCommand({ context, args }) {
+  const { config, repoRoot, output } = context;
+  agenticFactoryHeading(output, "gateway status");
+  const { flags } = parseCliFlags(args);
+  if (flags.requeue || flagValue(args, "--requeue")) {
+    output.error({
+      what: "Hosted wake requeue is retired",
+      why: "The local gateway repairs persisted runs by run_id; remote requeue is no longer available.",
+      fix: "Repair by run_id: inspect the run below, then rerun the gateway so pending commit/pause intents replay idempotently.",
+    });
+    process.exitCode = 2;
+    return;
+  }
+
+  let result;
+  try {
+    const selection = resolveGatewaySelection({
+      repoRoot,
+      config,
+      domainId: flags.domain || null,
+    });
+    result = await runGatewayOnce({
+      repoRoot,
+      config,
+      registry: selection.registry,
+      domains: selection.domains,
+    });
+  } catch (error) {
+    output.error({
+      what: "Gateway status could not be read",
+      why: redactOAuthSecrets(error.message),
+      fix: "run npm run init or pass --domain for a configured active domain, then retry.",
+    });
+    process.exitCode = 1;
+    return;
+  }
+
+  renderGatewayStatusResult(result, output, { repoRoot });
+  printVerboseHint(output);
+  process.exitCode = gatewayExitCode(result);
+}
+
+function resolveGatewaySelection({ repoRoot, config, domainId = null } = {}) {
+  const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
+  const domains = selectGatewayDomains({ registry, domainId });
+  if (domains.length === 0) {
+    throw new Error("no_active_domains: no active domains are configured. Run npm run init.");
+  }
+  return { registry, domains, config };
+}
+
+function renderGatewayCompletion(result, output) {
+  if (result.ok) {
+    output.success(`Gateway ${humanizeToken(result.status)}.`);
+  } else if (result.reason === "gateway_already_running") {
+    output.warn("Gateway already running in this checkout.");
+  } else {
+    output.error({
+      what: "Gateway did not start",
+      why: result.reason || result.status || "unknown",
+      fix: "inspect gateway status and local run evidence, then retry.",
+    });
+  }
+  output.keyValues(compactPairs([
+    ["Status", result.status],
+    ["Reason", result.reason],
+    ["Iterations", Array.isArray(result.iterations) ? result.iterations.length : null],
+    ["Events", Array.isArray(result.statuses) ? result.statuses.length : null],
+  ]), { heading: "Gateway" });
+}
+
+function renderGatewayStatusResult(result, output, { repoRoot } = {}) {
+  if (result.ok) output.success("Gateway status pass completed.");
+  else if (result.reason === "gateway_already_running") output.warn("Gateway already running in this checkout.");
+  else {
+    output.error({
+      what: "Gateway status pass did not complete",
+      why: result.reason || result.status || "unknown",
+      fix: "repair the reported gateway condition, then retry.",
+    });
+  }
+  renderGatewayEvents(result.statuses || [], output);
+  renderPlannedProjectSummary(result, output);
+  renderLatestRunEvidence({ repoRoot, output });
+  const reconciliation = result.startup?.resumeReconciliation;
+  if (reconciliation) renderNextResumeReconciliationReport(reconciliation, output);
+}
+
+function renderGatewayEvents(events, output) {
+  output.section("Gateway events");
+  if (events.length === 0) {
+    output.success("No active local run or replay events.");
+    return;
+  }
+  for (const event of events) renderGatewayStatusEvent(event, output);
+}
+
+function renderGatewayStatusEvent(event, output) {
+  const line = gatewayStatusEventLine(event);
+  if (ATTENTION_STATES.has(event.state)) output.warn(line);
+  else if (ACTIVE_STATES.has(event.state)) output.info(line);
+  else output.success(line);
+  output.detail(`gateway_event=${redactOAuthSecrets(JSON.stringify(event))}`);
+}
+
+function gatewayStatusEventLine(event = {}) {
+  const ref = event.projectId || event.ref || "gateway";
+  const suffix = [
+    event.reason,
+    event.runId ? `run=${event.runId}` : null,
+    event.artifactKind ? `artifact=${event.artifactKind}` : null,
+    event.nextAttemptAt ? `next=${new Date(event.nextAttemptAt).toISOString()}` : null,
+  ].filter(Boolean).join(" ");
+  return `${ref}: ${humanizeToken(event.state)}${suffix ? ` (${suffix})` : ""}`;
+}
+
+function renderPlannedProjectSummary(result, output) {
+  output.section("Planned projects");
+  const rows = plannedProjectRows(result);
+  if (rows.length === 0) {
+    output.success("No Planned projects selected by this pass.");
+    return;
+  }
+  for (const row of rows) {
+    const headline = `${row.projectId || row.domainId}: ${humanizeToken(row.action || row.status || "observed")}`;
+    if (["replay_degraded", "replay_dead_letter", "rate_limited"].includes(row.action || row.status)) {
+      output.warn(headline);
+    } else {
+      output.success(headline);
     }
-    try {
-      const result = await runOneDomainTriggerWake({
-        config,
-        repoRoot,
-        inboxClient,
-        registry,
-        domain,
-        createSetupGraphqlClient,
+    output.keyValues(compactPairs([
+      ["Domain", row.domainId],
+      ["Project", row.projectId],
+      ["Action", row.action],
+      ["Status", row.status],
+      ["Run", row.runId],
+      ["Artifact", row.artifactKind],
+      ["Reason", row.reason],
+    ]));
+  }
+}
+
+function plannedProjectRows(result) {
+  const domains = result.poll?.domains || [];
+  const rows = [];
+  for (const domain of domains) {
+    if (domain.status && domain.status !== "ok") {
+      rows.push({
+        domainId: domain.domainId,
+        status: domain.status,
+        reason: domain.reason || null,
       });
-      result.messages = [...messages, ...(result.messages || [])];
-      result.domainId = domain.id;
-      if (result.status !== "idle") return result;
-      lastIdle = result;
-    } finally {
-      lock.release();
+    }
+    for (const entry of domain.processed || []) {
+      rows.push(plannedProjectRow(domain, entry));
     }
   }
+  for (const entry of result.startup?.replay || []) {
+    rows.push(plannedProjectRow({ domainId: entry.pending?.domainId }, entry));
+  }
+  return rows;
+}
+
+function plannedProjectRow(domain, entry = {}) {
+  const pending = entry.pending || entry.replay?.pending || {};
+  const runId =
+    pending.runId ||
+    entry.result?.wake?.run_id ||
+    entry.result?.traceDelivery?.receipt?.run_id ||
+    entry.result?.artifact?.run_id ||
+    null;
   return {
-    status: "idle",
-    reason: lastIdle?.reason || (messages.length > 0 ? "already_running_for_domain" : "no_queued_wake"),
-    messages,
+    domainId: domain.domainId || pending.domainId || null,
+    projectId: entry.projectId || pending.projectId || null,
+    action: entry.action || null,
+    status: entry.result?.status || entry.replay?.status || entry.status || null,
+    runId,
+    artifactKind: pending.artifactKind || entry.result?.artifact?.kind || null,
+    reason: entry.result?.reason || entry.replay?.reason || entry.reason || null,
   };
 }
 
-async function runOneDomainTriggerWake({
-  config,
-  repoRoot,
-  inboxClient,
-  registry,
-  domain,
-  createSetupGraphqlClient = createLinearSetupGraphqlClient,
-}) {
-  const context = buildDomainContext({ domain, config, repoRoot });
-  const cache = readLinearCache(context.linear.cachePath);
-  const credentialStore = createLinearCredentialStore({
-    config,
-    repoRoot,
-    domainContext: context,
-  });
-  const runnerCredentialStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot,
-    domainContext: context,
-  });
-  const runnerCredential = await runnerCredentialStore.readCredential();
-  if (!runnerCredential) {
-    throw new Error(`Runner inbox credential is missing for domain ${context.domainId}; run npm run init.`);
-  }
-  const store = createHostedWakeQueueStore({ inboxClient, credential: runnerCredential });
-  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
-  const runtimeExecutor = createProcessRuntimeExecutor({
-    smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
-    repoRoot,
-  });
-  const traceSink = createLocalPhoenixTraceSink({ repoRoot });
+function renderLatestRunEvidence({ repoRoot, output, limit = 5 } = {}) {
+  output.section("Latest run evidence");
+  let local;
   try {
-    return await runTriggeredDecomposition({
-      store,
-      runnerId: runnerCredential.credentialId,
-      workspaceId: context.linear.workspaceId,
-      linearClientFactory: async () => createSetupGraphqlClient({
-        config,
-        repoRoot,
-        credentialStore,
-        allowBrowserAuth: false,
-        allowRefresh: true,
-      }).client,
-      config: configWithDomainLinearTeam(config, context),
-      cache,
-      runtimeExecutor,
-      repoRoot,
-      leaseDurationMs: config.inbox.runner.lease_duration_ms,
-      runnerVersion: process.version,
-      capabilities: runnerCredential.capabilities || config.inbox.runner.required_capabilities,
-      traceSink,
-      domainContext: context,
-      registry,
-    });
-  } finally {
-    await traceSink.shutdown();
+    local = readLocalEvalInputs({ repoRoot });
+  } catch (error) {
+    output.warn(`Local run evidence could not be read: ${redactOAuthSecrets(error.message)}`);
+    return;
+  }
+  const runs = [...(local.runs || [])]
+    .sort((left, right) => String(right.observed_at || "").localeCompare(String(left.observed_at || "")))
+    .slice(0, limit);
+  if (runs.length === 0) {
+    output.success("No local runs found.");
+    return;
+  }
+  for (const run of runs) {
+    const status = run.trace_status || "local_artifact";
+    output.info(`${run.run_id}: ${humanizeToken(run.artifact_kind || status)}`);
+    output.keyValues(compactPairs([
+      ["Run", run.run_id],
+      ["Project", run.project_id],
+      ["Artifact", run.artifact_kind],
+      ["Trace", run.trace_status],
+      ["Snapshot", run.snapshot_present ? "present" : "missing"],
+      ["Observed", run.observed_at],
+    ]));
   }
 }
 
-function selectRunnerDomains({ registry, domainId = null } = {}) {
-  const domains = registry?.domains || [];
-  if (!domainId) return domains.filter((domain) => domain.status === "active");
-  const domain = domains.find((candidate) => candidate.id === domainId);
-  if (!domain) throw new Error(`domain_not_found: ${domainId}`);
-  if (domain.status !== "active") {
-    throw new Error(`domain_not_active: ${domainId} status=${domain.status || "unknown"}`);
+function gatewayExitCode(result) {
+  if (result.reason === "gateway_already_running") return 0;
+  if (result.ok && GATEWAY_SUCCESS_STATUSES.has(result.status)) return 0;
+  return result.ok ? 0 : 1;
+}
+
+export async function runRuntimeSmokeCommand({ context, command, args }) {
+  const { config, repoRoot, output } = context;
+    agenticFactoryHeading(output, "runtime smoke");
+    let result;
+    try {
+      result = await runRuntimeSmokeChecks({
+        config,
+        repoRoot,
+        force: args.includes("--force"),
+      });
+    } catch (error) {
+      output.error({
+        what: "Runtime smoke could not run",
+        why: redactOAuthSecrets(error.message),
+        fix: "repair the configured runtime command or adapter assignment, then rerun runtime-smoke.",
+      });
+      process.exitCode = 1;
+      return;
+    }
+    renderRuntimeSmokeResult(result, output);
+    if (result.ok) printVerboseHint(output);
+    process.exitCode = result.ok ? 0 : 1;
+}
+
+function renderRuntimeSmokeResult(result, output) {
+  if (result.ok) output.success("Runtime smoke checks completed.");
+  else {
+    output.error({
+      what: "Runtime smoke found runtime checks that need repair",
+      why: runtimeSmokeFailureSummary(result),
+      fix: "repair the failing runtime command, model, or adapter config, then rerun npm run runtime-smoke -- --force.",
+    });
   }
-  return [domain];
+  output.keyValues([
+    ["Cache", result.cachePath],
+    ["Checks", result.results.length],
+  ], { heading: "Smoke cache" });
+  output.section("Runtime checks");
+  for (const item of result.results) {
+    const label = `${item.runtime} ${item.version} ${item.role}${item.cached ? " (cached)" : ""}`;
+    if (item.ok) output.success(label);
+    else output.warn(label);
+    output.keyValues(compactPairs([
+      ["Runtime", item.runtime],
+      ["Role", item.role],
+      ["Version", item.version],
+      ["Cached", item.cached ? "yes" : "no"],
+      ["Error", item.error ? redactOAuthSecrets(item.error) : null],
+    ]));
+  }
+  output.detail(`cache=${JSON.stringify(result.cache || null)}`);
+}
+
+function runtimeSmokeFailureSummary(result) {
+  return result.results
+    .filter((item) => !item.ok)
+    .map((item) => `${item.runtime}/${item.role}: ${redactOAuthSecrets(item.error || "runtime check failed")}`)
+    .join("\n") || "At least one runtime check failed.";
+}
+
+async function inspectTriggerStatus({
+  config,
+  repoRoot,
+  domainId = null,
+}) {
+  const selection = resolveGatewaySelection({ repoRoot, config, domainId });
+  return runGatewayOnce({
+    repoRoot,
+    config,
+    registry: selection.registry,
+    domains: selection.domains,
+  });
+}
+
+async function requeueTriggerWake() {
+  throw new Error("wake_requeue_retired: use run_id replay through npm run gateway -- status.");
+}
+
+function formatTriggerWakeStatusLine({ wake } = {}) {
+  if (!wake) return "";
+  return gatewayStatusEventLine({
+    projectId: wake.projectId || wake.object_id || wake.objectId || null,
+    state: wake.state || wake.derived_status || wake.status || "unknown",
+    reason: wake.reason || wake.displayReason || null,
+    runId: wake.run_id || wake.runId || null,
+    artifactKind: wake.artifact_kind || wake.artifactKind || null,
+  });
+}
+
+function selectRunnerDomains({ registry, domainId = null } = {}) {
+  return selectGatewayDomains({ registry, domainId });
+}
+
+async function runOneTriggerWake({
+  config,
+  repoRoot,
+  domainId = null,
+} = {}) {
+  const selection = resolveGatewaySelection({ repoRoot, config, domainId });
+  const result = await runGatewayOnce({
+    repoRoot,
+    config,
+    registry: selection.registry,
+    domains: selection.domains,
+  });
+  return {
+    status: result.ok ? "completed" : result.status,
+    reason: result.reason || null,
+    messages: [],
+    gateway: result,
+    domainId: selection.domains[0]?.id || null,
+  };
 }
 
 function acquireDomainRunnerLock({
@@ -300,362 +573,6 @@ function toDate(value) {
   return value instanceof Date ? value : new Date(value);
 }
 
-async function inspectTriggerStatus({
-  config,
-  repoRoot,
-  inboxClient,
-  cachePath,
-  domainId = null,
-}) {
-  const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
-  const selectedDomains = selectRunnerDomains({ registry, domainId });
-  if (selectedDomains.length === 0) {
-    throw new Error("no_active_domains: no active domains are configured. Run npm run init.");
-  }
-
-  return listWakeViewsForDomains({
-    registry,
-    domains: selectedDomains,
-    config,
-    repoRoot,
-    inboxClient,
-    domainId,
-  });
-}
-
-async function requeueTriggerWake({
-  config,
-  repoRoot,
-  inboxClient,
-  domainId = null,
-  wakeId,
-  createCredentialStore = createRunnerInboxCredentialStore,
-} = {}) {
-  if (!wakeId) throw new Error("wake_id_required: pass --requeue <wakeId>.");
-  const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
-  const selectedDomains = selectRunnerDomains({ registry, domainId });
-  if (selectedDomains.length === 0) {
-    throw new Error("no_active_domains: no active domains are configured. Run npm run init.");
-  }
-  const views = await listWakeViewsForDomains({
-    registry,
-    domains: selectedDomains,
-    config,
-    repoRoot,
-    inboxClient,
-    domainId,
-    createCredentialStore,
-  });
-  const wake = views.find((candidate) => candidate.id === wakeId || candidate.wake_id === wakeId);
-  if (!wake) throw new Error(`wake_not_found: ${wakeId}`);
-  const workspaceId = wake.workspace_id || wake.workspaceId;
-  const requeueDomainId = domainId || resolvedDomainIdForWake({ wake, registry, config, repoRoot });
-  if (!requeueDomainId) {
-    throw new Error(`domain_required_for_requeue: wake ${wakeId} is ambiguous; pass --domain <domain_id>.`);
-  }
-  const domain = selectedDomains.find((candidate) => candidate.id === requeueDomainId);
-  if (!domain) throw new Error(`domain_not_found_for_requeue: ${requeueDomainId}`);
-  const context = buildDomainContext({ domain, config, repoRoot });
-  const credentialStore = createCredentialStore({ config, repoRoot, domainContext: context });
-  const credential = await credentialStore.readCredential();
-  if (!credential) {
-    throw new Error(`Runner inbox credential is missing for domain ${context.domainId}; run npm run init.`);
-  }
-  const result = await inboxClient.requeueWake({
-    workspaceId,
-    credentialId: credential.credentialId,
-    token: credential.token,
-    wakeId,
-  });
-  if (result?.ok === false) throw new Error(`requeue_failed:${result.reason}`);
-  return result;
-}
-
-function resolvedDomainIdForWake({ wake, registry, config, repoRoot } = {}) {
-  const explicit =
-    nonEmptyString(wake?.domain_id) ||
-    nonEmptyString(wake?.domainId) ||
-    nonEmptyString(wake?.resolvedDomainId) ||
-    nonEmptyString(wake?.resolved_domain_id);
-  if (explicit) return explicit;
-  const resolved = resolveWakeDomainContext({
-    registry,
-    config,
-    repoRoot,
-    selector: {
-      workspaceId: wake?.workspace_id || wake?.workspaceId || wake?.organization_id || null,
-      webhookId: wake?.webhook_ids || wake?.webhookIds || wake?.webhook_id || null,
-      projectTeamIds: wake?.team_ids || wake?.teamIds || wake?.project_team_ids || wake?.projectTeamIds || null,
-    },
-  });
-  return resolved.ok ? resolved.context.domainId : null;
-}
-
-function nonEmptyString(value) {
-  return typeof value === "string" && value.trim() !== "" ? value : null;
-}
-
-function formatTriggerWakeStatusLine({ wake, repoRoot } = {}) {
-  const receipt = wake.run_id ? readTraceReceipt({ repoRoot, runId: wake.run_id }) : null;
-  const traceStatus = receipt?.trace_status ? `trace=${receipt.trace_status}` : "";
-  const candidates = routingCandidatesText(wake.routingCandidates || wake.routing_candidates || []);
-  return [
-    wake.domainLabel,
-    wake.derived_status || wake.status,
-    wake.trigger_type || wake.workflow_type,
-    wake.object_id || wake.objectId || "",
-    wake.displayReason || "",
-    candidates,
-    traceStatus,
-  ].filter(Boolean).join(" ").trim();
-}
-
-function routingCandidatesText(candidates = []) {
-  if (!Array.isArray(candidates) || candidates.length === 0) return "";
-  const rendered = candidates.map((candidate) => (
-    `${candidate.domainId}(${candidate.status}${candidate.teamId ? `,team=${candidate.teamId}` : ""})`
-  ));
-  return `candidates=${rendered.join(",")}`;
-}
-
-export async function runRunnerCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
-    agenticFactoryHeading(output, "runner");
-    let result;
-    try {
-      result = await runOneTriggerWake({
-        config,
-        repoRoot,
-        inboxClient,
-        cachePath,
-        domainId: flagValue(args, "--domain"),
-      });
-    } catch (error) {
-      output.error({
-        what: "Runner could not start",
-        why: redactOAuthSecrets(error.message),
-        fix: "run npm run init or pass --domain for an active domain, then retry.",
-      });
-      process.exitCode = 1;
-      return;
-    }
-    for (const message of result.messages || []) output.detail(redactOAuthSecrets(message));
-    renderRunnerResult(result, output);
-    process.exitCode = ["completed", "paused", "rejected", "idle"].includes(result.status) ? 0 : 1;
-    // Post-terminal, best-effort deterministic check emission (CONSTRAINTS
-    // #27/#30). The wake is already completed inside runTriggeredDecomposition
-    // and the exit code above is already fixed from the run outcome, so a
-    // failure here can only print a notice; it can never alter the run
-    // outcome or add a blocking call to the live mutation path. The wrapper
-    // never throws and uses a non-starting Phoenix probe (Phoenix is never
-    // booted just for emission; the explicit eval:emit-checks command is the
-    // primary, retryable path).
-    if (result.status === "completed" || result.status === "paused") {
-      const terminalRunId = result.traceDelivery?.receipt?.run_id || result.wake?.run_id || null;
-      try {
-        const emission = await emitDeterministicChecksBestEffort({ repoRoot, runId: terminalRunId });
-        if (emission.ok) {
-          output.success(`Deterministic checks emitted for run ${terminalRunId}`);
-          output.detail(`emitted_count=${emission.emitted_count}`);
-        } else {
-          output.warn(`Deterministic checks were not emitted: ${emission.reason || emission.storage}`);
-          output.nextSteps([{
-            text: "Retry checks",
-            hint: `npm run eval:emit-checks -- ${terminalRunId || "<run_id>"}`,
-          }]);
-        }
-      } catch (error) {
-        output.warn("Deterministic checks were not emitted.");
-        output.detail(redactOAuthSecrets(error.message));
-      }
-    }
-    if (process.exitCode === 0) printVerboseHint(output);
-}
-export async function runRuntimeSmokeCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
-    agenticFactoryHeading(output, "runtime smoke");
-    let result;
-    try {
-      result = await runRuntimeSmokeChecks({
-        config,
-        repoRoot,
-        force: args.includes("--force"),
-      });
-    } catch (error) {
-      output.error({
-        what: "Runtime smoke could not run",
-        why: redactOAuthSecrets(error.message),
-        fix: "repair the configured runtime command or adapter assignment, then rerun runtime-smoke.",
-      });
-      process.exitCode = 1;
-      return;
-    }
-    renderRuntimeSmokeResult(result, output);
-    if (result.ok) printVerboseHint(output);
-    process.exitCode = result.ok ? 0 : 1;
-}
-export async function runTriggerStatusCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
-    agenticFactoryHeading(output, "trigger status");
-    const domainId = flagValue(args, "--domain");
-    const requeueWakeId = flagValue(args, "--requeue");
-    try {
-      if (requeueWakeId) {
-        const requeued = await requeueTriggerWake({
-          config,
-          repoRoot,
-          inboxClient,
-          domainId,
-          wakeId: requeueWakeId,
-        });
-        output.success(`Trigger requeued: ${requeued.wakeId || requeueWakeId}`);
-        output.keyValues(compactPairs([
-          ["Wake", requeued.wakeId || requeueWakeId],
-          ["Status", requeued.status],
-          ["Domain", domainId],
-        ]), { heading: "Requeue" });
-        printVerboseHint(output);
-        process.exitCode = 0;
-        return;
-      }
-      const views = await inspectTriggerStatus({
-        config,
-        repoRoot,
-        inboxClient,
-        cachePath,
-        domainId,
-      });
-      renderTriggerStatusViews(views, output, { repoRoot });
-      const reconciliation = await collectNextResumeReconciliation({ repoRoot, hostedWakeViews: views });
-      renderNextResumeReconciliationReport(reconciliation, output);
-      printVerboseHint(output);
-      process.exitCode = 0;
-    } catch (error) {
-      output.error({
-        what: "Trigger status could not be read",
-        why: redactOAuthSecrets(error.message),
-        fix: "run npm run init or pass --domain for a configured active domain, then retry.",
-      });
-      process.exitCode = 1;
-    }
-}
-
-function renderRunnerResult(result, output) {
-  if (["completed", "idle"].includes(result.status)) output.success(runnerHeadline(result));
-  else if (["paused", "rejected"].includes(result.status)) output.warn(runnerHeadline(result));
-  else {
-    output.error({
-      what: "Runner did not complete",
-      why: result.reason || result.status || "unknown",
-      fix: "inspect the wake state and runner logs, then retry.",
-    });
-  }
-  output.keyValues(compactPairs([
-    ["Domain", result.domainId],
-    ["Wake", result.wake?.id || result.wake?.wake_id],
-    ["Reason", result.reason],
-    ["Run", result.traceDelivery?.receipt?.run_id || result.wake?.run_id],
-  ]), { heading: "Runner" });
-  if (result.traceDelivery) renderTraceDelivery(result.traceDelivery, output);
-  output.detail(`status=${result.status || "unknown"}`);
-  output.detail(`messages=${redactOAuthSecrets(JSON.stringify(result.messages || []))}`);
-}
-
-function runnerHeadline(result) {
-  if (result.status === "completed") return "Runner completed a trigger wake.";
-  if (result.status === "paused") return "Runner paused for operator input.";
-  if (result.status === "rejected") return "Runner rejected the trigger wake.";
-  if (result.status === "idle") return `Runner is idle${result.reason ? `: ${result.reason}` : ""}`;
-  return `Runner status: ${result.status || "unknown"}`;
-}
-
-function renderTraceDelivery(traceDelivery, output) {
-  const text = `Trace delivery: ${traceDelivery.status || "unknown"}`;
-  if (traceDelivery.status === "trace_exported" || traceDelivery.ok === true) output.success(text);
-  else output.warn(text);
-  output.keyValues(compactPairs([
-    ["Open Phoenix", traceDelivery.phoenixAppUrl],
-    ["Reason", traceDelivery.reason ? redactOAuthSecrets(traceDelivery.reason) : null],
-    ["Run", traceDelivery.receipt?.run_id],
-    ["Trace", traceDelivery.receipt?.trace_id],
-  ]), { heading: "Trace" });
-}
-
-function renderRuntimeSmokeResult(result, output) {
-  if (result.ok) output.success("Runtime smoke checks completed.");
-  else {
-    output.error({
-      what: "Runtime smoke found runtime checks that need repair",
-      why: runtimeSmokeFailureSummary(result),
-      fix: "repair the failing runtime command, model, or adapter config, then rerun npm run runtime-smoke -- --force.",
-    });
-  }
-  output.keyValues([
-    ["Cache", result.cachePath],
-    ["Checks", result.results.length],
-  ], { heading: "Smoke cache" });
-  output.section("Runtime checks");
-  for (const item of result.results) {
-    const label = `${item.runtime} ${item.version} ${item.role}${item.cached ? " (cached)" : ""}`;
-    if (item.ok) output.success(label);
-    else output.warn(label);
-    output.keyValues(compactPairs([
-      ["Runtime", item.runtime],
-      ["Role", item.role],
-      ["Version", item.version],
-      ["Cached", yesNo(item.cached)],
-      ["Error", item.error ? redactOAuthSecrets(item.error) : null],
-    ]));
-  }
-  output.detail(`cache=${JSON.stringify(result.cache || null)}`);
-}
-
-function runtimeSmokeFailureSummary(result) {
-  return result.results
-    .filter((item) => !item.ok)
-    .map((item) => `${item.runtime}/${item.role}: ${redactOAuthSecrets(item.error || "runtime check failed")}`)
-    .join("\n") || "At least one runtime check failed.";
-}
-
-function renderTriggerStatusViews(views, output, { repoRoot } = {}) {
-  output.section("Trigger wake-ups");
-  if (views.length === 0) {
-    output.success("No trigger wake-ups found.");
-    return;
-  }
-  for (const wake of views) {
-    if (triggerWakeNeedsAttention(wake)) output.warn(triggerWakeHeadline(wake));
-    else output.success(triggerWakeHeadline(wake));
-    output.keyValues(compactPairs([
-      ["Wake", wake.id || wake.wake_id],
-      ["Domain", wake.domainLabel || wake.domain_id || wake.domainId],
-      ["Status", wake.derived_status || wake.status],
-      ["Trigger", wake.trigger_type || wake.workflow_type],
-      ["Object", wake.object_id || wake.objectId],
-      ["Reason", wake.displayReason || wake.reason],
-      ["Candidates", routingCandidatesText(wake.routingCandidates || wake.routing_candidates || [])],
-      ["Trace", triggerWakeTraceStatus(wake, repoRoot)],
-    ]));
-    output.detail(`wake=${redactOAuthSecrets(JSON.stringify(wake))}`);
-  }
-}
-
-function triggerWakeNeedsAttention(wake) {
-  const status = String(wake.derived_status || wake.status || "");
-  return /dead|error|failed|routing|expired|lost/i.test(status) || Boolean(wake.displayReason);
-}
-
-function triggerWakeHeadline(wake) {
-  const status = wake.derived_status || wake.status || "unknown";
-  const objectId = wake.object_id || wake.objectId || wake.id || wake.wake_id || "wake";
-  return `${objectId}: ${humanizeToken(status)}`;
-}
-
-function triggerWakeTraceStatus(wake, repoRoot) {
-  const receipt = wake.run_id ? readTraceReceipt({ repoRoot, runId: wake.run_id }) : null;
-  return receipt?.trace_status || null;
-}
-
 function renderNextResumeReconciliationReport(report, output) {
   output.section("Next resume");
   if (report.ok) output.success("No stalled resume work needs intervention.");
@@ -689,7 +606,7 @@ function renderNextResumeReconciliationReport(report, output) {
     }
   }
   output.detail(report._note || "");
-  output.detail("external_actions=no hosted wakes claimed, no Linear writes, no GitHub writes");
+  output.detail("external_actions=no gateway work claimed, no Linear writes, no GitHub writes");
   output.detail(`sources=${redactOAuthSecrets(JSON.stringify(report.sources || []))}`);
 }
 
@@ -711,6 +628,7 @@ function rawPmStateLabel(label) {
   if (label === "Safe stop") return "Blocked but safe";
   return label;
 }
+
 export {
   acquireDomainRunnerLock,
   formatTriggerWakeStatusLine,

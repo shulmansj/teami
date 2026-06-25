@@ -43,6 +43,13 @@ test("config requires Agentic Factory OAuth setup fields", () => {
     /scope write/,
   );
 
+  const adminScope = structuredClone(config);
+  adminScope.linear.oauth.scopes = ["read", "write", "admin"];
+  assert.throws(
+    () => validateLinearConfig(adminScope, "test-config"),
+    /unsupported Linear OAuth scope admin/,
+  );
+
   const appActor = structuredClone(config);
   appActor.linear.oauth.actor = "app";
   assert.throws(
@@ -65,7 +72,7 @@ test("authorization URL uses PKCE, user actor, required scopes, and no secret", 
   assert.equal(url.searchParams.get("client_id"), config.linear.oauth.client_id);
   assert.equal(url.searchParams.get("redirect_uri"), config.linear.oauth.redirect_uri);
   assert.equal(url.searchParams.get("response_type"), "code");
-  assert.equal(url.searchParams.get("scope"), "read,write,admin");
+  assert.equal(url.searchParams.get("scope"), "read,write");
   assert.equal(url.searchParams.get("actor"), "user");
   assert.equal(url.searchParams.get("prompt"), "consent");
   assert.equal(url.searchParams.get("state"), "state-123");
@@ -97,7 +104,7 @@ test("token exchange and refresh use form encoding without client secrets", asyn
       refresh_token: `refresh-${calls.length}`,
       token_type: "Bearer",
       expires_in: 3600,
-      scope: "read write admin",
+      scope: "read write",
     });
   };
 
@@ -150,7 +157,7 @@ test("token provider refreshes stored OAuth credentials and persists rotation", 
       refresh_token: "refresh-new",
       token_type: "Bearer",
       expires_in: 3600,
-      scope: "read,write,admin",
+      scope: "read,write",
     });
   const provider = createLinearOAuthTokenProvider({
     config,
@@ -187,7 +194,7 @@ test("token provider can defer browser OAuth persistence until explicit commit",
       refreshToken: "refresh-browser",
       tokenType: "Bearer",
       expiresIn: 3600,
-      scope: "read write admin",
+      scope: "read write",
     }),
     now: () => Date.parse("2026-06-07T20:00:00.000Z"),
   });
@@ -267,7 +274,7 @@ test("token provider de-dupes concurrent refreshes", async () => {
         refresh_token: "refresh-shared-next",
         token_type: "Bearer",
         expires_in: 3600,
-        scope: "read write admin",
+        scope: "read write",
       });
     },
   });
@@ -335,7 +342,7 @@ test("browser authorization validates callback state and exchanges the returned 
       refresh_token: "refresh-browser",
       token_type: "Bearer",
       expires_in: 3600,
-        scope: "read write admin",
+      scope: "read write",
     });
   };
 
@@ -392,6 +399,7 @@ test("browser authorization rejects callback state mismatch before token exchang
 
 test("OAuth errors redact token material", async () => {
   const config = loadLinearConfig({ repoRoot });
+  const githubToken = "ghp_" + "a".repeat(16);
 
   await assert.rejects(
     () =>
@@ -402,7 +410,7 @@ test("OAuth errors redact token material", async () => {
           jsonResponse(
             {
               error_description:
-                "refresh-secret failed at http://127.0.0.1:8723/linear/oauth/callback?code=secret-code&state=abc",
+                `refresh-secret failed with ${githubToken} at http://127.0.0.1:8723/linear/oauth/callback?code=secret-code&state=abc`,
             },
             { ok: false, status: 400 },
           ),
@@ -411,6 +419,7 @@ test("OAuth errors redact token material", async () => {
       assert.match(error.message, /HTTP 400/);
       assert.doesNotMatch(error.message, /refresh-secret/);
       assert.doesNotMatch(error.message, /secret-code/);
+      assert.doesNotMatch(error.message, new RegExp(githubToken));
       assert.match(error.message, /Linear OAuth callback URL \[redacted\]/);
       return true;
     },

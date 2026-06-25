@@ -287,7 +287,7 @@ function validateLinearRecord(domain, label) {
     throw new Error(`Invalid domain registry: invalid_team_name_last_seen_at:${domain.id}`);
   }
   if (domain.status === "active") {
-    for (const field of ["workspace_id", "team_id", "team_key", "team_name", "webhook_id"]) {
+    for (const field of ["workspace_id", "team_id", "team_key", "team_name"]) {
       if (!isNonEmptyString(linear[field])) {
         throw new Error(`Invalid domain registry: active_domain_missing_${field}:${domain.id}`);
       }

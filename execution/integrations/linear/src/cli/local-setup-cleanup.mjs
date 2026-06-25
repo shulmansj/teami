@@ -1,6 +1,6 @@
 import fs from "node:fs";
+import path from "node:path";
 
-import { readLinearCache } from "../cache.mjs";
 import {
   removeDomainRegistryState,
   readDomainRegistry,
@@ -13,18 +13,11 @@ import {
   legacyCredentialTargetForConfig,
 } from "../linear-credential-store.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
-import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
-import { removeLinearWebhookRegistration } from "../linear-webhook-registration.mjs";
 import { removeSetupState } from "../local-state.mjs";
 import {
   cleanupLocalSupervisorLocalState,
   formatLocalSupervisorCleanupReport,
 } from "../local-supervisor.mjs";
-import {
-  createRunnerInboxCredentialStore,
-  legacyRunnerInboxCredentialTargetForConfig,
-  removeRunnerInboxCredential,
-} from "../runner-inbox-credential.mjs";
 import { createCliOutput } from "./cli-output.mjs";
 import { flagValue } from "./flags.mjs";
 
@@ -44,7 +37,7 @@ const LOCAL_SETUP_COMMAND_OPTIONS = Object.freeze({
 });
 
 export async function runLocalSetupCleanupCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output = createCliOutput() } = context;
+  const { config, repoRoot, cachePath, setupStatePath, output = createCliOutput() } = context;
     const commandOptions = LOCAL_SETUP_COMMAND_OPTIONS[command] || LOCAL_SETUP_COMMAND_OPTIONS.uninstall;
     output.heading(
       command === "reset"
@@ -54,7 +47,6 @@ export async function runLocalSetupCleanupCommand({ context, command, args }) {
     output.detail(commandOptions.startMessage);
     const result = await removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
-      inboxClient,
       repoRoot,
       domainId: flagValue(args, "--domain"),
       fullReset: commandOptions.fullReset,
@@ -105,11 +97,9 @@ async function removeLocalLinearSetup(
   setupStatePath,
   {
     config,
-    inboxClient,
     repoRoot,
     domainId = null,
     fullReset = false,
-    createSetupAuth = createLinearSetupGraphqlClient,
     removeDomainSetup = removeOneDomainSetup,
     log = (line) => console.log(line),
   },
@@ -118,9 +108,7 @@ async function removeLocalLinearSetup(
   if (!registry) {
     return removePreDomainLocalLinearSetup(cachePath, setupStatePath, {
       config,
-      inboxClient,
       repoRoot,
-      createSetupAuth,
       log,
     });
   }
@@ -137,31 +125,7 @@ async function removeLocalLinearSetup(
   const supervisorCleanup = cleanupLocalSupervisorLocalState({ repoRoot });
   for (const line of formatLocalSupervisorCleanupReport(supervisorCleanup)) log(line);
 
-  const legacyCache = readLinearCache(cachePath);
-  const legacySetupCredentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
-  if (legacyCache?.inbox?.linearWebhook?.id || legacyCache?.webhook?.id || legacyCache?.workspaceId) {
-    try {
-      const setupAuth = createSetupAuth({
-        config,
-        repoRoot,
-        credentialStore: legacySetupCredentialStore,
-        allowBrowserAuth: false,
-        allowRefresh: true,
-      });
-      await removeLinearWebhookRegistration({
-        linearClient: setupAuth.client,
-        inboxClient,
-        workspaceId: legacyCache.workspaceId,
-        teamId: legacyCache.teamId,
-        webhookId: legacyCache?.inbox?.linearWebhook?.id || legacyCache?.webhook?.id,
-      });
-      log("removed: Linear webhook inbox registration");
-    } catch (error) {
-      log(`could not remove Linear webhook inbox registration: ${redactOAuthSecrets(error.message)}`);
-    }
-  }
-
-  for (const store of legacyCredentialStores({ config, repoRoot, inboxClient })) {
+  for (const store of legacyCredentialStores({ config, repoRoot })) {
     try {
       await store.remove();
       log(`removed: ${store.label}`);
@@ -178,26 +142,23 @@ async function removeLocalLinearSetup(
         ? await removeRemovedDomainSetup({
             config,
             repoRoot,
-            inboxClient,
             domain,
             removeDomainSetup,
             log,
           })
         : await removeDomainSetup({
-            config,
-            repoRoot,
-            inboxClient,
-            domain,
-            allowMissingWebhookId: fullReset && domain.status === "setup_incomplete",
-            log,
-          });
+          config,
+          repoRoot,
+          domain,
+          log,
+        });
     ok = ok && removed.ok;
   }
   if (!ok) {
     log(
       fullReset
-        ? "Reset aborted before deleting local domain state because one or more hosted credentials or webhooks could not be removed."
-        : "Uninstall aborted before marking the domain removed because hosted cleanup did not complete.",
+        ? "Reset aborted before deleting local domain state because one or more local credentials could not be removed."
+        : "Uninstall aborted before marking the domain removed because local cleanup did not complete.",
     );
     return { ok: false };
   }
@@ -215,6 +176,7 @@ async function removeLocalLinearSetup(
   }
 
   removeLocalState(cachePath, "legacy linear cache", log);
+  removeRetiredEventPathLocalState({ config, repoRoot, log });
   const domainState = removeDomainRegistryState({ repoRoot });
   log(domainState.registryRemoved ? "removed: domain registry" : "already clean: domain registry");
   log(domainState.domainsDirRemoved ? "removed: per-domain Linear caches" : "already clean: per-domain Linear caches");
@@ -222,9 +184,6 @@ async function removeLocalLinearSetup(
   const githubStatePath = githubConnectionStatePath(repoRoot);
   if (fs.existsSync(githubStatePath)) {
     removeLocalState(githubStatePath, "GitHub connection state", log);
-    log(
-      "Manual cleanup required: uninstall the Agentic Factory GitHub App from the behavior repo and confirm the one-time setup grant is revoked (GitHub -> Settings -> Applications). Local state removal alone does not revoke server-side access.",
-    );
   }
 
   return { ok };
@@ -233,53 +192,15 @@ async function removeLocalLinearSetup(
 async function removePreDomainLocalLinearSetup(
   cachePath,
   setupStatePath,
-  { config, inboxClient, repoRoot, createSetupAuth = createLinearSetupGraphqlClient, log = (line) => console.log(line) },
+  { config, repoRoot, log = (line) => console.log(line) },
 ) {
   const supervisorCleanup = cleanupLocalSupervisorLocalState({ repoRoot });
   for (const line of formatLocalSupervisorCleanupReport(supervisorCleanup)) log(line);
 
-  const cache = readLinearCache(cachePath);
-  const webhookId = cache?.inbox?.linearWebhook?.id || cache?.webhook?.id;
   const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
-  if (webhookId || cache?.workspaceId) {
-    try {
-      const setupAuth = createSetupAuth({
-        config,
-        repoRoot,
-        credentialStore,
-        allowBrowserAuth: false,
-        allowRefresh: true,
-      });
-      await removeLinearWebhookRegistration({
-        linearClient: setupAuth.client,
-        inboxClient,
-        workspaceId: cache?.workspaceId,
-        teamId: cache?.teamId,
-        webhookId,
-      });
-      log("removed: Linear webhook inbox registration");
-    } catch (error) {
-      log(`could not remove Linear webhook inbox registration: ${redactOAuthSecrets(error.message)}`);
-    }
-  }
-
-  try {
-    await removeRunnerInboxCredential({
-      inboxClient,
-      credentialStore: createRunnerInboxCredentialStore({
-        config,
-        repoRoot,
-        target: legacyRunnerInboxCredentialTargetForConfig(config, repoRoot),
-      }),
-      workspaceId: cache?.workspaceId,
-    });
-    log("removed: runner inbox credential");
-  } catch (error) {
-    log(`could not remove runner inbox credential: ${redactOAuthSecrets(error.message)}`);
-    return { ok: false };
-  }
 
   removeLocalState(cachePath, "linear cache", log);
+  removeRetiredEventPathLocalState({ config, repoRoot, log });
   const domainState = removeDomainRegistryState({ repoRoot });
   log(domainState.registryRemoved ? "removed: domain registry" : "already clean: domain registry");
   log(domainState.domainsDirRemoved ? "removed: per-domain Linear caches" : "already clean: per-domain Linear caches");
@@ -287,9 +208,6 @@ async function removePreDomainLocalLinearSetup(
   const githubStatePath = githubConnectionStatePath(repoRoot);
   if (fs.existsSync(githubStatePath)) {
     removeLocalState(githubStatePath, "GitHub connection state", log);
-    log(
-      "Manual cleanup required: uninstall the Agentic Factory GitHub App from the behavior repo and confirm the one-time setup grant is revoked (GitHub -> Settings -> Applications). Local state removal alone does not revoke server-side access.",
-    );
   }
   try {
     await credentialStore.deleteTokenSet();
@@ -305,12 +223,8 @@ async function removePreDomainLocalLinearSetup(
 async function removeOneDomainSetup({
   config,
   repoRoot,
-  inboxClient,
   domain,
-  allowMissingWebhookId = false,
-  createSetupAuth = createLinearSetupGraphqlClient,
   createOAuthCredentialStore = createLinearCredentialStore,
-  createRunnerCredentialStore = createRunnerInboxCredentialStore,
   removeLocalFile = removeLocalState,
   log = (line) => console.log(line),
 }) {
@@ -321,55 +235,10 @@ async function removeOneDomainSetup({
   }
 
   const credentialStore = createOAuthCredentialStore({ config, repoRoot, domainContext: context });
-  const runnerCredentialStore = createRunnerCredentialStore({ config, repoRoot, domainContext: context });
   let ok = true;
 
-  if (!context.linear.webhookId) {
-    if (!allowMissingWebhookId) {
-      log(
-        `could not remove domain ${domain.id} Linear webhook inbox registration: missing webhook_id in the domain registry; run npm run doctor and delete the webhook manually in Linear if needed.`,
-      );
-      return { ok: false, reason: "missing_webhook_id" };
-    }
-    log(
-      `skipped: domain ${domain.id} has no webhook_id; no Linear webhook deletion was attempted.`,
-    );
-  } else {
-    try {
-      const setupAuth = createSetupAuth({
-        config,
-        repoRoot,
-        credentialStore,
-        allowBrowserAuth: false,
-        allowRefresh: true,
-      });
-      await removeLinearWebhookRegistration({
-        linearClient: setupAuth.client,
-        inboxClient,
-        workspaceId: context.linear.workspaceId,
-        teamId: context.linear.teamId,
-        webhookId: context.linear.webhookId,
-      });
-      log(`removed: domain ${domain.id} Linear webhook inbox registration`);
-    } catch (error) {
-      log(`could not remove domain ${domain.id} Linear webhook inbox registration: ${redactOAuthSecrets(error.message)}`);
-      return { ok: false };
-    }
-  }
-
-  try {
-    await removeRunnerInboxCredential({
-      inboxClient,
-      credentialStore: runnerCredentialStore,
-      workspaceId: context.linear.workspaceId,
-    });
-    log(`removed: domain ${domain.id} runner inbox credential`);
-  } catch (error) {
-    log(`could not remove domain ${domain.id} runner inbox credential: ${redactOAuthSecrets(error.message)}`);
-    return { ok: false };
-  }
-
   removeLocalFile(context.linear.cachePath, `domain ${domain.id} linear cache`, log);
+  removeRetiredEventPathLocalState({ config, repoRoot, domainId: domain.id, log });
 
   try {
     await credentialStore.deleteTokenSet();
@@ -385,11 +254,9 @@ async function removeOneDomainSetup({
 async function removeRemovedDomainSetup({
   config,
   repoRoot,
-  inboxClient,
   domain,
   removeDomainSetup = removeOneDomainSetup,
   createOAuthCredentialStore = createLinearCredentialStore,
-  createRunnerCredentialStore = createRunnerInboxCredentialStore,
   log = (line) => console.log(line),
 }) {
   const context = contextForRegistryDomain({ domain, config, repoRoot });
@@ -399,27 +266,24 @@ async function removeRemovedDomainSetup({
   }
 
   const credentialStore = createOAuthCredentialStore({ config, repoRoot, domainContext: context });
-  const runnerCredentialStore = createRunnerCredentialStore({ config, repoRoot, domainContext: context });
   let tokenSet = null;
-  let runnerCredential = null;
   try {
     tokenSet = await credentialStore.readTokenSet?.();
-    runnerCredential = await runnerCredentialStore.readCredential?.();
   } catch (error) {
     log(`could not verify removed domain ${domain.id} credentials: ${redactOAuthSecrets(error.message)}`);
     return { ok: false };
   }
 
-  if (!tokenSet && !runnerCredential) {
-    log(`already clean: removed domain ${domain.id} hosted credentials`);
+  if (!tokenSet) {
+    removeRetiredEventPathLocalState({ config, repoRoot, domainId: domain.id, log });
+    log(`already clean: removed domain ${domain.id} local credentials`);
     return { ok: true, alreadyClean: true };
   }
 
-  log(`removed domain ${domain.id} still has local credentials; attempting hosted cleanup before reset.`);
+  log(`removed domain ${domain.id} still has local credentials; removing local credential state before reset.`);
   return removeDomainSetup({
     config,
     repoRoot,
-    inboxClient,
     domain,
     log,
   });
@@ -440,7 +304,7 @@ function contextForRegistryDomain({ domain, config, repoRoot }) {
   }
 }
 
-function legacyCredentialStores({ config, repoRoot, inboxClient }) {
+function legacyCredentialStores({ config, repoRoot }) {
   return [
     {
       label: "legacy Linear setup OAuth credential",
@@ -451,19 +315,28 @@ function legacyCredentialStores({ config, repoRoot, inboxClient }) {
           target: legacyCredentialTargetForConfig(config, repoRoot),
         }).deleteTokenSet(),
     },
-    {
-      label: "legacy runner inbox credential",
-      remove: async () =>
-        removeRunnerInboxCredential({
-          inboxClient,
-          credentialStore: createRunnerInboxCredentialStore({
-            config,
-            repoRoot,
-            target: legacyRunnerInboxCredentialTargetForConfig(config, repoRoot),
-          }),
-        }),
-    },
   ];
+}
+
+function removeRetiredEventPathLocalState({
+  config,
+  repoRoot,
+  domainId = null,
+  log = (line) => console.log(line),
+} = {}) {
+  const inbox = config?.inbox || {};
+  const files = [
+    path.resolve(repoRoot, inbox.setup_grant_file || path.join(".agentic-factory", "inbox-setup-grant.env")),
+    domainId
+      ? path.resolve(repoRoot, ".agentic-factory", "domains", domainId, "inbox-runner-credential.json")
+      : path.resolve(repoRoot, inbox.credential_file || path.join(".agentic-factory", "inbox-runner-credential.json")),
+  ];
+  for (const filePath of files) {
+    if (fs.existsSync(filePath)) {
+      fs.rmSync(filePath, { force: true });
+      log(`removed: ${path.relative(repoRoot, filePath)}`);
+    }
+  }
 }
 
 function createCleanupProgress(output) {

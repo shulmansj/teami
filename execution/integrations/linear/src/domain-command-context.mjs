@@ -1,11 +1,9 @@
 import { readLinearCache } from "./cache.mjs";
 import { emptyDomainRegistry, readDomainRegistry } from "./domain-registry.mjs";
 import {
-  buildDomainContext,
   resolveForegroundDomainContext,
   resolveWakeDomainContext,
 } from "./domain-resolver.mjs";
-import { createRunnerInboxCredentialStore } from "./runner-inbox-credential.mjs";
 
 export function resolveForegroundDomainCache({
   config,
@@ -74,50 +72,8 @@ export function decorateWakeViewsForDomains({ views, registry, config, repoRoot 
 }
 
 export async function listWakeViewsForDomains({
-  registry,
-  domains,
-  config,
-  repoRoot = process.cwd(),
-  inboxClient,
-  domainId = null,
-  createCredentialStore = createRunnerInboxCredentialStore,
 } = {}) {
-  if (!inboxClient?.listWakeViews) {
-    throw new Error("Hosted inbox client with listWakeViews is required for trigger-status.");
-  }
-  const loadedRegistry = registry || readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
-  const selectedDomains = domains || loadedRegistry.domains.filter((domain) => domain.status === "active");
-  const workspaceGroups = new Map();
-  for (const domain of selectedDomains) {
-    const workspaceId = domain.linear?.workspace_id;
-    if (!workspaceId) continue;
-    if (!workspaceGroups.has(workspaceId)) workspaceGroups.set(workspaceId, []);
-    workspaceGroups.get(workspaceId).push(domain);
-  }
-
-  const views = [];
-  for (const [workspaceId, workspaceDomains] of workspaceGroups) {
-    const context = buildDomainContext({ domain: workspaceDomains[0], config, repoRoot });
-    const credentialStore = createCredentialStore({ config, repoRoot, domainContext: context });
-    const credential = await credentialStore.readCredential();
-    if (!credential) {
-      throw new Error(`Runner inbox credential is missing for workspace ${workspaceId}; run npm run init.`);
-    }
-    const response = await inboxClient.listWakeViews({
-      workspaceId,
-      credentialId: credential.credentialId,
-      token: credential.token,
-    });
-    views.push(...(response.views || response.wakeups || response || []));
-  }
-
-  return decorateWakeViewsForDomains({
-    views,
-    registry: loadedRegistry,
-    config,
-    repoRoot,
-    domainId,
-  });
+  throw new Error("wake_views_retired: use npm run gateway -- status for local trigger state.");
 }
 
 export function decorateWakeViewForDomains({ wake, registry, config, repoRoot = process.cwd() } = {}) {

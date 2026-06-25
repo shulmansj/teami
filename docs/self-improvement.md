@@ -149,8 +149,8 @@ Agentic Factory functionality for the workspace within repo-owned policy:
 runner work, scanner work, evidence resolution, HITL proposal drafting, and
 opening GitHub PRs only after the proposal write and packet gates are
 fail-closed. Until then, unattended supervisor PR work stays report-only or
-disabled. It does not authorize automatic merging, auto-acceptance, hosted
-Linear writes while the machine is off, or bypassing repo policy gates. The supervisor
+disabled. It does not authorize automatic merging, auto-acceptance, Linear
+writes while the machine is off, or bypassing repo policy gates. The supervisor
 should start at login with OS keep-alive/backoff, verify local workspace
 credentials, lazily start Phoenix for trace/eval work, and run the same
 runner/scanner codepath available in foreground commands.
@@ -158,16 +158,14 @@ Uninstall must deregister the supervisor and remove its local authority,
 including login registration, runner credentials, and any standing repo
 authority used for proposal drafting.
 
-This is still local-machine automation, not hosted execution: it improves
-restart recovery and unattended cadence while the workspace machine can run the
-user's login services, but it cannot promise hosted-grade availability. While
+This is local-machine automation: it improves restart recovery and unattended
+cadence while the workspace machine can run the user's login services. While
 the machine is off, nothing local can notify the user and nothing should update
-Linear until the local supervisor resumes. The hosted inbox may still queue
-work and track runner heartbeats as backend coordination state, but it should
-not become a PM-facing status UI and should not receive Linear write authority
-for machine-off status messages in MVP. At the next login, the supervisor must
-reconcile what happened while the machine was away and report expired, stale,
-resumed, still-waiting, or repair-needed work through existing surfaces.
+Linear until the local supervisor resumes. Linear still holds projects in the
+trigger state, and the gateway reconciles them on the next local poll. At the
+next login, the supervisor must reconcile what happened while the machine was
+away and report expired, stale, resumed, still-waiting, or repair-needed work
+through existing surfaces.
 
 Local Phoenix is also local custody. If the adopter loses local Phoenix state,
 the loop may lose human annotations, calibration examples, and test-split
@@ -179,9 +177,8 @@ No third eval UI also means no new PM dashboard or native desktop notification
 channel in MVP. Use existing surfaces instead: Phoenix for eval evidence,
 Linear for live work state once the local runner/supervisor is available to
 write, GitHub/PRs for repo proposals, and agent sessions or doctor commands for
-on-demand repair detail. The hosted `/status` endpoint remains a
-backend/operator health endpoint unless a later product decision deliberately
-adds a separate status UI.
+on-demand repair detail. Local status commands remain operator surfaces unless
+a later product decision deliberately adds a separate status UI.
 
 The agent-session worklist should have one broad user-facing entrypoint:
 "What needs my judgment?" It can use specialized internal queries for
@@ -195,15 +192,15 @@ provisional routing vocabulary, not settled product copy:
 
 | PM state | Landing surface | Source of truth |
 | --- | --- | --- |
-| Working | Linear project, Phoenix trace, or run summary | Hosted inbox/run registry plus local runner receipts |
+| Working | Linear project, Phoenix trace, or run summary | Local trigger/run state plus local runner receipts |
 | Needs your decision | Phoenix annotation view, setup/reauth flow, PR evidence summary, or Linear project update | Phoenix annotations, local credentials, repo proposal, or Linear state |
-| Blocked but safe | Linear project update when safe, agent/doctor detail on request, or PR body/status update when proposal-related | Hosted inbox, supervisor health, local ledger |
+| Blocked but safe | Linear project update when safe, agent/doctor detail on request, or PR body/status update when proposal-related | Local gateway state, supervisor health, local ledger |
 | Proposal ready | GitHub PR with product-readable evidence summary and Phoenix links | Repo/GitHub proposal artifact |
 
 `Linear update when safe` means the local supervisor or foreground runner is
 online, Linear auth is valid, the live project still matches the expected
 workspace/status, and the update is idempotent and rate-limited. It does not
-mean hosted machine-off writes.
+mean machine-off writes.
 
 The value receipt is an event in the proposal lifecycle, not a separate steady
 state by default. In MVP, the PR should pre-stage the claimed target
@@ -215,8 +212,8 @@ Promotion readiness is anchored in a dedicated Agentic Factory behavior repo.
 Behavior-changing proposals should route through owner-reviewed PRs in that
 repo. Product repos are bound separately with `domain:bind-repo` as local
 `git_repo` resources for domain-scoped work; that binding is not behavior-repo
-proposal authority and does not give the broker product-repo access. If the
-starter checkout already has an upstream/template remote, setup may preserve
+proposal authority and does not give proposal workflows product-repo access. If
+the starter checkout already has an upstream/template remote, setup may preserve
 that remote only as template state.
 
 Target ongoing controller access is selected-repo access to the Agentic Factory
@@ -227,13 +224,11 @@ generation is blocked for repair rather than falling back to product-repo,
 all-repo, or maintainer-operated access.
 
 Repo creation is an init-only setup capability, not a standing runtime
-permission. It may need a one-time user/org setup grant with repository
-administration capability; after the repo exists, Agentic Factory should revoke
-or avoid retaining that admin-capable credential and operate through narrower
-selected-repo authority. Broker-backed proposal writing, when enabled for the
-public setup path, is limited to the behavior repo and must stay within the
-hosted-service custody contract. It is not a normal product-repo access path,
-all-repositories grant, or maintainer support path.
+permission. It may require the user's existing `gh` session to have repo
+creation or administration capability during setup. Proposal writing uses the
+adopter's local git/`gh` auth against the configured behavior repo, and Agentic
+Factory stores no GitHub secret. It is not a normal product-repo access path or
+all-repositories grant.
 
 The controller should open regular PRs only after evidence is packaged and the
 proposal is ready for human review. If the proposal is not review-ready, keep it
@@ -312,10 +307,10 @@ attempt. It is not a durable eval backend and should not be committed.
 ### Local Phoenix Trace And Eval Store
 
 Local Phoenix on the adopter machine is the supported Agentic Factory trace and
-self-improvement path for this MVP. The hosted wake/`workflow_runs` registry
-remains the mutation-coordination store for webhook ingestion, leases, and
-terminal wake state; it does not receive trace payloads and does not store trace
-status.
+self-improvement path for this MVP. Local trigger/run state remains the
+mutation-coordination store for Linear polling, wake leases, mutation intent,
+and terminal wake state; it does not receive trace payloads and does not store
+trace status.
 
 The runner exports existing Agentic Factory `trace.mjs` spans to local Phoenix.
 It first tries Phoenix's OTLP HTTP trace endpoint and falls back to Phoenix's
@@ -541,7 +536,7 @@ anchored to local human taste.
 
 First-class Phoenix experiments require a non-mutating eval-mode entrypoint.
 The runner exposes that extraction point so candidate phase output can be
-produced from captured or synthetic project input without claiming a hosted wake
+produced from captured or synthetic project input without claiming a local wake
 or mutating Linear. Until experiment wrappers are complete, annotation and
 dataset promotion are the first self-improvement actions to make first-class.
 

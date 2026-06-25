@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 import { credentialTargetForConfig } from "./linear-credential-store.mjs";
-import { runnerInboxCredentialTargetForConfig } from "./runner-inbox-credential.mjs";
 import {
   domainCachePath,
   readDomainRegistry,
@@ -178,12 +177,6 @@ export function buildDomainContext({
     credentialTargets: {
       linearOAuth: config
         ? credentialTargetForConfig(config, repoRoot, {
-            domainId: domain.id,
-            workspaceId: domain.linear.workspace_id,
-          })
-        : null,
-      runnerInbox: config
-        ? runnerInboxCredentialTargetForConfig(config, repoRoot, {
             domainId: domain.id,
             workspaceId: domain.linear.workspace_id,
           })

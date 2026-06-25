@@ -25,27 +25,13 @@ test("foreground runner leaves Phoenix lifecycle to the trace sink instead of pr
 
   const result = await runForegroundTriggerRunnerOnce({
     config: {
-      inbox: {
-        runner: {
-          lease_duration_ms: 1000,
-          required_capabilities: ["linear.project.planned", "decomposition.trigger_runner.v1"],
-        },
+      runner: {
+        lease_duration_ms: 1000,
+        required_capabilities: ["linear.project.planned", "decomposition.trigger_runner.v1"],
       },
     },
     repoRoot,
     credentialStore: {},
-    runnerCredentialStore: {
-      async readCredential() {
-        return {
-          credentialId: "runner-credential-1",
-          workspaceId: "workspace-1",
-          token: "runner-token",
-          endpoint: "https://inbox.test",
-          capabilities: ["linear.project.planned", "decomposition.trigger_runner.v1"],
-        };
-      },
-    },
-    inboxClient: {},
     cachePath,
     stopPhoenixFn: async () => {
       stopCalled = true;
@@ -67,18 +53,23 @@ test("foreground runner leaves Phoenix lifecycle to the trace sink instead of pr
   assert.equal(report.some((line) => line.includes("stopped: managed local Phoenix")), false);
 });
 
-test("domain runner CLI path does not pre-stop Phoenix before trace sink readiness", () => {
-  // Post-split, the domain runner body lives in src/cli/runner-command.mjs;
-  // the body pin follows the wiring.
+test("gateway CLI path does not pre-stop Phoenix before trace sink readiness", () => {
   const source = fs.readFileSync(
     path.resolve(import.meta.dirname, "..", "src", "cli", "runner-command.mjs"),
     "utf8",
   );
-  const start = source.indexOf("async function runOneDomainTriggerWake");
-  const end = source.indexOf("function selectRunnerDomains", start);
-  assert.ok(start > 0, "runOneDomainTriggerWake must exist");
-  assert.ok(end > start, "runOneDomainTriggerWake body must be bounded");
-  const body = source.slice(start, end);
-  assert.equal(body.includes("stopPhoenix"), false);
-  assert.equal(body.includes("stopped: managed local Phoenix"), false);
+  assert.match(source, /runGatewayLoop/);
+  assert.equal(source.includes("stopPhoenix"), false);
+  assert.equal(source.includes("stopped: managed local Phoenix"), false);
+});
+
+test("runner entry points use the local trigger store instead of a remote wake queue", () => {
+  const files = [
+    path.resolve(import.meta.dirname, "..", "src", "foreground-runner.mjs"),
+    path.resolve(import.meta.dirname, "..", "src", "cli", "runner-command.mjs"),
+    path.resolve(import.meta.dirname, "..", "src", "gateway-loop.mjs"),
+  ];
+  const source = files.map((file) => fs.readFileSync(file, "utf8")).join("\n");
+  assert.match(source, /createLocalTriggerStore/);
+  assert.equal(source.includes("createHostedWakeQueueStore"), false);
 });

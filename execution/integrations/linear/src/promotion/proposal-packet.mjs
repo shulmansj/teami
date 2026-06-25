@@ -45,6 +45,7 @@ export function buildPromotionProposalPacket({
   candidateContentExcerpt,
   phoenixDeepLinks,
   machineAuthorship,
+  prProvenance,
   allowedOriginPrefix,
 } = {}) {
   const markerPayload = promotionMarkerPayload(marker);
@@ -112,6 +113,7 @@ export function buildPromotionProposalPacket({
     authority_custody_access: authorityCustodyAccess,
     undo_bounds: undoBounds,
     decline_path: declinePath,
+    pr_provenance: normalizePrProvenance(prProvenance),
     marker: enrichedMarker,
     optional_depth: {
       phoenix: {
@@ -188,6 +190,14 @@ export function renderPromotionProposalPacketMarkdown(packet) {
     lines.push(`- Repeat policy: ${prose(packet.decline_path.repeat_policy)}`);
   }
   lines.push("");
+
+  const provenance = renderPrProvenance(packet?.pr_provenance);
+  if (provenance.length > 0) {
+    lines.push("## Provenance");
+    lines.push("");
+    lines.push(...provenance);
+    lines.push("");
+  }
 
   lines.push("## Machine-readable marker");
   lines.push("");
@@ -524,6 +534,32 @@ function renderUndoBounds(bounds = {}) {
   return lines;
 }
 
+function renderPrProvenance(provenance = null) {
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) return [];
+  const lines = [`- Source run: ${prose(provenance.source_run_id ?? "unknown")}.`];
+  if (provenance.experiment_receipt_id) {
+    lines.push(`- Experiment receipt: ${prose(provenance.experiment_receipt_id)}.`);
+  }
+  if (provenance.phoenix_experiment_id) {
+    lines.push(`- Phoenix experiment: ${prose(provenance.phoenix_experiment_id)}.`);
+  }
+  if (provenance.proposal_instance_id || provenance.normalized_envelope_hash) {
+    const parts = [
+      provenance.proposal_instance_id ? `proposal ${provenance.proposal_instance_id}` : null,
+      provenance.normalized_envelope_hash ? `envelope ${provenance.normalized_envelope_hash}` : null,
+    ].filter(Boolean);
+    lines.push(`- Promotion identity: ${prose(parts.join("; "))}.`);
+  }
+  if (provenance.github_auth_mode || provenance.push_auth) {
+    const parts = [
+      provenance.github_auth_mode ? `GitHub mode ${provenance.github_auth_mode}` : null,
+      provenance.push_auth ? `push auth ${provenance.push_auth}` : null,
+    ].filter(Boolean);
+    lines.push(`- GitHub write custody: ${prose(parts.join("; "))}.`);
+  }
+  return lines;
+}
+
 function renderOptionalDepth(optionalDepth = {}) {
   const lines = [];
   const evidenceDepth = renderEvidenceDepth(optionalDepth.phoenix);
@@ -857,6 +893,22 @@ function arrayOfObjects(value) {
     .map((entry) => JSON.parse(JSON.stringify(entry)));
 }
 
+function normalizePrProvenance(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    schema_version: "agentic-factory-pr-provenance/v1",
+    source_run_id: nullableString(value.source_run_id ?? value.sourceRunId),
+    experiment_receipt_id: nullableString(value.experiment_receipt_id ?? value.experimentReceiptId),
+    phoenix_experiment_id: nullableString(value.phoenix_experiment_id ?? value.phoenixExperimentId),
+    proposal_instance_id: nullableString(value.proposal_instance_id ?? value.proposalInstanceId),
+    normalized_envelope_hash: nullableString(value.normalized_envelope_hash ?? value.normalizedEnvelopeHash),
+    candidate_target_key: nullableString(value.candidate_target_key ?? value.candidateTargetKey),
+    produced_at: nullableString(value.produced_at ?? value.producedAt),
+    github_auth_mode: nullableString(value.github_auth_mode ?? value.githubAuthMode),
+    push_auth: nullableString(value.push_auth ?? value.pushAuth),
+  };
+}
+
 function targetName(target) {
   return firstNonEmptyString(target?.human_name, "This factory behavior");
 }
@@ -874,6 +926,10 @@ function nonEmptyString(value) {
 
 function finiteOrNull(value) {
   return Number.isFinite(value) ? value : null;
+}
+
+function nullableString(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
 function prose(text) {

@@ -26,3 +26,9 @@ CONSTRAINTS.md
 AGENTS.md
 CLAUDE.md
 .claude/
+
+# The adopter companion is authored under starter/ and the publication exporter places it
+# at the adopter repo root (AGENTS.md/CLAUDE.md via dest_path). Un-ignore the source paths
+# so they can be tracked; the root AGENTS.md/CLAUDE.md above stay ignored (Steve's dev guidance).
+!starter/AGENTS.md
+!starter/CLAUDE.md

@@ -63,6 +63,20 @@ test("Default records carry an empty resources list without requiring registered
   validateDomainRegistry({ schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION, domains: [domain] });
 });
 
+test("Active local-poll domains do not require a webhook id", () => {
+  const domain = makeDomainRecord({
+    domainId: "local-poll",
+    status: "active",
+    workspaceId: "workspace-1",
+    teamId: "team-1",
+    teamKey: "LP",
+    teamName: "Local Poll",
+  });
+
+  assert.equal(domain.linear.webhook_id, null);
+  validateDomainRegistry({ schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION, domains: [domain] });
+});
+
 test("Resources validate by dispatching to the registered resource-kind definition", () => {
   resetResourceRegistry();
   try {

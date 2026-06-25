@@ -28,12 +28,11 @@ Use a low-risk project in a disposable or internal repo.
 Connect:
 
 - Test Linear workspace or low-risk Linear project.
-- Agentic Factory browser authorization through the launch-gated hosted setup
-  path.
-- The Agentic Factory-operated hosted inbox and broker after public endpoint,
-  key, settings, and live handoff proof, with the adopter's own Linear workspace
-  authorization and selected GitHub App installation context.
+- Agentic Factory browser authorization through `npm run init`, using the
+  adopter's own Linear OAuth grant.
+- Local gateway polling for projects in the trigger state; Linear is the queue.
 - A dedicated Agentic Factory behavior repo for process-change proposals.
+- The adopter's own git/`gh` auth for behavior-repo proposal branches and PRs.
 - Local agent runtimes for PM, Sr Eng, and execution agents.
 - Managed or reused local Phoenix for trace inspection and self-improvement.
 
@@ -44,13 +43,9 @@ Avoid:
 - Background merge actions.
 - API keys or adopter-created Linear OAuth apps.
 
-The hosted setup path is launch-gated until public endpoint, key, settings, and
-live handoff proof are recorded. Once enabled, it is a best-effort public beta
-boundary, not an enterprise support promise. It should be used for evaluation
-and controlled pilots with clear revocation and cleanup steps. The hosted inbox
-and broker are operated by Agentic Factory maintainers; they are not a
-maintainer support backdoor into the adopter's Linear workspace, local Phoenix,
-or product repository.
+The pilot boundary is local-first. The external authorities are the adopter's
+Linear OAuth grant and the adopter's GitHub session. Evaluation should use
+disposable or low-risk resources with clear revocation and cleanup steps.
 
 ## Phase 3: Controlled Production Pilot
 
@@ -83,49 +78,49 @@ decides otherwise.
 
 ## Current Technical Preview Shape
 
-The current runnable setup path is command-driven technical preview, not the
-future raw-command-free public setup claim:
+The current runnable setup is two commands:
 
 ```bash
 npm install
-npm run init
+./factory init
 ```
 
-The target audience remains a product-manager persona, not an infra operator,
-but the current preview has not yet earned a raw-command-free setup promise. The
+`factory` is a repo-local launcher (macOS/Linux `./factory <cmd>`, Windows
+cmd.exe `factory <cmd>`, PowerShell `.\factory.cmd <cmd>`); the `npm run
+<script>` forms remain as a fallback. `factory init` folds in the runtime check
+and a final health gate and ends on a green summary, then points at `factory
+gateway start`. After setup, the committed `AGENTS.md`/`CLAUDE.md` companion is
+the post-setup surface: open a claude/codex session in the folder and it adds
+domains, repairs red checks, and starts the gateway by running these same
+deterministic commands.
+
+The target audience is a product-manager persona, not an infra operator. The
 detailed self-improvement interaction model, including local-supervisor consent,
 PM-facing status routing, machine-off limits, and no-third-eval-UI boundaries,
 is owned in [self-improvement.md](self-improvement.md).
 
 `npm run init` authorizes Linear in the browser and uses Linear GraphQL to set
 up the Agentic Factory team, labels, project status mappings, project template,
-hosted webhook inbox registration, generated cache, scoped runner-to-inbox
-credential, managed or reused local Phoenix, and local OAuth credential. No API
-key is required.
+generated cache, local gateway state, managed or reused local Phoenix, and local
+OAuth credential. No API key or Linear admin scope is required.
 Setup can also run a GitHub connection phase for the Agentic Factory behavior
 repo. It creates or verifies a dedicated behavior repo, keeps starter/template
-remotes only as template state, verifies selected-repo access, and checks
-whether behavior-change PR generation can work. The behavior-repo broker path is
-for reviewable process-change proposals; it is distinct from product-repo
-checkout binding and must not be treated as product-repo access. Bind one
-existing product checkout to a domain with
+remotes only as template state, verifies local git/`gh` access, and checks
+whether behavior-change PR generation can work. The behavior-repo path is for
+reviewable process-change proposals; it is distinct from product-repo checkout
+binding and must not be treated as product-repo access. Bind one existing
+product checkout to a domain with
 `npm run domain:bind-repo -- --domain <id> --path <path>`; for example,
 `npm run domain:bind-repo -- --domain main --path ../product-app`. The binding
 records the product repo's local checkout path, `owner/repo`, and default
 branch; local checkout paths stay on the adopter machine. `npm run github:init`
 repairs only the behavior-repo GitHub phase when a prior init was interrupted.
 
-Linear requires admin permission to create and read webhook registrations. That
-permission belongs to the local setup path; the hosted inbox receives only the
-webhook signing secret needed to verify deliveries and the separate runner
-credential needed to lease wake-ups. It never receives Linear OAuth tokens and
-does not mutate Linear.
-The runner credential is scoped to one workspace and carries only the wake/run
-capabilities needed to lease and complete hosted inbox work. It is not a
-Phoenix credential.
-The current sandbox hosted inbox is a Supabase Edge Function. Hosted-service
-operator credentials are deployment detail, not adopter-facing credentials and
-not maintainer support access.
+Linear setup uses the adopter's read/write OAuth grant locally through GraphQL.
+The local gateway polls current project state and records local wake state
+before the Workflow Runner re-reads Linear and applies mutation gates. Agentic
+Factory does not store GitHub secrets; behavior-repo writes use the adopter's
+existing git/`gh` authority.
 
 Local Phoenix is managed from the adopter machine. `npm run init` installs or
 reuses Phoenix on a loopback endpoint, starts it when needed, records service
@@ -171,51 +166,47 @@ binding records the local checkout path, `owner/repo`, and default branch.
 
 The trust boundary is narrow: product-repo binding is repo-selection scoping
 for one local checkout, plus the foundation for local worktree/cwd selection in
-domain-scoped work. It is not hosted code execution, OS isolation, container
-isolation, behavior-repo broker access, or an all-repositories GitHub grant.
+domain-scoped work. It is not OS isolation, container isolation, behavior-repo
+proposal authority, or an all-repositories GitHub grant.
 Local checkout paths and local run state stay on the adopter's machine and must
 not appear in public examples, prompts, logs, traces, or export artifacts.
 
 ## Suggested Sandbox Run
 
-Use this path to verify the current Linear slice:
+Use this path to verify the current Linear slice. Or skip the command list: open
+a claude/codex session in the factory folder and the committed
+`AGENTS.md`/`CLAUDE.md` companion walks you through the same steps, running the
+commands for you.
 
 1. Run `npm install`.
-2. Run `npm run init`.
-3. Run `npm run doctor`.
-4. Run `npm run runtime-smoke` so the configured runtimes prove schema-valid
-   subagent-turn output through tool-less `session_start` invocations for their
-   installed versions.
-5. Create one disposable Linear project in the Agentic Factory team with a
+2. Run `./factory init` (Windows: `factory init` / `.\factory.cmd init`). It
+   authorizes Linear and GitHub in your browser, folds in the runtime check and a
+   final health gate, and ends on a green summary — no separate `doctor` or
+   `runtime-smoke` step. Re-run it to repair; it is idempotent and resumable.
+3. Create one disposable Linear project in the Agentic Factory team with a
    non-empty body. The repo template at
    [../execution/templates/linear-roadmap-project-body.md](../execution/templates/linear-roadmap-project-body.md)
    is an optional drafting aid, not a validation contract.
-6. Move the Linear project to `Planned` when the human owner approves
-   non-interactive decomposition.
-7. Start the Workflow Runner with `npm run runner` so it can heartbeat to the
-   hosted inbox and claim queued wake-ups. This is the current sandbox path; the
-   target adopter path is that the local supervisor, when explicitly enabled
-   through init or automation upgrade, keeps the runner and scanner alive after
-   login.
-8. For the current sandbox, use `npm run trigger-status` as the local/operator
-   view of wake state. Internal states such as `dead_letter` must be translated
-   to repair-needed product copy before they reach adopter-primary surfaces.
-   The target PM path is existing surfaces after the local supervisor resumes:
-   Linear updates where safe, Phoenix evidence links, GitHub/PR proposal
-   summaries, and agent/doctor detail on request.
-9. Open the local Phoenix UI URL printed by init/status to inspect the run
-   trace and phase spans.
-10. Move or delete test artifacts after the check.
+4. Run `./factory gateway start` so it polls Linear, creates local wake-ups, and
+   runs the Workflow Runner against eligible projects. It runs until Ctrl-C; keep
+   the terminal open while you want the factory listening. (Always-on autostart
+   after login is a later capability.)
+5. Move the Linear project to `Planned` when the human owner approves
+   non-interactive decomposition. The running gateway picks it up.
+6. Check progress with `./factory gateway status` (a one-pass wake/run view), and
+   open the local Phoenix UI URL printed by init/status to inspect the run trace
+   and phase spans. Internal states such as `dead_letter` are translated to
+   repair-needed product copy before they reach adopter-primary surfaces.
+7. Move or delete test artifacts after the check.
 
-At this point, Agentic Factory has proven GraphQL-backed Linear setup, webhook
-registration, the runner-to-inbox protocol contract, exact project update
+At this point, Agentic Factory has proven GraphQL-backed Linear setup, local
+gateway polling, local wake lease/replay behavior, exact project update
 posting, project-body Open Questions replacement, issue creation,
 deterministic idempotency behavior, and fail-closed terminal handling for
-unsafe partial mutation states. A deployed hosted inbox must pass a live queue
-handoff smoke before claiming readiness for an adopter workspace. Local Phoenix trace
-export should be verified separately on the adopter machine. It has not
-proven pull request generation, dev-agent dispatch, review automation, release
-automation, or hosted agent execution.
+unsafe partial mutation states. Local Phoenix trace export should be verified
+separately on the adopter machine. It has not proven pull request generation,
+dev-agent dispatch, review automation, release automation, or cloud agent
+execution.
 
 ## Permission Model
 
@@ -228,8 +219,7 @@ This section applies that contract to pilot rollout.
 Linear:
 
 - Authorize the Agentic Factory Linear app through browser OAuth.
-- Request read/write/admin scope for setup because Linear requires admin scope
-  to create and read webhooks.
+- Request read/write scope for setup and workflow mutations.
 - Restrict workflow instructions and config to the Agentic Factory team.
 - Read Agentic Factory project and issue data through the GraphQL client.
 - Create and update issues, project statuses, labels, and project updates only
@@ -237,14 +227,12 @@ Linear:
 
 GitHub:
 
-- Create or verify a dedicated Agentic Factory behavior repo during setup. Any
-  stronger one-time setup grant must be explicit, time-boxed, and revoked or
-  verified absent after setup.
+- Create or verify a dedicated Agentic Factory behavior repo during setup using
+  the adopter's local git/`gh` auth.
 - Bind product repos separately per domain with `domain:bind-repo`; keep that
-  separate from behavior-repo setup, do not attach product repositories through
-  the behavior-repo broker, and do not request all-repo access in normal v1
-  setup.
-- Keep steady-state automation on a selected-repo GitHub App installation.
+  separate from behavior-repo setup, and do not treat behavior-repo authority as
+  product-repo authority.
+- Keep proposal automation scoped to the configured behavior repo remote.
 - Read repo metadata.
 - Create branches and push proposal commits.
 - Open pull requests and update controller-owned PR bodies/state.
@@ -293,7 +281,7 @@ Until those checks pass, the platform is not in the supported path.
 | Humans are asked too many technical questions | Product owner becomes de facto engineering coordinator. | Escalation rule limits human questions to product impact. |
 | Automation moves too fast | The adopting team loses trust. | Low-risk projects first; `Planned` is the explicit handoff and every trigger outcome is visible. |
 | Permissions are too broad | Security and trust risk. | Narrow pilot permissions. |
-| Setup admin scope feels surprising | The adopter may distrust onboarding. | Explain that Linear requires admin for webhooks and that the hosted inbox never receives the OAuth token. |
+| Local auth scope feels surprising | The adopter may distrust onboarding. | Explain that Linear uses read/write OAuth locally, behavior-repo writes use the adopter's own git/`gh` auth, and Agentic Factory stores no GitHub secret. |
 | Workflow changes are not traceable | The system cannot learn from successes or failures. | Persist run artifacts and trace links before treating a run as successful. |
 | Onboarding becomes a pile of commands | The adopter loses trust before seeing value. | Keep one top-level init as the golden path and leave service-specific commands for repair and testing. |
 | Local Phoenix is down | Self-improvement evidence is missing for a run. | Continue real work, record local trace failure receipts and health counters, and repair with Phoenix commands. |

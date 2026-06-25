@@ -52,7 +52,7 @@ export { DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY } from "./promotion-target-keys.
 // Phoenix tag or version advance is intent, never accepted behavior).
 //
 // The judge is strictly non-mutating (CONSTRAINTS #27): this module never
-// imports a Linear client, never claims hosted wakes, and never decides live
+// imports a Linear client, never claims gateway wakes, and never decides live
 // mutation. Its only writes are (a) LLM annotations through the SHARED
 // createPhoenixTraceAnnotation path and (b) a local, gitignored judge-attempt
 // receipt that the derived worklist reads (worklist state itself stays

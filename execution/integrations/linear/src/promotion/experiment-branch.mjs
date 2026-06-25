@@ -1,4 +1,5 @@
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 import { collectExperimentEvidence } from "../disagreement-report.mjs";
 import { sanitizeAndClassifyContent } from "../eval-content-gate.mjs";
@@ -45,7 +46,7 @@ import {
   ensurePromotionWorkspace,
   promotionBranchName,
   pushBranchPlaceholder,
-  pushPromotionBranchWithInstallationToken,
+  pushPromotionBranchWithAmbientAuth,
   verifyPromotionBranchEnvelope,
 } from "../promotion-workspace.mjs";
 import {
@@ -150,6 +151,7 @@ export const UNTRUSTED_PROMOTION_OVERRIDE_KEYS = Object.freeze([
   "ensureReady",
   "fetchImpl",
   "runGit",
+  "githubSpawnImpl",
   "env",
   "acceptCrossVersion",
   "materializePromotionCandidateImpl",
@@ -167,7 +169,7 @@ export async function promoteCandidate(options = {}) {
 }
 
 // TEST-ONLY construction seam (outside-review FIX 4): the single place where
-// transports/policy paths/baseline override/fetch/git/env may be injected.
+// transports/policy paths/baseline override/fetch/git/gh-spawn/env may be injected.
 // Production code (cli.mjs and any future scanner/supervisor caller) calls
 // promoteCandidate above and can never reach these seams.
 export function createPromoteCandidateTestHarness(overrides = {}) {
@@ -211,6 +213,7 @@ async function promoteCandidateWithOverridesUnlocked({
   ensureReady = ensurePhoenixReady,
   fetchImpl = globalThis.fetch,
   runGit = defaultRunGit,
+  githubSpawnImpl = spawn,
   env = process.env,
   now = () => new Date(),
   onProgress = () => {},
@@ -702,6 +705,14 @@ async function promoteCandidateWithOverridesUnlocked({
     return blockedEarly("promotion_registry_unreadable", registryRead.path);
   }
   const preexistingRecord = registryRead.exists ? registryRead.record : null;
+  const basePrProvenance = buildPromotionPrProvenance({
+    receipt,
+    receiptState,
+    proposalInstanceId,
+    envelopeHash,
+    candidateTargetKey,
+    startedAt,
+  });
 
   const baseResult = {
     proposal_instance_id: proposalInstanceId,
@@ -724,6 +735,7 @@ async function promoteCandidateWithOverridesUnlocked({
     },
     evidence_lineage: gate.evidence_lineage ?? null,
     receipt_id: receiptState.receipt_id,
+    pr_provenance: basePrProvenance,
     registry_path: registryRead.path,
     started_at: startedAt,
   };
@@ -743,6 +755,7 @@ async function promoteCandidateWithOverridesUnlocked({
       candidate_version_id: candidateVersionId,
       accepted_baseline_id: acceptedBaselineId,
       receipt_id: receiptState.receipt_id,
+      pr_provenance: basePrProvenance,
       phoenix_scope: phoenixScope,
       evidence_ids: envelope.evidence_ids,
       policy: policyRecord,
@@ -877,8 +890,22 @@ async function promoteCandidateWithOverridesUnlocked({
   const selectGitHub = () => {
     if (!githubSelection) {
       githubSelection = githubTransport
-        ? { transport: githubTransport, brokerClient: null, mode: githubTransport.kind || "test_harness" }
-        : createProductionGitHubPromotionTransport({ repoRoot, repoIdentity, now });
+        ? {
+          transport: githubTransport,
+          mode: githubTransport.kind || "test_harness",
+          owner: githubRepo.owner,
+          repo: githubRepo.repo,
+          defaultBranch: repoIdentity?.default_branch ?? null,
+          checkoutPath: repoIdentity?.checkout_path || repoRoot,
+          pushAuth: repoIdentity?.push_auth === "ssh" ? "ssh" : "https",
+          realPushEnabled: false,
+        }
+        : createProductionGitHubPromotionTransport({
+          repoRoot,
+          repoIdentity,
+          now,
+          spawnImpl: githubSpawnImpl,
+        });
     }
     return githubSelection;
   };
@@ -1199,7 +1226,7 @@ async function promoteCandidateWithOverridesUnlocked({
     const normalizedGitHubError = String(error.message || "").toLowerCase().replace(/\s+/g, "_");
     const reason = /github_pr_listing_truncated|pr_listing_truncated/.test(normalizedGitHubError)
       ? "github_pr_listing_truncated"
-      : /github.*broker|github_token_broker|github_broker|github_transport/.test(normalizedGitHubError)
+      : /github_transport|github_api|local_ambient/.test(normalizedGitHubError)
       ? "github_transport_unavailable"
       : "github_pr_listing_failed";
     return blockedRetryable(reason, error.message);
@@ -1552,6 +1579,15 @@ async function promoteCandidateWithOverridesUnlocked({
     evidenceIds: envelope.evidence_ids,
     configuredOrigin,
   });
+  const prProvenance = buildPromotionPrProvenance({
+    receipt,
+    receiptState,
+    proposalInstanceId,
+    envelopeHash,
+    candidateTargetKey,
+    startedAt,
+    githubSelection: selectGitHub(),
+  });
   const proposalPacketDraft = buildPromotionProposalPacket({
     target: materializerTarget.target,
     marker,
@@ -1574,6 +1610,7 @@ async function promoteCandidateWithOverridesUnlocked({
     }),
     phoenixDeepLinks,
     machineAuthorship: receipt.launch?.drafted_by,
+    prProvenance,
     allowedOriginPrefix: configuredOrigin,
   });
   const packetGuard = validatePromotionPacketCompleteness({
@@ -1701,30 +1738,24 @@ async function promoteCandidateWithOverridesUnlocked({
     );
   }
 
-  // 20. Push branch (real broker connection) or dry-run push-equivalent, then PR.
+  // 20. Push branch (local ambient connection) or dry-run push-equivalent, then PR.
   let push;
-  if (selectGitHub().brokerClient) {
-    try {
-      const token = await selectGitHub().brokerClient.mintInstallationToken({
-        owner: githubRepo.owner,
-        repo: githubRepo.repo,
-        permissions: { contents: "write" },
-      });
-      push = pushPromotionBranchWithInstallationToken({
-        cloneDir: workspace.cloneDir,
-        owner: githubRepo.owner,
-        repo: githubRepo.repo,
-        branch,
-        token: token.token,
-        runGit,
-      });
-      if (!push.ok) return blockedRetryable(push.reason, push.detail ?? null);
-    } catch (error) {
-      return blockedRetryable("github_promotion_branch_push_failed", error.message);
-    }
+  const githubSelectionForPush = selectGitHub();
+  if (githubSelectionForPush.mode === "local_ambient" && githubSelectionForPush.realPushEnabled) {
+    push = pushPromotionBranchWithAmbientAuth({
+      cloneDir: workspace.cloneDir,
+      owner: githubSelectionForPush.owner,
+      repo: githubSelectionForPush.repo,
+      branch,
+      checkoutPath: githubSelectionForPush.checkoutPath,
+      pushAuth: githubSelectionForPush.pushAuth,
+      env,
+      runGit,
+    });
   } else {
     push = pushBranchPlaceholder({ branch });
   }
+  if (!push.ok) return blockedRetryable(push.reason, push.detail ?? null, { push });
   let createdPr;
   try {
     const baseBranch = workspace.defaultBranchRef.replace(/^origin\//, "");
@@ -1747,8 +1778,19 @@ async function promoteCandidateWithOverridesUnlocked({
     dry_run: selectGitHub().mode === "dry_run" || Boolean(createdPr.dry_run),
     reused: false,
   };
+  const recordedPrProvenance = buildPromotionPrProvenance({
+    receipt,
+    receiptState,
+    proposalInstanceId,
+    envelopeHash,
+    candidateTargetKey,
+    startedAt,
+    githubSelection: selectGitHub(),
+    pr: prRecord,
+  });
   appendStage("pr_created", { pr_number: prRecord.number }, {
     pr: prRecord,
+    pr_provenance: recordedPrProvenance,
     packet_guard: promotionPacketGuardRegistryRecord(packetGuard),
   });
 
@@ -1872,6 +1914,7 @@ async function promoteCandidateWithOverridesUnlocked({
     acceptance_policy_decision: acceptanceDecision,
     target_scope: targetScope,
     ...baseResult,
+    pr_provenance: recordedPrProvenance,
   };
 }
 
@@ -1889,4 +1932,47 @@ function trustedBeforeFilesForClassification({ target = {}, trustedArtifacts = {
     beforeFiles[manifestPath] = trustedArtifacts.manifestContent;
   }
   return beforeFiles;
+}
+
+function buildPromotionPrProvenance({
+  receipt = null,
+  receiptState = null,
+  proposalInstanceId = null,
+  envelopeHash = null,
+  candidateTargetKey = null,
+  startedAt = null,
+  githubSelection = null,
+  pr = null,
+} = {}) {
+  return withoutNullish({
+    schema_version: "agentic-factory-pr-provenance/v1",
+    source_run_id: nullableString(receipt?.launch?.agentic_factory_run_id),
+    experiment_receipt_id: nullableString(receiptState?.receipt_id ?? receipt?.receipt_id),
+    phoenix_experiment_id: nullableString(receiptState?.phoenix_experiment_id ?? receipt?.phoenix_experiment_id),
+    proposal_instance_id: nullableString(proposalInstanceId),
+    normalized_envelope_hash: nullableString(envelopeHash),
+    candidate_target_key: nullableString(candidateTargetKey),
+    produced_at: nullableString(startedAt),
+    github_auth_mode: nullableString(githubSelection?.mode),
+    github_owner: nullableString(githubSelection?.owner),
+    github_repo: nullableString(githubSelection?.repo),
+    default_branch: nullableString(githubSelection?.defaultBranch),
+    checkout_path: nullableString(githubSelection?.checkoutPath),
+    push_auth: nullableString(githubSelection?.pushAuth),
+    real_push_enabled: typeof githubSelection?.realPushEnabled === "boolean"
+      ? githubSelection.realPushEnabled
+      : null,
+    pr_number: Number.isFinite(pr?.number) ? pr.number : null,
+    pr_url: nullableString(pr?.url),
+  });
+}
+
+function withoutNullish(record) {
+  return Object.fromEntries(
+    Object.entries(record).filter(([, value]) => value !== null && value !== undefined),
+  );
+}
+
+function nullableString(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }

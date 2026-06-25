@@ -37,12 +37,6 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Edge dependency check
-        run: npm run edge:check
-
-      - name: Edge dependency audit
-        run: npm run edge:audit
-
       - name: Secret scan
         run: |
           npm run security:secrets

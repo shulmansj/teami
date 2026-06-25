@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,7 +62,7 @@ import {
   findStagedPathsOutsideAllowlist,
   parseRawCachedDiff,
   promotionBranchName,
-  pushPromotionBranchWithInstallationToken,
+  pushPromotionBranchWithAmbientAuth,
   readFileFromBranch,
   readPromotionCommitTrailers,
   validatePromotionBranchRef,
@@ -235,12 +236,16 @@ function initGitRepo(root, manifestContent = manifest) {
   );
 }
 
-function writeVerifiedGitHubState(root) {
+function writeVerifiedGitHubState(root, {
+  connectionMode = "dry_run",
+  realPushEnabled = false,
+  pushAuth = "https",
+} = {}) {
   const filePath = path.join(root, ".agentic-factory", "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
-    connection_mode: "dry_run",
+    connection_mode: connectionMode,
     status: "verified",
     repo: {
       id: "repo-proof-01",
@@ -248,15 +253,16 @@ function writeVerifiedGitHubState(root) {
       name: "behavior-rules",
       full_name: "factory-owner/behavior-rules",
     },
-    app_installation: {
-      installation_id: "install-proof-01",
-      app_slug: "agentic-factory",
-      repository_selection: "selected",
-      selected_repository_ids: ["repo-proof-01"],
-      selected_repository_full_names: ["factory-owner/behavior-rules"],
-      verified_exact: true,
-      dry_run: true,
+    app_installation: null,
+    local_auth: {
+      mode: "local_ambient",
+      gh_auth: connectionMode === "real" ? "verified" : "dry_run",
+      git_write: realPushEnabled ? "verified" : "dry_run",
+      real_push_enabled: realPushEnabled,
+      push_auth: pushAuth,
+      checked_at: "2026-06-17T12:00:00.000Z",
     },
+    push_auth: pushAuth,
     default_branch: "main",
     verified_at: "2026-06-17T12:00:00.000Z",
   }, null, 2)}\n`);
@@ -819,7 +825,7 @@ function policyEditRequest(policyEdit = {}, overrides = {}) {
 }
 
 // Every test goes through createPromoteCandidateTestHarness — the ONLY seam
-// where transports/policy paths/baseline override/fetch/git/env may be
+// where transports/policy paths/baseline override/fetch/git/gh-spawn/env may be
 // injected (outside-review FIX 4). The production promoteCandidate export
 // hard-rejects these keys (pinned by test below).
 async function runController({
@@ -852,6 +858,94 @@ async function runController({
     invocation: { transport: "cli_local_session" },
   });
   return { result, fetchImpl, githubTransport };
+}
+
+function createControllerGhSpawnMock() {
+  const calls = [];
+  const spawnImpl = (command, args, options) => {
+    const call = { command, args: [...args], options, stdin: "" };
+    calls.push(call);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      write(chunk) {
+        call.stdin += chunk.toString("utf8");
+      },
+      end() {
+        call.stdinEnded = true;
+      },
+    };
+    setImmediate(() => {
+      const response = controllerGhResponse(call);
+      if (response.stdout) child.stdout.emit("data", Buffer.from(response.stdout, "utf8"));
+      if (response.stderr) child.stderr.emit("data", Buffer.from(response.stderr, "utf8"));
+      child.emit("close", response.code ?? 0, response.signal ?? null);
+    });
+    return child;
+  };
+  return { spawnImpl, calls };
+}
+
+function controllerGhResponse(call) {
+  if (call.command !== "gh") {
+    return { code: 1, stderr: `unexpected command: ${call.command}` };
+  }
+  if (call.args[0] === "auth" && call.args[1] === "status") {
+    return { stdout: "github.com logged in\n" };
+  }
+  if (call.args[0] !== "api") {
+    return { code: 1, stderr: `unexpected gh args: ${call.args.join(" ")}` };
+  }
+  const method = argAfter(call.args, "--method");
+  const apiPath = call.args.find((arg) => arg.startsWith("repos/"));
+  if (method === "GET" && apiPath === "repos/factory-owner/behavior-rules/pulls") {
+    if (call.args.includes("state=open")) return { stdout: JSON.stringify([[]]) };
+    if (call.args.includes("state=closed")) return { stdout: JSON.stringify([[]]) };
+  }
+  const pullMatch = /^repos\/factory-owner\/behavior-rules\/pulls\/(\d+)$/.exec(apiPath || "");
+  if (method === "GET" && pullMatch) {
+    return {
+      stdout: JSON.stringify({
+        number: Number(pullMatch[1]),
+        state: "open",
+        body: "",
+      }),
+    };
+  }
+  if (method === "POST" && apiPath === "repos/factory-owner/behavior-rules/pulls") {
+    const payload = JSON.parse(call.stdin || "{}");
+    return {
+      stdout: JSON.stringify({
+        number: 701,
+        state: "open",
+        draft: Boolean(payload.draft),
+        title: payload.title,
+        body: payload.body,
+        head: { ref: payload.head },
+        base: { ref: payload.base },
+        html_url: "https://github.com/factory-owner/behavior-rules/pull/701",
+        created_at: "2026-06-17T12:00:00.000Z",
+        merged_at: null,
+        closed_at: null,
+      }),
+    };
+  }
+  if (method === "PATCH" && pullMatch) {
+    const payload = JSON.parse(call.stdin || "{}");
+    return {
+      stdout: JSON.stringify({
+        number: Number(pullMatch[1]),
+        body: payload.body,
+      }),
+    };
+  }
+  return { code: 1, stderr: `unexpected gh api request: ${call.args.join(" ")}` };
+}
+
+function argAfter(args, name) {
+  const index = args.indexOf(name);
+  return index === -1 ? null : args[index + 1];
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,6 +1442,7 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
     "## Risk and safe default",
     "## Authority and custody access",
     "## Undo and decline",
+    "## Provenance",
     PROMOTION_MARKER_SENTINEL_BEGIN,
     "<details><summary>Audit details</summary>",
   ];
@@ -1394,6 +1489,10 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
   assert.equal(result.policy.read_path, "user_invoked_active_checkout");
   assert.equal(result.policy.launch_policy_hash, null);
   assert.match(result.pr_body, /human label authenticity=asserted/);
+  assert.match(result.pr_body, /Source run: afexp-expr-prom-1/);
+  assert.match(result.pr_body, /Experiment receipt: expr-prom-1/);
+  assert.equal(result.pr_provenance.source_run_id, "afexp-expr-prom-1");
+  assert.equal(result.pr_provenance.experiment_receipt_id, "expr-prom-1");
 
   // Durable registry row with the staged history.
   const registryPath = path.join(
@@ -1406,6 +1505,11 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
   for (const stage of ["validated", "gate_evaluated", "drafted", "committed", "pr_created", "phoenix_outcome_recorded"]) {
     assert.ok(stages.includes(stage), `missing registry stage ${stage}`);
   }
+  assert.equal(registry.pr_provenance.source_run_id, "afexp-expr-prom-1");
+  assert.equal(registry.pr_provenance.experiment_receipt_id, "expr-prom-1");
+  assert.equal(registry.pr_provenance.pr_number, result.pr.number);
+  assert.equal(registry.pr_provenance.pr_url, result.pr.url);
+  assert.equal(registry.pr_provenance.github_auth_mode, "mock");
 
   // Phoenix outcome annotation written ONLY after the PR: the span export +
   // annotation POST are the only Phoenix POSTs, and the annotation carries
@@ -2588,7 +2692,7 @@ test("the production promoteCandidate API hard-rejects every trust-affecting ove
   // The trust list covers exactly the seams the outside review flagged.
   for (const key of [
     "githubTransport", "promotionPolicyPath", "workspaceEvalPolicyPath",
-    "baselineExperimentOverride", "ensureReady", "fetchImpl", "runGit", "env",
+    "baselineExperimentOverride", "ensureReady", "fetchImpl", "runGit", "githubSpawnImpl", "env",
     "acceptCrossVersion", "materializePromotionCandidateImpl",
   ]) {
     assert.ok(UNTRUSTED_PROMOTION_OVERRIDE_KEYS.includes(key), `${key} must be production-rejected`);
@@ -3900,34 +4004,51 @@ test("verifyPromotionBranchEnvelope fails closed when the branch tip != the reco
   assert.equal(noRecordedSha.verified, true, JSON.stringify(noRecordedSha));
 });
 
-test("real promotion branch push uses askpass env custody, not argv token material", () => {
+test("real promotion branch push uses ambient git auth with scrubbed HTTPS env", () => {
   const calls = [];
   const token = ["gh", "s_", "sensitive_installation_token"].join("");
-  const result = pushPromotionBranchWithInstallationToken({
+  const result = pushPromotionBranchWithAmbientAuth({
     cloneDir: "C:\\tmp\\promotion-workspace",
     owner: "state-owner",
     repo: "agentic-factory",
     branch: "agentic-factory/promotion/x/abc123abc123",
-    token,
+    checkoutPath: "C:\\work\\agentic-factory",
+    pushAuth: "https",
+    env: {
+      PATH: "test-path",
+      GH_TOKEN: token,
+      GITHUB_TOKEN: "github_pat_sensitive",
+      GIT_ASKPASS: "askpass-helper",
+      SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
+    },
     runGit: (args, options = {}) => {
       calls.push({ args, options });
+      if (args.join(" ") === "remote get-url --push origin") {
+        return { ok: true, stdout: "https://github.com/state-owner/agentic-factory.git\n", stderr: "" };
+      }
       return { ok: true, stdout: "", stderr: "" };
     },
   });
   assert.equal(result.ok, true);
   assert.equal(result.pushed, true);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].args, [
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].args, [
     "push",
     "https://github.com/state-owner/agentic-factory.git",
     "refs/heads/agentic-factory/promotion/x/abc123abc123:refs/heads/agentic-factory/promotion/x/abc123abc123",
   ]);
-  assert.equal(calls[0].options.env.AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN, token);
-  assert.ok(!JSON.stringify(calls[0].args).includes("ghs_sensitive"));
+  assert.equal(calls[1].options.cwd, "C:\\tmp\\promotion-workspace");
+  assert.equal(calls[1].options.exactEnv, true);
+  assert.equal(calls[1].options.env.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(calls[1].options.env.PATH, "test-path");
+  assert.equal(calls[1].options.env.GH_TOKEN, undefined);
+  assert.equal(calls[1].options.env.GITHUB_TOKEN, undefined);
+  assert.equal(calls[1].options.env.GIT_ASKPASS, undefined);
+  assert.equal(calls[1].options.env.SSH_AUTH_SOCK, undefined);
+  assert.ok(!JSON.stringify(calls[1].args).includes("ghs_sensitive"));
 });
 
 test("promotion branch push rejects default, protected, tag, and arbitrary refs before git", () => {
-  const token = ["gh", "s_", "ref_guard_token"].join("");
   const blockedBranches = [
     "main",
     "release/v1",
@@ -3938,12 +4059,11 @@ test("promotion branch push rejects default, protected, tag, and arbitrary refs 
   ];
   for (const branch of blockedBranches) {
     let gitCalled = false;
-    const result = pushPromotionBranchWithInstallationToken({
+    const result = pushPromotionBranchWithAmbientAuth({
       cloneDir: "C:\\tmp\\promotion-workspace",
       owner: "state-owner",
       repo: "agentic-factory",
       branch,
-      token,
       runGit: () => {
         gitCalled = true;
         return { ok: true, stdout: "", stderr: "" };
@@ -3956,6 +4076,42 @@ test("promotion branch push rejects default, protected, tag, and arbitrary refs 
     validatePromotionBranchRef("agentic-factory/promotion/x/abc123abc123").full_ref,
     "refs/heads/agentic-factory/promotion/x/abc123abc123",
   );
+});
+
+test("real promotion branch push uses configured SSH remote and preserves SSH_AUTH_SOCK", () => {
+  const calls = [];
+  const result = pushPromotionBranchWithAmbientAuth({
+    cloneDir: "/tmp/promotion-workspace",
+    owner: "state-owner",
+    repo: "agentic-factory",
+    branch: "agentic-factory/promotion/x/abc123abc123",
+    checkoutPath: "/work/agentic-factory",
+    pushAuth: "ssh",
+    env: {
+      PATH: "test-path",
+      GH_TOKEN: "ghs_sensitive",
+      GIT_ASKPASS: "askpass-helper",
+      SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
+    },
+    runGit: (args, options = {}) => {
+      calls.push({ args, options });
+      if (args.join(" ") === "remote get-url --push origin") {
+        return { ok: true, stdout: "git@github.com:state-owner/agentic-factory.git\n", stderr: "" };
+      }
+      return { ok: true, stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.remote, "git@github.com:state-owner/agentic-factory.git");
+  assert.equal(result.push_auth, "ssh");
+  assert.deepEqual(calls[1].args, [
+    "push",
+    "git@github.com:state-owner/agentic-factory.git",
+    "refs/heads/agentic-factory/promotion/x/abc123abc123:refs/heads/agentic-factory/promotion/x/abc123abc123",
+  ]);
+  assert.equal(calls[1].options.env.GH_TOKEN, undefined);
+  assert.equal(calls[1].options.env.GIT_ASKPASS, undefined);
+  assert.equal(calls[1].options.env.SSH_AUTH_SOCK, "/tmp/ssh-agent.sock");
 });
 
 test("promotion commit trailers write/read round-trip, including CRLF trailer lines", () => {
@@ -4861,15 +5017,16 @@ test("controller resolves the behavior-repo identity from the local GitHub conne
         name: "state-behavior-repo",
         full_name: "state-owner/state-behavior-repo",
       },
-      app_installation: {
-        installation_id: "dry-run-installation-1",
-        app_slug: "agentic-factory",
-        repository_selection: "selected",
-        selected_repository_ids: ["state-repo-1"],
-        selected_repository_full_names: ["state-owner/state-behavior-repo"],
-        verified_exact: true,
-        dry_run: true,
+      app_installation: null,
+      local_auth: {
+        mode: "local_ambient",
+        gh_auth: "dry_run",
+        git_write: "dry_run",
+        real_push_enabled: false,
+        push_auth: "https",
+        checked_at: "2026-06-10T03:00:00.000Z",
       },
+      push_auth: "https",
       default_branch: "main",
       verified_at: "2026-06-10T03:00:00.000Z",
     }, null, 2)}\n`,
@@ -4884,6 +5041,88 @@ test("controller resolves the behavior-repo identity from the local GitHub conne
     assert.equal(call.owner, "state-owner");
     assert.equal(call.repo, "state-behavior-repo");
   }
+});
+
+test("controller real local-ambient mode pushes the promotion branch with scrubbed SSH env", async () => {
+  const root = tempRoot();
+  initGitRepo(root);
+  runGitOrThrow(["remote", "add", "origin", "git@github.com:factory-owner/behavior-rules.git"], root);
+  writeVerifiedGitHubState(root, { connectionMode: "real", realPushEnabled: true, pushAuth: "ssh" });
+  writeReceiptFixture(root);
+  const fixture = passFixture();
+  const fetchImpl = fetchRouter(
+    controllerRoutes(fixture),
+    { annotationsByTrace: fixture.annotationsByTrace },
+  );
+  const gitCalls = [];
+  const { spawnImpl: githubSpawnImpl, calls: ghCalls } = createControllerGhSpawnMock();
+  const harness = createPromoteCandidateTestHarness({
+    ensureReady: readyUp,
+    fetchImpl,
+    baselineExperimentOverride: { experiment_id: "BASE1" },
+    githubSpawnImpl,
+    env: {
+      PATH: "test-path",
+      GH_TOKEN: "ghs_sensitive",
+      GIT_ASKPASS: "askpass-helper",
+      SSH_AUTH_SOCK: "/tmp/agentic-factory-ssh.sock",
+    },
+    runGit: (args, options = {}) => {
+      gitCalls.push({ args, options });
+      if (args[0] === "push") return { ok: true, stdout: "", stderr: "" };
+      return defaultRunGit(args, options);
+    },
+  });
+  const result = await harness.promoteCandidate({
+    repoRoot: root,
+    request: promotionRequest(),
+    invocation: { transport: "cli_local_session" },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome, "route_to_hitl");
+  assert.equal(result.push.pushed, true);
+  assert.equal(result.push.dry_run, false);
+  assert.equal(result.push.remote, "git@github.com:factory-owner/behavior-rules.git");
+  assert.equal(result.pr.dry_run, false);
+  assert.equal(result.pr.number, 701);
+  assert.equal(result.pr.url, "https://github.com/factory-owner/behavior-rules/pull/701");
+  const createPrGhCall = ghCalls.find((call) =>
+    call.args[0] === "api"
+    && call.args.includes("--method")
+    && call.args[call.args.indexOf("--method") + 1] === "POST"
+  );
+  assert.ok(createPrGhCall, "real local-ambient mode must create the PR through gh api");
+  assert.deepEqual(createPrGhCall.args, [
+    "api",
+    "--hostname",
+    "github.com",
+    "-H",
+    "Accept: application/vnd.github+json",
+    "-H",
+    "X-GitHub-Api-Version: 2022-11-28",
+    "--method",
+    "POST",
+    "repos/factory-owner/behavior-rules/pulls",
+    "--input",
+    "-",
+  ]);
+  const createPrInput = JSON.parse(createPrGhCall.stdin);
+  assert.equal(createPrInput.head, result.branch);
+  assert.equal(createPrInput.base, "main");
+  assert.equal(createPrInput.draft, false);
+  const pushCall = gitCalls.find((call) => call.args[0] === "push");
+  assert.ok(pushCall, "real local-ambient mode must run git push");
+  assert.deepEqual(pushCall.args, [
+    "push",
+    "git@github.com:factory-owner/behavior-rules.git",
+    `${result.push.ref}:${result.push.ref}`,
+  ]);
+  assert.equal(pushCall.options.cwd, path.join(root, ".agentic-factory", "promotion-workspace", "repo"));
+  assert.equal(pushCall.options.exactEnv, true);
+  assert.equal(pushCall.options.env.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(pushCall.options.env.GH_TOKEN, undefined);
+  assert.equal(pushCall.options.env.GIT_ASKPASS, undefined);
+  assert.equal(pushCall.options.env.SSH_AUTH_SOCK, "/tmp/agentic-factory-ssh.sock");
 });
 
 test("without a verified GitHub connection the controller falls back to the neutral placeholder identity", async () => {

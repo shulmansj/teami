@@ -42,7 +42,7 @@ const FORBIDDEN_CAPABILITIES = Object.freeze([
   "artifact_log_exfiltration",
   "maintainer_originated_adopter_pr",
   "auto_acceptance",
-  "hosted_linear_writes_while_machine_off",
+  "unattended_linear_writes_while_machine_off",
   "policy_bypass",
   "real_os_autostart_registration_tonight",
 ]);
@@ -100,10 +100,10 @@ export function registerLocalSupervisorStub({
     os_registration: planLocalSupervisorAutostartRegistration({ repoRoot, platform }),
     local_credential_custody: {
       owns_new_credentials: false,
-      runner_authority_source: "existing_runner_inbox_credential_store",
-      github_authority_source: "existing_github_connection_state_and_broker_stub",
+      runner_authority_source: "existing_local_trigger_store_and_linear_oauth",
+      github_authority_source: "existing_github_connection_state_and_local_ambient_auth",
       note:
-        "The supervisor stores no tokens in this registration file; uninstall removes this stub and the existing runner credential path removes local runner authority.",
+        "The supervisor stores no tokens in this registration file; uninstall removes this stub and the existing local credential paths remove local authority.",
     },
     updated_at: observedAt,
     created_at: existing?.created_at || observedAt,

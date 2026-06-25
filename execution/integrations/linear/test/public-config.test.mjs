@@ -3,7 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { assertRunnableHostedSetupConfig, loadLinearConfig } from "../src/config.mjs";
+import {
+  DEFAULT_POLL_INTERVAL_MS,
+  MIN_POLL_INTERVAL_MS,
+  loadLinearConfig,
+  validateLinearConfig,
+} from "../src/config.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const configExamplePath = path.join(
@@ -13,14 +18,10 @@ const configExamplePath = path.join(
   "linear",
   "config.example.json",
 );
-const publicHostedSetupProjectRef = ["ayhmwtwj", "thnjziwybtsu"].join("");
-const publicHostedSetupHost = [publicHostedSetupProjectRef, "supabase", "co"].join(".");
-const reservedHostedSetupHost = "public-hosted-setup.agentic-factory.invalid";
 const privateProductHandle = ["zan", "zibar"].join("");
 const privateRepoDefault = ["shulmansj", privateProductHandle].join("/");
 const privateRepoUrlDefault = `https://github.com/${privateRepoDefault}`;
 const sandboxLabel = ["internal", ["U", "A", "T"].join("")].join("/");
-const sandboxHost = ["https://", "u", "a", "t", ".agentic-factory.invalid"].join("");
 const maintainerLocalPath = ["C:", "Users", "Example"].join("\\");
 
 const publicConfigSurfaces = Object.freeze([
@@ -66,7 +67,6 @@ test("public config leak gate rejects known private repo and local handles", () 
     ["private repo URL", privateRepoUrlDefault],
     ["private product handle", privateProductHandle],
     ["private sandbox label", sandboxLabel],
-    ["private sandbox URL", `${sandboxHost}/functions/v1/agentic-factory-inbox`],
     ["maintainer local path", maintainerLocalPath],
   ]) {
     assert.throws(
@@ -77,49 +77,45 @@ test("public config leak gate rejects known private repo and local handles", () 
   }
 });
 
-test("public config uses the live hosted setup public beta endpoint", () => {
-  const config = loadLinearConfig({ repoRoot });
+test("public config loads with local-only trigger and GitHub setup surfaces", () => {
+  const loaded = loadLinearConfig({ repoRoot });
 
-  assertHostedUrl(config.inbox.base_url, "/functions/v1/agentic-factory-inbox");
-  assertHostedUrl(config.inbox.webhook_url, "/functions/v1/agentic-factory-inbox/v1/webhooks/linear");
-  assertHostedUrl(config.inbox.dashboard_url, "/functions/v1/agentic-factory-inbox/status");
-  assertHostedUrl(config.github.token_broker.base_url, "/functions/v1/agentic-factory-github-broker");
+  assert.equal(Object.hasOwn(loaded, "inbox"), false);
+  assert.equal(Object.hasOwn(loaded.github, "app_slug"), false);
+  assert.equal(Object.hasOwn(loaded.github, "app_id"), false);
+  assert.equal(Object.hasOwn(loaded.github, ["token", "broker"].join("_")), false);
+  assert.equal(loaded.poll.interval_ms, DEFAULT_POLL_INTERVAL_MS);
 });
 
-test("public hosted setup preflight accepts the checked-in live endpoint", () => {
-  const config = loadLinearConfig({ repoRoot });
+test("poll interval config defaults and validates the single public knob", () => {
+  const config = readJson(configExamplePath);
+  assert.equal(config.poll.interval_ms, DEFAULT_POLL_INTERVAL_MS);
 
-  assert.equal(assertRunnableHostedSetupConfig(config, "public config"), true);
-});
+  const defaulted = readJson(configExamplePath);
+  delete defaulted.poll;
+  assert.equal(validateLinearConfig(defaulted, "test-config", { repoRoot }), true);
+  assert.equal(defaulted.poll.interval_ms, DEFAULT_POLL_INTERVAL_MS);
 
-test("reserved hosted URLs are rejected before setup side effects", () => {
-  const config = loadLinearConfig({ repoRoot });
-  const reserved = JSON.parse(JSON.stringify(config));
-  reserved.inbox.base_url = `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-inbox`;
-  reserved.inbox.webhook_url =
-    `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-inbox/v1/webhooks/linear`;
-  reserved.inbox.dashboard_url = `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-inbox/status`;
-  reserved.github.token_broker.base_url =
-    `https://${reservedHostedSetupHost}/functions/v1/agentic-factory-github-broker`;
-
+  const tooFast = readJson(configExamplePath);
+  tooFast.poll.interval_ms = MIN_POLL_INTERVAL_MS - 1;
   assert.throws(
-    () => assertRunnableHostedSetupConfig(reserved, "reserved config"),
-    /hosted_setup_url_not_runnable: reserved config uses reserved \.invalid hosted setup URL/,
+    () => validateLinearConfig(tooFast, "test-config", { repoRoot }),
+    /poll\.interval_ms must be at least/,
   );
-});
 
-test("runnable hosted setup preflight accepts real HTTPS hosts", () => {
-  const config = loadLinearConfig({ repoRoot });
-  const runnable = JSON.parse(JSON.stringify(config));
-  runnable.inbox.base_url = "https://setup.agentic-factory.example/functions/v1/agentic-factory-inbox";
-  runnable.inbox.webhook_url =
-    "https://setup.agentic-factory.example/functions/v1/agentic-factory-inbox/v1/webhooks/linear";
-  runnable.inbox.dashboard_url =
-    "https://setup.agentic-factory.example/functions/v1/agentic-factory-inbox/status";
-  runnable.github.token_broker.base_url =
-    "https://setup.agentic-factory.example/functions/v1/agentic-factory-github-broker";
+  const nonInteger = readJson(configExamplePath);
+  nonInteger.poll.interval_ms = "10000";
+  assert.throws(
+    () => validateLinearConfig(nonInteger, "test-config", { repoRoot }),
+    /poll\.interval_ms must be an integer/,
+  );
 
-  assert.equal(assertRunnableHostedSetupConfig(runnable, "runnable config"), true);
+  const extraKnob = readJson(configExamplePath);
+  extraKnob.poll.backoff_ms = 30_000;
+  assert.throws(
+    () => validateLinearConfig(extraKnob, "test-config", { repoRoot }),
+    /unsupported poll config field\(s\): poll\.backoff_ms/,
+  );
 });
 
 test("public config separates behavior-repo GitHub setup from domain git repo binding", () => {
@@ -129,7 +125,7 @@ test("public config separates behavior-repo GitHub setup from domain git repo bi
   assert.equal(config.github.behavior_repo.owner, null);
   assert.equal(config.github.behavior_repo.name, "agentic-factory");
   assert.equal(config.github.behavior_repo.visibility, "private");
-  assert.equal(Object.hasOwn(config.github, "token_broker"), true);
+  assert.equal(Object.hasOwn(config.github, ["token", "broker"].join("_")), false);
   assert.equal(Object.hasOwn(config.github, "git_repo"), false);
   assert.equal(Object.hasOwn(config, "git_repo"), false);
   assert.deepEqual(config.github.starter_remote_urls, ["https://github.com/shulmansj/agentic-factory"]);
@@ -150,11 +146,8 @@ function publicConfigForbiddenHits(text) {
     .map(({ id }) => ({ id }));
 }
 
-function assertHostedUrl(value, expectedPath) {
-  const parsed = new URL(value);
-  assert.equal(parsed.protocol, "https:");
-  assert.equal(parsed.hostname, publicHostedSetupHost);
-  assert.equal(parsed.pathname, expectedPath);
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
 function escapeRegExp(value) {

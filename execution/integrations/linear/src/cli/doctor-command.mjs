@@ -18,10 +18,6 @@ import {
 import { phoenixStatus } from "../local-phoenix-manager.mjs";
 import { localSupervisorDoctorChecks } from "../local-supervisor.mjs";
 import {
-  createRunnerInboxCredentialStore,
-  legacyRunnerInboxCredentialTargetForConfig,
-} from "../runner-inbox-credential.mjs";
-import {
   readRuntimeSmokeCache,
   runtimeSmokeCachePath,
   runtimeSmokeDoctorChecks,
@@ -30,50 +26,44 @@ import { createCliOutput } from "./cli-output.mjs";
 import { flagValue } from "./flags.mjs";
 import { githubDoctorTransportFromConnection } from "./github-command-options.mjs";
 export async function runDoctorCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output = createCliOutput() } = context;
-    const checks = await doctorGraphqlLinear({
-      config,
-      repoRoot,
-      inboxClient,
-      cachePath,
-      domainId: flagValue(args, "--domain"),
-    });
-    output.heading(`Agentic Factory ${output.symbols.separator} doctor`);
-    printDoctorChecks(checks, output);
-    for (const line of formatRuntimeRoleAssignmentsSection(config)) output.detail(line);
-    process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
+  const { config, repoRoot, cachePath, output = createCliOutput() } = context;
+  const checks = await doctorGraphqlLinear({
+    config,
+    repoRoot,
+    cachePath,
+    domainId: flagValue(args, "--domain"),
+  });
+  output.heading(`Agentic Factory ${output.symbols.separator} doctor`);
+  printDoctorChecks(checks, output);
+  for (const line of formatRuntimeRoleAssignmentsSection(config)) output.detail(line);
+  process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
 }
 export async function runDoctorLinearCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output = createCliOutput() } = context;
-    const checks = await doctorGraphqlLinear({
-      config,
-      repoRoot,
-      inboxClient,
-      cachePath,
-      domainId: flagValue(args, "--domain"),
-      includeRunnerCredential: false,
-      includeRuntimeSmoke: false,
-      includePhoenix: false,
-      includeGitHub: false,
-      includeLocalSupervisor: false,
-    });
-    output.heading(`Agentic Factory ${output.symbols.separator} Linear doctor`);
-    printDoctorChecks(checks, output);
-    for (const line of formatRuntimeRoleAssignmentsSection(config)) output.detail(line);
-    process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
+  const { config, repoRoot, cachePath, output = createCliOutput() } = context;
+  const checks = await doctorGraphqlLinear({
+    config,
+    repoRoot,
+    cachePath,
+    domainId: flagValue(args, "--domain"),
+    includeRuntimeSmoke: false,
+    includePhoenix: false,
+    includeGitHub: false,
+    includeLocalSupervisor: false,
+  });
+  output.heading(`Agentic Factory ${output.symbols.separator} Linear doctor`);
+  printDoctorChecks(checks, output);
+  for (const line of formatRuntimeRoleAssignmentsSection(config)) output.detail(line);
+  process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
 }
 async function doctorGraphqlLinear({
   config,
   repoRoot,
-  inboxClient,
   cachePath,
   domainId = null,
-  includeRunnerCredential = true,
   includeRuntimeSmoke = true,
   includePhoenix = true,
   includeGitHub = true,
   includeLocalSupervisor = true,
-  hostedWakeViewLoader = null,
 }) {
   const domainDoctor = doctorDomainRegistryFromDisk({
     repoRoot,
@@ -123,11 +113,6 @@ async function doctorGraphqlLinear({
       repoRoot,
       context: foreground.context,
     })));
-    checks.push(await doctorInboxSetupGrantConnection({
-      inboxClient,
-      context: foreground.context,
-      domainId: domain.id,
-    }));
 
     const credentialStore = createLinearCredentialStore({
       config,
@@ -144,28 +129,21 @@ async function doctorGraphqlLinear({
       });
       const authResult = await setupAuth.client.verifyAuth();
       const doctor = await doctorLinear({ client: setupAuth.client, config: foreground.config, cache: foreground.cache });
+      const teamCheck = doctor.checks.find((check) => check.name === "team");
       checks.push({
         name: `domain ${domain.id} Linear setup OAuth`,
         ok: true,
         message: `GraphQL auth verified for viewer ${authResult.viewerId}`,
+      }, {
+        name: `domain ${domain.id} Linear team visibility`,
+        ok: teamCheck?.ok === true,
+        message: teamCheck?.ok === true
+          ? `can see team ${foreground.config.linear.team.key}`
+          : teamCheck?.message || `team ${foreground.config.linear.team.key} not visible`,
       }, ...doctor.checks.map((check) => ({
         ...check,
         name: `domain ${domain.id} ${check.name}`,
       })));
-      checks.push(await doctorLinearWebhookAdminPermission(setupAuth.client, domain.id));
-
-      if (includeRunnerCredential) {
-        checks.push(...(await doctorRunnerInboxCredential({
-          runnerCredentialStore: createRunnerInboxCredentialStore({
-            config,
-            repoRoot,
-            domainContext: foreground.context,
-          }),
-          inboxClient,
-          cache: foreground.cache,
-          domainId: domain.id,
-        })));
-      }
     } catch (error) {
       checks.push({
         name: `domain ${domain.id} Linear setup OAuth`,
@@ -208,53 +186,9 @@ async function doctorGraphqlLinear({
       repoRoot,
       config: supervisorForeground?.config || config,
       cachePath: supervisorForeground?.context?.linear?.cachePath || cachePath,
-      runnerCredentialStore: supervisorForeground
-        ? createRunnerInboxCredentialStore({
-            config,
-            repoRoot,
-            domainContext: supervisorForeground.context,
-          })
-        : createRunnerInboxCredentialStore({
-            config,
-            repoRoot,
-            target: legacyRunnerInboxCredentialTargetForConfig(config, repoRoot),
-          }),
-      hostedWakeViewLoader,
     })));
   }
   return checks;
-}
-
-async function ensureWebhookAdminAuthorization({
-  setupAuth,
-  config,
-  repoRoot,
-  credentialStore,
-  verifyWorkspaceGrant = null,
-  onProgress = (line) => console.log(line),
-}) {
-  try {
-    await setupAuth.client.listWebhooks({ teamId: null });
-    return setupAuth;
-  } catch (error) {
-    if (!isMissingLinearAdminPermission(error)) throw error;
-    onProgress(
-      "Existing Linear authorization is missing admin permission required for webhook registration. Reauthorizing in the browser...",
-    );
-    await setupAuth.tokenProvider.clear();
-    const reauthorized = createLinearSetupGraphqlClient({
-      config,
-      repoRoot,
-      credentialStore,
-      allowBrowserAuth: true,
-      allowRefresh: true,
-      deferTokenPersistence: true,
-      onProgress,
-    });
-    const workspace = verifyWorkspaceGrant ? await verifyWorkspaceGrant(reauthorized) : null;
-    await reauthorized.client.listWebhooks({ teamId: null });
-    return { setupAuth: reauthorized, workspace };
-  }
 }
 
 function doctorProductRepoBindingChecksForDomains(domains = []) {
@@ -311,40 +245,12 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
 
-async function doctorLinearWebhookAdminPermission(client, domainId = null) {
-  try {
-    await client.listWebhooks({ teamId: null });
-    return {
-      name: domainId ? `domain ${domainId} Linear webhook admin permission` : "Linear webhook admin permission",
-      ok: true,
-      message: "can read webhook registrations",
-    };
-  } catch (error) {
-    return {
-      name: domainId ? `domain ${domainId} Linear webhook admin permission` : "Linear webhook admin permission",
-      ok: false,
-      message: isMissingLinearAdminPermission(error)
-        ? "missing admin permission; rerun npm run init and approve the updated Linear grant"
-        : redactOAuthSecrets(error.message),
-    };
-  }
-}
-
-function isMissingLinearAdminPermission(error) {
-  return /admin required|Invalid role/i.test(error?.message || "");
-}
-
 async function doctorLegacyCredentialTargets({ config, repoRoot, context }) {
   const checks = [];
   const legacyOAuthStore = createLinearCredentialStore({
     config,
     repoRoot,
     target: legacyCredentialTargetForConfig(config, repoRoot),
-  });
-  const legacyRunnerStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot,
-    target: legacyRunnerInboxCredentialTargetForConfig(config, repoRoot),
   });
 
   try {
@@ -364,128 +270,7 @@ async function doctorLegacyCredentialTargets({ config, repoRoot, context }) {
     });
   }
 
-  try {
-    const credential = await legacyRunnerStore.readCredential();
-    checks.push({
-      name: `domain ${context.domainId} legacy runner credential target`,
-      ok: !credential,
-      message: credential
-        ? `legacy pre-domain target found for workspace=${context.linear.workspaceId}; rerun npm run init -- --domain ${context.domainId} or npm run reset`
-        : "no legacy pre-domain target found",
-    });
-  } catch (error) {
-    checks.push({
-      name: `domain ${context.domainId} legacy runner credential target`,
-      ok: false,
-      message: redactOAuthSecrets(error.message),
-    });
-  }
-
   return checks;
-}
-
-async function doctorRunnerInboxCredential({ runnerCredentialStore, inboxClient, cache, domainId = null }) {
-  try {
-    const credential = await runnerCredentialStore.readCredential();
-    if (!credential) {
-      return [{ name: domainCheckName(domainId, "runner inbox credential"), ok: false, message: "missing; run npm run init" }];
-    }
-    const verification = await inboxClient.verifyRunnerCredential({
-      workspaceId: cache?.workspaceId || credential.workspaceId,
-      credentialId: credential.credentialId,
-      token: credential.token,
-    });
-    return [{
-      name: domainCheckName(domainId, "runner inbox credential"),
-      ok: verification?.ok === true,
-      message: verification?.ok === true ? `verified ${credential.credentialId}` : "hosted inbox rejected credential",
-    }];
-  } catch (error) {
-    return [{ name: domainCheckName(domainId, "runner inbox credential"), ok: false, message: redactOAuthSecrets(error.message) }];
-  }
-}
-
-async function doctorInboxSetupGrantConnection({ inboxClient, context, domainId = null } = {}) {
-  const name = domainCheckName(domainId, "Connection");
-  const workspaceId = context?.linear?.workspaceId;
-  const teamId = context?.linear?.teamId;
-  const repair = setupGrantSelfServeRepair();
-  if (!workspaceId || !teamId) {
-    return {
-      name,
-      ok: false,
-      message: `missing local workspace/team identity; ${repair}`,
-    };
-  }
-  if (typeof inboxClient?.setupGrantStatus !== "function") {
-    return {
-      name,
-      ok: false,
-      message: `hosted inbox cannot report setup grant status; ${repair}`,
-    };
-  }
-  try {
-    const status = await inboxClient.setupGrantStatus({ workspaceId, teamId });
-    if (status?.ok === false) {
-      return {
-        name,
-        ok: false,
-        message: `${status.reason || status.error || "missing"}; ${repair}`,
-      };
-    }
-    const state = setupGrantStatusValue(status);
-    if (state === "provisional") {
-      return {
-        name,
-        ok: true,
-        message: "waiting for your first Planned project (not yet active)",
-      };
-    }
-    if (state === "confirmed") {
-      return {
-        name,
-        ok: true,
-        message: `active (confirmed ${setupGrantConfirmedAt(status) || "unknown"})`,
-      };
-    }
-    return {
-      name,
-      ok: false,
-      message: `${state || "missing"}; ${repair}`,
-    };
-  } catch (error) {
-    return {
-      name,
-      ok: false,
-      message: `${redactOAuthSecrets(error.message)}; ${repair}`,
-    };
-  }
-}
-
-function setupGrantSelfServeRepair() {
-  return "rerun npm run init. If it still fails, create a diagnostic export for support; support cannot recover credentials or operate this factory for you";
-}
-
-function setupGrantStatusValue(payload = {}) {
-  return payload.status || payload.grant?.status || payload.setupGrant?.status || payload.setup_grant?.status || null;
-}
-
-function setupGrantConfirmedAt(payload = {}) {
-  return (
-    payload.confirmedAt ||
-    payload.confirmed_at ||
-    payload.grant?.confirmedAt ||
-    payload.grant?.confirmed_at ||
-    payload.setupGrant?.confirmedAt ||
-    payload.setupGrant?.confirmed_at ||
-    payload.setup_grant?.confirmedAt ||
-    payload.setup_grant?.confirmed_at ||
-    null
-  );
-}
-
-function domainCheckName(domainId, name) {
-  return domainId ? `domain ${domainId} ${name}` : name;
 }
 
 function likelyDomainOrphans({ cachePath } = {}) {
@@ -497,9 +282,6 @@ function likelyDomainOrphans({ cachePath } = {}) {
       if (cache?.workspaceId) hints.push(`cached workspace ${cache.workspaceId}`);
       const webhookId = cache?.inbox?.linearWebhook?.id || cache?.webhook?.id;
       if (webhookId) hints.push(`cached webhook ${webhookId}`);
-      if (cache?.inbox?.runnerCredentialId) {
-        hints.push(`cached runner credential ${cache.inbox.runnerCredentialId}`);
-      }
     } catch (error) {
       hints.push(`unreadable legacy cache (${error.message})`);
     }
@@ -536,8 +318,5 @@ function compactDoctorDetail(message) {
 }
 
 export {
-  doctorInboxSetupGrantConnection,
   doctorGraphqlLinear,
-  doctorLinearWebhookAdminPermission,
-  ensureWebhookAdminAuthorization,
 };

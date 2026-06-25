@@ -2,7 +2,6 @@ import fs from "node:fs";
 
 import { resolveForegroundDomainCache } from "../domain-command-context.mjs";
 import { domainRegistryPath } from "../domain-registry.mjs";
-import { runForegroundTriggerRunnerOnce } from "../foreground-runner.mjs";
 import {
   cleanupLocalSupervisorLocalState,
   collectNextResumeReconciliation,
@@ -13,7 +12,6 @@ import {
   setLocalSupervisorDisabled,
 } from "../local-supervisor.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
-import { createRunnerInboxCredentialStore } from "../runner-inbox-credential.mjs";
 import { hasCliFlag, parseCliFlags } from "./flags.mjs";
 import {
   agenticFactoryHeading,
@@ -22,22 +20,18 @@ import {
   printVerboseHint,
 } from "./operator-output.mjs";
 import {
-  inspectTriggerStatus,
   renderNextResumeReconciliationReport,
-  runOneTriggerWake,
 } from "./runner-command.mjs";
 function resolveSupervisorCommandContext({
   config,
   repoRoot,
   cachePath,
   domainId = null,
-  legacyRunnerCredentialStore,
 }) {
   if (!fs.existsSync(domainRegistryPath(repoRoot))) {
     return {
       config,
       cachePath,
-      runnerCredentialStore: legacyRunnerCredentialStore,
       domainId: null,
     };
   }
@@ -45,17 +39,12 @@ function resolveSupervisorCommandContext({
   return {
     config: foreground.config,
     cachePath: foreground.cachePath,
-    runnerCredentialStore: createRunnerInboxCredentialStore({
-      config,
-      repoRoot,
-      domainContext: foreground.context,
-    }),
     domainId: foreground.context.domainId,
   };
 }
 
 export async function runSupervisorRegisterCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "supervisor register");
     let result;
     try {
@@ -79,7 +68,7 @@ export async function runSupervisorRegisterCommand({ context, command, args }) {
     process.exitCode = result.ok ? 0 : 1;
 }
 export async function runSupervisorRunCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "supervisor run");
     let result;
     try {
@@ -91,32 +80,13 @@ export async function runSupervisorRunCommand({ context, command, args }) {
       repoRoot,
       cachePath,
       domainId: flags.domain || null,
-      legacyRunnerCredentialStore: runnerCredentialStore,
     });
     result = await runLocalSupervisorLoop({
       repoRoot,
       config: supervisorContext.config,
       cachePath: supervisorContext.cachePath,
-      runnerCredentialStore: supervisorContext.runnerCredentialStore,
       maxIterations,
       intervalMs,
-      runRunnerOnce: () =>
-        supervisorContext.domainId
-          ? runOneTriggerWake({
-              config,
-              repoRoot,
-              inboxClient,
-              cachePath,
-              domainId: supervisorContext.domainId,
-            })
-          : runForegroundTriggerRunnerOnce({
-              config,
-              repoRoot,
-              credentialStore,
-              runnerCredentialStore,
-              inboxClient,
-              cachePath,
-            }),
       onProgress: (line) => output.detail(line),
     });
     } catch (error) {
@@ -133,7 +103,7 @@ export async function runSupervisorRunCommand({ context, command, args }) {
     process.exitCode = result.ok ? 0 : 1;
 }
 export async function runSupervisorStatusCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "supervisor status");
     let status;
     try {
@@ -143,20 +113,11 @@ export async function runSupervisorStatusCommand({ context, command, args }) {
       repoRoot,
       cachePath,
       domainId: flags.domain || null,
-      legacyRunnerCredentialStore: runnerCredentialStore,
     });
     status = await readLocalSupervisorStatus({
       repoRoot,
       config: supervisorContext.config,
       cachePath: supervisorContext.cachePath,
-      runnerCredentialStore: supervisorContext.runnerCredentialStore,
-      hostedWakeViewLoader: () => inspectTriggerStatus({
-        config: supervisorContext.config,
-        repoRoot,
-        inboxClient,
-        cachePath: supervisorContext.cachePath,
-        domainId: supervisorContext.domainId,
-      }),
     });
     } catch (error) {
       output.error({
@@ -172,7 +133,7 @@ export async function runSupervisorStatusCommand({ context, command, args }) {
     process.exitCode = status.ok ? 0 : 1;
 }
 export async function runSupervisorReconcileCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "supervisor reconcile");
     let report;
     try {
@@ -182,23 +143,15 @@ export async function runSupervisorReconcileCommand({ context, command, args }) 
       repoRoot,
       cachePath,
       domainId: flags.domain || null,
-      legacyRunnerCredentialStore: runnerCredentialStore,
     });
     report = await collectNextResumeReconciliation({
       repoRoot,
-      hostedWakeViewLoader: () => inspectTriggerStatus({
-        config: supervisorContext.config,
-        repoRoot,
-        inboxClient,
-        cachePath: supervisorContext.cachePath,
-        domainId: supervisorContext.domainId,
-      }),
     });
     } catch (error) {
       output.error({
         what: "Supervisor reconciliation could not run",
         why: redactOAuthSecrets(error.message),
-        fix: "repair domain registry or hosted wake access, then retry.",
+        fix: "repair domain registry or local run evidence access, then retry.",
       });
       process.exitCode = 1;
       return;
@@ -215,7 +168,7 @@ export async function runSupervisorReconcileCommand({ context, command, args }) 
     process.exitCode = report.ok ? 0 : 1;
 }
 export async function runSupervisorDisableCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "supervisor disable");
     let result;
     try {
@@ -239,7 +192,7 @@ export async function runSupervisorDisableCommand({ context, command, args }) {
     process.exitCode = result.ok ? 0 : 1;
 }
 export async function runSupervisorEnableCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "supervisor enable");
     let result;
     try {
@@ -258,7 +211,7 @@ export async function runSupervisorEnableCommand({ context, command, args }) {
     process.exitCode = result.ok ? 0 : 1;
 }
 export async function runSupervisorUnregisterCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "supervisor unregister");
     let result;
     try {

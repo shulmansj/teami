@@ -61,8 +61,8 @@ import {
 //      given in a read-only guard (createEvalModeReadOnlyLinearClient) that
 //      throws on any non-read method, so even a misuse with a live client
 //      cannot mutate.
-//   3. Hosted wakes are structurally out of reach: this module never imports
-//      the hosted inbox/wake-queue modules and eval mode takes no wake store;
+//   3. Gateway wakes are structurally out of reach: this module never imports
+//      the local trigger store and eval mode takes no wake store;
 //      the only wake-shaped object is the local `eval_<run_id>` pseudo-wake.
 //
 // Phoenix stays lazy (CONSTRAINTS #40): traces are exported through the
@@ -1224,7 +1224,7 @@ export function formatEvalRunReport(result) {
   lines.push(`eval decomposition run ${result.eval_run_id} (variant ${result.variant_id}):`);
   lines.push(`  source: ${describeSource(result.source)}`);
   lines.push(
-    `  status: ${result.status}${result.reason ? ` (${result.reason})` : ""} — non-mutating by construction; no Linear writes, no hosted wake claims`,
+    `  status: ${result.status}${result.reason ? ` (${result.reason})` : ""} — non-mutating by construction; no Linear writes, no gateway wake claims`,
   );
   for (const [targetKey, override] of Object.entries(result.prompt_overrides || {})) {
     lines.push(`  prompt override: ${targetKey} -> ${override.candidate_prompt_version_id} sha256:${override.candidate_prompt_sha256}`);

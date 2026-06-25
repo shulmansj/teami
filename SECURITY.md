@@ -16,10 +16,9 @@ not include the vulnerability details there.
 ## Scope
 
 Reports are in scope when they affect the current public Agentic Factory source
-tree, hosted setup path, GitHub App or broker flow, local runner behavior, or
-documented setup process.
+tree, Linear OAuth setup, local gateway polling, ambient GitHub proposal path,
+local runner behavior, or documented setup process.
 
 Out of scope for now: requests for bounty payments, support questions, feature
 requests, social engineering, physical attacks, denial-of-service testing, and
 findings that require access to non-public systems.
-

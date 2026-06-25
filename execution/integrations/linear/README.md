@@ -1,7 +1,7 @@
 # Linear Integration
 
-This folder contains the GraphQL-backed Linear setup, hosted inbox/broker
-client contracts, and local decomposition workflow slice.
+This folder contains the GraphQL-backed Linear setup, local gateway trigger
+contracts, behavior-repo GitHub path, and local decomposition workflow slice.
 
 ## Public Setup Status
 
@@ -12,73 +12,66 @@ npm run init
 npm run domain:bind-repo -- --domain main --path ../product-app
 ```
 
-The checked-in public config points at the Agentic Factory-operated hosted
-public beta endpoint. `npm run init` authorizes Linear in the browser with the
-Agentic Factory OAuth app, then uses Linear GraphQL to provision the
-workspace: browser authorization, dedicated team, required labels, project
-status mappings, project template, hosted webhook inbox registration,
-runner-to-inbox credential, managed or reused local Phoenix, and local cache. No
-Linear API key is required.
+`npm run init` authorizes Linear in the browser with the Agentic Factory OAuth
+app, then uses Linear GraphQL to provision the workspace: browser
+authorization, dedicated team, required labels, project status mappings,
+project template, local gateway state, managed or reused local Phoenix, and
+local cache. The public poll knob is `poll.interval_ms`. No Linear API key or
+Linear admin scope is required.
 
-The setup path is a best-effort public beta boundary, not an enterprise support
-or uptime promise. Report setup bugs through the public repository issue
-templates after launch, without posting credentials, workspace data, webhook
-payloads, repo contents, or local paths. Security-sensitive reports should use
-the private vulnerability reporting path once the public repository enables it.
+Report setup bugs through the public repository issue templates after launch,
+without posting credentials, workspace data, repo contents, or local paths.
+Security-sensitive reports should use the private vulnerability reporting path
+once the public repository enables it.
 
 ## Responsibility Split
 
-Agentic Factory deliberately separates hosted coordination from local authority.
+Agentic Factory deliberately keeps live authority local.
 
-The hosted inbox verifies Linear webhooks, dedupes deliveries, records wake
-state, and leases work to a compatible local runner. It receives the Linear
-webhook signing secret and a separate runner credential. It never receives
-Linear OAuth tokens, repo contents, Phoenix traces, model-provider tokens, or
-Linear write authority.
+The local gateway polls Linear's current state with the adopter's OAuth grant,
+computes trigger fingerprints, records local wake state, and leases work to a
+compatible local runner. Linear is the queue: the source project remains the
+work-state surface, and the gateway only starts work after seeing an eligible
+project in the configured trigger state.
 
 The local runner owns adopter-side authority. It reads Linear through the
 browser OAuth credential and GraphQL, persists run artifacts locally, writes
 Linear only after deterministic gates pass, invokes agent runtimes from the
 adopter machine, and exports trace/eval evidence to local Phoenix.
 
-The hosted GitHub App/broker path is for the Agentic Factory behavior repo:
-setup transport and reviewable process-change proposal branches. It is distinct
-from product-repo binding. Product-repo binding is a local domain `git_repo`
+The behavior-repo GitHub path uses the adopter's own git/`gh` auth for setup
+transport and reviewable process-change proposal branches. It is distinct from
+product-repo binding. Product-repo binding is a local domain `git_repo`
 checkout binding included by the landed domain resource-binding work. It binds
 one existing local checkout per domain and must not be treated as proved by
-GitHub App installation or broker token minting.
+behavior-repo PR access.
 
-If the hosted inbox or broker is unavailable, setup, doctor, and runner paths
-fail closed or report the hosted HTTP error. The configured hosted status URL is
-diagnostic health and coordination state, not a PM-facing dashboard or support
-console.
+If Linear OAuth, local git, or `gh` authority is unavailable, setup, doctor,
+gateway, and proposal paths fail closed or report the local authorization
+problem. `npm run trigger-status` is local/operator state, not a PM-facing
+dashboard or support console.
 
-Revocation has separate local and hosted surfaces. `npm run uninstall` removes
-the registered webhook connection when possible, revokes/removes the local
-runner inbox credential, removes local Linear OAuth credentials, and clears
-generated local setup state. GitHub behavior-repo access can be stopped by
-uninstalling the GitHub App from the selected repo or revoking the setup grant;
-already issued broker credentials expire quickly, while immediate hosted-wide
-revocation requires maintainer key rotation.
+Revocation is local. `npm run uninstall` removes local Linear OAuth
+credentials and generated local setup state. GitHub behavior-repo access can be
+stopped by revoking the adopter's local GitHub session or removing that
+session's access to the configured behavior repo.
 
-The hosted inbox stores no product content. Linear webhook bodies are consumed
-in memory, hashed for dedupe, and discarded. Persisted state is limited to body
-hashes, allowlisted headers, routing facts, wake/run lifecycle state, and
-credential hashes; retention details are owned in
-[../../../supabase/README.md](../../../supabase/README.md).
+Local trigger state stores only coordination facts: trigger fingerprints,
+project IDs, wake/run lifecycle state, leases, mutation intent, replay intent,
+and suppression records. Product content is re-read directly from Linear by the
+runner when work is claimed.
 
 ## Current Technical Commands
 
-This is technical/operator detail for the hosted setup slice. It is not a
-raw-command-free setup promise. The checked-in public config targets the hosted
-public beta endpoint, and setup commands can create or update Linear workspace
-objects and the dedicated Agentic Factory behavior repo connection.
+This is technical/operator detail for the local setup slice. It is not a
+raw-command-free setup promise. Setup commands can create or update Linear
+workspace objects and the dedicated Agentic Factory behavior repo connection.
 
 Sandbox operation after setup, required when decomposition work is exercised:
 
 ```text
 npm run runtime-smoke
-npm run runner
+npm run gateway
 npm run trigger-status
 npm run doctor
 npm run phoenix:doctor
@@ -96,16 +89,15 @@ npm run doctor:linear
 
 `npm run init` is the runnable setup path. The GitHub phase connects the Agentic
 Factory behavior repo: create or verify the dedicated behavior repo, preserve
-starter/upstream remotes only as template state, verify selected-repo access,
-and check PR-generation readiness. Init does not bind product repos through
-that behavior-repo connection.
+starter/upstream remotes only as template state, verify local git/`gh` access
+to the configured repo, and check PR-generation readiness. Init does not bind
+product repos through that behavior-repo connection.
 Product repos are bound explicitly per domain with
 `npm run domain:bind-repo -- --domain <id> --path <path>`, which records the
 one existing checkout path, `owner/repo`, and default branch for that domain.
-That product-repo binding is distinct from the behavior-repo token-broker setup under
-`config.github`. Broker-backed proposal writing is behavior-repo transport
-only; it is not product-repo access and does not prove local `git_repo`
-checkout binding.
+That product-repo binding is distinct from the behavior-repo setup under
+`config.github`. Behavior-repo proposal writing is not product-repo access and
+does not prove local `git_repo` checkout binding.
 
 The current runnable workflow still uses foreground commands for smoke testing,
 repair, and manual runner operation. `npm run runner` is currently required
@@ -113,19 +105,14 @@ whenever the adopter wants queued decomposition work to be claimed and
 processed. The mature local-supervisor target is owned in
 [../../../docs/self-improvement.md](../../../docs/self-improvement.md).
 
-Linear requires admin scope to create and inspect webhooks. Setup uses that
-OAuth grant locally through GraphQL. The hosted inbox receives the Linear
-webhook signing secret for verification and a separate runner credential for
-wake leasing; it never receives Linear OAuth tokens and does not mutate Linear.
-The setup handoff to the hosted inbox is authenticated with the scoped setup
-grant that `init` self-issues during the browser flow, read from the environment
-or from ignored local state at `.agentic-factory/inbox-setup-grant.env`;
-adopters supply no token. Internal hosted-service operator credentials are not
-the runner credential, are never required for normal adopter setup, and are not
-sent to Linear.
+Setup uses the adopter's read/write OAuth grant locally through GraphQL. The
+local gateway polls current project state and records local wake state; it does
+not mutate Linear. The Workflow Runner performs Linear mutations only after it
+claims a local wake, re-reads the project, validates eligibility, and persists
+the terminal artifact.
 
 `npm run doctor:linear` checks the same Linear substrate without mutating
-workspace state. `npm run doctor` adds runner inbox credential, runtime smoke,
+workspace state. `npm run doctor` adds local gateway readiness, runtime smoke,
 each domain's product-repo binding status, and read-only local Phoenix health.
 `npm run phoenix:doctor` is also read-only; use `npm run phoenix:start` or
 `npm run init` to install or start Phoenix.
@@ -135,10 +122,11 @@ trace through the local OTLP exporter, verifies the trace by id and span name in
 Phoenix, records a local receipt, and exits non-zero when delivery cannot be
 proved.
 
-`npm run runner` starts one local Workflow Runner pass. It authenticates to the
-hosted inbox with the runner credential, heartbeats, claims one queued wake-up,
-renews the lease while active, re-reads Linear through GraphQL, attempts local
-Phoenix trace export, and then drives the trigger runner execution core.
+`npm run gateway` starts the local gateway path. It polls Linear for eligible
+projects, records local wake-ups, claims one queued wake-up, renews the lease
+while active, re-reads Linear through GraphQL, attempts local Phoenix trace
+export, and then drives the trigger runner execution core. `npm run runner` is
+an alias for this local gateway path.
 
 `npm run runtime-smoke` verifies each configured role runtime can start a
 tool-less `session_start` invocation and return a locally schema-valid
@@ -151,17 +139,15 @@ evidence.
 
 `npm run trigger-status` is the secondary local/operator inspection command for
 queued and terminal wake-up state. When a local per-run trace receipt exists,
-the command combines hosted wake state with the local receipt result in its output.
-The configured hosted status URL is a hosted inbox health/coordination
-endpoint, not a PM-facing dashboard in MVP. The current foreground command
-remains the operator view until the local supervisor can reconcile status back
-through existing user surfaces. Phoenix is the trace and self-improvement UI.
+the command combines local wake state with the local receipt result in its
+output. The current foreground command remains the operator view until the
+local supervisor can reconcile status back through existing user surfaces.
+Phoenix is the trace and self-improvement UI.
 
-`npm run uninstall` is the adopter cleanup path. It attempts to remove the registered
-webhook inbox connection, stops any managed local Phoenix process,
-revokes/removes the local runner inbox credential, then removes generated local
-state and the local Linear OAuth credential. It does not delete reusable Linear
-team, label, status, template, project, or issue objects.
+`npm run uninstall` is the adopter cleanup path. It removes local gateway state,
+stops any managed local Phoenix process, then removes generated local state and
+the local Linear OAuth credential. It does not delete reusable Linear team,
+label, status, template, project, or issue objects.
 It does not silently delete local Phoenix trace history under
 `.agent-shell/phoenix-data`.
 
@@ -205,35 +191,28 @@ OAuth credentials are stored through OS credential storage by default. If OS
 credential storage is unavailable, setup fails loudly unless the user has
 explicitly configured the local file fallback for testing.
 
-The runner-to-inbox credential uses a separate credential target and can be
-revoked without invalidating Linear OAuth. Missing OS credential support fails
-loudly unless the explicit local testing fallback is configured.
+Local wake state is separate from Linear OAuth. Missing OS credential support
+for Linear OAuth fails loudly unless the explicit local testing fallback is
+configured. Local wake/run state must never contain GitHub auth material,
+Phoenix credentials, model-provider tokens, rich prompts, source snippets, or
+shell output.
 
-The runner credential carries wake/run capabilities only. It never contains
-Linear OAuth, GitHub App user or installation tokens, Phoenix credentials, or
-model-provider tokens, and those tokens must not be sent to hosted wake/run
-services or local trace receipts.
-
-## Trigger Inbox And Wake Queue
+## Local Gateway And Wake State
 
 The first trigger is `linear.project.planned`: a Linear project update where
 the project status changed and may now be in the configured `Planned` state.
-The hosted inbox treats this as a candidate wake-up only. It verifies the
-Linear HMAC signature and normalizes the event in memory, dedupes by
-`Linear-Delivery`, and enqueues a decomposition wake with
-`requires_runner_verification=true`. It persists no product content: only a
-body hash, an allowlisted header subset, and derived routing facts are stored
-(the data-minimization boundary is owned by `supabase/README.md`).
+The local gateway treats an eligible project as a candidate wake-up only. It
+polls current Linear state, computes a trigger fingerprint, suppresses already
+handled terminal outcomes for the same fingerprint, and records a local
+decomposition wake with `requires_runner_verification=true`.
 
-The repository includes a deterministic in-memory queue substrate for tests and
-a hosted queue client contract for the runner. The current sandbox hosted
-service is the Supabase Edge Function in `supabase/functions/agentic-factory-inbox`,
-backed by the migration in `supabase/migrations`. It implements the same
-heartbeat, claim, renew, mutation-start, complete, and dead-letter protocol as
-the deterministic test substrate.
+The repository includes a deterministic local queue substrate for tests and the
+local gateway path. It implements heartbeat, claim, renew, mutation-start,
+complete, replay, suppression, and dead-letter behavior against local
+Agentic Factory state.
 
 The runner is the first component allowed to mutate Linear. It must claim a
-hosted wake-up and receive a lease token before re-reading the project through
+local wake-up and receive a lease token before re-reading the project through
 the GraphQL service. Every lease renewal and status transition includes that
 lease token so stale runners cannot update a wake after another runner has
 claimed it.
@@ -252,9 +231,9 @@ Wake statuses are:
 `routing_error` is an active, non-terminal quarantine state. It appears in
 `npm run trigger-status` when a runner claimed the wake but could not resolve a
 safe domain/project/team identity, such as a missing active domain, ambiguous
-webhook/team match, or cross-domain team conflict. Fix the domain registry or
-hosted webhook identity first, then requeue the wake so it can be claimed again;
-do not dead-letter it as ordinary runner failure.
+team/project match, or cross-domain team conflict. Fix the domain registry or
+Linear project/team identity first, then requeue the wake so it can be claimed
+again; do not dead-letter it as ordinary runner failure.
 
 `waiting_for_runner` is derived from a queued wake-up with no fresh compatible
 runner heartbeat. It is not stored as a wake status.
@@ -263,15 +242,15 @@ Terminal statuses are `paused`, `completed`, `rejected`, and `dead_letter`.
 Only non-terminal wake-ups are unique by `(workspace_id, wake_key)`, so a later
 human move back to `Planned` after a pause creates a fresh wake-up.
 
-No hidden Linear scan or reconciliation fallback may create mutation-capable
-decomposition work. Repair tooling may inspect, enqueue, retry, or dead-letter
-wake-ups, but it must not bypass wake claiming before Linear mutation.
+No mutation-capable decomposition run may bypass local wake claiming. Repair
+tooling may inspect, enqueue, retry, or dead-letter wake-ups, but it must not
+bypass wake claiming before Linear mutation.
 
 ## Local Phoenix Trace Collection
 
 Local Phoenix on the adopter machine is the only supported trace/eval path for
-now. The hosted inbox remains trace-agnostic and only coordinates webhook
-ingestion, wake leases, and mutation safety.
+now. The local gateway remains trace-agnostic and only coordinates Linear
+polling, wake leases, and mutation safety.
 
 `npm run init` and `npm run phoenix:start` manage a loopback Phoenix service at
 `http://127.0.0.1:6006` by default. Managed Phoenix state is ignored local
@@ -374,15 +353,6 @@ promotion), derived at read time and never persisted to Phoenix.
 
 ## Live Linear Verification
 
-The maintained hosted inbox runs as Supabase Edge Function
-`agentic-factory-inbox` with JWT verification disabled. This is intentional for
-Linear webhooks; the function performs custom Linear HMAC verification and
-setup/runner credential checks.
-
-Public setup docs do not include hosted deploy, secret rotation, or migration
-commands. Those are maintainer launch operations, and runnable public setup
-remains gated until the public hosted endpoint and launch proof are recorded.
-
 Keep `npm test` deterministic and credential-free. When Linear behavior is part
 of the claim, use the Agentic Factory OAuth credential and Linear GraphQL for
 live smoke checks against disposable projects or issues, then move test
@@ -394,6 +364,12 @@ project comments or documents. Live verification on 2026-06-07 confirmed that
 this path can create a Linear project update with exact authored Markdown, find
 it by `run_id`, and archive the test update afterward. The same live pass
 verified refresh-token exchange and GraphQL auth with the refreshed token.
+
+Use `npm run uat:gateway` for the live poll/replay proof against disposable
+Linear artifacts when a change claims local gateway behavior. The harness moves
+a disposable project through the trigger state, waits for the local gateway to
+pick it up, and verifies replay can re-apply the persisted terminal mutation
+idempotently.
 
 ## Implemented Service Semantics
 
@@ -446,9 +422,9 @@ verified refresh-token exchange and GraphQL auth with the refreshed token.
   trace attributes.
 - If a runner dies before Linear mutation starts, the lease can expire and the
   wake returns to `queued`. If it dies after mutation starts, the wake moves to
-  `dead_letter` as an internal fail-closed state until a self-serve repair or
-  future recovery path can reconcile from the original local run artifact or
-  explicitly clean up partial Linear state.
+  `dead_letter` as an internal fail-closed state until replay or a self-serve
+  repair path can reconcile from the original local run artifact or explicitly
+  clean up partial Linear state.
 - `decomposition_quality` is available as an offline scorer over trace and
   Linear state; it is not a live decomposition span or mutation gate.
 - `accepted_packet_sufficiency` is available as an offline check that accepted

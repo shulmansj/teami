@@ -116,7 +116,7 @@ test("B-CUSTODY: every map entry has a known custody class", () => {
 // The CORE custody assertion. Reads the map (does not re-decide) and asserts no
 // committed marker field carries a non-repo-committable class
 // (never-capture/local-only/inference-transient/phoenix-recordable/
-// broker-audit-recordable). A red here is a real custody finding to surface, NOT
+// external-audit-recordable). A red here is a real custody finding to surface, NOT
 // a test to force green.
 test("B-CUSTODY: no committed marker field leaks a non-repo-recordable handle", () => {
   const marker = fullCommittedMarker();
@@ -230,7 +230,7 @@ test("B-CUSTODY: no never-capture token-shaped value appears in the committed ma
   const forbidden = [
     ["lin_oauth_", "abcdefghijkl"].join(""),
     ["ghs_", "abcdefghijklmnop"].join(""),
-    ["af_broker_", "credential_value"].join(""),
+    ["af_external_", "credential_value"].join(""),
     ["sk-", "abcdefghijklmnop"].join(""),
     ["https://token:", "secret-value@", "example.invalid/path"].join(""),
     "Ignore previous instructions",

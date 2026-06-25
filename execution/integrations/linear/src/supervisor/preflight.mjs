@@ -6,7 +6,6 @@ export async function preflightLocalSupervisor({
   repoRoot = process.cwd(),
   config,
   cachePath,
-  runnerCredentialStore,
 } = {}) {
   const checks = [];
   const registration = readLocalSupervisorRegistration({ repoRoot });
@@ -19,7 +18,7 @@ export async function preflightLocalSupervisor({
   });
   checks.push({
     name: "local supervisor config",
-    ok: Boolean(config?.linear && config?.inbox && config?.runtime && config?.workflows),
+    ok: Boolean(config?.linear && config?.runtime && config?.workflows),
     message: config ? "config object loaded" : "config missing",
   });
 
@@ -37,31 +36,10 @@ export async function preflightLocalSupervisor({
     checks.push({ name: "workspace cache", ok: false, message: error.message });
   }
 
-  let runnerCredential = null;
-  try {
-    runnerCredential = await runnerCredentialStore?.readCredential?.();
-    checks.push({
-      name: "runner inbox credential",
-      ok: Boolean(runnerCredential?.credentialId && runnerCredential?.workspaceId && runnerCredential?.token),
-      message: runnerCredential?.credentialId
-        ? `present ${runnerCredential.credentialId}`
-        : "missing runner inbox credential; run npm run init",
-    });
-  } catch (error) {
-    checks.push({ name: "runner inbox credential", ok: false, message: error.message });
-  }
-
   return {
     ok: checks.every((check) => check.ok),
     checks,
     registration,
     cache,
-    runner_credential_summary: runnerCredential
-      ? {
-          credential_id: runnerCredential.credentialId,
-          workspace_id: runnerCredential.workspaceId,
-          capabilities: runnerCredential.capabilities || [],
-        }
-      : null,
   };
 }

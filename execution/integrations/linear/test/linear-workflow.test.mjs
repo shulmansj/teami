@@ -8,7 +8,6 @@ import { writeLinearCache } from "../src/cache.mjs";
 import { cachePathForConfig, loadLinearConfig, validateLinearConfig } from "../src/config.mjs";
 import {
   decorateWakeViewsForDomains,
-  listWakeViewsForDomains,
 } from "../src/domain-command-context.mjs";
 import { extractDecompositionKey } from "../src/issue-body.mjs";
 import {
@@ -36,29 +35,21 @@ import {
   writeDomainRegistry,
 } from "../src/domain-registry.mjs";
 import { githubConnectionStatePath } from "../src/github-setup.mjs";
-import { removeLinearWebhookRegistration } from "../src/linear-webhook-registration.mjs";
 import {
   createLinearCredentialStore,
   legacyCredentialTargetForConfig,
 } from "../src/linear-credential-store.mjs";
 import {
-  createRunnerInboxCredentialStore,
-  legacyRunnerInboxCredentialTargetForConfig,
-} from "../src/runner-inbox-credential.mjs";
-import {
   acquireDomainRunnerLock,
   authorizeLinearSetupWorkspace,
-  formatTriggerWakeStatusLine,
   legacyCredentialStores,
   promptLinearWorkspacePicker,
   promoteSetupCredentialToDomain,
   removeLocalLinearSetup,
-  requeueTriggerWake,
   removeOneDomainSetup,
   resolveGitHubPhaseResumeDomain,
   resolveSupervisorCommandContext,
   resolveSetupCommandDomainNameHint,
-  runOneTriggerWake,
   selectRunnerDomains,
 } from "../cli.mjs";
 import { setupStatePathForCache } from "../src/local-state.mjs";
@@ -1356,6 +1347,10 @@ test("Webhook id and team id land in the registry entry", async () => {
   assert.equal(writtenCache.domainId, "registry-domain");
   assert.equal(writtenCache.workspaceId, "workspace-1");
   assert.equal(writtenCache.teamId, result.domain.linear.team_id);
+  assert.equal(Object.hasOwn(writtenCache, "inbox"), false);
+  assert.equal(writtenCache.localRunner.triggerSource, "local_gateway_poll");
+  assert.equal(writtenCache.localRunner.legacyWebhook.id, "webhook-registry-domain");
+  assert.equal(writtenCache.localRunner.legacyRunnerCredentialId, "runner-workspace-1");
 });
 
 test("Bootstrap to promotion flow lands tokens under the domain-scoped target before active registry", async () => {
@@ -1505,7 +1500,8 @@ test("domain:add and init share setupLinearDomain for a second workspace with is
   validateDomainRegistry(registry);
   assert.deepEqual(registry.domains.map((domain) => domain.id), ["support-ops", "sales-ops"]);
   assert.notEqual(first.context.credentialTargets.linearOAuth, second.context.credentialTargets.linearOAuth);
-  assert.notEqual(first.context.credentialTargets.runnerInbox, second.context.credentialTargets.runnerInbox);
+  assert.equal(Object.hasOwn(first.context.credentialTargets, "runnerInbox"), false);
+  assert.equal(Object.hasOwn(second.context.credentialTargets, "runnerInbox"), false);
   assert.notEqual(caches.get("support-ops").path, caches.get("sales-ops").path);
   assert.equal(registry.domains.find((domain) => domain.id === "support-ops").linear.webhook_id, "webhook-support");
   assert.equal(registry.domains.find((domain) => domain.id === "sales-ops").linear.webhook_id, "webhook-sales");
@@ -1573,7 +1569,7 @@ test("Failure mid-add leaves the first domain registry entry, credentials, and c
           writeDomainEntrySnapshot({ repoRoot: tempRoot, registry: nextRegistry, domainId: "support-ops" });
         },
       }),
-    /runner_authority_failed: Hosted inbox error: HTTP 400 invalid runner authority/,
+    /runner_authority_failed: Runner authority error: HTTP 400 invalid runner authority/,
   );
 
   assert.deepEqual(fs.readFileSync(domainEntrySnapshotPath(tempRoot, "support-ops")), firstRegistryBefore);
@@ -1640,307 +1636,6 @@ test("trigger-status all-domains display resolves wake contract identity through
   assert.equal(views[1].domainLabel, "domain_unresolved=webhook_id_mismatch");
   assert.equal(views[1].displayReason, "team_id_mismatch");
   assert.deepEqual(views[1].routingCandidates, [{ domainId: "sales-ops", status: "active", teamId: "team-sales" }]);
-});
-
-test("trigger-status all-domains view uses one wake views call per workspace with matching runner credentials", async () => {
-  const config = loadLinearConfig({ repoRoot });
-  const registry = {
-    schema_version: "agentic-factory-domain-registry/v1",
-    domains: [
-      makeDomainRecord({
-        domainId: "support-ops",
-        status: "active",
-        workspaceId: "workspace-1",
-        teamId: "team-support",
-        teamKey: "SUP",
-        teamName: "Support Ops",
-        webhookId: "webhook-support",
-      }),
-      makeDomainRecord({
-        domainId: "sales-ops",
-        status: "active",
-        workspaceId: "workspace-2",
-        teamId: "team-sales",
-        teamKey: "SAL",
-        teamName: "Sales Ops",
-        webhookId: "webhook-sales",
-      }),
-    ],
-  };
-  const credentials = {
-    "support-ops": { credentialId: "runner-support", token: "token-support", workspaceId: "workspace-1" },
-    "sales-ops": { credentialId: "runner-sales", token: "token-sales", workspaceId: "workspace-2" },
-  };
-  const calls = [];
-
-  const views = await listWakeViewsForDomains({
-    registry,
-    domains: registry.domains,
-    config,
-    repoRoot,
-    createCredentialStore: ({ domainContext }) => ({
-      async readCredential() {
-        return credentials[domainContext.domainId];
-      },
-    }),
-    inboxClient: {
-      async listWakeViews(input) {
-        calls.push(input);
-        if (input.workspaceId === "workspace-1") {
-          return {
-            views: [{
-              id: "wake-support",
-              workspace_id: "workspace-1",
-              webhook_ids: ["webhook-support"],
-              team_ids: ["team-support"],
-              status: "queued",
-            }],
-          };
-        }
-        return {
-          views: [{
-            id: "wake-sales",
-            workspace_id: "workspace-2",
-            webhook_ids: ["webhook-sales"],
-            team_ids: ["team-sales"],
-            status: "queued",
-          }],
-        };
-      },
-    },
-  });
-
-  assert.deepEqual(calls, [
-    { workspaceId: "workspace-1", credentialId: "runner-support", token: "token-support" },
-    { workspaceId: "workspace-2", credentialId: "runner-sales", token: "token-sales" },
-  ]);
-  assert.equal(calls.some((call) => Object.hasOwn(call, "workspaceIds")), false);
-  assert.deepEqual(views.map((view) => view.resolvedDomainId), ["support-ops", "sales-ops"]);
-});
-
-test("trigger-status lists routing_error wakes with object id, reason, and candidate domains", () => {
-  const line = formatTriggerWakeStatusLine({
-    repoRoot,
-    wake: {
-      domainLabel: "domain_unresolved=ambiguous_domain_project_team_intersection",
-      status: "routing_error",
-      trigger_type: "linear.project.planned",
-      object_id: "project-quarantined",
-      displayReason: "ambiguous_domain_project_team_intersection",
-      routingCandidates: [
-        { domainId: "support-ops", status: "active", teamId: "team-support" },
-        { domainId: "sales-ops", status: "active", teamId: "team-sales" },
-      ],
-    },
-  });
-
-  assert.match(line, /routing_error/);
-  assert.match(line, /project-quarantined/);
-  assert.match(line, /ambiguous_domain_project_team_intersection/);
-  assert.match(line, /candidates=support-ops\(active,team=team-support\),sales-ops\(active,team=team-sales\)/);
-});
-
-test("trigger-status --requeue calls the workspace-scoped hosted requeue endpoint after registry repair", async () => {
-  const config = loadLinearConfig({ repoRoot });
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-requeue-"));
-  const registry = {
-    schema_version: "agentic-factory-domain-registry/v1",
-    domains: [
-      makeDomainRecord({
-        domainId: "sales-ops",
-        status: "active",
-        workspaceId: "workspace-1",
-        teamId: "team-sales",
-        teamKey: "SAL",
-        teamName: "Sales Ops",
-        webhookId: "webhook-sales",
-      }),
-      makeDomainRecord({
-        domainId: "support-ops",
-        status: "active",
-        workspaceId: "workspace-1",
-        teamId: "team-support",
-        teamKey: "SUP",
-        teamName: "Support Ops",
-        webhookId: "webhook-support",
-      }),
-    ],
-  };
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  const calls = [];
-  const inboxClient = {
-    async listWakeViews(input) {
-      calls.push(["list", input]);
-      return {
-        views: [{
-          id: "wake-routing",
-          workspace_id: "workspace-1",
-          webhook_ids: ["webhook-support"],
-          team_ids: ["team-support"],
-          status: "routing_error",
-          object_id: "project-routing",
-          routing_error_reason: "team_id_mismatch",
-          routing_candidates: [{ domainId: "support-ops", status: "active", teamId: "team-support" }],
-        }],
-      };
-    },
-    async requeueWake(input) {
-      calls.push(["requeue", input]);
-      return { ok: true, wakeId: input.wakeId, status: "queued" };
-    },
-  };
-
-  const result = await requeueTriggerWake({
-    config,
-    repoRoot: tempRoot,
-    inboxClient,
-    wakeId: "wake-routing",
-    createCredentialStore: ({ domainContext }) => ({
-      async readCredential() {
-        return domainContext.domainId === "support-ops"
-          ? { credentialId: "runner-support", token: "token-support", workspaceId: "workspace-1" }
-          : { credentialId: "runner-sales", token: "token-sales", workspaceId: "workspace-1" };
-      },
-    }),
-  });
-
-  assert.deepEqual(result, { ok: true, wakeId: "wake-routing", status: "queued" });
-  assert.deepEqual(calls, [
-    ["list", { workspaceId: "workspace-1", credentialId: "runner-sales", token: "token-sales" }],
-    ["requeue", {
-      workspaceId: "workspace-1",
-      credentialId: "runner-support",
-      token: "token-support",
-      wakeId: "wake-routing",
-    }],
-  ]);
-});
-
-test("trigger-status --requeue requires --domain when wake facts do not resolve one active domain", async () => {
-  const config = loadLinearConfig({ repoRoot });
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-requeue-ambiguous-"));
-  const registry = {
-    schema_version: "agentic-factory-domain-registry/v1",
-    domains: [
-      makeDomainRecord({
-        domainId: "support-ops",
-        status: "active",
-        workspaceId: "workspace-1",
-        teamId: "team-support",
-        teamKey: "SUP",
-        teamName: "Support Ops",
-        webhookId: "webhook-support",
-      }),
-      makeDomainRecord({
-        domainId: "sales-ops",
-        status: "active",
-        workspaceId: "workspace-1",
-        teamId: "team-sales",
-        teamKey: "SAL",
-        teamName: "Sales Ops",
-        webhookId: "webhook-sales",
-      }),
-    ],
-  };
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  const calls = [];
-  const inboxClient = {
-    async listWakeViews(input) {
-      calls.push(["list", input]);
-      return {
-        views: [{
-          id: "wake-ambiguous",
-          workspace_id: "workspace-1",
-          status: "routing_error",
-          object_id: "project-ambiguous",
-          routing_error_reason: "insufficient_wake_identity",
-        }],
-      };
-    },
-    async requeueWake(input) {
-      calls.push(["requeue", input]);
-      return { ok: true };
-    },
-  };
-
-  await assert.rejects(
-    () => requeueTriggerWake({
-      config,
-      repoRoot: tempRoot,
-      inboxClient,
-      wakeId: "wake-ambiguous",
-      createCredentialStore: ({ domainContext }) => ({
-        async readCredential() {
-          return {
-            credentialId: `runner-${domainContext.domainId}`,
-            token: `token-${domainContext.domainId}`,
-            workspaceId: "workspace-1",
-          };
-        },
-      }),
-    }),
-    /domain_required_for_requeue: wake wake-ambiguous is ambiguous; pass --domain <domain_id>/,
-  );
-  assert.equal(calls.filter(([kind]) => kind === "requeue").length, 0);
-});
-
-test("runner iterates active domains in registry order and reports per-domain lock contention", async () => {
-  const config = loadLinearConfig({ repoRoot });
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runner-lock-"));
-  const registry = {
-    schema_version: "agentic-factory-domain-registry/v1",
-    domains: [
-      makeDomainRecord({
-        domainId: "support-ops",
-        status: "active",
-        workspaceId: "workspace-1",
-        teamId: "team-support",
-        teamKey: "SUP",
-        teamName: "Support Ops",
-        webhookId: "webhook-support",
-      }),
-      makeDomainRecord({
-        domainId: "paused-ops",
-        status: "paused",
-        workspaceId: "workspace-paused",
-        teamId: "team-paused",
-        teamKey: "PAU",
-        teamName: "Paused Ops",
-        webhookId: "webhook-paused",
-      }),
-      makeDomainRecord({
-        domainId: "sales-ops",
-        status: "active",
-        workspaceId: "workspace-2",
-        teamId: "team-sales",
-        teamKey: "SAL",
-        teamName: "Sales Ops",
-        webhookId: "webhook-sales",
-      }),
-    ],
-  };
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  assert.deepEqual(selectRunnerDomains({ registry }).map((domain) => domain.id), ["support-ops", "sales-ops"]);
-  assert.throws(
-    () => selectRunnerDomains({ registry, domainId: "paused-ops" }),
-    /domain_not_active: paused-ops status=paused/,
-  );
-
-  const lock = acquireDomainRunnerLock({ repoRoot: tempRoot, domainId: "support-ops" });
-  assert.equal(lock.ok, true);
-  try {
-    const result = await runOneTriggerWake({
-      config,
-      repoRoot: tempRoot,
-      inboxClient: {},
-      domainId: "support-ops",
-    });
-    assert.equal(result.status, "idle");
-    assert.equal(result.reason, "already_running_for_domain");
-    assert.deepEqual(result.messages, ["already running for domain support-ops"]);
-  } finally {
-    lock.release();
-  }
 });
 
 test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", () => {
@@ -2051,267 +1746,6 @@ test("runner lock release only removes the lock when the token still matches", (
   fs.rmSync(lockPath, { force: true });
 });
 
-test("uninstall removes the exact Linear webhook and verifies it is gone", async () => {
-  const deletedSecrets = [];
-  const linearClient = {
-    webhooks: [{ id: "webhook-support", teamId: "team-support" }],
-    async deleteWebhook(id) {
-      this.webhooks = this.webhooks.filter((webhook) => webhook.id !== id);
-      return { ok: true };
-    },
-    async listWebhooks() {
-      return this.webhooks;
-    },
-  };
-
-  const result = await removeLinearWebhookRegistration({
-    linearClient,
-    inboxClient: {
-      async deleteLinearWebhookSecret(input) {
-        deletedSecrets.push(input);
-        return { deleted: 1 };
-      },
-    },
-    workspaceId: "workspace-1",
-    teamId: "team-support",
-    webhookId: "webhook-support",
-  });
-
-  assert.deepEqual(result, { webhookDeleted: true, secretDeleted: true });
-  assert.deepEqual(linearClient.webhooks, []);
-  assert.deepEqual(deletedSecrets, [{ workspaceId: "workspace-1", webhookId: "webhook-support" }]);
-});
-
-test("uninstall with missing registry webhook_id fails loudly without deletion calls", async () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-uninstall-missing-webhook-"));
-  const deleteCalls = [];
-  const otherDomainCache = path.join(tempRoot, ".agentic-factory", "domains", "other-domain", "linear.json");
-  writeLinearCache(otherDomainCache, { domainId: "other-domain", workspaceId: "workspace-2" });
-  const result = await removeOneDomainSetup({
-    config,
-    repoRoot: tempRoot,
-    domain: makeDomainRecord({
-      domainId: "broken-domain",
-      status: "setup_incomplete",
-      workspaceId: "workspace-1",
-      teamId: "team-broken",
-      teamKey: "BRK",
-      teamName: "Broken Domain",
-      webhookId: null,
-    }),
-    inboxClient: {
-      async deleteLinearWebhookSecret(input) {
-        deleteCalls.push(["inbox", input]);
-      },
-      async revokeRunnerCredential(input) {
-        deleteCalls.push(["runner", input]);
-      },
-    },
-    createSetupAuth: () => ({
-      client: {
-        async deleteWebhook(id) {
-          deleteCalls.push(["linear", id]);
-        },
-        async listWebhooks() {
-          return [];
-        },
-      },
-    }),
-    createOAuthCredentialStore: () => ({ async deleteTokenSet() {} }),
-    createRunnerCredentialStore: () => ({
-      async readCredential() {
-        return { workspaceId: "workspace-1", credentialId: "runner-broken", token: "runner-token" };
-      },
-      async deleteCredential() {
-        deleteCalls.push(["local-runner-delete"]);
-      },
-    }),
-    removeLocalFile: () => {
-      deleteCalls.push(["cache-delete"]);
-    },
-    log: () => {},
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "missing_webhook_id");
-  assert.deepEqual(deleteCalls, []);
-  assert.equal(fs.existsSync(otherDomainCache), true);
-});
-
-test("reset removes setup_incomplete local state when webhook_id was never recorded", async () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-reset-setup-incomplete-no-webhook-"));
-  const cachePath = cachePathForConfig(config, tempRoot);
-  const setupStatePath = setupStatePathForCache(cachePath);
-  const domainCachePath = path.join(tempRoot, ".agentic-factory", "domains", "clean-adopter", "linear.json");
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "clean-adopter",
-      status: "setup_incomplete",
-      workspaceId: "workspace-1",
-      workspaceName: "Workspace",
-      teamId: "team-clean",
-      teamKey: "CLE",
-      teamName: "clean-adopter",
-      webhookId: null,
-    }),
-  );
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  writeLinearCache(domainCachePath, { domainId: "clean-adopter", workspaceId: "workspace-1" });
-  fs.writeFileSync(setupStatePath, "{}\n", "utf8");
-
-  const oauthStore = createLinearCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    domainId: "clean-adopter",
-    workspaceId: "workspace-1",
-  });
-  const runnerStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    domainId: "clean-adopter",
-    workspaceId: "workspace-1",
-  });
-  await oauthStore.writeTokenSet({ refreshToken: "refresh-clean" });
-  await runnerStore.writeCredential({
-    schema_version: 1,
-    workspaceId: "workspace-1",
-    credentialId: "runner-clean",
-    token: "runner-token",
-    capabilities: ["linear.project.planned"],
-  });
-
-  const calls = [];
-  const { result, logs } = await captureConsoleLogs(() =>
-    removeLocalLinearSetup(cachePath, setupStatePath, {
-      config,
-      repoRoot: tempRoot,
-      inboxClient: {
-        async revokeRunnerCredential(input) {
-          calls.push(["runner-revoke", input]);
-          return { ok: true };
-        },
-      },
-      fullReset: true,
-      createSetupAuth: () => {
-        throw new Error("webhook deletion should be skipped when webhook_id is absent");
-      },
-    }));
-
-  assert.equal(result.ok, true);
-  assert.deepEqual(calls.map((call) => call[0]), ["runner-revoke"]);
-  assert.equal(await oauthStore.readTokenSet(), null);
-  assert.equal(await runnerStore.readCredential(), null);
-  assert.equal(fs.existsSync(cachePath), false);
-  assert.equal(fs.existsSync(setupStatePath), false);
-  assert.equal(fs.existsSync(domainRegistryPath(tempRoot)), false);
-  assert.equal(fs.existsSync(path.dirname(domainCachePath)), false);
-  assert.equal(
-    logs.includes("skipped: domain clean-adopter has no webhook_id; no Linear webhook deletion was attempted."),
-    true,
-  );
-  assert.equal(logs.includes("removed: domain clean-adopter Linear setup OAuth credential"), true);
-  assert.equal(logs.includes("removed: domain registry"), true);
-});
-
-test("uninstall with no domain registry runs the full legacy cleanup path", async () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-pre-domain-uninstall-"));
-  const cachePath = cachePathForConfig(config, tempRoot);
-  const setupStatePath = setupStatePathForCache(cachePath);
-  const githubStatePath = githubConnectionStatePath(tempRoot);
-  const supervisorRegistrationPath = path.join(tempRoot, ".agentic-factory", "supervisor", "registration.json");
-  const setupStore = createLinearCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    target: legacyCredentialTargetForConfig(config, tempRoot),
-  });
-  const runnerStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    target: legacyRunnerInboxCredentialTargetForConfig(config, tempRoot),
-  });
-
-  writeLinearCache(cachePath, {
-    workspaceId: "workspace-legacy",
-    teamId: "team-legacy",
-    inbox: {
-      linearWebhook: { id: "webhook-legacy" },
-      runnerCredentialId: "runner-legacy",
-    },
-  });
-  fs.writeFileSync(setupStatePath, "{}\n", "utf8");
-  fs.mkdirSync(path.dirname(githubStatePath), { recursive: true });
-  fs.writeFileSync(githubStatePath, "{}\n", "utf8");
-  fs.mkdirSync(path.dirname(supervisorRegistrationPath), { recursive: true });
-  fs.writeFileSync(supervisorRegistrationPath, "{}\n", "utf8");
-  await setupStore.writeTokenSet({ refreshToken: "refresh-legacy" });
-  await runnerStore.writeCredential({
-    schema_version: 1,
-    workspaceId: "workspace-legacy",
-    credentialId: "runner-legacy",
-    token: "runner-token",
-    capabilities: ["linear.project.planned"],
-  });
-
-  const calls = [];
-  const { result, logs } = await captureConsoleLogs(() =>
-    removeLocalLinearSetup(cachePath, setupStatePath, {
-      config,
-      repoRoot: tempRoot,
-      inboxClient: {
-        async deleteLinearWebhookSecret(input) {
-          calls.push(["inbox-secret", input]);
-          return { deleted: 1 };
-        },
-        async revokeRunnerCredential(input) {
-          calls.push(["runner-revoke", input]);
-          return { ok: true };
-        },
-      },
-      createSetupAuth: () => ({
-        client: {
-          async deleteWebhook(id) {
-            calls.push(["linear-delete", id]);
-            return { ok: true };
-          },
-          async listWebhooks() {
-            calls.push(["linear-list"]);
-            return [];
-          },
-        },
-      }),
-    }));
-
-  assert.equal(result.ok, true);
-  assert.deepEqual(calls.map((call) => call[0]), [
-    "linear-delete",
-    "linear-list",
-    "inbox-secret",
-    "runner-revoke",
-  ]);
-  assert.deepEqual(calls[2][1], { workspaceId: "workspace-legacy", webhookId: "webhook-legacy" });
-  assert.deepEqual(calls[3][1], {
-    workspaceId: "workspace-legacy",
-    credentialId: "runner-legacy",
-    token: "runner-token",
-  });
-  assert.equal(fs.existsSync(cachePath), false);
-  assert.equal(fs.existsSync(setupStatePath), false);
-  assert.equal(fs.existsSync(githubStatePath), false);
-  assert.equal(fs.existsSync(supervisorRegistrationPath), false);
-  assert.equal(await setupStore.readTokenSet(), null);
-  assert.equal(await runnerStore.readCredential(), null);
-  assert.equal(logs.includes("removed: Linear webhook inbox registration"), true);
-  assert.equal(logs.includes("removed: runner inbox credential"), true);
-  assert.equal(logs.includes("removed: linear cache"), true);
-  assert.equal(logs.includes("removed: Linear setup OAuth credential"), true);
-  assert.ok(logs.indexOf("removed: runner inbox credential") < logs.indexOf("removed: linear cache"));
-  assert.ok(logs.indexOf("removed: linear cache") < logs.indexOf("removed: Linear setup OAuth credential"));
-});
-
 test("uninstall with a registry and ambiguous domain selection fails before cleanup", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-ambiguous-uninstall-"));
@@ -2350,14 +1784,6 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
     removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot: tempRoot,
-      inboxClient: {
-        async deleteLinearWebhookSecret() {
-          throw new Error("must not delete webhook secret");
-        },
-        async revokeRunnerCredential() {
-          throw new Error("must not revoke runner credential");
-        },
-      },
       createSetupAuth: () => {
         throw new Error("must not create setup auth");
       },
@@ -2396,7 +1822,6 @@ test("uninstall with a registry and one active domain still marks only that doma
     removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot: tempRoot,
-      inboxClient: {},
       removeDomainSetup: async ({ domain }) => {
         removedDomains.push(domain.id);
         return { ok: true };
@@ -2433,233 +1858,41 @@ test("reset with a removed-status ghost entry and no credentials completes and w
   writeLinearCache(domainCachePath, { domainId: "zztest-secondary", workspaceId: "workspace-sandbox" });
   fs.writeFileSync(setupStatePath, "{}\n", "utf8");
 
-  let hostedCleanupCalls = 0;
+  let removedDomainCleanupCalls = 0;
   const { result, logs } = await captureConsoleLogs(() =>
     removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot: tempRoot,
-      inboxClient: {},
       fullReset: true,
       removeDomainSetup: async () => {
-        hostedCleanupCalls += 1;
-        throw new Error("removed ghost should not require hosted cleanup");
+        removedDomainCleanupCalls += 1;
+        throw new Error("removed ghost should not require domain cleanup");
       },
     }));
 
   assert.equal(result.ok, true);
-  assert.equal(hostedCleanupCalls, 0);
+  assert.equal(removedDomainCleanupCalls, 0);
   assert.equal(fs.existsSync(cachePath), false);
   assert.equal(fs.existsSync(setupStatePath), false);
   assert.equal(fs.existsSync(domainRegistryPath(tempRoot)), false);
   assert.equal(fs.existsSync(path.dirname(domainCachePath)), false);
-  assert.equal(logs.includes("already clean: removed domain zztest-secondary hosted credentials"), true);
+  assert.equal(logs.includes("already clean: removed domain zztest-secondary local credentials"), true);
   assert.equal(logs.includes("removed: domain registry"), true);
   assert.equal(logs.includes("removed: per-domain Linear caches"), true);
-});
-
-test("reset with an active entry whose hosted revocation fails aborts local destruction", async () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-reset-active-revoke-failure-"));
-  const cachePath = cachePathForConfig(config, tempRoot);
-  const setupStatePath = setupStatePathForCache(cachePath);
-  const domainCachePath = path.join(tempRoot, ".agentic-factory", "domains", "support-ops", "linear.json");
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
-      status: "active",
-      workspaceId: "workspace-1",
-      teamId: "team-support",
-      teamKey: "SUP",
-      teamName: "Support Ops",
-      webhookId: "webhook-support",
-    }),
-  );
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  writeLinearCache(cachePath, { workspaceId: "workspace-legacy" });
-  writeLinearCache(domainCachePath, { domainId: "support-ops", workspaceId: "workspace-1" });
-  fs.writeFileSync(setupStatePath, "{}\n", "utf8");
-
-  const runnerStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    domainId: "support-ops",
-    workspaceId: "workspace-1",
-  });
-  const oauthStore = createLinearCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    domainId: "support-ops",
-    workspaceId: "workspace-1",
-  });
-  await runnerStore.writeCredential({
-    schema_version: 1,
-    workspaceId: "workspace-1",
-    credentialId: "runner-support",
-    token: "runner-token",
-    capabilities: ["linear.project.planned"],
-  });
-  await oauthStore.writeTokenSet({ refreshToken: "refresh-support" });
-
-  const { result, logs } = await captureConsoleLogs(() =>
-    removeLocalLinearSetup(cachePath, setupStatePath, {
-      config,
-      repoRoot: tempRoot,
-      inboxClient: {
-        async deleteLinearWebhookSecret() {
-          return { deleted: 1 };
-        },
-        async revokeRunnerCredential() {
-          throw new Error("hosted revoke down");
-        },
-      },
-      fullReset: true,
-      removeDomainSetup: (input) =>
-        removeOneDomainSetup({
-          ...input,
-          createSetupAuth: () => ({
-            client: {
-              async deleteWebhook() {
-                return { ok: true };
-              },
-              async listWebhooks() {
-                return [];
-              },
-            },
-          }),
-        }),
-    }));
-
-  assert.equal(result.ok, false);
-  assert.equal(fs.existsSync(cachePath), true);
-  assert.equal(fs.existsSync(setupStatePath), true);
-  assert.equal(fs.existsSync(domainRegistryPath(tempRoot)), true);
-  assert.equal(fs.existsSync(domainCachePath), true);
-  assert.equal(await runnerStore.readCredential().then((value) => value.credentialId), "runner-support");
-  assert.equal(await oauthStore.readTokenSet().then((value) => value.refreshToken), "refresh-support");
-  assert.equal(
-    logs.includes(
-      "Reset aborted before deleting local domain state because one or more hosted credentials or webhooks could not be removed.",
-    ),
-    true,
-  );
-});
-
-test("failed runner revocation aborts local credential and cache destruction", async () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-revoke-failure-"));
-  const domain = makeDomainRecord({
-    domainId: "support-ops",
-    status: "active",
-    workspaceId: "workspace-1",
-    teamId: "team-support",
-    teamKey: "SUP",
-    teamName: "Support Ops",
-    webhookId: "webhook-support",
-  });
-  const runnerStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    domainId: "support-ops",
-    workspaceId: "workspace-1",
-  });
-  const oauthStore = createLinearCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    domainId: "support-ops",
-    workspaceId: "workspace-1",
-  });
-  const cachePath = path.join(tempRoot, ".agentic-factory", "domains", "support-ops", "linear.json");
-  writeLinearCache(cachePath, { domainId: "support-ops", workspaceId: "workspace-1" });
-  await runnerStore.writeCredential({
-    schema_version: 1,
-    workspaceId: "workspace-1",
-    credentialId: "runner-support",
-    token: "runner-token",
-    capabilities: ["linear.project.planned"],
-  });
-  await oauthStore.writeTokenSet({ refreshToken: "refresh-support" });
-
-  const result = await removeOneDomainSetup({
-    config,
-    repoRoot: tempRoot,
-    domain,
-    inboxClient: {
-      async deleteLinearWebhookSecret() {
-        return { deleted: 1 };
-      },
-      async revokeRunnerCredential() {
-        throw new Error("hosted revoke down");
-      },
-    },
-    createSetupAuth: () => ({
-      client: {
-        async deleteWebhook() {
-          return { ok: true };
-        },
-        async listWebhooks() {
-          return [];
-        },
-      },
-    }),
-    log: () => {},
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(fs.existsSync(cachePath), true);
-  assert.equal(await runnerStore.readCredential().then((value) => value.credentialId), "runner-support");
-  assert.equal(await oauthStore.readTokenSet().then((value) => value.refreshToken), "refresh-support");
-});
-
-test("legacy cleanup revokes the hosted runner credential before deleting local state", async () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-legacy-revoke-"));
-  const runnerStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot: tempRoot,
-    target: legacyRunnerInboxCredentialTargetForConfig(config, tempRoot),
-  });
-  await runnerStore.writeCredential({
-    schema_version: 1,
-    workspaceId: "workspace-legacy",
-    credentialId: "runner-legacy",
-    token: "legacy-token",
-    capabilities: ["linear.project.planned"],
-  });
-  const calls = [];
-  const stores = legacyCredentialStores({
-    config,
-    repoRoot: tempRoot,
-    inboxClient: {
-      async revokeRunnerCredential(input) {
-        calls.push(["revoke", input]);
-        assert.equal(await runnerStore.readCredential().then((value) => value.credentialId), "runner-legacy");
-        return { ok: true };
-      },
-    },
-  });
-
-  await stores.find((store) => store.label === "legacy runner inbox credential").remove();
-
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][1].credentialId, "runner-legacy");
-  assert.equal(await runnerStore.readCredential(), null);
 });
 
 test("supervisor command context falls back to legacy when the domain registry is absent", () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-supervisor-no-registry-"));
-  const legacyRunnerCredentialStore = { kind: "legacy-sentinel" };
   const context = resolveSupervisorCommandContext({
     config,
     repoRoot: tempRoot,
     cachePath: path.join(tempRoot, "legacy-linear.json"),
-    legacyRunnerCredentialStore,
   });
 
   assert.equal(context.config, config);
   assert.equal(context.cachePath, path.join(tempRoot, "legacy-linear.json"));
-  assert.equal(context.runnerCredentialStore, legacyRunnerCredentialStore);
+  assert.equal(Object.hasOwn(context, "runnerCredentialStore"), false);
   assert.equal(context.domainId, null);
 });
 
@@ -2676,7 +1909,6 @@ test("supervisor command context surfaces corrupt registry JSON instead of legac
         config,
         repoRoot: tempRoot,
         cachePath: path.join(tempRoot, "legacy-linear.json"),
-        legacyRunnerCredentialStore: { kind: "legacy-sentinel" },
       }),
     /JSON|property name|Unexpected token|not valid/i,
   );
@@ -2698,17 +1930,14 @@ test("supervisor command context uses healthy domain registry context", () => {
     }),
   );
   writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  const legacyRunnerCredentialStore = { kind: "legacy-sentinel" };
-
   const context = resolveSupervisorCommandContext({
     config,
     repoRoot: tempRoot,
     cachePath: path.join(tempRoot, "legacy-linear.json"),
-    legacyRunnerCredentialStore,
   });
 
   assert.equal(context.domainId, "support-ops");
-  assert.notEqual(context.runnerCredentialStore, legacyRunnerCredentialStore);
+  assert.equal(Object.hasOwn(context, "runnerCredentialStore"), false);
   assert.equal(context.config.linear.team.key, "SUP");
   assert.match(context.cachePath.replace(/\\/g, "/"), /\/\.agentic-factory\/domains\/support-ops\/linear\.json$/);
 });
@@ -6057,7 +5286,6 @@ async function captureConsoleLogs(fn) {
 function fileCredentialConfig(config) {
   const next = structuredClone(config);
   next.linear.oauth.credential_storage = "file";
-  next.inbox.credential_storage = "file";
   return next;
 }
 

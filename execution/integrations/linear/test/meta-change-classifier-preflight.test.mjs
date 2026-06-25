@@ -219,14 +219,14 @@ const FIXTURES = [
     surfaceIncludes: ["workflow_ci_authority"],
   },
   {
-    id: "authority_broker_or_token_edit",
+    id: "authority_secret_hygiene_edit",
     changes: [edit(
-      "execution/integrations/linear/src/github-token-broker-client.mjs",
-      "Increase installation token TTL and include additional repository permissions.",
+      "execution/integrations/linear/src/github-secret-hygiene.mjs",
+      "Preserve the GitHub token when opening production proposal PRs.",
     )],
     expectedClass: "authority_change",
-    protectedIncludes: ["execution/integrations/linear/src/github-token-broker-client.mjs"],
-    surfaceIncludes: ["github_token_broker"],
+    protectedIncludes: ["execution/integrations/linear/src/github-secret-hygiene.mjs"],
+    surfaceIncludes: ["github_secret_hygiene"],
   },
   {
     id: "supervisor_write_path_edit",
@@ -282,20 +282,20 @@ const FIXTURES = [
     surfaceIncludes: ["runtime_adapter_authority"],
   },
   {
-    id: "hosted_wake_queue_custody_surface",
+    id: "local_trigger_store_custody_surface",
     changes: [edit(
-      "execution/integrations/linear/src/hosted-wake-queue-store.mjs",
-      "await inboxClient.markWakeRunning({ workspaceId, wakeId, leaseMs: 60000 });",
+      "execution/integrations/linear/src/local-trigger-store.mjs",
+      "await store.markWakeRunning({ wakeId, runnerId, leaseToken, leaseMs: 60000 });",
     )],
     expectedClass: "authority_change",
-    protectedIncludes: ["execution/integrations/linear/src/hosted-wake-queue-store.mjs"],
-    surfaceIncludes: ["hosted_wake_queue_authority"],
+    protectedIncludes: ["execution/integrations/linear/src/local-trigger-store.mjs"],
+    surfaceIncludes: ["local_trigger_store_authority"],
   },
   {
     id: "domain_credential_routing_surface",
     changes: [edit(
       "execution/integrations/linear/src/domain-resolver.mjs",
-      "credentialTargets.runnerInbox = runnerInboxCredentialTargetForConfig(config, repoRoot, { domainContext: fallbackContext });",
+      "credentialTargets.linearOAuth = credentialTargetForConfig(config, repoRoot, { domainContext: fallbackContext });",
     )],
     expectedClass: "authority_change",
     protectedIncludes: ["execution/integrations/linear/src/domain-resolver.mjs"],
@@ -324,11 +324,11 @@ const FIXTURES = [
   {
     id: "supabase_migration_authority_surface",
     changes: [edit(
-      "supabase/migrations/20260617000000_setup_grants.sql",
-      "alter table setup_grants add column token_ttl_seconds integer default 86400;",
+      "supabase/migrations/20260617000000_future_authority_schema.sql",
+      "create table future_authority_records (id text primary key, token_ttl_seconds integer default 86400);",
     )],
     expectedClass: "authority_change",
-    protectedIncludes: ["supabase/migrations/20260617000000_setup_grants.sql"],
+    protectedIncludes: ["supabase/migrations/20260617000000_future_authority_schema.sql"],
     surfaceIncludes: ["supabase_migration_authority"],
   },
   {
@@ -359,17 +359,17 @@ const FIXTURES = [
         "Ask for clearer blocker names before handoff.",
       ),
       edit(
-        "execution/integrations/linear/src/broker-credential.mjs",
-        "Store the broker token for reuse across proposal writes.",
+        "execution/integrations/linear/src/github-secret-hygiene.mjs",
+        "Keep a GitHub token in the child process environment for proposal writes.",
       ),
     ],
     expectedClass: "authority_change",
     expectedMixed: ["ordinary_semantic", "authority_change"],
     protectedIncludes: [
       "execution/evals/decomposition/accepted-prompts/sr-eng-blocker-check.md",
-      "execution/integrations/linear/src/broker-credential.mjs",
+      "execution/integrations/linear/src/github-secret-hygiene.mjs",
     ],
-    surfaceIncludes: ["agent_behavior_prompt", "broker_credential"],
+    surfaceIncludes: ["agent_behavior_prompt", "github_secret_hygiene"],
   },
   {
     id: "unknown_sensitive_generated_or_binary",

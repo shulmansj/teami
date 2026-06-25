@@ -4,7 +4,7 @@
     "oauth": {
       "client_id": "00117f8c7dba0a3adf8d2a7398f5f64f",
       "redirect_uri": "http://127.0.0.1:8723/linear/oauth/callback",
-      "scopes": ["read", "write", "admin"],
+      "scopes": ["read", "write"],
       "actor": "user",
       "credential_storage": "os"
     },
@@ -35,21 +35,8 @@
       }
     }
   },
-  "inbox": {
-    "base_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-inbox",
-    "webhook_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-inbox/v1/webhooks/linear",
-    "dashboard_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-inbox/status",
-    "credential_storage": "os",
-    "credential_file": ".agentic-factory/inbox-runner-credential.json",
-    "linear": {
-      "webhook_label": "Agentic Factory hosted inbox",
-      "resource_types": ["Project"]
-    },
-    "runner": {
-      "required_capabilities": ["linear.project.planned", "decomposition.trigger_runner.v1"],
-      "heartbeat_stale_ms": 120000,
-      "lease_duration_ms": 300000
-    }
+  "poll": {
+    "interval_ms": 10000
   },
   "github": {
     "behavior_repo": {
@@ -57,13 +44,7 @@
       "name": "agentic-factory",
       "visibility": "private"
     },
-    "starter_remote_urls": ["https://github.com/shulmansj/agentic-factory"],
-    "app_slug": "agentik-factory",
-    "app_id": "4046750",
-    "token_broker": {
-      "base_url": "https://ayhmwtwjthnjziwybtsu.supabase.co/functions/v1/agentic-factory-github-broker",
-      "token_file": ".agentic-factory/github-broker-token.env"
-    }
+    "starter_remote_urls": ["https://github.com/shulmansj/agentic-factory"]
   },
   "runtime": {
     "default_invocation": "session_start",
