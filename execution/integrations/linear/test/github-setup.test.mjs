@@ -1369,10 +1369,10 @@ test("cli init runs the GitHub phase and fails init (no silent eval-only complet
   assert.ok(initIndex >= 0 && initIndex < pendingIndex, "GitHub phase must gate the pending init completion");
   assert.ok(
     setupSource.includes('Move a Linear project to "Planned" to start your first run') &&
-      setupSource.includes("factory gateway start") &&
-      setupSource.includes("factory doctor") &&
+      setupSource.includes('factoryLauncherCommand("gateway start")') &&
+      setupSource.includes('factoryLauncherCommand("doctor")') &&
       setupSource.includes("Setup complete."),
-    "init must end with the factory gateway start next step and the factory doctor command",
+    "init must end with the platform-aware factory gateway start next step and the factory doctor command",
   );
   assert.doesNotMatch(setupSource, /running/);
   assert.doesNotMatch(setupSource, /requestSetupGrant|writeInboxSetupGrant|setup_grant_conflict/);
