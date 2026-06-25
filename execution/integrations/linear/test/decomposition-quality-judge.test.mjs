@@ -496,8 +496,8 @@ test("the judge never receives Linear mutation capability", async () => {
   for (const banned of [
     "linear-graphql-client",
     "linear-service",
-    "hosted-inbox-client",
-    "hosted-wake-queue-store",
+    "local-trigger-store",
+    "createLocalTriggerStore",
     "linear-webhook",
     "linearClient",
     "getProjectContext",

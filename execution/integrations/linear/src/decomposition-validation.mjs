@@ -29,7 +29,7 @@ const EXPECTED_SUBAGENT_FAMILIES = Object.freeze([
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export const VALIDATION_SCOPE_CAVEAT =
-  "Scope caveat: eval mode has no lease renewal, so a green validation run does not prove the hosted lease/long-turn path is safe; this is not a security-spine proof.";
+  "Scope caveat: eval mode has no lease renewal, so a green validation run does not prove the gateway lease/long-turn path is safe; this is not a security-spine proof.";
 
 export function defaultValidationOperatorDir() {
   const base = process.platform === "win32" ? "C:\\tmp" : os.tmpdir();

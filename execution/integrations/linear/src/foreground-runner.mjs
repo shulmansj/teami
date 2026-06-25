@@ -1,20 +1,21 @@
 import { readLinearCache } from "./cache.mjs";
-import { createHostedWakeQueueStore } from "./hosted-wake-queue-store.mjs";
 import { createLinearSetupGraphqlClient } from "./linear-setup-auth.mjs";
 import { createLocalPhoenixTraceSink } from "./local-phoenix-trace-sink.mjs";
+import { createLocalTriggerStore } from "./local-trigger-store.mjs";
 import {
   readRuntimeSmokeCache,
   runtimeSmokeCachePath,
   smokeTestsFromRuntimeSmokeCache,
 } from "./runtime-smoke.mjs";
 import { createProcessRuntimeExecutor, runTriggeredWorkflow } from "./trigger-runner.mjs";
+import { DECOMPOSITION_REQUIRED_CAPABILITIES } from "./workflows/decomposition/definition.mjs";
+
+const DEFAULT_LOCAL_LEASE_DURATION_MS = 5 * 60 * 1000;
 
 export async function runForegroundTriggerRunnerOnce({
   config,
   repoRoot = process.cwd(),
   credentialStore,
-  runnerCredentialStore,
-  inboxClient,
   cachePath,
   domainContext = null,
   registry = null,
@@ -24,11 +25,7 @@ export async function runForegroundTriggerRunnerOnce({
   runTriggeredDecompositionFn = null,
 } = {}) {
   const cache = readLinearCache(cachePath);
-  const runnerCredential = await runnerCredentialStore?.readCredential?.();
-  if (!runnerCredential) {
-    throw new Error("Runner inbox credential is missing; run npm run init.");
-  }
-  const store = createHostedWakeQueueStore({ inboxClient, credential: runnerCredential });
+  const store = createLocalTriggerStore({ repoRoot });
   const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
   const runtimeExecutor = createProcessRuntimeExecutor({
     smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
@@ -40,8 +37,8 @@ export async function runForegroundTriggerRunnerOnce({
   try {
     result = await runWorkflow({
       store,
-      runnerId: runnerCredential.credentialId,
-      workspaceId: cache?.workspaceId || runnerCredential.workspaceId,
+      runnerId: localRunnerId({ domainContext, workspaceId: cache?.workspaceId }),
+      workspaceId: domainContext?.linear?.workspaceId || cache?.workspaceId,
       linearClientFactory: async () => createSetupGraphqlClient({
         config,
         repoRoot,
@@ -53,9 +50,9 @@ export async function runForegroundTriggerRunnerOnce({
       cache,
       runtimeExecutor,
       repoRoot,
-      leaseDurationMs: config.inbox.runner.lease_duration_ms,
+      leaseDurationMs: config?.runner?.lease_duration_ms || DEFAULT_LOCAL_LEASE_DURATION_MS,
       runnerVersion: process.version,
-      capabilities: runnerCredential.capabilities || config.inbox.runner.required_capabilities,
+      capabilities: config?.runner?.required_capabilities || DECOMPOSITION_REQUIRED_CAPABILITIES,
       traceSink,
       domainContext,
       registry,
@@ -70,6 +67,10 @@ export async function runForegroundTriggerRunnerOnce({
       phoenix_lifecycle: "trace_sink_adopt_or_start",
     },
   };
+}
+
+function localRunnerId({ domainContext = null, workspaceId = null } = {}) {
+  return `local-runner:${domainContext?.domainId || workspaceId || "default"}`;
 }
 
 export function formatForegroundRunnerReport(result) {

@@ -23,7 +23,6 @@ import {
 import {
   runImprovementDrafter,
 } from "../improvement-drafter.mjs";
-import { createHostedInboxClient } from "../hosted-inbox-client.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
 import { setupStatePathForCache } from "../local-state.mjs";
 import {
@@ -62,10 +61,6 @@ import {
   DEFAULT_RICH_DATASET_NAME,
   promoteRichDecompositionExample,
 } from "../rich-promotion.mjs";
-import {
-  createRunnerInboxCredentialStore,
-  legacyRunnerInboxCredentialTargetForConfig,
-} from "../runner-inbox-credential.mjs";
 import { readTraceHealth, readTraceReceipt } from "../trace-status-store.mjs";
 import { runGitHubInitPhase } from "../github-setup.mjs";
 import {
@@ -87,8 +82,6 @@ import {
 } from "./github-command-options.mjs";
 import {
   githubInitTransportFromFlags,
-  githubLiveRequested,
-  issueInstallationBoundGitHubBrokerCredential,
   runLinearSetupCommand,
 } from "./linear-setup-command.mjs";
 import {
@@ -96,6 +89,7 @@ import {
   runLocalSetupCleanupCommand,
 } from "./local-setup-cleanup.mjs";
 import {
+  runGatewayCommand,
   runRunnerCommand,
   runRuntimeSmokeCommand,
   runTriggerStatusCommand,
@@ -117,7 +111,7 @@ import {
   yesNo,
 } from "./operator-output.mjs";
 
-const CLI_USAGE = "Usage: node execution/integrations/linear/cli.mjs <init|domain:add|domain:bind-repo|github:init|doctor|doctor:linear|phoenix:start|phoenix:doctor|phoenix:status|phoenix:preflight|phoenix:annotate-trace|phoenix:promote-run|phoenix:promote-decomposition|phoenix:experiment-decomposition|phoenix:experiment-amend|eval:decomposition|eval:disagreements|eval:emit-checks|eval:gate|eval:judge|eval:register-prompt|eval:register-judge-prompt|promote-candidate|draft-improvement|promotion:scan|supervisor:register|supervisor:run|supervisor:status|supervisor:reconcile|supervisor:disable|supervisor:enable|supervisor:unregister|phoenix:stop|runner|runtime-smoke|trigger-status|worklist|uninstall|reset>";
+const CLI_USAGE = "Usage: node execution/integrations/linear/cli.mjs <init|domain:add|domain:bind-repo|github:init|doctor|doctor:linear|phoenix:start|phoenix:doctor|phoenix:status|phoenix:preflight|phoenix:annotate-trace|phoenix:promote-run|phoenix:promote-decomposition|phoenix:experiment-decomposition|phoenix:experiment-amend|eval:decomposition|eval:disagreements|eval:emit-checks|eval:gate|eval:judge|eval:register-prompt|eval:register-judge-prompt|promote-candidate|draft-improvement|promotion:scan|supervisor:register|supervisor:run|supervisor:status|supervisor:reconcile|supervisor:disable|supervisor:enable|supervisor:unregister|phoenix:stop|gateway|runner|runtime-smoke|trigger-status|worklist|uninstall|reset>";
 
 const COMMAND_TABLE = new Map([
   ["uninstall", runLocalSetupCleanupCommand],
@@ -157,10 +151,35 @@ const COMMAND_TABLE = new Map([
   ["eval:register-prompt", runEvalRegisterPromptCommand],
   ["eval:register-judge-prompt", runEvalRegisterPromptCommand],
   ["phoenix:stop", runPhoenixStopCommand],
+  ["gateway", runGatewayCommand],
   ["runner", runRunnerCommand],
   ["runtime-smoke", runRuntimeSmokeCommand],
   ["trigger-status", runTriggerStatusCommand],
 ]);
+
+const NOUN_VERB_COMMANDS = new Map([
+  ["gateway", new Map([
+    ["start", { command: "gateway", consumeVerb: true }],
+    ["status", { command: "gateway", consumeVerb: false }],
+  ])],
+  ["domain", new Map([
+    ["add", { command: "domain:add", consumeVerb: true }],
+    ["bind-repo", { command: "domain:bind-repo", consumeVerb: true }],
+  ])],
+]);
+
+// Normalize `<noun> <verb>` invocations to the real command token. Single-token and colon commands
+// pass through unchanged. A leading global flag (or no verb) means a bare noun - pass through. An
+// unknown verb passes through unchanged so the existing unknown-command/usage path (exit 2) still fires.
+export function normalizeCommandInvocation({ command, args = [] } = {}) {
+  const verbs = NOUN_VERB_COMMANDS.get(command);
+  if (!verbs) return { command, args };
+  const verb = args[0];
+  if (!verb || verb.startsWith("--")) return { command, args };
+  const mapping = verbs.get(verb);
+  if (!mapping) return { command, args };
+  return { command: mapping.command, args: mapping.consumeVerb ? args.slice(1) : args };
+}
 
 const COMMAND_HELP = new Map([
   ["init", "Usage: npm run init -- --domain <name> [--workspace <name-or-id>] [--github-dry-run] [--verbose]"],
@@ -169,6 +188,7 @@ const COMMAND_HELP = new Map([
   ["github:init", "Usage: npm run github:init -- [--github-dry-run] [--github-owner <owner>] [--github-repo <repo>]"],
   ["doctor", "Usage: npm run doctor -- [--domain <id>] [--verbose]"],
   ["doctor:linear", "Usage: npm run doctor:linear -- [--domain <id>] [--verbose]"],
+  ["gateway", "Usage: npm run gateway -- [status] [--domain <id>] [--verbose]"],
   ["runtime-smoke", "Usage: npm run runtime-smoke -- [--domain <id>] [--verbose]"],
   ["reset", "Usage: npm run reset -- [--domain <id>] [--verbose]"],
   ["uninstall", "Usage: npm run uninstall -- --domain <id> [--verbose]"],
@@ -189,28 +209,23 @@ function createCliContext({ repoRoot, output = createCliOutput() }) {
   const config = loadLinearConfig({ repoRoot });
   const cachePath = cachePathForConfig(config, repoRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const inboxClient = createHostedInboxClient({ config, repoRoot });
   const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
-  const runnerCredentialStore = createRunnerInboxCredentialStore({
-    config,
-    repoRoot,
-    target: legacyRunnerInboxCredentialTargetForConfig(config, repoRoot),
-  });
   return {
     cachePath,
     config,
     credentialStore,
-    inboxClient,
     output,
     repoRoot,
     runGit: defaultRunGit,
-    runnerCredentialStore,
     setupStatePath,
   };
 }
 
 export async function runCliCommand({ repoRoot = process.cwd(), command, args = [] } = {}) {
   registerGitRepoResourceKind();
+  const normalized = normalizeCommandInvocation({ command, args });
+  command = normalized.command;
+  args = normalized.args;
   const outputFlags = extractCliOutputFlags(args);
   const output = createCliOutput({
     verbose: outputFlags.verbose,
@@ -280,10 +295,9 @@ function printCliHelp(output = createCliOutput(), command = null) {
 }
 
 export async function runGithubInitCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     const { flags } = parseCliFlags(args);
     const githubConfig = configWithGithubFlags(config, flags);
-    const githubLive = githubLiveRequested(flags);
     const githubProgress = (line) => {
       const text = String(line || "");
       if (/^(FAIL GitHub setup:|Repair:)/i.test(text)) return;
@@ -305,26 +319,12 @@ export async function runGithubInitCommand({ context, command, args }) {
         config: githubConfig,
         flags,
         repoRoot,
-        inboxClient,
         onProgress: githubProgress,
       }),
       requestedOwner: flags["github-owner"] || null,
       requestedRepoName: flags["github-repo"] || null,
       requestedVisibility: flags["github-visibility"] || null,
       onProgress: githubProgress,
-      ...(githubLive
-        ? {
-          githubInstallIntent: (input) => inboxClient.githubInstallIntent(input),
-          githubInstallStatus: (input) => inboxClient.githubInstallStatus(input),
-          issueGitHubBrokerCredential: (input) => issueInstallationBoundGitHubBrokerCredential({
-            ...input,
-            config: githubConfig,
-            repoRoot,
-            inboxClient,
-            onProgress: githubProgress,
-          }),
-        }
-        : {}),
     });
     if (!result.ok) {
       output.detail(`reason: ${result.reason}`);
@@ -345,7 +345,7 @@ export async function runGithubInitCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runPhoenixStartCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix start");
     let phoenix;
     try {
@@ -382,7 +382,7 @@ export async function runPhoenixStartCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runPhoenixDoctorCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix doctor");
     let status;
     try {
@@ -400,7 +400,7 @@ export async function runPhoenixDoctorCommand({ context, command, args }) {
     process.exitCode = status.ok ? 0 : 1;
 }
 export async function runPhoenixStatusCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix status");
     let status;
     try {
@@ -436,7 +436,7 @@ export async function runPhoenixStatusCommand({ context, command, args }) {
     process.exitCode = status.ok ? 0 : 1;
 }
 export async function runPhoenixPreflightCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix preflight");
     let preflight;
     try {
@@ -482,7 +482,7 @@ export async function runPhoenixPreflightCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runPhoenixAnnotateTraceCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix annotate trace");
     const { positionals, flags } = parseCliFlags(args);
     const [traceId, label, maybeScore, ...explanationParts] = positionals;
@@ -542,7 +542,7 @@ export async function runPhoenixAnnotateTraceCommand({ context, command, args })
     process.exitCode = 0;
 }
 export async function runWorklistCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "worklist");
     // Agent-session judgment worklist: a derived, read-only view recomputed on
     // every invocation. It never mutates Linear, never writes to Phoenix, and
@@ -565,7 +565,7 @@ export async function runWorklistCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runPhoenixPromoteRunCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix promote run");
     const [runId, datasetName = "agentic-factory-decomposition-runs"] = args;
     if (!runId) {
@@ -602,7 +602,7 @@ export async function runPhoenixPromoteRunCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runPhoenixPromoteDecompositionCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix promote decomposition");
     // Rich decomposition example promotion (explicit command; bounded
     // phoenix:promote-run stays the safe default). Fails closed on missing
@@ -687,7 +687,7 @@ export async function runPhoenixPromoteDecompositionCommand({ context, command, 
     process.exitCode = 0;
 }
 export async function runEvalEmitChecksCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "eval emit-checks");
     // Track D2: post-run deterministic check emission, strictly outside the
     // live mutation path (re-runnable on demand). Runs the existing offline
@@ -727,7 +727,7 @@ export async function runEvalEmitChecksCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runEvalJudgeCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "eval judge");
     // Track D: the decomposition_quality model judge — code-first wrapper
     // around a Phoenix-managed prompt, strictly outside the live mutation
@@ -771,12 +771,12 @@ export async function runEvalJudgeCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runEvalDecompositionCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "eval decomposition");
     // Track E: first-class non-mutating decomposition eval-mode task. Wraps
     // the existing runDecompositionEvalMode over one captured example —
     // structurally incapable of Linear mutation (snapshot-backed read-only
-    // client + eval-mode guard) and of hosted wake claims (no wake store
+    // client + eval-mode guard) and of local gateway wake claims (no wake store
     // exists on this path; CONSTRAINTS #27). Phoenix stays lazy: traces and
     // the optional --emit-checks/--judge chains reuse Phoenix only when it is
     // already running and degrade to report-only/local receipts otherwise.
@@ -830,7 +830,7 @@ export async function runEvalDecompositionCommand({ context, command, args }) {
     process.exitCode = 0;
 }
 export async function runPhoenixExperimentDecompositionCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix experiment decomposition");
     // Track F: thin, agent-callable Phoenix experiment wrapper over a curated
     // dataset. Phoenix IS the experiment store (no custom store): the wrapper
@@ -882,7 +882,7 @@ export async function runPhoenixExperimentDecompositionCommand({ context, comman
     process.exitCode = 0;
 }
 export async function runPhoenixExperimentAmendCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix experiment amend");
     // Managed-experiment receipt amendments: retroactive registration,
     // reclassification, and withdrawal. Identity is verified through the
@@ -921,7 +921,7 @@ export async function runPhoenixExperimentAmendCommand({ context, command, args 
     process.exitCode = result.ok ? 0 : 1;
 }
 export async function runEvalDisagreementsCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "eval disagreements");
     // Step 9 (Track G): disagreement report. Compares HUMAN, LLM, and CODE
     // results for one run or one experiment while preserving the raw records
@@ -960,7 +960,7 @@ export async function runEvalDisagreementsCommand({ context, command, args }) {
     process.exitCode = report.ok ? 0 : 1;
 }
 export async function runEvalGateCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "eval gate");
     // Step 9 (Track G): process-change gate. Pure evaluation logic: reads the
     // managed receipt + Phoenix evidence (REST GETs) + repo-owned policy and
@@ -1000,7 +1000,7 @@ export async function runEvalGateCommand({ context, command, args }) {
     process.exitCode = result.ok && result.verdict === "pass" ? 0 : 1;
 }
 export async function runDraftImprovementCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "draft improvement");
     const rawArgs = args;
     const supersedeExistingCandidate = rawArgs.includes("--supersede-existing-candidate");
@@ -1045,14 +1045,14 @@ export async function runDraftImprovementCommand({ context, command, args }) {
     process.exitCode = result.ok ? 0 : 1;
 }
 export async function runPromoteCandidateCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "promote candidate");
     // Step 10 (Track G): the agentic_factory.promote_candidate MVP promotion
     // controller. CLI JSON transport (D3): the request envelope comes from
     // --input <request.json>, with inline flags for debugging. The controller
     // owns the outcome (route_to_hitl | blocked); the only caller-requestable
     // action is propose_repo_change (CONSTRAINTS #7). Real GitHub work is
-    // selected only from a verified real connection state plus broker config.
+    // selected only from a verified real local-ambient connection state.
     const promoteRawArgs = args;
     // Boolean flag: explicit human acceptance of cross-version comparison is
     // REQUEST-VISIBLE (accept_cross_version_comparison in the envelope), never
@@ -1122,14 +1122,14 @@ export async function runPromoteCandidateCommand({ context, command, args }) {
     process.exitCode = result.ok && result.outcome === "route_to_hitl" ? 0 : 1;
 }
 export async function runPromotionScanCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "promotion scan");
     // Step 12: deterministic candidate-intent scanner. It records local
     // ledger/health under .agentic-factory/promotion-candidates/, derives
     // budget/caps from repo-visible PR markers, and calls the committed
     // promotion controller only after explicit intent and deterministic
     // evidence packaging. GitHub marker reads share the same production
-    // broker/dry-run selection as the controller.
+    // local-ambient/dry-run selection as the controller.
     let result;
     try {
       result = await scanPromotionCandidates({
@@ -1437,7 +1437,7 @@ function promotionCandidateStatusCounts(candidates = []) {
 }
 
 export async function runEvalRegisterPromptCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, command === "eval:register-judge-prompt"
       ? "eval register judge prompt"
       : "eval register prompt");
@@ -1478,7 +1478,7 @@ export async function runEvalRegisterPromptCommand({ context, command, args }) {
     process.exitCode = result.ok ? 0 : 1;
 }
 export async function runPhoenixStopCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, inboxClient, credentialStore, runnerCredentialStore, output } = context;
+  const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix stop");
     let stopped;
     try {
@@ -1832,7 +1832,7 @@ function renderEvalRunReport(result, output) {
     });
     return;
   }
-  output.success(`Eval decomposition: ${result.status} (no Linear mutations, no hosted wake claims)`);
+  output.success(`Eval decomposition: ${result.status} (no Linear mutations, no local gateway wake claims)`);
   output.keyValues([
     ["Eval run id", result.eval_run_id || "unknown"],
     ["Source", describeEvalSource(result.source)],

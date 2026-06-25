@@ -1175,7 +1175,7 @@ test("Step 17 offline fixture proves a judge experiment runs but its promotion i
     realGitHubWrites: 0,
     gitPushes: gitCalls.filter((call) => call.args[0] === "push").length,
     autoMergeOrMarkReadyCalls: githubTransport.calls.filter((call) => /merge|ready|review/i.test(`${call.endpointId} ${call.path}`)).length,
-    hostedWakeClaims: 0,
+    gatewayWakeClaims: 0,
   };
   assert.deepEqual(hardFloor, {
     liveLinearMutations: 0,
@@ -1183,7 +1183,7 @@ test("Step 17 offline fixture proves a judge experiment runs but its promotion i
     realGitHubWrites: 0,
     gitPushes: 0,
     autoMergeOrMarkReadyCalls: 0,
-    hostedWakeClaims: 0,
+    gatewayWakeClaims: 0,
   });
 });
 
@@ -1499,7 +1499,7 @@ test("Step 17 offline fixture routes runtime-role evidence to an accepted-defaul
     realGitHubWrites: 0,
     gitPushes: gitCalls.filter((call) => call.args[0] === "push").length,
     autoMergeOrMarkReadyCalls: githubTransport.calls.filter((call) => /merge|ready|review/i.test(`${call.endpointId} ${call.path}`)).length,
-    hostedWakeClaims: 0,
+    gatewayWakeClaims: 0,
   };
   assert.deepEqual(hardFloor, {
     liveLinearMutations: 0,
@@ -1507,7 +1507,7 @@ test("Step 17 offline fixture routes runtime-role evidence to an accepted-defaul
     realGitHubWrites: 0,
     gitPushes: 0,
     autoMergeOrMarkReadyCalls: 0,
-    hostedWakeClaims: 0,
+    gatewayWakeClaims: 0,
   });
 });
 
@@ -1792,7 +1792,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
     realGitHubWrites: 0,
     gitPushes: gitCalls.filter((call) => call.args[0] === "push").length,
     autoMergeOrMarkReadyCalls: githubTransport.calls.filter((call) => /merge|ready|review/i.test(`${call.endpointId} ${call.path}`)).length,
-    hostedWakeClaims: 0,
+    gatewayWakeClaims: 0,
   };
   assert.deepEqual(hardFloor, {
     liveLinearMutations: 0,
@@ -1800,6 +1800,6 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
     realGitHubWrites: 0,
     gitPushes: 0,
     autoMergeOrMarkReadyCalls: 0,
-    hostedWakeClaims: 0,
+    gatewayWakeClaims: 0,
   });
 });

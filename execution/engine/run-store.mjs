@@ -273,7 +273,7 @@ function migrateLegacyRunArtifactForRead(artifact, options = {}) {
   return migrated;
 }
 
-function writeFileAndFsync(filePath, contents, { flag = "w" } = {}) {
+export function writeFileAndFsync(filePath, contents, { flag = "w" } = {}) {
   let fd = null;
   let pendingError = null;
   try {
@@ -294,7 +294,7 @@ function writeFileAndFsync(filePath, contents, { flag = "w" } = {}) {
   if (pendingError) throw pendingError;
 }
 
-function fsyncDirectoryAfterRename(dirPath) {
+export function fsyncDirectoryAfterRename(dirPath) {
   if (process.platform === "win32") return false;
   let fd = null;
   let pendingError = null;

@@ -30,33 +30,30 @@ instances.
 
 ## Public Trust Boundaries
 
-Agentic Factory splits hosted coordination from local authority.
+Agentic Factory keeps live authority local.
 
-The Agentic Factory-operated hosted inbox verifies Linear webhook deliveries,
-dedupes events, records wake-up state, and leases work to a compatible local
-runner. The hosted inbox stores webhook signing material and runner lease
-credentials, but it does not receive Linear OAuth tokens, Phoenix traces, repo
-contents, or Linear write authority.
-Public evaluator setup remains launch-gated until hosted endpoint, key,
-settings, and live handoff proof are recorded; this boundary is not an uptime
-SLA or enterprise support promise.
+The local gateway polls Linear's current state with the adopter's OAuth grant
+for projects in the trigger state. Linear is the queue: moving a project to
+`Planned` is the human handoff, and the gateway records local wake state,
+trigger fingerprints, leases, mutation intent, suppression records, and replay
+records in the adopter checkout.
 
 The local runner owns adopter-side authority. It reads Linear through OAuth and
 GraphQL, persists run evidence before mutation, writes Linear only after
 deterministic gates pass, emits trace/eval evidence to local Phoenix, and runs
 repo or agent commands from the adopter's machine.
 
-The GitHub broker path is for the Agentic Factory behavior repo: reviewable
-proposal branches and pull requests for process changes. It is not the product
-repository binding path and should not be read as all-repositories access.
+The behavior-repo GitHub path uses the adopter's own git/`gh` auth for
+reviewable proposal branches and pull requests for process changes. Agentic
+Factory stores no GitHub secret. PR provenance is visible in local run evidence
+and the PR body.
 
 Product-repo binding is local and explicit. `domain:bind-repo` binds one
 existing local checkout per domain as that domain's `git_repo` resource. The
 binding records the local checkout path, `owner/repo`, and default branch. The
 landed resource seam supports repo-selection scoping and local worktree/cwd
-selection for domain-scoped work. It is not hosted code execution, OS
-isolation, container isolation, behavior-repo broker access, all-repositories
-GitHub access, or a substitute for local permission checks.
+selection for domain-scoped work. It is not OS isolation, container isolation,
+all-repositories GitHub access, or a substitute for local permission checks.
 
 ## Roles
 
@@ -317,11 +314,10 @@ not mutate Linear directly. Linear writes happen when the Workflow Runner
 commits a validated terminal orchestrator output or a persisted artifact.
 
 The trigger is intentionally boring: when a human finishes documenting scope
-and moves a project to the configured `Planned` status, Linear posts a webhook
-to the hosted Agentic Factory inbox. The inbox verifies the signature, dedupes
-delivery noise, normalizes the event, and creates a workflow wake-up. It does
-not decide whether the project is good, summarize the project, generate prose,
-or mutate Linear.
+and moves a project to the configured `Planned` status, the local gateway sees
+that current Linear state on its next poll and creates a local workflow wake-up.
+The gateway does not decide whether the project is good, summarize the project,
+generate prose, or mutate Linear.
 
 The Workflow Runner claims a wake-up before any mutation-capable decomposition
 run. It re-reads Linear through OAuth and GraphQL, applies deterministic gates,
@@ -333,12 +329,11 @@ Queued wake-ups with no fresh compatible runner heartbeat are displayed as
 `waiting_for_runner`; that state is derived, not stored as another state
 machine.
 
-The hosted inbox has a narrower trust boundary than the runner. It stores
-webhook signing secrets and runner lease credentials, but it never receives
-Linear OAuth tokens and has no Linear write path. Hosted status is
-diagnostic/operator health, not a PM dashboard; owner-facing state should return
-through Linear, GitHub PRs, Phoenix evidence, and guided agent or doctor
-summaries when those surfaces are available.
+The local gateway has a narrower authority boundary than the runner. It records
+poll observations and wake lifecycle state, while Linear writes remain inside
+the Workflow Runner after eligibility and durability gates pass. Owner-facing
+state should return through Linear, GitHub PRs, Phoenix evidence, and guided
+agent or doctor summaries when those surfaces are available.
 
 ## State Model
 
@@ -359,7 +354,7 @@ Use Linear's native project status categories instead of Agentic Factory-specifi
 `AF` status names. The statuses are the human-visible lifecycle state:
 `Planned` is the approval boundary for decomposition, and `In Progress` is the
 visible signal that decomposition has completed. Before decomposition has
-created issues, the hosted wake queue is the active-run coordination authority.
+created issues, the local wake state is the active-run coordination authority.
 After mutation begins, local run artifacts plus Linear-visible generated issue
 markers are the retry authority; another runner must not silently continue a
 partial post-mutation run from a different machine.
@@ -411,7 +406,7 @@ Local execution states:
 - Every agent-driven Linear mutation that matters to decomposition quality
   should attempt local Phoenix tracing as described in
   [self-improvement.md](self-improvement.md). Trace delivery failure is local,
-  visible, counted, and repairable; it does not change hosted wake/run state or
+  visible, counted, and repairable; it does not change local wake/run state or
   block the user's real Linear/GitHub work.
 
 ## Human Checkpoints

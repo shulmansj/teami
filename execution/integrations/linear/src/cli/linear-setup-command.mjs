@@ -1,29 +1,15 @@
 import { createInterface } from "node:readline/promises";
 
-import { assertRunnableHostedSetupConfig } from "../config.mjs";
 import { writeLinearCache } from "../cache.mjs";
 import {
   emptyDomainRegistry,
-  mintDomainId,
   readDomainRegistry,
   writeDomainRegistry,
 } from "../domain-registry.mjs";
 import {
-  createRealGitHubSetupTransport,
   readGitHubConnectionState,
   runGitHubInitPhase,
 } from "../github-setup.mjs";
-import {
-  createGitHubTokenBrokerClient,
-  writeGitHubBrokerCredential,
-} from "../github-token-broker-client.mjs";
-import {
-  readInboxSetupGrantFile,
-  writeInboxSetupGrant,
-} from "../hosted-inbox-client.mjs";
-import {
-  ensureLinearWebhookRegistration,
-} from "../linear-webhook-registration.mjs";
 import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
 import {
   declaredWorkspaceFromResumeDomain,
@@ -46,15 +32,12 @@ import {
   LOCAL_SUPERVISOR_CONSENT_FLAG,
   registerLocalSupervisorStub,
 } from "../local-supervisor.mjs";
-import {
-  createRunnerInboxCredentialStore,
-  ensureRunnerInboxCredential,
-} from "../runner-inbox-credential.mjs";
+import { runRuntimeSmokeChecks } from "../runtime-smoke.mjs";
 import { createCliOutput } from "./cli-output.mjs";
+import { doctorGraphqlLinear } from "./doctor-command.mjs";
 import { hasCliFlag, parseCliFlags } from "./flags.mjs";
 import {
   configWithGithubFlags,
-  githubDryRunRequested,
   githubFailureTitle,
   githubSetupTransportFromFlags,
 } from "./github-command-options.mjs";
@@ -65,13 +48,13 @@ import {
 
 const LINEAR_SETUP_COMMAND_OPTIONS = Object.freeze({
   "domain:add": {
-    intro: "Agentic Factory will add a domain to the same factory and learning loop, then ask Linear for read/write/admin browser authorization for that domain's workspace.",
+    intro: "Agentic Factory will add a domain to the same factory and learning loop, then ask Linear for read/write browser authorization for that domain's workspace.",
     prompt: "Domain name to add to this factory and learning loop: ",
     readyLabel: "Domain",
     runGithubPhase: false,
   },
   init: {
-    intro: "Agentic Factory will ask Linear for read/write/admin browser authorization to verify setup, register the hosted webhook inbox, and post project updates. No API key is required.",
+    intro: "Agentic Factory will ask Linear for read/write browser authorization to verify setup and post project updates. No API key is required.",
     prompt: "First domain name: ",
     readyLabel: "First domain",
     runGithubPhase: true,
@@ -79,7 +62,7 @@ const LINEAR_SETUP_COMMAND_OPTIONS = Object.freeze({
 });
 
 export async function runLinearSetupCommand({ context, command, args }) {
-  const { config, repoRoot, inboxClient, output = createCliOutput() } = context;
+  const { config, repoRoot, cachePath, output = createCliOutput() } = context;
     const commandOptions = LINEAR_SETUP_COMMAND_OPTIONS[command] || LINEAR_SETUP_COMMAND_OPTIONS.init;
     const initArgs = args;
     const { flags: initFlags } = parseCliFlags(initArgs);
@@ -101,36 +84,23 @@ export async function runLinearSetupCommand({ context, command, args }) {
       output.success(`Workspace: ${workspaceLabel(githubResumeDomain.linear)}`);
       output.success(`Team "${githubResumeDomain.linear?.team_name || domainNameForResumeDomain(githubResumeDomain)}" already connected`);
       output.info("Linear connected.");
-      output.info("Refreshing GitHub setup authorization...");
-      try {
-        await refreshGitHubResumeSetupGrant({
-          resumeDomain: githubResumeDomain,
-          inboxClient,
-          config,
-          repoRoot,
-          onProgress: (line) => output.detail(line),
-        });
-      } catch (error) {
-        output.error({
-          what: "GitHub setup authorization could not be refreshed",
-          why: "Setup needs a fresh hosted setup grant before GitHub can be connected.",
-          fix: `${error.message} Re-run npm run init to start a fresh self-serve setup authorization. If this persists, create a diagnostic export for support; support cannot recover credentials or operate this factory for you.`,
-        });
-        process.exitCode = 1;
-        return;
-      }
-      output.success("GitHub setup authorization refreshed");
       const githubOk = await runGitHubInitStep({
         repoRoot,
         config,
         initFlags,
-        inboxClient,
         output,
         totalSteps,
       });
       if (!githubOk) return;
-      finishSetupOutput({ output, commandOptions, phoenixAppUrl: null });
-      process.exitCode = 0;
+      await finishSetupOutput({
+        output,
+        commandOptions,
+        phoenixAppUrl: null,
+        config,
+        repoRoot,
+        cachePath,
+        domainId: githubResumeDomain.id,
+      });
       return;
     }
     output.step(1, totalSteps, commandOptions.runGithubPhase ? "Connect Linear" : "Connect Linear domain");
@@ -145,7 +115,6 @@ export async function runLinearSetupCommand({ context, command, args }) {
     }
     explicitWorkspaceExpectation(initFlags, process.env);
     const domainName = domainNameHint || await resolveInitDomainName(initArgs, { command });
-    assertRunnableHostedSetupConfig(config, "Linear setup config");
     const linearProgress = createLinearSetupProgress(output);
     const workspaceAuthorization = await authorizeLinearSetupWorkspace({
       config,
@@ -161,7 +130,6 @@ export async function runLinearSetupCommand({ context, command, args }) {
     output.success(`Workspace: ${workspaceLabel(workspaceAuthorization.workspace)}`);
     output.detail(`workspace_id=${workspaceAuthorization.workspace.id}`);
     output.detail("Linear setup authorization verified.");
-    const setupGrantDomainId = resolveSetupGrantDomainId({ registry, domainName });
 
     const result = await setupLinearDomain({
       client: workspaceAuthorization.setupAuth.client,
@@ -171,37 +139,6 @@ export async function runLinearSetupCommand({ context, command, args }) {
       domainName,
       workspace: workspaceAuthorization.workspace,
       declaredWorkspace: workspaceAuthorization.declaredWorkspace,
-      registerWebhook: async ({ client, config: configForDomain, cache, workspaceId, teamId }) => {
-        await ensureInboxSetupGrant({
-          inboxClient,
-          config,
-          repoRoot,
-          workspaceId,
-          teamId,
-          domainId: setupGrantDomainId,
-          onProgress: (line) => output.detail(line),
-        });
-        return ensureLinearWebhookRegistration({
-          linearClient: client,
-          inboxClient,
-          config: configForDomain,
-          cache,
-          workspaceId,
-          teamId,
-        });
-      },
-      ensureRunnerCredential: ({ workspaceId, domainId }) =>
-        ensureRunnerInboxCredential({
-          inboxClient,
-          credentialStore: createRunnerInboxCredentialStore({
-            config,
-            repoRoot,
-            workspaceId,
-            domainId,
-          }),
-          workspaceId,
-          capabilities: config.inbox.runner.required_capabilities,
-        }),
       writeCache: (nextCache, context) => {
         writeLinearCache(context.linear.cachePath, nextCache);
       },
@@ -219,20 +156,7 @@ export async function runLinearSetupCommand({ context, command, args }) {
     });
     printSummary(result.summary, output);
     output.success(`Team "${result.domain.linear?.team_name || domainName}" created (project template + labels ready)`);
-    output.success("Webhook connected to the hosted inbox");
-    output.detail(
-      `${result.webhookRegistration.created ? "created" : "verified"}: Linear webhook ${result.webhookRegistration.webhook.id}`,
-    );
-    if (result.webhookRegistration.webhook.url) {
-      output.detail(`Linear webhook URL: ${result.webhookRegistration.webhook.url}`);
-    }
-    if (result.webhookRegistration.handoff?.message) {
-      output.detail(result.webhookRegistration.handoff.message);
-    }
-    output.detail(
-      `${result.runnerCredential.created ? "created" : "verified"}: runner inbox credential ${result.runnerCredential.credential.credentialId}`,
-    );
-    output.detail(`Trigger status dashboard: ${config.inbox.dashboard_url}`);
+    output.success("Local gateway ready for Planned projects");
     output.info("Linear connected.");
     let phoenixAppUrl = null;
     const phoenix = await ensurePhoenixReady({
@@ -264,21 +188,27 @@ export async function runLinearSetupCommand({ context, command, args }) {
         repoRoot,
         config,
         initFlags,
-        inboxClient,
         output,
         totalSteps,
       });
       if (!githubOk) return;
     }
-    finishSetupOutput({ output, commandOptions, phoenixAppUrl });
-    process.exitCode = result.ok ? 0 : 1;
+    await finishSetupOutput({
+      output,
+      commandOptions,
+      phoenixAppUrl,
+      config,
+      repoRoot,
+      cachePath,
+      domainId: result.domain.id,
+    });
+    if (!result.ok) process.exitCode = 1;
 }
 
 async function runGitHubInitStep({
   repoRoot,
   config,
   initFlags = {},
-  inboxClient,
   output,
   totalSteps,
 } = {}) {
@@ -286,11 +216,10 @@ async function runGitHubInitStep({
   // init REQUIRES the GitHub connection because the MVP product promise
   // includes generating promotion PRs — a missing GitHub capability fails
   // init with a connect-GitHub repair path instead of silently completing
-  // an eval-only adoption (plan ~424-434). The default setup transport is
-  // the broker-backed real GitHub path; pass --github-dry-run for a
-  // recorded rehearsal that is not adoption-complete.
+  // an eval-only adoption (plan ~424-434). The default setup transport uses
+  // the adopter's local git/gh auth; pass --github-dry-run for a recorded
+  // rehearsal that is not adoption-complete.
   const githubConfig = configWithGithubFlags(config, initFlags);
-  const githubLive = githubLiveRequested(initFlags);
   output.step(2, totalSteps, "Connect GitHub");
   const githubProgress = createGitHubSetupProgress(output);
   const githubPhase = await runGitHubInitPhase({
@@ -300,26 +229,12 @@ async function runGitHubInitStep({
       config: githubConfig,
       flags: initFlags,
       repoRoot,
-      inboxClient,
       onProgress: githubProgress.log,
     }),
     requestedOwner: initFlags["github-owner"] || null,
     requestedRepoName: initFlags["github-repo"] || null,
     requestedVisibility: initFlags["github-visibility"] || null,
     onProgress: githubProgress.log,
-    ...(githubLive
-      ? {
-        githubInstallIntent: (input) => inboxClient.githubInstallIntent(input),
-        githubInstallStatus: (input) => inboxClient.githubInstallStatus(input),
-        issueGitHubBrokerCredential: (input) => issueInstallationBoundGitHubBrokerCredential({
-          ...input,
-          config: githubConfig,
-          repoRoot,
-          inboxClient,
-          onProgress: githubProgress.log,
-        }),
-      }
-      : {}),
   });
   if (!githubPhase.ok) {
     output.detail(`reason: ${githubPhase.reason}`);
@@ -335,8 +250,8 @@ async function runGitHubInitStep({
   if (!githubProgress.state.repoPrinted) {
     output.success(`Repo connected: ${githubPhase.connection.repo.full_name}`);
   }
-  if (!githubProgress.state.appPrinted) {
-    output.success("App installed and authorized");
+  if (!githubProgress.state.authPrinted) {
+    output.success("Local GitHub auth verified");
   }
   if (githubPhase.connection.connection_mode === "dry_run") {
     output.warn("Dry-run recorded; setup is not complete until GitHub is connected for real.");
@@ -354,89 +269,112 @@ async function runGitHubInitStep({
   return true;
 }
 
-function finishSetupOutput({ output, commandOptions, phoenixAppUrl = null }) {
+async function runFinalGate({
+  config,
+  repoRoot,
+  cachePath,
+  domainId,
+  output,
+  runSmoke = runRuntimeSmokeChecks,
+  runDoctor = doctorGraphqlLinear,
+} = {}) {
+  output.section("Verifying setup");
+  output.info(`Running your claude/codex once to verify it works${output.symbols.ellipsis} this can take a minute the first time.`);
+  let smoke;
+  try {
+    smoke = await runSmoke({ config, repoRoot });
+  } catch (error) {
+    smoke = { ok: false, results: [], error: error.message };
+  }
+  if (smoke.ok) {
+    output.success("Runtime check passed");
+  } else {
+    output.warn("Runtime check did not pass; setup will still complete.");
+    output.info("run npm run runtime-smoke");
+  }
+
+  let checks = [];
+  try {
+    checks = await runDoctor({
+      config,
+      repoRoot,
+      cachePath,
+      domainId,
+      includeRuntimeSmoke: false,
+      includePhoenix: false,
+      includeLocalSupervisor: false,
+    });
+  } catch (error) {
+    checks = [{ name: "health check", ok: false, message: error.message }];
+  }
+
+  for (const check of checks) {
+    if (check.ok) {
+      output.success(check.name);
+    } else {
+      output.error({ what: check.name });
+      if (check.message) output.detail(`${check.name}: ${check.message}`);
+    }
+  }
+  const doctorGreen = checks.length > 0 && checks.every((check) => check.ok);
+  if (doctorGreen) {
+    output.success("Setup verified.");
+  } else {
+    output.error({
+      what: "Some setup checks need attention",
+      fix: "fix the checks above, then re-run npm run init (setup is resumable).",
+    });
+  }
+  return { ok: doctorGreen, smokeOk: Boolean(smoke.ok), doctorOk: doctorGreen };
+}
+
+async function finishSetupOutput({
+  output,
+  commandOptions,
+  phoenixAppUrl = null,
+  config,
+  repoRoot,
+  cachePath,
+  domainId,
+  finalGate = runFinalGate,
+  runSmoke,
+  runDoctor,
+}) {
+  const gate = await finalGate({
+    config,
+    repoRoot,
+    cachePath,
+    domainId,
+    output,
+    runSmoke,
+    runDoctor,
+  });
+  if (!gate.ok) {
+    output.warn("Setup is resumable — fix the checks above and re-run npm run init.");
+    process.exitCode = 1;
+    return gate;
+  }
   output.done(commandOptions.runGithubPhase ? "Setup complete." : `${commandOptions.readyLabel} connected.`);
   output.nextSteps([
     'Move a Linear project to "Planned" to start your first run',
-    { text: "npm run doctor", hint: "check everything's healthy" },
+    { text: "factory gateway start", hint: "open your factory for business (polls Linear; Ctrl-C to stop)" },
+    { text: "factory doctor", hint: "re-check everything's healthy" },
     { text: "Local Phoenix (traces)", hint: phoenixAppUrl || "run npm run phoenix:start" },
   ]);
   if (!output.verbose) {
     output.raw(`\n  ${output.style.dim("(Run with --verbose for full detail.)")}\n`);
   }
+  process.exitCode = 0;
+  return gate;
 }
 
 async function githubInitTransportFromFlags({
   config,
   flags = {},
   repoRoot,
-  inboxClient = null,
   onProgress = () => {},
 } = {}) {
-  if (!githubLiveRequested(flags)) {
-    return githubSetupTransportFromFlags({ config, flags, repoRoot, inboxClient, onProgress });
-  }
-  if (typeof inboxClient?.githubInstallIntent !== "function" || typeof inboxClient?.githubInstallStatus !== "function") {
-    throw new Error("github_install_binding_unavailable: hosted inbox client cannot drive GitHub App install intent/status");
-  }
-  if (typeof inboxClient?.issueBrokerCredential !== "function") {
-    throw new Error("github_broker_credential_issue_unavailable: hosted inbox client cannot issue installation-bound broker credentials");
-  }
-  return createRealGitHubSetupTransport({
-    brokerClient: lazyGitHubTokenBrokerClient({ config, repoRoot }),
-    repoRoot,
-  });
-}
-
-function githubLiveRequested(flags = {}) {
-  return !githubDryRunRequested(flags);
-}
-
-function lazyGitHubTokenBrokerClient({ config, repoRoot } = {}) {
-  return {
-    async verifyInstallation(input) {
-      return createGitHubTokenBrokerClient({ config, repoRoot }).verifyInstallation(input);
-    },
-    async mintInstallationToken(input) {
-      return createGitHubTokenBrokerClient({ config, repoRoot }).mintInstallationToken(input);
-    },
-  };
-}
-
-async function issueInstallationBoundGitHubBrokerCredential({
-  config,
-  repoRoot,
-  inboxClient,
-  owner,
-  repo,
-  onProgress = () => {},
-} = {}) {
-  const issued = await inboxClient.issueBrokerCredential({});
-  if (issued?.ok === false) {
-    throw new Error(`github_broker_credential_issue_failed: ${issued.reason || issued.error || "unknown"}`);
-  }
-  const credential = brokerCredentialFromIssueResponse(issued);
-  writeGitHubBrokerCredential({
-    broker: config?.github?.token_broker || {},
-    repoRoot,
-    credential,
-  });
-  onProgress(`GitHub broker credential: installation-bound credential saved for ${owner}/${repo}`);
-  return issued;
-}
-
-function brokerCredentialFromIssueResponse(payload = {}) {
-  const credential =
-    payload.brokerCredential ||
-    payload.broker_credential ||
-    payload.credential ||
-    payload.token ||
-    payload.githubBrokerCredential ||
-    payload.github_broker_credential;
-  if (typeof credential !== "string" || credential.trim() === "") {
-    throw new Error("github_broker_credential_issue_failed: response did not include a broker credential");
-  }
-  return credential;
+  return githubSetupTransportFromFlags({ config, flags, repoRoot, onProgress });
 }
 
 async function authorizeLinearSetupWorkspace({
@@ -468,7 +406,7 @@ async function authorizeLinearSetupWorkspace({
 
   for (let attempt = 1; attempt <= maxAuthorizationAttempts; attempt += 1) {
     if (!trustLinePrinted) {
-      log("Authorizing grants Agentic Factory read/write/admin access to the entire selected Linear workspace; Linear has no narrower scope.");
+      log("Authorizing grants Agentic Factory read/write access to the entire selected Linear workspace; Linear has no narrower scope.");
       trustLinePrinted = true;
     }
     for (const line of workspaceAuthorizationInstructions(selection)) log(line);
@@ -753,8 +691,7 @@ function createLinearSetupProgress(output) {
 
 function createGitHubSetupProgress(output) {
   const state = {
-    appPrinted: false,
-    installBrowserPrinted: false,
+    authPrinted: false,
     repoPrinted: false,
   };
 
@@ -779,34 +716,10 @@ function createGitHubSetupProgress(output) {
       output.detail(text);
       return;
     }
-    if (/^Install and authorize/i.test(text)) {
-      if (!state.installBrowserPrinted) {
-        output.info(`Opening GitHub to install Agentic Factory or grant it access to this repo${output.symbols.ellipsis}`);
-        state.installBrowserPrinted = true;
-      }
-      output.detail(text);
-      return;
-    }
-    if (/^Authorize Agentic Factory/i.test(text)) {
-      if (!state.installBrowserPrinted) {
-        output.info(`Opening GitHub to authorize the existing Agentic Factory App installation${output.symbols.ellipsis}`);
-        state.installBrowserPrinted = true;
-      }
-      output.detail(text);
-      return;
-    }
-    if (/^If the browser does not open, paste this GitHub/i.test(text)) {
-      output.info(text.trim());
-      return;
-    }
-    if (/^Waiting for GitHub authorization to finish/i.test(text)) {
-      output.info("Waiting for GitHub to finish the browser authorization...");
-      return;
-    }
-    if (/^(verified|recorded \(dry-run\)|found): GitHub App installation/i.test(text)) {
-      if (!state.appPrinted) {
-        output.success("App installed and authorized");
-        state.appPrinted = true;
+    if (/^(verified|recorded \(dry-run\)): behavior repo will use local ambient git\/gh auth/i.test(text)) {
+      if (!state.authPrinted) {
+        output.success("Local GitHub auth verified");
+        state.authPrinted = true;
       }
       output.detail(text);
       return;
@@ -834,142 +747,6 @@ function createGitHubSetupProgress(output) {
   };
 
   return { log, state };
-}
-
-function resolveSetupGrantDomainId({ registry = emptyDomainRegistry(), domainName } = {}) {
-  const resumeDomain = setupIncompleteDomainForName(registry, domainName);
-  if (resumeDomain?.id) return resumeDomain.id;
-  return mintDomainId(domainName, (registry.domains || []).map((domain) => domain.id));
-}
-
-async function ensureInboxSetupGrant({
-  inboxClient,
-  config,
-  repoRoot,
-  workspaceId,
-  teamId,
-  domainId,
-  bypassActiveConflict = false,
-  onProgress = () => {},
-} = {}) {
-  if (!inboxClient?.requestSetupGrant) {
-    throw new Error("Hosted inbox client cannot request setup grants.");
-  }
-  let requested = await inboxClient.requestSetupGrant({
-    workspaceId,
-    teamId,
-    domainId,
-    ...(bypassActiveConflict ? { bypassActiveConflict: true } : {}),
-  });
-  if (bypassActiveConflict && setupGrantInactiveReason(requested?.reason)) {
-    requested = await inboxClient.requestSetupGrant({ workspaceId, teamId, domainId });
-  }
-  if (requested?.ok === false && requested.reason === "setup_grant_conflict") {
-    return resumeConflictingInboxSetupGrant({
-      inboxClient,
-      config,
-      repoRoot,
-      workspaceId,
-      teamId,
-      onProgress,
-    });
-  }
-  if (requested?.ok === false) {
-    throw new Error(`setup_grant_request_failed: ${requested.reason || requested.error || "unknown"}`);
-  }
-  const setupGrant = setupGrantFromResponse(requested);
-  writeInboxSetupGrant({ inbox: config?.inbox || {}, repoRoot, setupGrant });
-  onProgress(
-    requested?.refreshed === true
-      ? "refreshed: reopened inbox setup window for this Linear team"
-      : "created: provisional inbox setup grant for this Linear team",
-  );
-  return { status: "provisional", resumed: false };
-}
-
-async function refreshGitHubResumeSetupGrant({
-  resumeDomain,
-  inboxClient,
-  config,
-  repoRoot,
-  onProgress = () => {},
-} = {}) {
-  const workspaceId = resumeDomain?.linear?.workspace_id;
-  const teamId = resumeDomain?.linear?.team_id;
-  const domainId = resumeDomain?.id;
-  if (!workspaceId || !teamId || !domainId) {
-    throw new Error("saved Linear domain is missing workspace, team, or domain identifiers");
-  }
-  return ensureInboxSetupGrant({
-    inboxClient,
-    config,
-    repoRoot,
-    workspaceId,
-    teamId,
-    domainId,
-    bypassActiveConflict: true,
-    onProgress,
-  });
-}
-
-async function resumeConflictingInboxSetupGrant({
-  inboxClient,
-  config,
-  repoRoot,
-  workspaceId,
-  teamId,
-  onProgress = () => {},
-} = {}) {
-  const local = readInboxSetupGrantFile({ inbox: config?.inbox || {}, repoRoot });
-  if (!local.exists || !local.setupGrant) {
-    throw new Error(
-      "A pending connection for this team already exists. Continue from the same checkout, start a fresh self-serve setup authorization, or create a diagnostic export for support; support cannot recover credentials or operate this factory for you.",
-    );
-  }
-  const status = await inboxClient.setupGrantStatus({
-    workspaceId,
-    teamId,
-    setupGrant: local.setupGrant,
-  });
-  if (status?.ok === false) {
-    throw new Error(
-      `Local setup grant cannot resume this team (${status.reason || status.error || "unknown"}); rerun npm run init to start a fresh self-serve setup authorization, or create a diagnostic export for support.`,
-    );
-  }
-  const state = setupGrantStatusValue(status);
-  if (state === "provisional" || state === "confirmed") {
-    onProgress(`resumed: ${state} inbox setup grant for this Linear team`);
-    return { status: state, resumed: true };
-  }
-  throw new Error(
-    `Local setup grant is ${state || "unknown"} for this team; rerun npm run init to start a fresh self-serve setup authorization, or create a diagnostic export for support.`,
-  );
-}
-
-function setupGrantFromResponse(payload = {}) {
-  const setupGrant =
-    payload.setupGrant ||
-    payload.setup_grant ||
-    payload.token ||
-    payload.grantToken ||
-    payload.grant_token;
-  if (typeof setupGrant !== "string" || setupGrant.trim() === "") {
-    throw new Error("setup_grant_request_failed: response did not include a setup grant");
-  }
-  return setupGrant;
-}
-
-function setupGrantInactiveReason(reason = "") {
-  return [
-    "invalid setup grant",
-    "setup grant expired",
-    "setup grant is not active",
-    "setup grant confirmation window expired",
-  ].includes(String(reason));
-}
-
-function setupGrantStatusValue(payload = {}) {
-  return payload.status || payload.grant?.status || payload.setupGrant?.status || payload.setup_grant?.status || null;
 }
 
 async function resolveInitDomainName(args = [], { command = "init" } = {}) {
@@ -1051,16 +828,13 @@ function domainNameForResumeDomain(domain = null) {
 
 export {
   authorizeLinearSetupWorkspace,
-  ensureInboxSetupGrant,
   explicitInitDomainName,
+  finishSetupOutput,
   githubInitTransportFromFlags,
-  githubLiveRequested,
-  issueInstallationBoundGitHubBrokerCredential,
   promptLinearWorkspacePicker,
-  refreshGitHubResumeSetupGrant,
   resolveInitDomainName,
   resolveGitHubPhaseResumeDomain,
   resolveLinearWorkspaceSelection,
   resolveSetupCommandDomainNameHint,
-  resolveSetupGrantDomainId,
+  runFinalGate,
 };

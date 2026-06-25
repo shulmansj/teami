@@ -325,15 +325,16 @@ function writeVerifiedGitHubState(root, overrides = {}) {
       name: "fixture-behavior",
       full_name: "fixture-owner/fixture-behavior",
     },
-    app_installation: {
-      installation_id: "dry-run-installation-1",
-      app_slug: "agentic-factory",
-      repository_selection: "selected",
-      selected_repository_ids: ["fixture-repo-1"],
-      selected_repository_full_names: ["fixture-owner/fixture-behavior"],
-      verified_exact: true,
-      dry_run: true,
+    app_installation: null,
+    local_auth: {
+      mode: "local_ambient",
+      gh_auth: "dry_run",
+      git_write: "dry_run",
+      real_push_enabled: false,
+      push_auth: "https",
+      checked_at: "2026-06-10T03:00:00.000Z",
     },
+    push_auth: "https",
     ...overrides,
   };
   fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");

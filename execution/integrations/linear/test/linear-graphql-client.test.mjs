@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createLinearGraphqlClient } from "../src/linear-graphql-client.mjs";
+import { createLinearGraphqlClient, isLinearRateLimited } from "../src/linear-graphql-client.mjs";
 import { findIssueByDecompositionKey } from "../src/linear-service.mjs";
 
 test("GraphQL project update creation sends OAuth bearer auth and exact authored body", async () => {
@@ -218,7 +218,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
               {
                 id: "webhook-1",
                 url: "https://inbox.test/v1/webhooks/linear",
-                label: "Agentic Factory hosted inbox",
+                label: "Agentic Factory local gateway",
                 enabled: true,
                 allPublicTeams: false,
                 resourceTypes: ["Project"],
@@ -292,7 +292,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   assert.equal(
     (await client.createWebhook({
       url: "https://inbox.test/v1/webhooks/linear",
-      label: "Agentic Factory hosted inbox",
+      label: "Agentic Factory local gateway",
       teamId: "team-1",
       resourceTypes: ["Project"],
       secret: "secret-1",
@@ -303,7 +303,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   assert.equal(
     (await client.updateWebhook("webhook-1", {
       url: "https://inbox.test/v1/webhooks/linear",
-      label: "Agentic Factory hosted inbox",
+      label: "Agentic Factory local gateway",
       teamId: "team-1",
       allPublicTeams: false,
       resourceTypes: ["Project"],
@@ -490,6 +490,158 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
   });
 });
 
+test("GraphQL planned project candidates query is cheap, server-filtered, and client-guarded", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("query PlannedProjectCandidates")) {
+        return jsonResponse(
+          {
+            data: {
+              team: {
+                id: "team-1",
+                projects: connection(
+                  [
+                    plannedProjectCandidate("project-1", { teamIds: ["team-1"] }),
+                    plannedProjectCandidate("project-started", {
+                      status: { id: "status-started", name: "Started", type: "started" },
+                      teamIds: ["team-1"],
+                    }),
+                    plannedProjectCandidate("project-other-team", { teamIds: ["team-other"] }),
+                    plannedProjectCandidate("project-2", { teamIds: ["team-other", "team-1"] }),
+                  ],
+                  { hasNextPage: true, endCursor: "cursor-1" },
+                ),
+              },
+            },
+          },
+          {
+            headers: {
+              "x-ratelimit-requests-remaining": "500",
+              "x-ratelimit-requests-reset": "1710000000000",
+              "x-complexity": "217",
+              "x-ratelimit-complexity-limit": "10000",
+              "x-ratelimit-complexity-remaining": "9000",
+              "x-ratelimit-complexity-reset": "1710000001000",
+              "x-ratelimit-endpoint-requests-remaining": "5",
+              "x-ratelimit-endpoint-requests-reset": "1710000002000",
+            },
+          },
+        );
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  const result = await client.listPlannedProjectCandidates("team-1", { after: "cursor-0" });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].variables, { teamId: "team-1", after: "cursor-0", first: 25 });
+  assert.match(calls[0].query, /team\s*\(\s*id:\s*\$teamId\s*\)/);
+  assert.match(calls[0].query, /projects\s*\(/);
+  assert.doesNotMatch(calls[0].query, /issues\s*\(/);
+  assert.deepEqual(result.candidates, [
+    {
+      id: "project-1",
+      name: "Project project-1",
+      status: { id: "status-planned", name: "Planned", type: "planned" },
+      teams: { nodes: [{ id: "team-1" }] },
+    },
+    {
+      id: "project-2",
+      name: "Project project-2",
+      status: { id: "status-planned", name: "Planned", type: "planned" },
+      teams: { nodes: [{ id: "team-other" }, { id: "team-1" }] },
+    },
+  ]);
+  assert.deepEqual(result.pageInfo, { hasNextPage: true, endCursor: "cursor-1" });
+  assert.deepEqual(result.rateLimit, {
+    scope: "endpoint",
+    resetAt: 1710000002000,
+    remaining: 5,
+    rawHeaders: {
+      "x-ratelimit-requests-remaining": "500",
+      "x-ratelimit-requests-reset": "1710000000000",
+      "x-complexity": "217",
+      "x-ratelimit-complexity-limit": "10000",
+      "x-ratelimit-complexity-remaining": "9000",
+      "x-ratelimit-complexity-reset": "1710000001000",
+      "x-ratelimit-endpoint-requests-remaining": "5",
+      "x-ratelimit-endpoint-requests-reset": "1710000002000",
+    },
+  });
+});
+
+test("GraphQL project snapshot context query pages issues with bounded fingerprint projection", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("query ProjectSnapshotContext")) {
+        const firstPage = !body.variables.after;
+        return jsonResponse({
+          data: {
+            project: {
+              id: body.variables.projectId,
+              name: "Project",
+              description: "Intent",
+              content: "## Open Questions\n",
+              status: { id: "status-planned", name: "Planned", type: "planned" },
+              labels: connection([{ id: "plabel-1", name: "Has Open Questions" }]),
+              issues: connection(
+                firstPage
+                  ? [snapshotIssueNode({ id: "issue-1", identifier: "AF-1", title: "Build UI" })]
+                  : [snapshotIssueNode({ id: "issue-2", identifier: "AF-2", title: "Build API" })],
+                firstPage ? { hasNextPage: true, endCursor: "cursor-1" } : undefined,
+              ),
+            },
+          },
+        });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  const project = await client.getProjectSnapshotContext("project-1");
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.variables), [
+    { projectId: "project-1", after: null, first: 50 },
+    { projectId: "project-1", after: "cursor-1", first: 50 },
+  ]);
+  assert.match(calls[0].query, /issues\(first:\s*\$first,\s*after:\s*\$after,\s*includeArchived:\s*true\)/);
+  assert.doesNotMatch(calls[0].query, /relations\s*\(/);
+  assert.deepEqual(project, {
+    id: "project-1",
+    name: "Project",
+    description: "Intent",
+    content: "## Open Questions\n",
+    status: { id: "status-planned", name: "Planned", type: "planned" },
+    labels: [{ id: "plabel-1", name: "Has Open Questions" }],
+    issues: [
+      {
+        id: "issue-1",
+        identifier: "AF-1",
+        title: "Build UI",
+        state: { id: "state-backlog", name: "Backlog", type: "unstarted" },
+        labels: [{ id: "ilabel-discovery", name: "Discovery" }],
+      },
+      {
+        id: "issue-2",
+        identifier: "AF-2",
+        title: "Build API",
+        state: { id: "state-backlog", name: "Backlog", type: "unstarted" },
+        labels: [{ id: "ilabel-discovery", name: "Discovery" }],
+      },
+    ],
+  });
+});
+
 test("GraphQL issue reads give agents mediated project-scoped context", async () => {
   const calls = [];
   const client = createLinearGraphqlClient({
@@ -573,6 +725,63 @@ test("GraphQL client preserves Linear structured errors for setup classification
   );
 });
 
+test("GraphQL client attaches rate-limit metadata and detects Linear throttles", async () => {
+  const linearError = {
+    message: "Rate limit exceeded",
+    extensions: { code: "RATELIMITED" },
+  };
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "secret-oauth-token",
+    fetchImpl: async () =>
+      jsonResponse(
+        {
+          errors: [linearError],
+          data: null,
+        },
+        {
+          ok: false,
+          status: 400,
+          headers: {
+            "x-ratelimit-requests-remaining": "100",
+            "x-ratelimit-requests-reset": "1710000000000",
+            "x-complexity": "10001",
+            "x-ratelimit-complexity-limit": "10000",
+            "x-ratelimit-complexity-remaining": "0",
+            "x-ratelimit-complexity-reset": "1710000003000",
+            "x-ratelimit-endpoint-requests-remaining": "2",
+            "x-ratelimit-endpoint-requests-reset": "1710000002000",
+          },
+        },
+      ),
+  });
+
+  await assert.rejects(
+    () => client.verifyAuth(),
+    (error) => {
+      assert.equal(isLinearRateLimited(error), true);
+      assert.equal(error.httpStatus, 400);
+      assert.deepEqual(error.errors, [linearError]);
+      assert.deepEqual(error.rateLimit, {
+        scope: "complexity",
+        resetAt: 1710000003000,
+        remaining: 0,
+        rawHeaders: {
+          "x-ratelimit-requests-remaining": "100",
+          "x-ratelimit-requests-reset": "1710000000000",
+          "x-complexity": "10001",
+          "x-ratelimit-complexity-limit": "10000",
+          "x-ratelimit-complexity-remaining": "0",
+          "x-ratelimit-complexity-reset": "1710000003000",
+          "x-ratelimit-endpoint-requests-remaining": "2",
+          "x-ratelimit-endpoint-requests-reset": "1710000002000",
+        },
+      });
+      return true;
+    },
+  );
+  assert.equal(isLinearRateLimited(new Error("not linear")), false);
+});
+
 test("GraphQL client fails closed on auth and GraphQL errors without leaking tokens", async () => {
   const client = createLinearGraphqlClient({
     tokenProvider: async () => "secret-oauth-token",
@@ -618,10 +827,11 @@ test("GraphQL client times out stalled requests without leaking tokens", async (
   );
 });
 
-function jsonResponse(payload, { ok = true, status = 200 } = {}) {
+function jsonResponse(payload, { ok = true, status = 200, headers = {} } = {}) {
   return {
     ok,
     status,
+    headers,
     async text() {
       return JSON.stringify(payload);
     },
@@ -675,5 +885,31 @@ function relatedIssue(id, title) {
     identifier: `AF-${id.replace(/\D/g, "") || "1"}`,
     title,
     url: `https://linear.test/${id}`,
+  };
+}
+
+function plannedProjectCandidate(
+  id,
+  {
+    name = `Project ${id}`,
+    status = { id: "status-planned", name: "Planned", type: "planned" },
+    teamIds = ["team-1"],
+  } = {},
+) {
+  return {
+    id,
+    name,
+    status,
+    teams: connection(teamIds.map((teamId) => ({ id: teamId }))),
+  };
+}
+
+function snapshotIssueNode({ id, identifier, title }) {
+  return {
+    id,
+    identifier,
+    title,
+    state: { id: "state-backlog", name: "Backlog", type: "unstarted" },
+    labels: connection([{ id: "ilabel-discovery", name: "Discovery" }]),
   };
 }

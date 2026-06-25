@@ -15,9 +15,8 @@ owner document for a claim before editing or relying on it.
 | Documentation ownership, linking rules, and stale-copy cleanup | [documentation-hygiene.md](documentation-hygiene.md) |
 | Execution artifacts and Linear issue body contracts | [../execution/README.md](../execution/README.md) |
 | Linear project input contract | [../execution/linear-project.md](../execution/linear-project.md) |
-| Linear setup, hosted inbox/broker client, runner, and decomposition workflow | [../execution/integrations/linear/README.md](../execution/integrations/linear/README.md) |
+| Linear setup, local gateway, runner, GitHub proposal path, and decomposition workflow | [../execution/integrations/linear/README.md](../execution/integrations/linear/README.md) |
 | Decomposition eval schemas, rubrics, Phoenix pins, and promotion controller contracts | [../execution/evals/decomposition/README.md](../execution/evals/decomposition/README.md) |
-| Hosted service source, data minimization, and Edge dependency checks | [../supabase/README.md](../supabase/README.md) |
 | Example package map and provenance labels | [../examples/README.md](../examples/README.md) |
 | Synthetic portfolio walkthrough | [../examples/portfolio-demo/README.md](../examples/portfolio-demo/README.md) |
 
@@ -27,7 +26,6 @@ owner document for a claim before editing or relying on it.
 | --- | --- |
 | [../execution/](../execution/) | Public contracts, templates, schemas, eval assets, and integration source. |
 | [../examples/](../examples/) | Fictional or disposable examples; not roadmap truth or account-connected setup proof. |
-| [../supabase/](../supabase/README.md) | Hosted inbox and GitHub broker source plus the public trust-boundary docs for that source. |
 
 ## Reading Paths
 

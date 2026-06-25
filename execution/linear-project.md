@@ -26,7 +26,7 @@ Automation must use resolved Linear status IDs or native status types, not
 display-name matching.
 
 When trigger execution is connected, moving a project to `Planned` is the
-automation handoff. The hosted inbox may only enqueue a candidate wake-up; the
+automation handoff. The local gateway may only record a candidate wake-up; the
 Workflow Runner must claim that wake-up, re-read the project through Linear
 GraphQL, and then apply the readiness gates below before mutating Linear.
 
@@ -258,7 +258,7 @@ Workflow Runner:
   artifact on commit retries rather than re-invoking agents
 - reject packets that need a Linear project update or `Open Questions` mutation
   but omit the exact authored markdown for that surface
-- claim a hosted wake-up before mutation-capable triggered decomposition runs
+- claim a local wake-up before mutation-capable triggered decomposition runs
   and carry `event_id`, `wake_id`, and `run_id` through traces and run state
 - treat a paused wake as terminal; a later human move back to `Planned` creates
   a fresh `linear.project.planned` wake-up

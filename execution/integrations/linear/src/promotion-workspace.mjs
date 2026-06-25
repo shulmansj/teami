@@ -2,18 +2,17 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { createGitHubInstallationTokenAskPass } from "./github-askpass.mjs";
+import { redactGitHubSecrets, scrubGitHubAuthEnv } from "./github-secret-hygiene.mjs";
 import { resolveDefaultBranchRef } from "./promotion-policy.mjs";
 
 // Internal promotion workspace (CONSTRAINTS #14/#15/#16): repo-writing
 // promotion work happens ONLY in a dedicated internal clone under
 // .agentic-factory/promotion-workspace/ (gitignored local custody), never by
 // mutating the adopter's active checkout. Dry-run connections record the push
-// intent; real GitHub connections push only with a broker-minted, short-lived
-// GitHub App installation token.
+// intent; real GitHub connections use the adopter's ambient local git auth.
 //
-// Commits are attributed to a BOT IDENTITY PLACEHOLDER, never the adopter
-// (CONSTRAINTS #25); configure the real GitHub App bot identity at GitHub setup.
+// Commits are attributed to a local automation placeholder unless overridden by
+// the adopter in their checkout.
 
 export const PROMOTION_BRANCH_NAMESPACE = "agentic-factory/promotion";
 
@@ -23,8 +22,7 @@ export function controllerNamespacePr(pr) {
 }
 
 export const PROMOTION_BOT_IDENTITY_PLACEHOLDER = Object.freeze({
-  // Replace with the installed GitHub App bot identity
-  // (e.g. "agentic-factory[bot]" + the App's noreply address) at GitHub setup.
+  // Replace with an adopter-approved automation identity when desired.
   name: "agentic-factory[bot] (placeholder)",
   email: "agentic-factory-bot@placeholder.invalid",
 });
@@ -53,10 +51,10 @@ export function promotionWorkspaceCloneDir(workspaceDir) {
   return path.join(workspaceDir, "repo");
 }
 
-export function defaultRunGit(args, { cwd, env } = {}) {
+export function defaultRunGit(args, { cwd, env, exactEnv = false } = {}) {
   const result = spawnSync("git", args, {
     cwd,
-    env: env ? { ...process.env, ...env } : process.env,
+    env: env ? (exactEnv ? env : { ...process.env, ...env }) : process.env,
     encoding: "utf8",
     windowsHide: true,
   });
@@ -819,55 +817,94 @@ export function pushBranchPlaceholder({ branch } = {}) {
     pushed: false,
     dry_run: true,
     branch,
-    todo: "Dry-run GitHub connection: no branch was pushed. Re-run after real GitHub setup verifies the broker-backed App installation.",
+    todo: "Dry-run GitHub connection: no branch was pushed. Re-run after local git/gh auth is verified for the behavior repo.",
   };
 }
 
-export function pushPromotionBranchWithInstallationToken({
+function resolvePromotionPushUrl({
+  owner,
+  repo,
+  checkoutPath,
+  pushAuth,
+  runGit,
+} = {}) {
+  if (checkoutPath) {
+    const remote = runGit(["remote", "get-url", "--push", "origin"], { cwd: checkoutPath });
+    const url = remote.ok ? remote.stdout.trim() : "";
+    if (url) return { ok: true, pushUrl: url, source: "origin_push_remote" };
+  }
+  if (pushAuth === "ssh") {
+    return {
+      ok: false,
+      reason: "github_push_url_required",
+      detail: "SSH push mode requires a configured origin push remote in the adopter checkout.",
+    };
+  }
+  if (!owner || !repo) return { ok: false, reason: "github_push_identity_required" };
+  return {
+    ok: true,
+    pushUrl: `https://github.com/${owner}/${repo}.git`,
+    source: "github_https_fallback",
+  };
+}
+
+export function pushPromotionBranchWithAmbientAuth({
   cloneDir,
   owner,
   repo,
   branch,
-  token,
+  checkoutPath = null,
+  pushUrl = null,
+  pushAuth = "https",
+  env = process.env,
   runGit = defaultRunGit,
 } = {}) {
   if (!cloneDir) return { ok: false, reason: "promotion_workspace_required" };
-  if (!owner || !repo || !branch) return { ok: false, reason: "github_push_identity_required" };
-  if (!token) return { ok: false, reason: "github_installation_token_required" };
+  if (!branch) return { ok: false, reason: "github_push_identity_required" };
   const ref = validatePromotionBranchRef(branch);
   if (!ref.ok) return { ok: false, reason: ref.reason };
+  const normalizedPushAuth = pushAuth === "ssh" ? "ssh" : "https";
+  const resolvedPushUrl = typeof pushUrl === "string" && pushUrl.trim()
+    ? { ok: true, pushUrl: pushUrl.trim(), source: "provided" }
+    : resolvePromotionPushUrl({
+      owner,
+      repo,
+      checkoutPath,
+      pushAuth: normalizedPushAuth,
+      runGit,
+    });
+  if (!resolvedPushUrl.ok) return resolvedPushUrl;
 
-  const askpass = createGitHubInstallationTokenAskPass({ token });
-  try {
-    const result = runGit(
-      [
-        "push",
-        `https://github.com/${owner}/${repo}.git`,
-        `${ref.full_ref}:${ref.full_ref}`,
-      ],
-      {
-        cwd: cloneDir,
-        env: {
-          ...askpass.env,
-        },
+  const result = runGit(
+    [
+      "push",
+      resolvedPushUrl.pushUrl,
+      `${ref.full_ref}:${ref.full_ref}`,
+    ],
+    {
+      cwd: cloneDir,
+      env: {
+        ...scrubGitHubAuthEnv(env, { pushAuth: normalizedPushAuth }),
+        GIT_TERMINAL_PROMPT: "0",
       },
-    );
-    if (!result.ok) {
-      return {
-        ok: false,
-        reason: "github_promotion_branch_push_failed",
-        detail: result.stderr.trim() || result.stdout.trim(),
-      };
-    }
+      exactEnv: true,
+    },
+  );
+  if (!result.ok) {
     return {
-      ok: true,
-      pushed: true,
-      dry_run: false,
-      branch,
-      ref: ref.full_ref,
-      remote: `https://github.com/${owner}/${repo}.git`,
+      ok: false,
+      reason: "github_promotion_branch_push_failed",
+      detail: redactGitHubSecrets(result.stderr.trim() || result.stdout.trim()),
     };
-  } finally {
-    askpass.cleanup();
   }
+  return {
+    ok: true,
+    pushed: true,
+    dry_run: false,
+    branch,
+    ref: ref.full_ref,
+    remote: resolvedPushUrl.pushUrl,
+    remote_source: resolvedPushUrl.source,
+    push_auth: normalizedPushAuth,
+  };
 }

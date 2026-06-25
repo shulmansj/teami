@@ -26,9 +26,9 @@
 // auto-apply, or mark-ready (CONSTRAINTS #8 — enforced in the GitHub client).
 //
 // GitHub live posture (CONSTRAINTS #22/#23/#25): dry-run connections still use
-// the dry-run transport, but a VERIFIED real connection selects the hosted
-// broker-backed GitHub App transport from local config. Broker unavailable
-// fails closed; production callers cannot inject a transport.
+// the dry-run transport, but a VERIFIED real connection selects the adopter's
+// local ambient git/gh auth. Local transport unavailable fails closed;
+// production callers cannot inject a transport.
 
 import {
   classifyAgentBehaviorProposalScope,

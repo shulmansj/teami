@@ -4,6 +4,16 @@ const DEFAULT_ENDPOINT = "https://api.linear.app/graphql";
 const PAGE_SIZE = 50;
 const LABEL_PAGE_SIZE = 100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 1000;
+const LINEAR_RATE_LIMIT_HEADER_NAMES = [
+  "x-ratelimit-requests-remaining",
+  "x-ratelimit-requests-reset",
+  "x-complexity",
+  "x-ratelimit-complexity-limit",
+  "x-ratelimit-complexity-remaining",
+  "x-ratelimit-complexity-reset",
+  "x-ratelimit-endpoint-requests-remaining",
+  "x-ratelimit-endpoint-requests-reset",
+];
 
 const TEAM_FIELDS = `
   id
@@ -150,6 +160,30 @@ const PROJECT_FIELDS = `
   }
 `;
 
+const SNAPSHOT_ISSUE_FIELDS = `
+  id
+  identifier
+  title
+  state {
+    id
+    name
+    type
+  }
+  labels(first: ${LABEL_PAGE_SIZE}, includeArchived: true) {
+    nodes {
+      ${PROJECT_LABEL_FIELDS}
+    }
+  }
+`;
+
+export function isLinearRateLimited(error) {
+  return (
+    error?.httpStatus === 400 &&
+    Array.isArray(error.errors) &&
+    error.errors.some((entry) => entry?.extensions?.code === "RATELIMITED")
+  );
+}
+
 export function createLinearGraphqlClient({
   endpoint = DEFAULT_ENDPOINT,
   fetchImpl = globalThis.fetch,
@@ -164,6 +198,10 @@ export function createLinearGraphqlClient({
   }
 
   async function request(query, variables = {}) {
+    return (await requestWithMeta(query, variables)).data;
+  }
+
+  async function requestWithMeta(query, variables = {}) {
     const token = await tokenProvider();
     if (typeof token !== "string" || token.trim() === "") {
       throw new Error("Linear GraphQL OAuth token is missing.");
@@ -182,26 +220,36 @@ export function createLinearGraphqlClient({
       },
       requestTimeoutMs,
     );
-    const payload = await parseGraphqlResponse(response);
+    const rateLimit = readLinearRateLimitHeaders(response.headers);
+    let payload;
+    try {
+      payload = await parseGraphqlResponse(response);
+    } catch (error) {
+      error.rateLimit = rateLimit;
+      throw error;
+    }
 
     if (!response.ok) {
       throw linearGraphqlRequestError(
         `Linear GraphQL request failed with HTTP ${response.status}: ${graphqlErrorMessage(payload)}`,
         payload,
         response.status,
+        rateLimit,
       );
     }
     if (payload.errors?.length) {
       throw linearGraphqlRequestError(
         `Linear GraphQL request failed: ${graphqlErrorMessage(payload)}`,
         payload,
+        null,
+        rateLimit,
       );
     }
     if (!payload.data) {
       throw new Error("Linear GraphQL response did not include data.");
     }
 
-    return payload.data;
+    return { data: payload.data, rateLimit };
   }
 
   async function verifyAuth() {
@@ -632,6 +680,103 @@ export function createLinearGraphqlClient({
     );
   }
 
+  async function listPlannedProjectCandidates(teamId, { first = 25, after = null } = {}) {
+    if (typeof teamId !== "string" || teamId.trim() === "") {
+      throw new Error("teamId is required to list planned Linear project candidates.");
+    }
+    const { data, rateLimit } = await requestWithMeta(
+      `
+        query PlannedProjectCandidates($teamId: String!, $after: String, $first: Int!) {
+          team(id: $teamId) {
+            id
+            projects(first: $first, after: $after) {
+              nodes {
+                id
+                name
+                status {
+                  ${PROJECT_STATUS_FIELDS}
+                }
+                teams(first: ${LABEL_PAGE_SIZE}) {
+                  nodes {
+                    id
+                  }
+                }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        }
+      `,
+      { teamId, after, first },
+    );
+    // Linear's ProjectFilter has no `teams` field and its `state` filter does not
+    // filter by status type, so we scope by the team's own projects connection and
+    // filter to `planned` client-side (isPlannedProjectCandidateForTeam). Verified
+    // against the live API 2026-06-24.
+    const projectsConnection = data.team?.projects;
+    if (!projectsConnection) {
+      throw new Error("Linear planned projects query did not return a team projects connection.");
+    }
+    return {
+      candidates: connectionNodes(projectsConnection)
+        .filter((project) => isPlannedProjectCandidateForTeam(project, teamId))
+        .map(normalizePlannedProjectCandidate),
+      pageInfo: normalizePageInfo(projectsConnection.pageInfo),
+      rateLimit,
+    };
+  }
+
+  async function getProjectSnapshotContext(projectId) {
+    if (typeof projectId !== "string" || projectId.trim() === "") {
+      throw new Error("projectId is required to load Linear project snapshot context.");
+    }
+
+    const issues = [];
+    let after = null;
+    let project = null;
+    do {
+      const data = await request(
+        `
+          query ProjectSnapshotContext($projectId: String!, $after: String, $first: Int!) {
+            project(id: $projectId) {
+              id
+              name
+              description
+              content
+              status {
+                ${PROJECT_STATUS_FIELDS}
+              }
+              labels(first: ${LABEL_PAGE_SIZE}, includeArchived: true) {
+                nodes {
+                  ${PROJECT_LABEL_FIELDS}
+                }
+              }
+              issues(first: $first, after: $after, includeArchived: true) {
+                nodes {
+                  ${SNAPSHOT_ISSUE_FIELDS}
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }
+        `,
+        { projectId, after, first: PAGE_SIZE },
+      );
+      if (!data.project?.id) throw new Error(`Linear project ${projectId} was not found.`);
+      project ||= normalizeProjectSnapshotBase(data.project);
+      issues.push(...connectionNodes(data.project.issues).map(normalizeSnapshotIssue));
+      after = nextCursor(data.project.issues, "project snapshot issues");
+    } while (after);
+
+    return { ...project, issues };
+  }
+
   async function getProjectContext(projectId) {
     if (typeof projectId !== "string" || projectId.trim() === "") {
       throw new Error("projectId is required to load Linear project context.");
@@ -931,6 +1076,8 @@ export function createLinearGraphqlClient({
     updateTemplate,
     createProject,
     updateProject,
+    listPlannedProjectCandidates,
+    getProjectSnapshotContext,
     getProjectContext,
     listProjectIssues,
     getIssueContext,
@@ -1091,6 +1238,51 @@ function normalizeProjectBase(project) {
   };
 }
 
+function isPlannedProjectCandidateForTeam(project, teamId) {
+  return (
+    project?.status?.type === "planned" &&
+    connectionNodes(project.teams).some((team) => team?.id === teamId)
+  );
+}
+
+function normalizePlannedProjectCandidate(project) {
+  return {
+    id: project.id,
+    name: project.name,
+    status: normalizeProjectStatus(project.status),
+    teams: {
+      nodes: connectionNodes(project.teams).map((team) => ({ id: team.id })),
+    },
+  };
+}
+
+function normalizeProjectSnapshotBase(project) {
+  return {
+    id: project.id,
+    name: project.name,
+    description: project.description || null,
+    content: project.content || "",
+    status: project.status ? normalizeProjectStatus(project.status) : null,
+    labels: connectionNodes(project.labels).map(normalizeProjectLabel),
+  };
+}
+
+function normalizeSnapshotIssue(issue) {
+  return {
+    id: issue.id,
+    identifier: issue.identifier || null,
+    title: issue.title || "",
+    state: issue.state
+      ? {
+          id: issue.state.id,
+          name: issue.state.name,
+          type: issue.state.type,
+        }
+      : null,
+    labels: connectionNodes(issue.labels).map(normalizeProjectLabel),
+  };
+}
+
 function normalizeIssue(issue) {
   return {
     id: issue.id,
@@ -1161,6 +1353,13 @@ function connectionNodes(connection) {
   return connection?.nodes || [];
 }
 
+function normalizePageInfo(pageInfo) {
+  return {
+    hasNextPage: Boolean(pageInfo?.hasNextPage),
+    endCursor: pageInfo?.endCursor || null,
+  };
+}
+
 function dedupeById(items) {
   const seen = new Set();
   const deduped = [];
@@ -1200,11 +1399,12 @@ async function parseGraphqlResponse(response) {
   }
 }
 
-function linearGraphqlRequestError(message, payload, status = null) {
+function linearGraphqlRequestError(message, payload, status = null, rateLimit = null) {
   const error = new Error(message);
   if (payload?.errors) error.errors = payload.errors;
   if (payload) error.graphqlPayload = payload;
   if (status) error.httpStatus = status;
+  if (rateLimit) error.rateLimit = rateLimit;
   return error;
 }
 
@@ -1232,4 +1432,69 @@ async function fetchWithTimeout(fetchImpl, url, options, timeoutMs) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function readLinearRateLimitHeaders(headers) {
+  const rawHeaders = {};
+  for (const name of LINEAR_RATE_LIMIT_HEADER_NAMES) {
+    const value = readHeader(headers, name);
+    if (value !== null) rawHeaders[name] = value;
+  }
+  const scopes = [
+    {
+      scope: "endpoint",
+      remaining: parseHeaderInteger(rawHeaders["x-ratelimit-endpoint-requests-remaining"]),
+      resetAt: parseHeaderInteger(rawHeaders["x-ratelimit-endpoint-requests-reset"]),
+    },
+    {
+      scope: "complexity",
+      remaining: parseHeaderInteger(rawHeaders["x-ratelimit-complexity-remaining"]),
+      resetAt: parseHeaderInteger(rawHeaders["x-ratelimit-complexity-reset"]),
+    },
+    {
+      scope: "requests",
+      remaining: parseHeaderInteger(rawHeaders["x-ratelimit-requests-remaining"]),
+      resetAt: parseHeaderInteger(rawHeaders["x-ratelimit-requests-reset"]),
+    },
+  ];
+  const selected = selectRateLimitScope(scopes);
+  return {
+    scope: selected?.scope || null,
+    resetAt: selected?.resetAt ?? null,
+    remaining: selected?.remaining ?? null,
+    rawHeaders,
+  };
+}
+
+function selectRateLimitScope(scopes) {
+  const populated = scopes.filter((scope) => scope.remaining !== null || scope.resetAt !== null);
+  if (populated.length === 0) return null;
+  const exhausted = populated.find((scope) => scope.remaining !== null && scope.remaining <= 0);
+  if (exhausted) return exhausted;
+  const withRemaining = populated.filter((scope) => scope.remaining !== null);
+  if (withRemaining.length > 0) {
+    return withRemaining.sort((left, right) => left.remaining - right.remaining)[0];
+  }
+  return populated[0];
+}
+
+function parseHeaderInteger(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function readHeader(headers, name) {
+  if (!headers) return null;
+  const loweredName = name.toLowerCase();
+  if (typeof headers.get === "function") {
+    const value = headers.get(name) ?? headers.get(loweredName);
+    if (value !== undefined && value !== null) return String(value);
+  }
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === loweredName && value !== undefined && value !== null) {
+      return String(value);
+    }
+  }
+  return null;
 }

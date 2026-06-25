@@ -33,12 +33,6 @@ function tempRepo() {
 function testConfig(overrides = {}) {
   return {
     linear: {},
-    inbox: {
-      runner: {
-        lease_duration_ms: 60_000,
-        required_capabilities: ["linear.project.planned", "decomposition.trigger_runner.v1"],
-      },
-    },
     runtime: {},
     workflows: { decomposition: { roles: {} } },
     local_supervisor: {
@@ -56,26 +50,10 @@ function writeWorkspaceCache(repoRoot) {
     `${JSON.stringify({
       workspaceId: "workspace-1",
       teamId: "team-1",
-      inbox: { runnerCredentialId: "runner-credential-1" },
     }, null, 2)}\n`,
     "utf8",
   );
   return cachePath;
-}
-
-function runnerCredentialStore(credential = {}) {
-  return {
-    async readCredential() {
-      return {
-        schema_version: 1,
-        workspaceId: "workspace-1",
-        credentialId: "runner-credential-1",
-        token: "runner-token-1",
-        capabilities: ["linear.project.planned", "decomposition.trigger_runner.v1"],
-        ...credential,
-      };
-    },
-  };
 }
 
 function writeJson(filePath, value) {
@@ -148,13 +126,12 @@ test("foreground runner and supervisor source do not expose direct GitHub propos
     .map((relative) => fs.readFileSync(path.join(repoCheckout, ...relative.split("/")), "utf8"))
     .join("\n");
   assert.doesNotMatch(source, /createGitHubPromotionClient/);
-  assert.doesNotMatch(source, /createBrokerGitHubTransport/);
   assert.doesNotMatch(source, /pushPromotionBranchWithInstallationToken/);
   assert.doesNotMatch(source, /createPullRequest/);
   assert.doesNotMatch(source, /mergePullRequest|markReadyForReview|submitReview|createReview/);
 });
 
-test("local supervisor run skips hosted wake claims by default and runs the scanner once", async () => {
+test("local supervisor run leaves gateway autostart deferred and runs the scanner once", async () => {
   const repoRoot = tempRepo();
   const cachePath = writeWorkspaceCache(repoRoot);
   registerLocalSupervisorStub({ repoRoot, explicitConsent: true });
@@ -165,7 +142,6 @@ test("local supervisor run skips hosted wake claims by default and runs the scan
     repoRoot,
     config: testConfig(),
     cachePath,
-    runnerCredentialStore: runnerCredentialStore(),
     runRunnerOnce: async () => {
       runnerCalls += 1;
       return { status: "idle" };
@@ -191,13 +167,13 @@ test("local supervisor run skips hosted wake claims by default and runs the scan
   assert.equal(scannerCalls, 1);
   assert.equal(result.iterations[0].runner.status, "skipped");
   assert.equal(result.iterations[0].runner.reason, LOCAL_SUPERVISOR_HARDFLOOR_RUNNER_STUB_REASON);
-  assert.match(result.iterations[0].runner.detail, /disabled by default/);
+  assert.match(result.iterations[0].runner.detail, /Gateway autostart is deferred/);
   assert.equal(result.iterations[0].scanner.status, "ok");
 
   const state = JSON.parse(fs.readFileSync(localSupervisorStatePath(repoRoot), "utf8"));
   assert.equal(state.status, "ok");
   assert.equal(state.last_iteration.runner.reason, LOCAL_SUPERVISOR_HARDFLOOR_RUNNER_STUB_REASON);
-  assert.match(formatLocalSupervisorRunReport(result).join("\n"), /hosted_wake_claims_disabled_by_default/);
+  assert.match(formatLocalSupervisorRunReport(result).join("\n"), /gateway_autostart_deferred/);
 });
 
 test("local supervisor propagates scanner report-only state without adding a writer", async () => {
@@ -210,7 +186,6 @@ test("local supervisor propagates scanner report-only state without adding a wri
     repoRoot,
     config: testConfig(),
     cachePath,
-    runnerCredentialStore: runnerCredentialStore(),
     scanPromotionCandidatesFn: async () => {
       scannerCalls += 1;
       return {
@@ -252,7 +227,6 @@ test("local supervisor disable flag prevents runner and scanner work", async () 
     repoRoot,
     config: testConfig(),
     cachePath,
-    runnerCredentialStore: runnerCredentialStore(),
     runRunnerOnce: async () => {
       throw new Error("runner should not be called while disabled");
     },
@@ -280,7 +254,6 @@ test("local supervisor crash-loop backoff blocks the next start until the record
     repoRoot,
     config: testConfig(),
     cachePath,
-    runnerCredentialStore: runnerCredentialStore(),
     scanPromotionCandidatesFn: async () => {
       scannerCalls += 1;
       throw new Error("scanner exploded");
@@ -301,7 +274,6 @@ test("local supervisor crash-loop backoff blocks the next start until the record
     repoRoot,
     config: testConfig(),
     cachePath,
-    runnerCredentialStore: runnerCredentialStore(),
     scanPromotionCandidatesFn: async () => {
       scannerCalls += 1;
       return { ok: true, status: "ok", candidates: [] };
@@ -325,7 +297,6 @@ test("local supervisor status and cleanup report local-only state", async () => 
     repoRoot,
     config: testConfig(),
     cachePath,
-    runnerCredentialStore: runnerCredentialStore(),
   });
   assert.equal(status.registration.ok, true);
   assert.equal(status.disable.disabled, true);
@@ -341,7 +312,7 @@ test("local supervisor status and cleanup report local-only state", async () => 
   assert.equal(fs.existsSync(localSupervisorDisablePath(repoRoot)), false);
 });
 
-test("next-resume reconciliation classifies aged, expired, dead-lettered, resumed, and attention work", async () => {
+test("next-resume reconciliation classifies aged, commit-unconfirmed, resumed, and attention work", async () => {
   const repoRoot = tempRepo();
   const scannerDir = path.join(repoRoot, ".agentic-factory", "promotion-candidates");
   writeJson(localSupervisorStatePath(repoRoot), {
@@ -383,36 +354,32 @@ test("next-resume reconciliation classifies aged, expired, dead-lettered, resume
     kind: "resume",
     packet: { open_questions_markdown: "" },
   });
+  writeRunArtifact(repoRoot, "run-commit", {
+    kind: "commit",
+    linear_project_id: "project-commit",
+  });
+  writeJson(path.join(repoRoot, ".agentic-factory", "runs", "unconfirmed-linear-mutation-intents", "run-commit.json"), {
+    schema_version: "agentic-factory-unconfirmed-linear-mutation-intent/v1",
+    run_id: "run-commit",
+    artifact_kind: "commit",
+    linear_project_id: "project-commit",
+    domain_id: "support-ops",
+    wake_id: "wake-commit",
+    started_at: "2026-06-10T11:45:00.000Z",
+  });
 
   const report = await collectNextResumeReconciliation({
     repoRoot,
     now: () => new Date("2026-06-10T12:00:00.000Z"),
     agedAfterMs: 60 * 60 * 1000,
-    hostedWakeViews: [
-      {
-        id: "wake-expired",
-        status: "running",
-        derived_status: "running",
-        object_id: "project-expired",
-        started_at: "2026-06-10T11:00:00.000Z",
-        lease_expires_at: "2026-06-10T11:30:00.000Z",
-      },
-      {
-        id: "wake-dead",
-        status: "dead_letter",
-        derived_status: "dead_letter",
-        object_id: "project-dead",
-        reason: "runner_lost_after_linear_mutation_started",
-        terminal_at: "2026-06-10T11:20:00.000Z",
-      },
-    ],
   });
 
   assert.equal(report.schema_version, NEXT_RESUME_RECONCILIATION_SCHEMA_VERSION);
   const classifications = new Set(report.items.map((item) => item.classification));
-  for (const expected of ["aged", "expired", "dead-lettered", "resumed", "attention"]) {
+  for (const expected of ["aged", "resumed", "attention"]) {
     assert.ok(classifications.has(expected), `missing classification ${expected}`);
   }
+  assert.ok(report.items.some((item) => item.reason === "commit_mutation_unconfirmed"));
   for (const item of report.items) {
     assert.ok(PROVISIONAL_PM_STATES.includes(item.pm_state), `unexpected PM state ${item.pm_state}`);
   }
@@ -423,7 +390,7 @@ test("next-resume reconciliation classifies aged, expired, dead-lettered, resume
   assert.match(lines, /Needs your decision=/);
   assert.match(lines, /Blocked but safe=/);
   assert.match(lines, /Proposal ready=/);
-  assert.match(lines, /no hosted wakes claimed, no Linear writes, no GitHub writes/);
+  assert.match(lines, /no gateway work claimed, no Linear writes, no GitHub writes/);
 });
 
 test("next-resume reconciliation surfaces local proposal registry records as Proposal ready", async () => {
@@ -445,7 +412,6 @@ test("next-resume reconciliation surfaces local proposal registry records as Pro
 
   const report = await collectNextResumeReconciliation({
     repoRoot,
-    hostedWakeViews: [],
     now: () => new Date("2026-06-10T12:00:00.000Z"),
   });
   const proposal = report.items.find((item) => item.ref === "prop-ready");
@@ -503,7 +469,6 @@ test("next-resume reconciliation surfaces scanner v2 ledger statuses", async () 
 
   const report = await collectNextResumeReconciliation({
     repoRoot,
-    hostedWakeViews: [],
     now: () => new Date("2026-06-10T12:00:00.000Z"),
   });
   const readyV2 = report.items.find((item) => item.id === "proposal:prop-ready-v2");
@@ -523,7 +488,7 @@ test("next-resume reconciliation surfaces scanner v2 ledger statuses", async () 
   assert.equal(blocked.detail, "page 2 failed");
 });
 
-test("next-resume CLI source pin uses hosted wake views without claim or mutation calls", () => {
+test("next-resume CLI source pin uses local reconciliation without gateway wake claims", () => {
   const cliSource = fs.readFileSync(
     path.join(repoCheckout, "execution", "integrations", "linear", "cli.mjs"),
     "utf8",
@@ -541,13 +506,8 @@ test("next-resume CLI source pin uses hosted wake views without claim or mutatio
     path.join(repoCheckout, "execution", "integrations", "linear", "src", "cli", "runner-command.mjs"),
     "utf8",
   );
-  const inspectStart = runnerCommandSource.indexOf("async function inspectTriggerStatus");
-  const inspectEnd = runnerCommandSource.indexOf("async function requeueTriggerWake");
-  assert.ok(inspectStart > 0 && inspectEnd > inspectStart, "inspectTriggerStatus body must be source-pinnable");
-  const inspectBody = runnerCommandSource.slice(inspectStart, inspectEnd);
-  assert.match(inspectBody, /listWakeViews/);
   assert.doesNotMatch(
-    inspectBody,
-    /claimNextWake|claimWake|heartbeat|completeWake|deadLetterWake|markWakeRunning|markMutationStarted|renewLease/,
+    `${supervisorCommandSource}\n${runnerCommandSource}`,
+    /listWakeViews|claimWake|heartbeatRunner|requeueWake/,
   );
 });

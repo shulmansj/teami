@@ -10,16 +10,16 @@ human become the technical coordinator.
 
 Current status: source-visible portfolio preview and command-driven technical
 preview. Implemented behavior includes Linear OAuth setup, GraphQL-backed
-workspace provisioning, planned-project webhook wake-ups, local runner
-decomposition, local Phoenix traces/evals, the behavior-repo GitHub proposal
-path, deterministic tests, and local domain `git_repo` binding for one existing
-checkout per domain.
+workspace provisioning, local gateway polling for planned projects, local
+runner decomposition, local Phoenix traces/evals, the behavior-repo GitHub
+proposal path through the adopter's own git/`gh` auth, deterministic tests, and
+local domain `git_repo` binding for one existing checkout per domain.
 
-Primary trust boundary: hosted Agentic Factory services coordinate Linear
-webhook wake-ups and behavior-repo GitHub token minting; the local runner holds
-adopter-side Linear OAuth, product checkout paths, agent runtime execution, and
-Phoenix traces. The hosted inbox never receives Linear OAuth tokens, repo
-contents, Phoenix traces, or Linear write authority.
+Primary trust boundary: live paths run from the adopter's checkout. The local
+gateway polls Linear with the adopter's OAuth grant, records local wake state,
+and hands work to the local runner. Behavior-repo proposal writes use the
+adopter's ambient git/`gh` auth. Agentic Factory stores no GitHub secret; run
+evidence and PR bodies carry provenance for review.
 
 - See It Work: [portfolio demo](examples/portfolio-demo/README.md)
 - Run Setup: [quickstart](#quickstart)
@@ -36,46 +36,82 @@ Start with the portfolio demo before connecting an account:
   illustrative, hand-curated from current output, or hand-curated from current
   implementation.
 - The resource-binding evidence in the demo explains the landed local
-  `git_repo` binding seam without exposing a private checkout or claiming hosted
+  `git_repo` binding seam without exposing a private checkout or claiming cloud
   code execution.
 
 ## Quickstart
 
-Use this path for a public beta technical evaluation with the Agentic
-Factory-operated hosted setup endpoint. Use disposable evaluation Linear and
+Use this path for a technical evaluation. Use disposable evaluation Linear and
 GitHub resources for a first run; setup creates or reuses Linear workspace
-objects and can connect a dedicated Agentic Factory behavior repo. Hosted setup
-is best-effort public beta infrastructure, not an enterprise support, uptime,
-or recovery promise.
+objects and connects a dedicated Agentic Factory behavior repo using your local
+git/`gh` auth. The live external authorities are your Linear OAuth grant and
+your own GitHub session.
+
+Two commands:
 
 ```bash
 npm install
-npm run init
-npm run domain:bind-repo -- --domain main --path ../product-app
-npm run doctor
-npm run runtime-smoke
+./factory init
 ```
 
-`npm run init` opens the Linear browser authorization flow, provisions the
+`factory` is a repo-local launcher (no global install). Run it per shell from
+the repo directory:
+
+- macOS/Linux: `./factory <command>`
+- Windows cmd.exe: `factory <command>`
+- Windows PowerShell: `.\factory.cmd <command>`
+
+(The `npm run <script>` forms still work as a fallback, e.g. `npm run init`.)
+
+`factory init` opens the Linear browser authorization flow, provisions the
 Agentic Factory Linear team/template/labels/status mapping through GraphQL,
-registers the hosted webhook inbox, mints a scoped runner credential, prepares
-local Phoenix, and can connect the dedicated Agentic Factory behavior repo for
-reviewable process-change proposals.
+prepares local gateway state and local Phoenix, and connects the dedicated
+Agentic Factory behavior repo through your local git/`gh` auth. It then runs a
+runtime check and a final health gate and ends on a green summary — no separate
+`doctor` or `runtime-smoke` step. It is idempotent and resumable: re-run it to
+repair.
 
-`domain:bind-repo` is separate. It binds one existing local product checkout to
-one domain as a local `git_repo` resource. It does not grant hosted access to
-the product repo and it does not use the behavior-repo GitHub broker.
-
-To exercise the current sandbox workflow:
+Then open your factory for business:
 
 ```bash
-npm run runner
-npm run trigger-status
+./factory gateway start
 ```
 
-If setup reports a hosted HTTP or authorization error, treat that as a public
-beta setup failure to report through the public issue templates, not as a
-reason to paste private credentials into the public setup path.
+`factory gateway start` polls Linear and runs a decomposition whenever you move
+a project to `Planned`. It runs until you press Ctrl-C, so keep the terminal
+open while you want the factory listening. Check state any time with
+`factory gateway status`.
+
+### The companion
+
+After setup you don't need to memorize commands. Open a claude or codex session
+in the factory folder and say hi — the committed `AGENTS.md`/`CLAUDE.md`
+companion helps you add a domain, repair a red check, start the gateway, and run
+your first decomposition, invoking the deterministic commands for you. You
+approve every Linear/GitHub authorization in your own browser; the companion
+holds no credential.
+
+### Repair / re-run
+
+Every step is a standalone command, so you can repair without starting over:
+
+- `factory doctor` — health check; it names the exact repair command for any red
+  check.
+- `factory init` — reconnect Linear or finish an interrupted setup
+  (idempotent/resumable).
+- `npm run runtime-smoke` — re-verify your claude/codex runtime.
+- `factory domain add --domain "<name>" --workspace "<ws>"` — connect another
+  Linear workspace as a new domain.
+
+Binding a product code repo
+(`npm run domain:bind-repo -- --domain main --path ../product-app`) is separate
+from setup and is prep for a later code-shipping capability; today's
+decomposition workflow does not require it, and it grants Agentic Factory no new
+GitHub secret.
+
+If setup reports a Linear OAuth, local git, or `gh` authorization error, repair
+that local authority directly. Do not paste private credentials into public
+issues or generated artifacts.
 
 ## Tests
 
@@ -84,8 +120,6 @@ Core deterministic checks:
 ```bash
 npm test
 npm run security:secrets
-npm run edge:check
-npm run edge:audit
 ```
 
 Runtime and local observability checks:
@@ -97,17 +131,17 @@ npm run preflight:phoenix
 ```
 
 `npm test` is credential-free and covers the Linear workflow contracts,
-resource-binding behavior, hosted inbox/broker contracts, eval helpers, and
-fail-closed paths. Live Linear or hosted setup checks should use disposable
-workspaces/projects and the documented cleanup path.
+resource-binding behavior, local gateway contracts, eval helpers, and
+fail-closed paths. Live Linear or local GitHub checks should use disposable
+workspaces/projects/repositories and the documented cleanup path.
 
 ## Architecture
 
 ```text
 Human product intent
   -> Linear project moved to Planned
-  -> hosted inbox verifies webhook, dedupes it, and queues a wake-up
-  -> local Workflow Runner leases the wake-up
+  -> local gateway polls Linear and records a wake-up
+  -> local Workflow Runner leases the local wake-up
   -> local runner re-reads Linear through OAuth + GraphQL
   -> local runner persists run evidence before any Linear mutation
   -> Linear project updates and execution issues are written after gates pass
@@ -118,9 +152,9 @@ Behavior changes use a separate GitHub path:
 
 ```text
 Agentic Factory behavior repo
-  <- hosted GitHub broker mints short-lived selected-repo tokens
-  <- GitHub App limited to metadata, contents, and pull request permissions
+  <- adopter's local git/gh auth pushes proposal branches
   <- local proposal controller packages eval evidence for human-reviewed PRs
+  <- run evidence and PR body record provenance for review
 ```
 
 Product repo access stays local:
@@ -132,36 +166,32 @@ domain.resources[]
   -> local cwd/worktree selection for domain-scoped work
 ```
 
-The hosted inbox/broker coordinates wake-ups and behavior-repo proposal
-transport. It is not a cloud runner, product-repo checkout service, hosted
-Phoenix store, or all-repositories GitHub grant.
+The local gateway and runner coordinate wake-ups and Linear mutations from the
+adopter machine. Product-repo checkout access and behavior-repo proposal access
+both stay local and explicit.
 
 ## Security/Permissions
 
-- Linear setup uses browser OAuth and GraphQL. Admin scope is requested because
-  Linear requires it for webhook setup; Linear writes are performed by the
-  local runner after deterministic gates pass.
-- The hosted inbox stores webhook signing material and runner credential hashes.
-  It consumes Linear webhook bodies in memory, persists hashes/routing facts
-  instead of product content, and has no Linear write path.
-- The GitHub broker is scoped to the Agentic Factory behavior repo for
-  proposal branches and PRs. It is distinct from product-repo binding and does
-  not request all-repositories access.
+- Linear setup uses browser OAuth and GraphQL. The checked-in OAuth scope is
+  read/write; Linear writes are performed by the local runner after
+  deterministic gates pass.
+- The local gateway records trigger fingerprints, wake leases, mutation intent,
+  suppression records, and replay records under local Agentic Factory state.
+  Linear remains the live queue because the gateway polls current project
+  state before starting work.
+- Behavior-repo proposal writes use the adopter's own git/`gh` auth for
+  proposal branches and PRs. They are distinct from product-repo binding, and
+  Agentic Factory stores no GitHub secret.
 - Local Phoenix is local custody. Traces, annotations, datasets, and eval
   evidence stay on the adopter machine unless the adopter chooses otherwise.
 - Security reports should use GitHub private vulnerability reporting when the
-  public repository enables it. Do not post credentials, tenant data, webhook
-  payloads, repo contents, or local paths in public issues.
+  public repository enables it. Do not post credentials, tenant data, Linear
+  project data, repo contents, or local paths in public issues.
 
 ## Current Limits
 
 - Source-visible/no reuse license: the code is public for evaluation and
   review, but no license grants copying, modification, distribution, or reuse.
-- Hosted setup is best-effort public beta infrastructure, not an enterprise
-  support promise.
-- No public SLA, durable monitoring/audit claim, gateway/IP limit claim,
-  automated sweep claim, or service-key rotation claim is made for the hosted
-  service.
 - No npm release is available; this repo is not a package distribution channel.
 - External PRs are not supported yet. Feedback through issues is welcome after
   launch, but maintainers may apply changes privately.
@@ -173,7 +203,7 @@ Phoenix store, or all-repositories GitHub grant.
   later capability is landed, verified, and documented. Behavior-repo proposal
   PRs remain human-reviewed process-change proposals.
 - Background supervisor and OS autostart are not the current launch path; use
-  foreground `npm run runner` for sandbox evaluation.
+  foreground `factory gateway start` for sandbox evaluation.
 
 ## Reuse/License
 
@@ -199,14 +229,11 @@ docs/
   promotion-acceptance-policy.md
   self-improvement.md
 execution/
-  integrations/linear/   Linear OAuth, GraphQL setup, runner, GitHub broker client
+  integrations/linear/   Linear OAuth, GraphQL setup, local gateway, runner, GitHub path
   evals/decomposition/   schemas, rubrics, datasets, judge prompts
   templates/             Linear issue, roadmap, review, and PR templates
 examples/
   portfolio-demo/        synthetic walkthrough and public-safe evidence
-supabase/
-  functions/             hosted inbox and GitHub broker source
-  migrations/            hosted queue/credential schema
 ```
 
 When present, `maintainers/` contains product/process memory for maintainers.

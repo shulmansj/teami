@@ -322,6 +322,29 @@ test("machine-authorship line renders only when supplied", () => {
   assert.ok(withMachine.includes("Machine-drafted candidate (agentic_factory_drafter_v1:gpt-5)"));
 });
 
+test("PR provenance renders the source run and promotion identity into the review body", () => {
+  const body = buildPromotionPrBody(fixture({
+    prProvenance: {
+      source_run_id: "run-source-123",
+      experiment_receipt_id: "expr-receipt-123",
+      phoenix_experiment_id: "EXP1",
+      proposal_instance_id: "prop-renderer0001",
+      normalized_envelope_hash: "a".repeat(64),
+      github_auth_mode: "local_ambient",
+      push_auth: "ssh",
+    },
+  }));
+
+  assert.match(body, /## Provenance/);
+  assert.match(body, /Source run: run-source-123/);
+  assert.match(body, /Experiment receipt: expr-receipt-123/);
+  assert.match(body, /GitHub write custody: GitHub mode local_ambient; push auth ssh/);
+  assert.ok(
+    body.indexOf("## Provenance") < body.indexOf("## Machine-readable marker"),
+    "provenance should be visible before the marker block",
+  );
+});
+
 test("runtime role defaults body renders change rows and disclosure with one marker", () => {
   const body = buildPromotionPrBody(fixture({
     target: {

@@ -1,8 +1,8 @@
 export const LOCAL_SUPERVISOR_HARDFLOOR_RUNNER_STUB_REASON =
-  "hosted_wake_claims_disabled_by_default";
+  "gateway_autostart_deferred";
 
 async function runSupervisorRunnerStep({
-  allowHostedWakeClaims,
+  allowGatewayWakeClaims,
   runRunnerOnce,
   disable,
   onProgress,
@@ -10,19 +10,19 @@ async function runSupervisorRunnerStep({
   if (disable.runner_disabled) {
     return { ok: true, status: "skipped", reason: "runner_disabled" };
   }
-  if (allowHostedWakeClaims !== true) {
+  if (allowGatewayWakeClaims !== true) {
     return {
       ok: true,
       status: "skipped",
       reason: LOCAL_SUPERVISOR_HARDFLOOR_RUNNER_STUB_REASON,
       detail:
-        "Hosted wake claims are disabled by default; supervisor default never claims hosted wakes without explicit enablement.",
+        "Gateway autostart is deferred; run npm run gateway as the operator-controlled poll loop.",
     };
   }
   if (typeof runRunnerOnce !== "function") {
     return { ok: false, status: "blocked", reason: "foreground_runner_not_wired" };
   }
-  onProgress("local supervisor: running foreground runner codepath");
+  onProgress("local supervisor: running local gateway codepath");
   const result = await runRunnerOnce();
   return {
     ok: ["completed", "paused", "rejected", "idle"].includes(result.status),

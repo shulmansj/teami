@@ -15,15 +15,10 @@ import {
   parseTokenSecret,
   serializeTokenSet,
 } from "../src/linear-credential-store.mjs";
-import {
-  isLegacyRunnerInboxCredentialTargetForConfig,
-  legacyRunnerInboxCredentialTargetForConfig,
-  runnerInboxCredentialTargetForConfig,
-} from "../src/runner-inbox-credential.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
-test("Two domains in different workspaces produce different targets for both credential types", () => {
+test("Two domains in different workspaces produce different Linear OAuth credential targets", () => {
   const config = loadLinearConfig({ repoRoot });
   const domainA = { domainId: "support-ops", workspaceId: "workspace-a" };
   const domainB = { domainId: "sales-ops", workspaceId: "workspace-b" };
@@ -31,10 +26,6 @@ test("Two domains in different workspaces produce different targets for both cre
   assert.notEqual(
     credentialTargetForConfig(config, "fixture-repo-a", domainA),
     credentialTargetForConfig(config, "fixture-repo-a", domainB),
-  );
-  assert.notEqual(
-    runnerInboxCredentialTargetForConfig(config, "fixture-repo-a", domainA),
-    runnerInboxCredentialTargetForConfig(config, "fixture-repo-a", domainB),
   );
 });
 
@@ -49,10 +40,6 @@ test("Same domain credential targets are stable across calls", () => {
     credentialTargetForConfig(config, "fixture-repo-a", domain),
     credentialTargetForConfig(config, "fixture-repo-a", domain),
   );
-  assert.equal(
-    runnerInboxCredentialTargetForConfig(config, "fixture-repo-a", domain),
-    runnerInboxCredentialTargetForConfig(config, "fixture-repo-a", domain),
-  );
   assert.notEqual(
     credentialTargetForConfig(config, "fixture-repo-a", domain),
     credentialTargetForConfig(config, "fixture-repo-b", domain),
@@ -62,10 +49,8 @@ test("Same domain credential targets are stable across calls", () => {
 test("Legacy-format detection fires on a synthesized old target", () => {
   const config = loadLinearConfig({ repoRoot });
   const oldOAuthTarget = legacyCredentialTargetForConfig(config, "fixture-repo-a");
-  const oldRunnerTarget = legacyRunnerInboxCredentialTargetForConfig(config, "fixture-repo-a");
 
   assert.equal(isLegacyCredentialTargetForConfig(oldOAuthTarget, config, "fixture-repo-a"), true);
-  assert.equal(isLegacyRunnerInboxCredentialTargetForConfig(oldRunnerTarget, config, "fixture-repo-a"), true);
   assert.equal(
     isLegacyCredentialTargetForConfig(
       credentialTargetForConfig(config, "fixture-repo-a", {
@@ -89,10 +74,6 @@ test("New-format credential target builders throw when domain or workspace ids a
   assert.throws(
     () => credentialTargetForConfig(config, "fixture-repo-a", { domainId: "support-ops" }),
     /requires workspace_id/,
-  );
-  assert.throws(
-    () => runnerInboxCredentialTargetForConfig(config, "fixture-repo-a"),
-    /requires workspace_id and domain_id/,
   );
   assert.throws(
     () => createLinearCredentialStore({ config, repoRoot: "fixture-repo-a" }),

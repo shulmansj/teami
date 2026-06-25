@@ -6,13 +6,12 @@ import path from "node:path";
 import test from "node:test";
 
 import { loadLinearConfig } from "../src/config.mjs";
-import { createGitHubInstallationTokenAskPass } from "../src/github-askpass.mjs";
 import * as githubSetupModule from "../src/github-setup.mjs";
 
 const {
   createDryRunGitHubSetupTransport,
+  createLocalAmbientGitHubSetupTransport,
   createMockGitHubSetupTransport,
-  createRealGitHubSetupTransport,
   DEFAULT_BEHAVIOR_REPO_NAME,
   DRY_RUN_OWNER_PLACEHOLDER,
   DRY_RUN_GITHUB_SETUP_BANNER,
@@ -22,14 +21,14 @@ const {
   githubConnectionDoctorChecks,
   githubConnectionStatePath,
   normalizeGitRemoteUrl,
+  parseGitHubRemoteUrl,
   planRemoteLayout,
+  pushAuthForRemoteUrl,
   readGitHubConnectionState,
   resolveBehaviorRepoIdentity,
   resolveGitHubSetupSettings,
   runGitHubInitPhase,
   scanTrackedTreeForSecrets,
-  STEADY_STATE_APP_PERMISSIONS,
-  verifyAppPermissionSnapshot,
 } = githubSetupModule;
 
 const STARTER_URL = "https://github.com/agentic-factory/agentic-factory-starter";
@@ -80,6 +79,11 @@ function createInMemoryRunGit({ remotes = {} } = {}) {
       remoteMap.set(name, value);
       return ok();
     }
+    if (command === "remote" && subcommand === "get-url") {
+      const remoteName = args[2] === "--push" ? args[3] : args[2];
+      if (!remoteMap.has(remoteName)) return fail(`remote ${remoteName} missing`);
+      return ok(`${remoteMap.get(remoteName)}\n`);
+    }
     if (command === "remote" && subcommand === "rename") {
       if (!remoteMap.has(name)) return fail(`remote ${name} missing`);
       const existing = remoteMap.get(name);
@@ -94,19 +98,9 @@ function createInMemoryRunGit({ remotes = {} } = {}) {
     if (command === "ls-files" && subcommand === "-z") return ok("");
     if (command === "symbolic-ref") return ok("main\n");
     if (command === "rev-parse") return ok("abc123\n");
+    if (command === "push" && subcommand === "--dry-run") return ok("dry-run ok\n");
     return fail(`unexpected git command: ${args.join(" ")}`);
   };
-}
-
-function askpassOutput(askpass, prompt) {
-  const result = spawnSync(askpass.askpassPath, [prompt], {
-    encoding: "utf8",
-    env: { ...process.env, ...askpass.env },
-    shell: process.platform === "win32",
-    windowsHide: true,
-  });
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout.trim();
 }
 
 function initGitRepo(root, { remotes = {} } = {}) {
@@ -128,8 +122,6 @@ function configWithStarter(overrides = {}) {
     github: {
       behavior_repo: { owner: null, name: DEFAULT_BEHAVIOR_REPO_NAME, visibility: "private" },
       starter_remote_urls: [STARTER_URL],
-      app_slug: "agentic-factory",
-      app_id: "123456",
       ...overrides,
     },
   };
@@ -153,12 +145,9 @@ function verifiedRealStateFixture({
   repoId = "repo-real-1",
   originApplied = true,
   upstreamUrl = STARTER_URL,
-  permissions = { ...STEADY_STATE_APP_PERMISSIONS },
-  repositorySelection = "selected",
-  selectedRepositoryIds = [repoId],
-  selectedRepositoryFullNames = null,
-  revoked = true,
-  setupGrant = null,
+  checkoutPath = null,
+  pushAuth = "https",
+  realPushEnabled = true,
 } = {}) {
   return {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -174,26 +163,32 @@ function verifiedRealStateFixture({
       url: `https://github.com/${owner}/${name}`,
     },
     default_branch: "main",
+    local_checkout_path: checkoutPath,
+    push_auth: pushAuth,
+    local_auth: {
+      mode: "local_ambient",
+      gh_auth: "verified",
+      git_write: "verified",
+      real_push_enabled: realPushEnabled,
+      push_auth: pushAuth,
+      checked_at: "2026-06-10T03:00:00.000Z",
+    },
     remotes: {
-      origin: { url: `https://github.com/${owner}/${name}`, planned: true, applied: originApplied },
+      origin: {
+        url: `https://github.com/${owner}/${name}`,
+        push_url: pushAuth === "ssh" ? `git@github.com:${owner}/${name}.git` : `https://github.com/${owner}/${name}`,
+        push_auth: pushAuth,
+        planned: true,
+        applied: originApplied,
+      },
       upstream: upstreamUrl
         ? { url: upstreamUrl, preserved_from: "origin", planned: true, applied: originApplied }
         : null,
       planned_actions: [],
     },
-    app_installation: {
-      installation_id: "inst-1",
-      app_slug: "agentic-factory",
-      permission_snapshot: permissions,
-      repository_selection: repositorySelection,
-      selected_repository_ids: selectedRepositoryIds,
-      selected_repository_full_names: selectedRepositoryFullNames || [`${owner}/${name}`],
-      verified_exact: true,
-    },
-    push_verification: { recorded: true, pushed: true, branch: "main", head_sha: "abc", verified: true },
+    push_verification: { recorded: true, pushed: true, branch: "main", head_sha: "abc", verified: true, push_auth: pushAuth },
     pre_push_sanitizer: { scanned_count: 1, skipped_binary_count: 0, tracked_count: 1, findings: [] },
-    pr_generation: { verified: true, probes: {} },
-    setup_grant: setupGrant ?? { revoked, confirmed: revoked, revoked_at: revoked ? "2026-06-10T03:00:00.000Z" : null },
+    pr_generation: { verified: true, derived_from: "local_ambient_git_gh_auth", mode: "local_ambient" },
     failures: [],
     verified_at: "2026-06-10T03:00:00.000Z",
   };
@@ -207,34 +202,43 @@ function writeStateFixture(root, state) {
 }
 
 // ---------------------------------------------------------------------------
-// Transports: broker-backed real path + credential-path separation.
+// Transports: local ambient path plus dry-run rehearsal.
 // ---------------------------------------------------------------------------
 
-test("the real GitHub setup transport fails closed without the hosted broker client", () => {
-  assert.throws(() => createRealGitHubSetupTransport(), /github_setup_not_configured/);
-});
-
-test("real GitHub init requires adopter-owned GitHub App identity", async () => {
+test("real GitHub init binds with local ambient auth without stored GitHub credentials", async () => {
   const root = tempRoot();
-  const mock = createMockGitHubSetupTransport();
+  const behaviorUrl = "https://github.com/acme/agentic-factory";
+  const mock = createMockGitHubSetupTransport({
+    existingRepos: ["acme/agentic-factory"],
+    existingRepoDetails: {
+      "acme/agentic-factory": {
+        id: "repo-acme-agentic-factory",
+        owner: "acme",
+        name: "agentic-factory",
+        full_name: "acme/agentic-factory",
+        visibility: "private",
+        default_branch: "main",
+      },
+    },
+  });
   const transport = { ...mock, kind: "real" };
   const { result } = await runPhase({
     root,
     transport,
+    runGit: createInMemoryRunGit({ remotes: { origin: `${behaviorUrl}.git` } }),
     config: {
       github: {
         behavior_repo: { owner: "acme", name: DEFAULT_BEHAVIOR_REPO_NAME, visibility: "private" },
         starter_remote_urls: [],
-        app_slug: "<your-github-app-slug>",
-        app_id: "<your-github-app-id>",
       },
     },
   });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "github_app_identity_not_configured");
-  assert.match(result.repair, /github\.app_slug/);
-  assert.match(result.repair, /github\.app_id/);
-  assert.equal(mock.calls.length, 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.connection.connection_mode, "real");
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
+  assert.equal(result.connection.local_auth.mode, "local_ambient");
+  assert.equal(result.connection.local_auth.real_push_enabled, true);
+  assert.equal(result.connection.remotes.origin.push_auth, "https");
 });
 
 test("real setup resolves missing behavior repo owner from gh login, prompting in TTY and defaulting non-TTY", async () => {
@@ -288,10 +292,26 @@ test("real init emits visible progress immediately after GitHub owner selection"
   const events = [];
   const transport = {
     kind: "real",
-    async request({ endpointId }) {
+    async request({ endpointId, owner, repo, params = {} }) {
       events.push(`transport:${endpointId}`);
       if (endpointId === "get_repository") {
-        return { exists: true, repo: { visibility: "private" } };
+        return {
+          exists: true,
+          repo: {
+            id: "repo-octocat-agentic-factory",
+            owner,
+            name: repo,
+            full_name: `${owner}/${repo}`,
+            visibility: "private",
+            default_branch: "main",
+          },
+        };
+      }
+      if (endpointId === "push_initial_branch") {
+        return { pushed: true, recorded: true, branch: params.branch, head_sha: params.head_sha };
+      }
+      if (endpointId === "verify_default_branch") {
+        return { verified: true, default_branch: params.branch, head_sha: params.head_sha };
       }
       throw new Error(`unexpected endpoint: ${endpointId}`);
     },
@@ -308,15 +328,14 @@ test("real init emits visible progress immediately after GitHub owner selection"
     onProgress: (line) => events.push(`progress:${line}`),
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "behavior_repo_name_collision");
+  assert.equal(result.ok, true);
   const targetIndex = events.indexOf("progress:GitHub repo target: octocat/agentic-factory (private)");
   const localRemotesIndex = events.indexOf("progress:GitHub progress: Checking local Git remotes...");
   const repoCheckIndex = events.indexOf("progress:GitHub progress: Checking whether octocat/agentic-factory is available on GitHub...");
   const transportIndex = events.indexOf("transport:get_repository");
   assert.ok(targetIndex >= 0, `missing target progress: ${events.join("\n")}`);
-  assert.ok(localRemotesIndex > targetIndex, `missing local-remotes progress: ${events.join("\n")}`);
-  assert.ok(repoCheckIndex > localRemotesIndex, `missing repo-check progress: ${events.join("\n")}`);
+  assert.ok(localRemotesIndex >= 0 && localRemotesIndex < targetIndex, `missing local-remotes progress: ${events.join("\n")}`);
+  assert.ok(repoCheckIndex > targetIndex, `missing repo-check progress: ${events.join("\n")}`);
   assert.ok(repoCheckIndex < transportIndex, `repo-check progress must print before network lookup: ${events.join("\n")}`);
 });
 
@@ -392,17 +411,12 @@ test("real setup without flag, config owner, or gh login fails with a gh auth re
   assert.match(settings.detail, /--github-owner/);
 });
 
-test("the real GitHub setup transport ignores renamed-repo redirects during availability checks", async () => {
-  const transport = createRealGitHubSetupTransport({
-    brokerClient: {
-      async verifyInstallation() {
-        throw new Error("unexpected install verification");
-      },
-      async mintInstallationToken() {
-        throw new Error("unexpected token mint");
-      },
-    },
+test("the local ambient GitHub setup transport ignores renamed-repo redirects during availability checks", async () => {
+  const transport = createLocalAmbientGitHubSetupTransport({
     runCommand: (command, args) => {
+      if (command === "gh" && args.join(" ") === "auth status --hostname github.com") {
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      }
       if (command === "gh" && args[0] === "repo" && args[1] === "view") {
         return {
           ok: true,
@@ -430,31 +444,17 @@ test("the real GitHub setup transport ignores renamed-repo redirects during avai
   assert.equal(result.redirected_repo, "shulmansj/agentic-factory-prevalidation-20260614");
 });
 
-test("the real GitHub setup transport uses gh for repo setup and broker tokens for steady-state push/probes", async () => {
+test("the local ambient GitHub setup transport uses gh for repo setup and local git for push/probes", async () => {
   const root = tempRoot();
   const commandCalls = [];
-  const brokerCalls = [];
-  const transport = createRealGitHubSetupTransport({
+  const transport = createLocalAmbientGitHubSetupTransport({
     repoRoot: root,
     now: () => new Date("2026-06-10T05:00:00.000Z"),
-    brokerClient: {
-      async verifyInstallation(input) {
-        brokerCalls.push({ op: "verify", input });
-        return {
-          installation: {
-            id: 123,
-            app_slug: "agentic-factory-app",
-            permissions: { ...STEADY_STATE_APP_PERMISSIONS },
-          },
-        };
-      },
-      async mintInstallationToken(input) {
-        brokerCalls.push({ op: "mint", input });
-        return { token: `ghs_setup_${brokerCalls.length}` };
-      },
-    },
     runCommand: (command, args, options = {}) => {
       commandCalls.push({ command, args, options });
+      if (command === "gh" && args.join(" ") === "auth status --hostname github.com") {
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      }
       if (command === "gh" && args[0] === "repo" && args[1] === "create") {
         return { ok: true, status: 0, stdout: "", stderr: "" };
       }
@@ -474,13 +474,8 @@ test("the real GitHub setup transport uses gh for repo setup and broker tokens f
       if (command === "git" && args[0] === "push") {
         return { ok: true, status: 0, stdout: "", stderr: "" };
       }
-      if (command === "gh" && args[0] === "api") {
-        return {
-          ok: true,
-          status: 0,
-          stdout: JSON.stringify({ name: "main", commit: { sha: "abc123" } }),
-          stderr: "",
-        };
+      if (command === "git" && args[0] === "ls-remote") {
+        return { ok: true, status: 0, stdout: "abc123\trefs/heads/main\n", stderr: "" };
       }
       return { ok: false, status: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
     },
@@ -491,12 +486,6 @@ test("the real GitHub setup transport uses gh for repo setup and broker tokens f
     owner: "shulmansj",
     repo: "agentic-factory",
     params: { visibility: "private" },
-  });
-  const installation = await transport.request({
-    endpointId: "get_app_installation",
-    owner: "shulmansj",
-    repo: "agentic-factory",
-    params: { app_slug: "agentic-factory-app", app_id: "123456" },
   });
   const pushed = await transport.request({
     endpointId: "push_initial_branch",
@@ -510,70 +499,37 @@ test("the real GitHub setup transport uses gh for repo setup and broker tokens f
     repo: "agentic-factory",
     params: { branch: "main" },
   });
-  await transport.request({
-    endpointId: "probe_pr_create_capability",
-    owner: "shulmansj",
-    repo: "agentic-factory",
-  });
-  const setupGrant = await transport.request({
-    endpointId: "revoke_setup_grant",
-    owner: "shulmansj",
-    repo: "agentic-factory",
-  });
 
   assert.equal(created.created, true);
-  assert.equal(installation.installation.id, 123);
   assert.equal(pushed.pushed, true);
-  assert.equal(setupGrant.revoked, false);
-  assert.equal(setupGrant.confirmed, true);
-  assert.equal(setupGrant.revocation_method, "not_applicable_existing_gh_operator_session");
-  assert.equal(setupGrant.grant_retained, false);
   assert.ok(commandCalls.some((call) =>
     call.command === "gh"
     && call.args.join(" ") === "repo create shulmansj/agentic-factory --private --disable-issues --disable-wiki",
   ));
   const gitPush = commandCalls.find((call) => call.command === "git" && call.args[0] === "push");
   assert.equal(gitPush.options.cwd, root);
-  assert.match(gitPush.options.env.GIT_ASKPASS, /askpass/);
-  assert.equal(gitPush.options.env.AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN, "ghs_setup_2");
-  assert.ok(!JSON.stringify(gitPush.args).includes("ghs_setup"));
-  assert.deepEqual(brokerCalls.map((call) => call.op), ["verify", "mint", "mint", "mint"]);
-  assert.deepEqual(brokerCalls[1].input.permissions, { contents: "write" });
-  assert.deepEqual(brokerCalls[2].input.permissions, { contents: "read" });
-  assert.deepEqual(brokerCalls[3].input.permissions, { pull_requests: "write" });
+  assert.equal(gitPush.options.env.GIT_TERMINAL_PROMPT, "0");
+  assert.ok(!("AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN" in gitPush.options.env));
+  assert.ok(!JSON.stringify(commandCalls).includes("ghs_setup"));
 });
 
-test("GitHub installation-token askpass script emits username/password without embedding the token", () => {
-  const token = ["gh", "s_", "runtime_token_for_askpass_test"].join("");
-  const askpass = createGitHubInstallationTokenAskPass({ token, tempRoot: tempRoot() });
-  try {
-    const script = fs.readFileSync(askpass.askpassPath, "utf8");
-    assert.ok(!script.includes(token));
-    assert.equal(askpassOutput(askpass, "Username for 'https://github.com': "), "x-access-token");
-    assert.equal(askpassOutput(askpass, "Password for 'https://x-access-token@github.com': "), token);
-  } finally {
-    const dir = askpass.tempDir;
-    askpass.cleanup();
-    assert.equal(fs.existsSync(dir), false);
-  }
-});
-
-test("setup endpoint allowlist separates setup-grant and steady-state credential paths and has no merge/admin surface", () => {
+test("setup endpoint allowlist names local ambient auth surfaces and has no merge/admin surface", () => {
   for (const endpoint of GITHUB_SETUP_ENDPOINT_ALLOWLIST) {
     assert.ok(
-      ["setup_grant", "steady_state_app"].includes(endpoint.credential_path),
+      ["local_gh_auth", "local_git_auth"].includes(endpoint.credential_path),
       `endpoint ${endpoint.id} must declare a credential path`,
     );
     assert.ok(!/merge|ready|approve|review/i.test(endpoint.id), `merge-shaped setup endpoint: ${endpoint.id}`);
   }
   const byId = Object.fromEntries(GITHUB_SETUP_ENDPOINT_ALLOWLIST.map((entry) => [entry.id, entry]));
-  // Repo creation and grant revocation ride the one-time setup grant; the
-  // push/branch/PR capability surface rides the steady-state App.
-  assert.equal(byId.create_repository.credential_path, "setup_grant");
-  assert.equal(byId.revoke_setup_grant.credential_path, "setup_grant");
-  assert.equal(byId.push_initial_branch.credential_path, "steady_state_app");
-  assert.equal(byId.probe_branch_create_capability.credential_path, "steady_state_app");
-  assert.equal(byId.probe_pr_create_capability.credential_path, "steady_state_app");
+  assert.equal(byId.create_repository.credential_path, "local_gh_auth");
+  assert.equal(byId.push_initial_branch.credential_path, "local_git_auth");
+  assert.deepEqual(Object.keys(byId).sort(), [
+    "create_repository",
+    "get_repository",
+    "push_initial_branch",
+    "verify_default_branch",
+  ]);
 });
 
 test("both setup transports refuse endpoint ids outside the allowlist", async () => {
@@ -599,12 +555,17 @@ test("dry-run setup transport records calls and marks every shape dry_run: true"
   });
   assert.equal(created.dry_run, true);
   assert.equal(created.repo.visibility, "private");
-  const revoked = await transport.request({ endpointId: "revoke_setup_grant", owner: "o", repo: "r" });
-  assert.equal(revoked.dry_run, true);
-  assert.equal(revoked.revoked, true);
+  const pushed = await transport.request({
+    endpointId: "push_initial_branch",
+    owner: "o",
+    repo: "r",
+    params: { branch: "main" },
+  });
+  assert.equal(pushed.dry_run, true);
+  assert.equal(pushed.recorded, true);
   assert.deepEqual(
     transport.calls.map((call) => call.endpointId),
-    ["create_repository", "revoke_setup_grant"],
+    ["create_repository", "push_initial_branch"],
   );
 });
 
@@ -655,21 +616,36 @@ test("a remote already named upstream is preserved and only a new origin is plan
   assert.equal(result.connection.remotes.upstream.preserved_from, "upstream");
 });
 
-test("pre-existing adopter-owned remote is a setup conflict with a repair path, never adopted", async () => {
+test("pre-existing adopter-owned GitHub origin is bound as the behavior repo with local auth", async () => {
   const root = initGitRepo(tempRoot(), {
     remotes: { origin: "https://github.com/some-adopter/their-own-repo.git" },
   });
-  const transport = createMockGitHubSetupTransport();
+  const mock = createMockGitHubSetupTransport({
+    existingRepos: ["some-adopter/their-own-repo"],
+    existingRepoDetails: {
+      "some-adopter/their-own-repo": {
+        id: "repo-some-adopter-their-own-repo",
+        owner: "some-adopter",
+        name: "their-own-repo",
+        full_name: "some-adopter/their-own-repo",
+        visibility: "private",
+        default_branch: "main",
+      },
+    },
+  });
+  const transport = { ...mock, kind: "real" };
   const { result } = await runPhase({ root, transport });
-  assert.equal(result.ok, false);
-  assert.equal(result.status, "setup_conflict");
-  assert.equal(result.reason, "github_remote_setup_conflict");
-  assert.match(result.repair, /never adopts a pre-existing adopter-owned remote/);
-  assert.match(result.detail, /some-adopter\/their-own-repo/);
-  // The conflict is decided BEFORE any GitHub call: no repo lookup/creation.
-  assert.equal(transport.calls.length, 0);
-  // No partial adoption: the recorded state is not a verified connection.
-  assert.equal(resolveBehaviorRepoIdentity({ repoRoot: root }).ok, false);
+  assert.equal(result.ok, true);
+  assert.equal(result.connection.connection_mode, "real");
+  assert.equal(result.connection.repo.owner, "some-adopter");
+  assert.equal(result.connection.repo.name, "their-own-repo");
+  assert.equal(result.connection.repo.owner_source, "origin_remote");
+  assert.equal(result.connection.local_auth.mode, "local_ambient");
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
+  assert.ok(!transport.calls.some((call) => call.endpointId === "create_repository"));
+  const identity = resolveBehaviorRepoIdentity({ repoRoot: root });
+  assert.equal(identity.ok, true);
+  assert.deepEqual(identity.repo, { owner: "some-adopter", repo: "their-own-repo" });
 });
 
 test("ssh and https starter remote spellings normalize to the same identity", () => {
@@ -717,25 +693,25 @@ test("real remote application rolls back if the final origin/upstream shape is n
 // Name collision + creation outcomes (error rows ~1897-1898).
 // ---------------------------------------------------------------------------
 
-test("behavior repo name collision refuses to attach and suggests a safe suffix", async () => {
+test("existing behavior repo is bound rather than treated as a name collision", async () => {
   const root = initGitRepo(tempRoot());
   const transport = createMockGitHubSetupTransport({
     existingRepos: [`${DRY_RUN_OWNER_PLACEHOLDER}/${DEFAULT_BEHAVIOR_REPO_NAME}`],
   });
   const { result } = await runPhase({ root, transport });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "behavior_repo_name_collision");
-  assert.match(result.repair, /never attaches to an existing repo/);
-  assert.match(result.repair, new RegExp(`${DEFAULT_BEHAVIOR_REPO_NAME}-2`));
+  assert.equal(result.ok, true);
+  assert.equal(result.connection.repo.full_name, `${DRY_RUN_OWNER_PLACEHOLDER}/${DEFAULT_BEHAVIOR_REPO_NAME}`);
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
+  assert.equal(result.connection.local_auth.mode, "local_ambient");
   assert.ok(!transport.calls.some((call) => call.endpointId === "create_repository"));
 });
 
-test("real init resumes a repo created by a prior pending App-approval run", async () => {
+test("real init resumes a repo created by a prior pending local GitHub run", async () => {
   const root = initGitRepo(tempRoot(), { remotes: { origin: `${STARTER_URL}.git` } });
   writeStateFixture(root, {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
     connection_mode: "real",
-    status: "pending_app_approval",
+    status: "pending_org_approval",
     adoption_complete: false,
     repo: {
       owner: "shulmansj",
@@ -747,26 +723,19 @@ test("real init resumes a repo created by a prior pending App-approval run", asy
     },
     default_branch: null,
     remotes: null,
-    app_installation: null,
     push_verification: null,
     pre_push_sanitizer: null,
     pr_generation: null,
-    setup_grant: {
-      revoked: true,
-      confirmed: true,
-      revoked_at: "2026-06-10T20:34:25.963Z",
-    },
     failures: [
       {
-        reason: "github_app_installation_pending_approval",
-        repair: "install app",
+        reason: "behavior_repo_creation_pending_org_approval",
+        repair: "approve repo creation",
       },
     ],
     verified_at: null,
   });
   const mock = createMockGitHubSetupTransport({
     existingRepos: ["shulmansj/agentic-factory"],
-    appInstalled: true,
   });
   const transport = { ...mock, kind: "real" };
   const { result } = await runPhase({
@@ -779,7 +748,9 @@ test("real init resumes a repo created by a prior pending App-approval run", asy
   assert.equal(result.ok, true);
   assert.equal(result.connection.connection_mode, "real");
   assert.equal(result.connection.adoption_complete, true);
-  assert.equal(result.connection.setup_grant.revoked, true);
+  assert.equal(Object.hasOwn(result.connection, "setup_grant"), false);
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
+  assert.equal(result.connection.local_auth.real_push_enabled, true);
   assert.ok(!mock.calls.some((call) => call.endpointId === "create_repository"));
   assert.ok(mock.calls.some((call) => call.endpointId === "push_initial_branch"));
   assert.deepEqual(listRemotes(root), {
@@ -788,7 +759,7 @@ test("real init resumes a repo created by a prior pending App-approval run", asy
   });
 });
 
-test("real init resumes a repo created before a failed hosted install intent", async () => {
+test("real init resumes a repo created before a failed local auth verification", async () => {
   const root = initGitRepo(tempRoot(), { remotes: { origin: `${STARTER_URL}.git` } });
   writeStateFixture(root, {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -805,30 +776,20 @@ test("real init resumes a repo created before a failed hosted install intent", a
     },
     default_branch: null,
     remotes: null,
-    app_installation: null,
     push_verification: null,
     pre_push_sanitizer: null,
     pr_generation: null,
-    setup_grant: {
-      revoked: false,
-      confirmed: true,
-      revoked_at: null,
-      revocation_method: "not_applicable_existing_gh_operator_session",
-      grant_retained: false,
-      operator_gh_session_not_retained: true,
-    },
     failures: [
       {
-        reason: "github_app_install_intent_failed",
+        reason: "behavior_repo_unreachable",
         repair: "retry GitHub setup",
-        detail: "setup grant mutation window expired",
+        detail: "local gh auth could not reach the repo",
       },
     ],
     verified_at: null,
   });
   const mock = createMockGitHubSetupTransport({
     existingRepos: ["shulmansj/agentic-factory"],
-    appInstalled: true,
   });
   const transport = { ...mock, kind: "real" };
   const { result } = await runPhase({
@@ -840,12 +801,14 @@ test("real init resumes a repo created before a failed hosted install intent", a
   });
   assert.equal(result.ok, true);
   assert.equal(result.connection.adoption_complete, true);
+  assert.equal(Object.hasOwn(result.connection, "setup_grant"), false);
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
   assert.ok(!mock.calls.some((call) => call.endpointId === "create_repository"));
   assert.ok(mock.calls.some((call) => call.endpointId === "get_repository"));
   assert.ok(mock.calls.some((call) => call.endpointId === "push_initial_branch"));
 });
 
-test("real init resumes an empty repo after a prior collision state overwrote creation evidence", async () => {
+test("real init resumes an empty repo after a prior failed state overwrote creation evidence", async () => {
   const root = initGitRepo(tempRoot(), { remotes: { origin: `${STARTER_URL}.git` } });
   writeStateFixture(root, {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -862,23 +825,14 @@ test("real init resumes an empty repo after a prior collision state overwrote cr
     },
     default_branch: null,
     remotes: null,
-    app_installation: null,
     push_verification: null,
     pre_push_sanitizer: null,
     pr_generation: null,
-    setup_grant: {
-      revoked: false,
-      confirmed: true,
-      revoked_at: null,
-      revocation_method: "not_applicable_existing_gh_operator_session",
-      grant_retained: false,
-      operator_gh_session_not_retained: true,
-    },
     failures: [
       {
-        reason: "behavior_repo_name_collision",
-        repair: "repo name collides",
-        detail: "a repository named shulmansj/agentic-factory already exists",
+        reason: "behavior_repo_unreachable",
+        repair: "repo was not reachable",
+        detail: "gh could not reach shulmansj/agentic-factory",
       },
     ],
     verified_at: null,
@@ -888,7 +842,6 @@ test("real init resumes an empty repo after a prior collision state overwrote cr
     existingRepoDetails: {
       "shulmansj/agentic-factory": { empty: true, visibility: "private" },
     },
-    appInstalled: true,
   });
   const transport = { ...mock, kind: "real" };
   const { result } = await runPhase({
@@ -900,6 +853,8 @@ test("real init resumes an empty repo after a prior collision state overwrote cr
   });
   assert.equal(result.ok, true);
   assert.equal(result.connection.adoption_complete, true);
+  assert.equal(Object.hasOwn(result.connection, "setup_grant"), false);
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
   assert.ok(!mock.calls.some((call) => call.endpointId === "create_repository"));
   assert.ok(mock.calls.some((call) => call.endpointId === "push_initial_branch"));
 });
@@ -922,20 +877,18 @@ test("org-approval-required repo creation stops in a repairable pending state wi
   assert.equal(result.status, "pending_org_approval");
   assert.equal(result.reason, "behavior_repo_creation_pending_org_approval");
   assert.match(result.repair, /owner to approve/);
-  assert.match(result.repair, /rather than silently completing a partial, eval-only adoption/);
+  assert.match(result.repair, /rather than silently completing a partial adoption/);
   // The pending state is durable for doctor, but never a verified connection.
   const stored = readGitHubConnectionState({ repoRoot: root });
   assert.equal(stored.ok, true);
   assert.equal(stored.connection.status, "pending_org_approval");
   assert.equal(resolveBehaviorRepoIdentity({ repoRoot: root }).ok, false);
-  // Fail-safe: the exercised setup grant is still revoked on the way out.
-  assert.ok(transport.calls.some((call) => call.endpointId === "revoke_setup_grant"));
+  assert.ok(!transport.calls.some((call) => call.endpointId === "push_initial_branch"));
 });
 
-test("real GitHub phase binds the hosted install before issuing the broker credential", async () => {
+test("real GitHub phase records local ambient auth without install callbacks", async () => {
   const root = tempRoot();
   const calls = [];
-  let statusCalls = 0;
   const behaviorUrl = "https://github.com/acme/agentic-factory";
   const runGit = (args) => {
     calls.push({ type: "git", args });
@@ -966,30 +919,13 @@ test("real GitHub phase binds the hosted install before issuing the broker crede
               full_name: `${owner}/${repo}`,
               visibility: "private",
               url: behaviorUrl,
-            },
-          };
-        case "get_app_installation":
-          return {
-            installed: true,
-            installation: {
-              id: "installation-bound",
-              app_slug: "agentic-factory-app",
-              permissions: { ...STEADY_STATE_APP_PERMISSIONS },
-              repository_selection: "selected",
-              selected_repository_ids: ["repo-acme-agentic-factory"],
-              selected_repository_full_names: ["acme/agentic-factory"],
+              default_branch: "main",
             },
           };
         case "push_initial_branch":
           return { pushed: true, recorded: true, branch: params.branch, head_sha: params.head_sha };
         case "verify_default_branch":
           return { verified: true, default_branch: params.branch, head_sha: params.head_sha };
-        case "revoke_setup_grant":
-          return { revoked: true, confirmed: true };
-        case "probe_branch_create_capability":
-          return { capable: true, derived_from: "test" };
-        case "probe_pr_create_capability":
-          return { capable: true, derived_from: "test" };
         default:
           throw new Error(`unexpected_endpoint:${endpointId}`);
       }
@@ -1000,182 +936,56 @@ test("real GitHub phase binds the hosted install before issuing the broker crede
     root,
     config: configWithStarter({
       behavior_repo: { owner: "acme", name: "agentic-factory", visibility: "private" },
-      app_slug: "agentic-factory-app",
-      app_id: "123456",
     }),
     transport,
     runGit,
-    githubInstallStatus: async () => {
-      statusCalls += 1;
-      calls.push({ type: "status", statusCalls });
-      return statusCalls === 1
-        ? { ok: true, grant: { githubInstallationId: null } }
-        : { ok: true, grant: { githubInstallationId: "installation-bound" } };
-    },
-    githubInstallIntent: async (input) => {
-      calls.push({ type: "intent", input });
-      return { ok: true, installUrl: "https://github.test/install" };
-    },
-    issueGitHubBrokerCredential: async (input) => {
-      calls.push({ type: "issue", input });
-      return { ok: true };
-    },
-    openBrowser: async (url) => {
-      calls.push({ type: "open", url });
-    },
-    sleep: async () => {
-      calls.push({ type: "sleep" });
-    },
-    installPollIntervalMs: 1,
-    installPollTimeoutMs: 2,
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.find((call) => call.type === "issue").input, {
-    owner: "acme",
-    repo: "agentic-factory",
-    installationId: "installation-bound",
-  });
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
+  assert.equal(Object.hasOwn(result.connection, "setup_grant"), false);
+  assert.equal(result.connection.local_auth.mode, "local_ambient");
+  assert.equal(result.connection.local_auth.real_push_enabled, true);
+  assert.equal(result.connection.pr_generation.derived_from, "local_ambient_git_gh_auth");
   const order = calls.map((call) => call.type === "transport" ? `transport:${call.endpointId}` : call.type);
-  assert.ok(order.indexOf("status") < order.indexOf("intent"));
-  assert.ok(order.indexOf("intent") < order.indexOf("issue"));
-  assert.ok(order.indexOf("issue") < order.indexOf("transport:get_app_installation"));
-  assert.ok(!order.includes("sleep"), "second status poll should observe the bound installation immediately");
+  assert.deepEqual(
+    order.filter((entry) => entry.startsWith("transport:")),
+    ["transport:get_repository", "transport:push_initial_branch", "transport:verify_default_branch"],
+  );
 });
 
 // ---------------------------------------------------------------------------
-// Setup grant revocation (error row ~1899).
+// Local ambient auth replaces external setup credentials.
 // ---------------------------------------------------------------------------
 
-test("the setup grant is revoked after creation and push, before init reports success", async () => {
+test("local ambient init stores only local auth proof for GitHub writes", async () => {
   const root = initGitRepo(tempRoot());
   const transport = createMockGitHubSetupTransport();
   const { result } = await runPhase({ root, transport });
   assert.equal(result.ok, true);
   const order = transport.calls.map((call) => call.endpointId);
-  const revokeIndex = order.indexOf("revoke_setup_grant");
-  assert.ok(revokeIndex > order.indexOf("create_repository"), "revoke must follow creation");
-  assert.ok(revokeIndex > order.indexOf("push_initial_branch"), "revoke must follow the initial push");
-  assert.equal(result.connection.setup_grant.revoked, true);
-  assert.equal(result.connection.setup_grant.confirmed, true);
+  assert.ok(order.indexOf("create_repository") < order.indexOf("push_initial_branch"));
+  assert.deepEqual(order, ["get_repository", "create_repository", "push_initial_branch", "verify_default_branch"]);
+  assert.equal(Object.hasOwn(result.connection, "setup_grant"), false);
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
+  assert.equal(result.connection.local_auth.mode, "local_ambient");
 });
 
-test("an unconfirmable setup-grant revocation fails init safe with an exact cleanup repair", async () => {
-  const root = initGitRepo(tempRoot());
-  const transport = createMockGitHubSetupTransport({ revoke: { revoked: false, confirmed: false } });
-  const { result } = await runPhase({ root, transport });
-  assert.equal(result.ok, false);
-  assert.equal(result.status, "failed_revocation_unconfirmed");
-  assert.equal(result.reason, "setup_grant_revocation_unconfirmed");
-  assert.match(result.repair, /revoke it manually NOW/);
-  assert.match(result.repair, /never merely forgotten/);
-  assert.equal(resolveBehaviorRepoIdentity({ repoRoot: root }).ok, false);
-});
-
-// ---------------------------------------------------------------------------
-// App installation permission exactness (CONSTRAINTS #23, error row ~1901).
-// ---------------------------------------------------------------------------
-
-test("an EXTRA app permission fails verification (steady-state app holds nothing beyond the exact set)", async () => {
-  const root = initGitRepo(tempRoot());
-  const transport = createMockGitHubSetupTransport({
-    appPermissions: { ...STEADY_STATE_APP_PERMISSIONS, issues: "write" },
-  });
-  const { result } = await runPhase({ root, transport });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "github_app_permissions_not_exact");
-  assert.match(result.detail, /EXTRA/);
-  assert.match(result.detail, /issues/);
-  assert.match(result.repair, /never repo-administration/);
-});
-
-test("a MISSING or wrong-level app permission fails verification", async () => {
-  for (const permissions of [
-    { metadata: "read", contents: "write" }, // pull_requests missing
-    { metadata: "read", contents: "read", pull_requests: "write" }, // contents wrong level
-  ]) {
-    const root = initGitRepo(tempRoot());
-    const { result } = await runPhase({
-      root,
-      transport: createMockGitHubSetupTransport({ appPermissions: permissions }),
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, "github_app_permissions_not_exact");
-  }
-  const verification = verifyAppPermissionSnapshot({ metadata: "read", contents: "write" });
-  assert.deepEqual(verification.missing, ["pull_requests"]);
-  assert.equal(verification.ok, false);
-});
-
-test("selected behavior repo proof records stable repo id and selected repo scope", async () => {
+test("local behavior repo proof records stable repo id and ambient auth state", async () => {
   const root = initGitRepo(tempRoot());
   const transport = createMockGitHubSetupTransport({
     repositoryId: "repo-selected-123",
-    selectedRepositoryIds: ["repo-selected-123"],
-    selectedRepositoryFullNames: [`${DRY_RUN_OWNER_PLACEHOLDER}/${DEFAULT_BEHAVIOR_REPO_NAME}`],
   });
   const { result } = await runPhase({ root, transport });
   assert.equal(result.ok, true);
   assert.equal(result.connection.repo.id, "repo-selected-123");
-  assert.equal(result.connection.app_installation.repository_selection, "selected");
-  assert.deepEqual(result.connection.app_installation.selected_repository_ids, ["repo-selected-123"]);
-  assert.deepEqual(
-    result.connection.app_installation.selected_repository_full_names,
-    [`${DRY_RUN_OWNER_PLACEHOLDER}/${DEFAULT_BEHAVIOR_REPO_NAME}`],
-  );
+  assert.equal(Object.hasOwn(result.connection, "app_installation"), false);
+  assert.equal(result.connection.local_auth.mode, "local_ambient");
+  assert.equal(result.connection.push_auth, "https");
   const identity = resolveBehaviorRepoIdentity({ repoRoot: root });
   assert.equal(identity.ok, true);
   assert.equal(identity.repo_id, "repo-selected-123");
-});
-
-test("selected behavior repo proof fails on all-repo, repo-id, and repo-name drift before push", async () => {
-  const cases = [
-    {
-      name: "missing selected-repo signal",
-      transport: createMockGitHubSetupTransport({
-        repositorySelection: null,
-        selectedRepositoryIds: [],
-        selectedRepositoryFullNames: [],
-      }),
-      reason: "github_app_installation_not_selected_repo",
-      detail: /repository_selection=missing/,
-    },
-    {
-      name: "all repos",
-      transport: createMockGitHubSetupTransport({ repositorySelection: "all" }),
-      reason: "github_app_installation_not_selected_repo",
-      detail: /repository_selection=all/,
-    },
-    {
-      name: "repo id mismatch",
-      transport: createMockGitHubSetupTransport({
-        repositoryId: "repo-selected-123",
-        selectedRepositoryIds: ["repo-other-999"],
-      }),
-      reason: "github_app_installation_repo_id_mismatch",
-      detail: /repo-selected-123/,
-    },
-    {
-      name: "repo name mismatch",
-      transport: createMockGitHubSetupTransport({
-        repositoryId: "repo-selected-123",
-        selectedRepositoryIds: ["repo-selected-123"],
-        selectedRepositoryFullNames: ["somebody/product-repo"],
-      }),
-      reason: "github_app_installation_repo_name_mismatch",
-      detail: /behavior repo/,
-    },
-  ];
-  for (const fixture of cases) {
-    const root = initGitRepo(tempRoot());
-    const { result } = await runPhase({ root, transport: fixture.transport });
-    assert.equal(result.ok, false, fixture.name);
-    assert.equal(result.reason, fixture.reason, fixture.name);
-    assert.match(result.detail, fixture.detail, fixture.name);
-    assert.ok(!fixture.transport.calls.some((call) => call.endpointId === "push_initial_branch"));
-    assert.ok(!fixture.transport.calls.some((call) => call.endpointId === "probe_pr_create_capability"));
-    assert.equal(resolveBehaviorRepoIdentity({ repoRoot: root }).ok, false);
-  }
+  assert.equal(identity.push_auth, "https");
 });
 
 // ---------------------------------------------------------------------------
@@ -1202,8 +1012,6 @@ test("token-shaped tracked content blocks the initial push with a sanitizer repo
   assert.match(result.repair, /Secrets are never sanitized through/);
   // The push intent is never even recorded.
   assert.ok(!transport.calls.some((call) => call.endpointId === "push_initial_branch"));
-  // Fail-safe revocation still runs.
-  assert.ok(transport.calls.some((call) => call.endpointId === "revoke_setup_grant"));
 });
 
 test("security scan seed fixture source does not trip the pre-push sanitizer", () => {
@@ -1258,7 +1066,7 @@ test("the repo's own tracked tree passes the pre-push secret scan (adopters' ini
 // All-phases-required success contract (plan ~424-434, error row ~1894).
 // ---------------------------------------------------------------------------
 
-test("init succeeds ONLY when creation, origin plan, push verify, app verify, and PR-generation verify all pass", async () => {
+test("init succeeds only when repo reachability, origin plan, push verify, and local auth recording pass", async () => {
   const root = initGitRepo(tempRoot());
   const transport = createMockGitHubSetupTransport();
   const { result } = await runPhase({ root, transport });
@@ -1270,11 +1078,14 @@ test("init succeeds ONLY when creation, origin plan, push verify, app verify, an
   assert.equal(connection.connection_mode, "dry_run");
   assert.equal(connection.adoption_complete, false);
   assert.equal(connection.default_branch, "main");
-  assert.equal(connection.app_installation.verified_exact, true);
-  assert.deepEqual(connection.app_installation.permission_snapshot, STEADY_STATE_APP_PERMISSIONS);
+  assert.equal(Object.hasOwn(connection, "app_installation"), false);
   assert.equal(connection.push_verification.verified, true);
+  assert.equal(connection.push_verification.push_auth, "https");
+  assert.equal(connection.local_auth.mode, "local_ambient");
+  assert.equal(connection.local_auth.real_push_enabled, false);
   assert.equal(connection.pr_generation.verified, true);
-  assert.equal(connection.setup_grant.revoked, true);
+  assert.equal(connection.pr_generation.derived_from, "local_ambient_git_gh_auth");
+  assert.equal(Object.hasOwn(connection, "setup_grant"), false);
   assert.ok(connection.verified_at);
   // The durable state file round-trips and resolves a behavior-repo identity.
   const identity = resolveBehaviorRepoIdentity({ repoRoot: root });
@@ -1307,30 +1118,18 @@ test("real init mode does not emit the dry-run banner or dry-run connection mode
   assert.doesNotMatch(output, /connection_mode=dry_run/);
 });
 
-test("a failing PR-generation probe fails init with a connect-GitHub repair path (no silent eval-only completion)", async () => {
-  const root = initGitRepo(tempRoot());
-  const { result } = await runPhase({
-    root,
-    transport: createMockGitHubSetupTransport({ prCreateCapable: false }),
-  });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "pr_generation_unverified");
-  assert.match(result.repair, /connect GitHub to complete adoption/);
-  assert.equal(resolveBehaviorRepoIdentity({ repoRoot: root }).ok, false);
-});
-
-test("a transport failure during capability probing fails init with a connect-GitHub repair path", async () => {
+test("a transport failure during behavior repo lookup fails init with a local gh repair path", async () => {
   const root = initGitRepo(tempRoot());
   const { result } = await runPhase({
     root,
     transport: createMockGitHubSetupTransport({
-      failures: { probe_pr_create_capability: { error: new Error("github api unreachable") } },
+      failures: { get_repository: { error: new Error("github api unreachable") } },
     }),
   });
   assert.equal(result.ok, false);
-  assert.equal(result.reason, "pr_generation_verification_failed");
+  assert.equal(result.reason, "github_repo_lookup_failed");
   assert.match(result.detail, /github api unreachable/);
-  assert.match(result.repair, /connect GitHub to complete adoption/);
+  assert.match(result.repair, /verify local gh auth/);
 });
 
 test("an unverified initial-branch push fails init", async () => {
@@ -1341,7 +1140,7 @@ test("an unverified initial-branch push fails init", async () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "initial_branch_push_unverified");
-  assert.match(result.repair, /connect GitHub to complete adoption/);
+  assert.match(result.repair, /push the initial main branch/);
 });
 
 test("dry-run mode is loudly disclosed: banner, incomplete adoption, and connection_mode dry_run", async () => {
@@ -1352,7 +1151,7 @@ test("dry-run mode is loudly disclosed: banner, incomplete adoption, and connect
   assert.equal(result.connection.connection_mode, "dry_run");
   const output = progress.join("\n");
   assert.match(output, /DRY-RUN GITHUB SETUP/);
-  assert.match(output, /broker-backed GitHub setup transport/);
+  assert.match(output, /local git\/gh auth/);
   assert.match(output, /NOT a/);
   assert.match(output, /adoption is NOT complete/);
   for (const line of DRY_RUN_GITHUB_SETUP_BANNER) {
@@ -1385,15 +1184,14 @@ test("resolveBehaviorRepoIdentity returns the verified repo identity and connect
   assert.equal(identity.source, "github_connection_state");
 });
 
-test("resolveBehaviorRepoIdentity fails typed when stored selected-repo proof drifts", () => {
+test("resolveBehaviorRepoIdentity returns local ambient auth details", () => {
   const root = tempRoot();
-  writeStateFixture(root, verifiedRealStateFixture({
-    repoId: "repo-selected-123",
-    selectedRepositoryIds: ["repo-other-999"],
-  }));
+  writeStateFixture(root, verifiedRealStateFixture({ pushAuth: "ssh", checkoutPath: "C:/work/agentic-factory" }));
   const identity = resolveBehaviorRepoIdentity({ repoRoot: root });
-  assert.equal(identity.ok, false);
-  assert.equal(identity.reason, "github_app_installation_repo_id_mismatch");
+  assert.equal(identity.ok, true);
+  assert.equal(identity.push_auth, "ssh");
+  assert.equal(identity.checkout_path, "C:/work/agentic-factory");
+  assert.equal(identity.real_push_enabled, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -1422,11 +1220,8 @@ test("doctor loudly flags a dry-run connection as not adoption-complete", async 
   // Remote plan is recorded but not applied in dry-run: named as such.
   assert.equal(byName["GitHub remote shape"].ok, false);
   assert.match(byName["GitHub remote shape"].message, /not applied \(dry-run planned only/);
-  // Setup grant + permissions + PR capability report from the recorded state
-  // and the (dry-run) lookup.
-  assert.equal(byName["GitHub setup grant"].ok, true);
-  assert.equal(byName["GitHub App permissions"].ok, true);
-  assert.equal(byName["GitHub PR generation"].ok, true);
+  assert.equal(byName["GitHub behavior repo reachable"], undefined);
+  assert.equal(byName["GitHub local write auth"], undefined);
 });
 
 test("doctor reports remote drift against a real verified connection with an exact repair", async () => {
@@ -1436,10 +1231,6 @@ test("doctor reports remote drift against a real verified connection with an exa
   writeStateFixture(root, verifiedRealStateFixture({ owner: "acme", name: "acme-behavior" }));
   const checks = await githubConnectionDoctorChecks({
     repoRoot: root,
-    transport: createMockGitHubSetupTransport({
-      appPermissions: { ...STEADY_STATE_APP_PERMISSIONS },
-      installationId: "inst-1",
-    }),
   });
   const remoteCheck = checks.find((check) => check.name === "GitHub remote shape");
   assert.equal(remoteCheck.ok, false);
@@ -1448,74 +1239,71 @@ test("doctor reports remote drift against a real verified connection with an exa
   assert.match(remoteCheck.message, /upstream is missing/);
 });
 
-test("doctor reports app permission drift (extra permission) and missing PR capability with named repairs", async () => {
-  const root = initGitRepo(tempRoot());
-  writeStateFixture(root, verifiedRealStateFixture());
+test("doctor reports behavior repo reachability and local write auth", async () => {
+  const root = tempRoot();
+  writeStateFixture(root, verifiedRealStateFixture({ checkoutPath: root }));
+  const transport = createMockGitHubSetupTransport({
+    existingRepos: ["real-owner/real-behavior-repo"],
+  });
   const checks = await githubConnectionDoctorChecks({
     repoRoot: root,
-    transport: createMockGitHubSetupTransport({
-      appPermissions: { ...STEADY_STATE_APP_PERMISSIONS, issues: "write" },
-      prCreateCapable: false,
+    runGit: createInMemoryRunGit({
+      remotes: {
+        origin: "https://github.com/real-owner/real-behavior-repo",
+        upstream: STARTER_URL,
+      },
     }),
+    transport,
   });
   const byName = Object.fromEntries(checks.map((check) => [check.name, check]));
-  assert.equal(byName["GitHub App permissions"].ok, false);
-  assert.match(byName["GitHub App permissions"].message, /EXTRA/);
-  assert.match(byName["GitHub App permissions"].message, /issues/);
-  assert.match(byName["GitHub App permissions"].message, /no issues\/comments/);
-  assert.equal(byName["GitHub PR generation"].ok, false);
-  assert.match(byName["GitHub PR generation"].message, /pr_create=false/);
+  assert.equal(byName["GitHub remote shape"].ok, true);
+  assert.equal(byName["GitHub behavior repo reachable"].ok, true);
+  assert.match(byName["GitHub behavior repo reachable"].message, /reachable with local gh auth/);
+  assert.equal(byName["GitHub local write auth"].ok, true);
+  assert.match(byName["GitHub local write auth"].message, /git push --dry-run can create/);
 });
 
-test("doctor for a real connection fails closed when no live setup transport is provided", async () => {
-  const root = initGitRepo(tempRoot(), {
-    remotes: { origin: "https://github.com/real-owner/real-behavior-repo", upstream: STARTER_URL },
+test("doctor fails closed when the behavior repo is unreachable with local gh auth", async () => {
+  const root = tempRoot();
+  writeStateFixture(root, verifiedRealStateFixture({ checkoutPath: root }));
+  const checks = await githubConnectionDoctorChecks({
+    repoRoot: root,
+    runGit: createInMemoryRunGit({
+      remotes: {
+        origin: "https://github.com/real-owner/real-behavior-repo",
+        upstream: STARTER_URL,
+      },
+    }),
+    transport: createMockGitHubSetupTransport({ existingRepos: [] }),
   });
-  writeStateFixture(root, verifiedRealStateFixture());
-  const checks = await githubConnectionDoctorChecks({ repoRoot: root });
   const byName = Object.fromEntries(checks.map((check) => [check.name, check]));
-  assert.equal(byName["GitHub App permissions"].ok, false);
-  assert.match(byName["GitHub App permissions"].message, /live GitHub permission lookup was not run/);
-  assert.equal(byName["GitHub PR generation"].ok, false);
-  assert.match(byName["GitHub PR generation"].message, /live PR-generation capability probes were not run/);
-  assert.doesNotMatch(byName["GitHub App permissions"].message, /dry-run lookup/);
+  assert.equal(byName["GitHub behavior repo reachable"].ok, false);
+  assert.match(byName["GitHub behavior repo reachable"].message, /not reachable with local gh auth/);
 });
 
-test("doctor reports operator gh-session setup as not applicable instead of revoked", async () => {
-  const root = initGitRepo(tempRoot(), {
-    remotes: { origin: "https://github.com/real-owner/real-behavior-repo", upstream: STARTER_URL },
-  });
-  writeStateFixture(root, verifiedRealStateFixture({
-    setupGrant: {
-      revoked: false,
-      confirmed: true,
-      revoked_at: null,
-      revocation_method: "not_applicable_existing_gh_operator_session",
-      grant_retained: false,
-      operator_gh_session_not_retained: true,
-    },
-  }));
+test("doctor fails closed when local git write auth cannot push a behavior branch", async () => {
+  const root = tempRoot();
+  writeStateFixture(root, verifiedRealStateFixture({ checkoutPath: root }));
+  const runGit = (args, options = {}) => {
+    if (args[0] === "push" && args[1] === "--dry-run") {
+      return { ok: false, status: 1, stdout: "", stderr: "permission denied" };
+    }
+    return createInMemoryRunGit({
+      remotes: {
+        origin: "https://github.com/real-owner/real-behavior-repo",
+        upstream: STARTER_URL,
+      },
+    })(args, options);
+  };
   const checks = await githubConnectionDoctorChecks({
     repoRoot: root,
-    transport: createMockGitHubSetupTransport(),
+    runGit,
+    transport: createMockGitHubSetupTransport({ existingRepos: ["real-owner/real-behavior-repo"] }),
   });
-  const grantCheck = checks.find((check) => check.name === "GitHub setup grant");
-  assert.equal(grantCheck.ok, true);
-  assert.match(grantCheck.message, /not applicable/);
-  assert.match(grantCheck.message, /no Agentic Factory setup grant was minted or retained/);
-  assert.doesNotMatch(grantCheck.message, /revoked at/);
-});
-
-test("doctor reports an unrevoked setup grant with the manual cleanup repair", async () => {
-  const root = initGitRepo(tempRoot());
-  writeStateFixture(root, verifiedRealStateFixture({ revoked: false }));
-  const checks = await githubConnectionDoctorChecks({
-    repoRoot: root,
-    transport: createMockGitHubSetupTransport(),
-  });
-  const grantCheck = checks.find((check) => check.name === "GitHub setup grant");
-  assert.equal(grantCheck.ok, false);
-  assert.match(grantCheck.message, /revoke it manually/i);
+  const byName = Object.fromEntries(checks.map((check) => [check.name, check]));
+  assert.equal(byName["GitHub behavior repo reachable"].ok, true);
+  assert.equal(byName["GitHub local write auth"].ok, false);
+  assert.match(byName["GitHub local write auth"].message, /permission denied/);
 });
 
 test("doctor reports pending/failed connection states with their recorded repair", async () => {
@@ -1554,64 +1342,40 @@ test("cli init runs the GitHub phase and fails init (no silent eval-only complet
     "utf8",
   );
   assert.ok(doctorSource.includes("githubConnectionDoctorChecks"), "doctor must include the GitHub checks");
-  assert.ok(
-    dispatchSource.includes("createHostedInboxClient({ config, repoRoot })"),
-    "CLI context must make the hosted inbox client read the same repo root where init persists grant files",
-  );
+  assert.doesNotMatch(dispatchSource, /createHostedInboxClient/);
+  assert.equal(dispatchSource.includes(["inbox", "Client"].join("")), false);
   assert.ok(
     setupSource.includes("githubInitTransportFromFlags") &&
-      setupSource.includes("issueInstallationBoundGitHubBrokerCredential") &&
-      setupSource.includes("githubLiveRequested"),
-    "full init must expose the shared GitHub live setup helpers",
+      setupSource.includes("githubSetupTransportFromFlags"),
+    "full init must resolve GitHub setup through the shared local-ambient transport helper",
   );
   assert.ok(
-    setupSource.includes("return githubSetupTransportFromFlags({ config, flags, repoRoot, inboxClient, onProgress })"),
-    "explicit dry-run GitHub setup transport fallback must stay unchanged",
+    setupSource.includes("return githubSetupTransportFromFlags({ config, flags, repoRoot, onProgress })"),
+    "github init transport helper must delegate to the flag-based local/dry-run transport resolver",
   );
   assert.ok(
-    dispatchSource.includes("githubInitTransportFromFlags") &&
-      dispatchSource.includes("githubLiveRequested") &&
-      dispatchSource.includes("issueInstallationBoundGitHubBrokerCredential"),
-    "standalone github:init must reuse the full-init GitHub live setup helpers",
+    dispatchSource.includes("githubInitTransportFromFlags"),
+    "standalone github:init must reuse the full-init GitHub transport helper",
   );
   assert.ok(
-    dispatchSource.includes("const githubLive = githubLiveRequested(flags)") &&
-      dispatchSource.includes("transport: await githubInitTransportFromFlags({"),
+    dispatchSource.includes("transport: await githubInitTransportFromFlags({"),
     "standalone github:init must choose the shared init transport before running the phase",
   );
-  assert.ok(
-    dispatchSource.includes("githubInstallIntent: (input) => inboxClient.githubInstallIntent(input)") &&
-      dispatchSource.includes("githubInstallStatus: (input) => inboxClient.githubInstallStatus(input)") &&
-      dispatchSource.includes("issueGitHubBrokerCredential: (input) => issueInstallationBoundGitHubBrokerCredential({"),
-    "standalone github:init live path must pass install-binding callbacks and defer broker issuance",
-  );
-  assert.doesNotMatch(
-    dispatchSource,
-    /githubSetupTransportFromFlags/,
-    "standalone github:init must not use the eager broker credential transport",
-  );
+  assert.doesNotMatch(dispatchSource, /githubLiveRequested|issueInstallationBoundGitHubBrokerCredential/);
+  assert.doesNotMatch(dispatchSource, /githubInstallIntent|githubInstallStatus/);
+  assert.doesNotMatch(setupSource, /githubInstallIntent: \(input\)|githubInstallStatus: \(input\)/);
   const initIndex = setupSource.indexOf("runGitHubInitPhase(");
   const pendingIndex = setupSource.indexOf('Move a Linear project to "Planned" to start your first run');
   assert.ok(initIndex >= 0 && initIndex < pendingIndex, "GitHub phase must gate the pending init completion");
   assert.ok(
     setupSource.includes('Move a Linear project to "Planned" to start your first run') &&
-      setupSource.includes("npm run doctor") &&
+      setupSource.includes("factory gateway start") &&
+      setupSource.includes("factory doctor") &&
       setupSource.includes("Setup complete."),
-    "init must end with the locked pending-state next steps and the repo's actual status command",
+    "init must end with the factory gateway start next step and the factory doctor command",
   );
   assert.doesNotMatch(setupSource, /running/);
-  assert.ok(
-    setupSource.includes("let requested = await inboxClient.requestSetupGrant({") &&
-      setupSource.includes("workspaceId,") &&
-      setupSource.includes("teamId,") &&
-      setupSource.includes("domainId,") &&
-      setupSource.includes("bypassActiveConflict ? { bypassActiveConflict: true } : {}") &&
-      setupSource.includes("setupGrantInactiveReason(requested?.reason)") &&
-      setupSource.includes("requested = await inboxClient.requestSetupGrant({ workspaceId, teamId, domainId })"),
-    "init must request a setup grant for the selected team, support authenticated refresh on GitHub resume, and fall back to a fresh issue when the local grant is inactive",
-  );
-  assert.ok(setupSource.includes("writeInboxSetupGrant"), "init must persist the setup grant before hosted setup mutations");
-  assert.ok(setupSource.includes("setup_grant_conflict"), "init must handle setup grant conflict/resume explicitly");
+  assert.doesNotMatch(setupSource, /requestSetupGrant|writeInboxSetupGrant|setup_grant_conflict/);
   assert.ok(setupSource.includes('output.info("GitHub connected.")'), "init should surface the GitHub connected state");
   assert.doesNotMatch(setupSource, /Linear workspace setup is ready|First domain is ready/);
   assert.doesNotMatch(setupSource, /ensureWebhookAdminAuthorization/);

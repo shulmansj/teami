@@ -650,20 +650,12 @@ test("live mutation path stays free of deterministic check emission", () => {
       `${liveModule.name} must not call deterministic check emission`,
     );
   }
-  // The runner CLI hook is post-terminal: it appears strictly AFTER the exit
-  // code is fixed from the run outcome.
-  // Post-split, the runner command body lives in src/cli/runner-command.mjs;
-  // the ordering pin follows the wiring.
   const cliSource = fs.readFileSync(
     path.resolve(import.meta.dirname, "..", "src", "cli", "runner-command.mjs"),
     "utf8",
   );
-  const exitCodeIndex = cliSource.indexOf(
-    'process.exitCode = ["completed", "paused", "rejected", "idle"].includes(result.status)',
-  );
-  const hookIndex = cliSource.indexOf("emitDeterministicChecksBestEffort(");
-  assert.ok(exitCodeIndex > 0, "runner exit-code mapping must exist");
-  assert.ok(hookIndex > exitCodeIndex, "best-effort emission must run only after the run outcome is fixed");
+  assert.ok(!cliSource.includes("deterministic-check-emission"));
+  assert.ok(!cliSource.includes("emitDeterministicCheck"));
 });
 
 test("code evaluators emit only the documented pass|needs_revision subset of the canonical label set", () => {

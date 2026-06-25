@@ -227,7 +227,7 @@ test("Multi-domain registry plus no --domain returns an explicit foreground comm
   assert.deepEqual(resolved.candidates.map((candidate) => candidate.domainId), ["domain-a", "domain-b"]);
 });
 
-test("doctor, runner, and trigger-status foreground startup read per-domain cache, not legacy cache", () => {
+test("doctor and gateway foreground startup read per-domain cache, not legacy cache", () => {
   const config = loadLinearConfig({ repoRoot });
   const tempRoot = path.join(repoRoot, ".tmp-domain-command-test");
   const registry = registryWithDomains([
@@ -235,7 +235,7 @@ test("doctor, runner, and trigger-status foreground startup read per-domain cach
   ]);
   const seen = [];
 
-  for (const commandName of ["doctor", "runner", "trigger-status"]) {
+  for (const commandName of ["doctor", "gateway", "gateway status"]) {
     const resolved = resolveForegroundDomainCache({
       registry,
       config,
@@ -252,8 +252,8 @@ test("doctor, runner, and trigger-status foreground startup read per-domain cach
     seen.map((item) => [item.commandName, item.cachePath.replace(/\\/g, "/")]),
     [
       ["doctor", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
-      ["runner", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
-      ["trigger-status", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
+      ["gateway", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
+      ["gateway status", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
     ],
   );
 });

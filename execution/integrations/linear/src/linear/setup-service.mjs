@@ -142,13 +142,6 @@ export async function setupLinearDomain({
   if (typeof domainName !== "string" || domainName.trim() === "") {
     throw new Error("An explicit domain name is required before Linear setup can mutate anything.");
   }
-  if (typeof registerWebhook !== "function") {
-    throw new Error("Domain setup requires a webhook registration function.");
-  }
-  if (typeof ensureRunnerCredential !== "function") {
-    throw new Error("Domain setup requires a runner credential function.");
-  }
-
   const currentRegistry = registry || emptyDomainRegistry();
   validateDomainRegistry(currentRegistry);
   const trimmedDomainName = domainName.trim();
@@ -249,8 +242,18 @@ export async function setupLinearDomain({
 
   onPreview(
     teamPlan.mode === "adopt"
-      ? `will use Linear team '${teamPlan.team.name}' in workspace ${workspaceLabel(organization)} and register one webhook`
-      : `will create Linear team '${teamPlan.input.name}' in workspace ${workspaceLabel(organization)} and register one webhook`,
+      ? setupPreviewLine({
+          action: "use",
+          teamName: teamPlan.team.name,
+          organization,
+          registerWebhook,
+        })
+      : setupPreviewLine({
+          action: "create",
+          teamName: teamPlan.input.name,
+          organization,
+          registerWebhook,
+        }),
   );
 
   let team = teamPlan.team || null;
@@ -292,58 +295,76 @@ export async function setupLinearDomain({
   }
 
   let webhookRegistration = null;
-  try {
-    webhookRegistration = await registerWebhook({
-      client,
-      config: configForDomain,
-      cache: initializedCache,
-      workspaceId,
-      teamId: team.id,
-    });
-  } catch (error) {
-    await failWithSetupIncomplete("linear_webhook_registration_failed", error, { team });
-  }
-  try {
-    await persistSetupIncomplete({ team, webhook: webhookRegistration.webhook });
-  } catch (error) {
-    throw setupIncompleteError({
-      cause: "registry_write_failed",
-      domain: makeSetupIncompleteDomain({
-        domainId,
-        domainName: adopterProvidedName,
+  if (typeof registerWebhook === "function") {
+    try {
+      webhookRegistration = await registerWebhook({
+        client,
+        config: configForDomain,
+        cache: initializedCache,
         workspaceId,
-        workspaceName,
-        team,
-        webhook: webhookRegistration.webhook,
-      }),
-      registry: latestRegistry,
-      originalError: error,
-    });
+        teamId: team.id,
+      });
+    } catch (error) {
+      await failWithSetupIncomplete("linear_webhook_registration_failed", error, { team });
+    }
+    try {
+      await persistSetupIncomplete({ team, webhook: webhookRegistration.webhook });
+    } catch (error) {
+      throw setupIncompleteError({
+        cause: "registry_write_failed",
+        domain: makeSetupIncompleteDomain({
+          domainId,
+          domainName: adopterProvidedName,
+          workspaceId,
+          workspaceName,
+          team,
+          webhook: webhookRegistration.webhook,
+        }),
+        registry: latestRegistry,
+        originalError: error,
+      });
+    }
+  } else {
+    webhookRegistration = {
+      skipped: true,
+      reason: "local_gateway_poll",
+      webhook: null,
+    };
   }
 
   let runnerCredential = null;
-  try {
-    runnerCredential = await ensureRunnerCredential({
-      workspaceId,
-      teamId: team.id,
-      domainId,
-    });
-  } catch (error) {
-    await failWithSetupIncomplete("runner_authority_failed", error, {
-      team,
-      webhook: webhookRegistration.webhook,
-    });
+  if (typeof ensureRunnerCredential === "function") {
+    try {
+      runnerCredential = await ensureRunnerCredential({
+        workspaceId,
+        teamId: team.id,
+        domainId,
+      });
+    } catch (error) {
+      await failWithSetupIncomplete("runner_authority_failed", error, {
+        team,
+        webhook: webhookRegistration.webhook,
+      });
+    }
+  } else {
+    runnerCredential = {
+      skipped: true,
+      reason: "local_gateway_runner_identity",
+      credential: null,
+    };
   }
+  const localRunnerCache = {
+    triggerSource: "local_gateway_poll",
+  };
+  if (webhookRegistration.webhook) localRunnerCache.legacyWebhook = webhookRegistration.webhook;
+  const runnerCredentialId = runnerCredential.credential?.credentialId || runnerCredential.credentialId;
+  if (runnerCredentialId) localRunnerCache.legacyRunnerCredentialId = runnerCredentialId;
   const finalCache = {
     ...initializedCache,
     domainId,
     workspaceId,
     teamId: team.id,
-    inbox: {
-      dashboardUrl: configForDomain.inbox.dashboard_url,
-      linearWebhook: webhookRegistration.webhook,
-      runnerCredentialId: runnerCredential.credential?.credentialId || runnerCredential.credentialId,
-    },
+    localRunner: localRunnerCache,
   };
   const activeDomain = makeDomainRecord({
     domainId,
@@ -355,7 +376,7 @@ export async function setupLinearDomain({
     teamKey: team.key,
     teamName: team.name,
     teamNameLastSeenAt: new Date().toISOString(),
-    webhookId: webhookRegistration.webhook?.id,
+    webhookId: webhookRegistration.webhook?.id || null,
   });
   const nextRegistry = upsertDomainRecord(currentRegistry, activeDomain);
   const context = buildDomainContext({
@@ -423,6 +444,14 @@ export async function setupLinearDomain({
     webhookRegistration,
     runnerCredential,
   };
+}
+
+function setupPreviewLine({ action, teamName, organization, registerWebhook }) {
+  const verb = action === "use" ? "use" : "create";
+  const suffix = typeof registerWebhook === "function"
+    ? " and register one webhook"
+    : " and start runs from the local gateway";
+  return `will ${verb} Linear team '${teamName}' in workspace ${workspaceLabel(organization)}${suffix}`;
 }
 
 function makeSetupIncompleteDomain({
@@ -547,15 +576,15 @@ function teamKeyBase(name) {
 }
 
 function setupIncompleteError({ cause, domain, registry, originalError } = {}) {
-  const hostedDetail =
+  const runnerAuthorityDetail =
     cause === "runner_authority_failed" && originalError?.message
-      ? ` Hosted inbox error: ${originalError.message}.`
+      ? ` Runner authority error: ${originalError.message}.`
       : "";
   const teamCreateDetail = TEAM_CREATE_SETUP_CAUSES.includes(cause)
     ? teamCreateErrorDetail(originalError)
     : "";
   const setupError = new Error(
-    `${cause}:${hostedDetail}${teamCreateDetail} ${repairPathForSetupIncompleteCause(cause)}`,
+    `${cause}:${runnerAuthorityDetail}${teamCreateDetail} ${repairPathForSetupIncompleteCause(cause)}`,
   );
   setupError.setupIncompleteCause = cause;
   setupError.domain = domain;
@@ -649,7 +678,7 @@ export function repairPathForSetupIncompleteCause(cause) {
     return "Rerun npm run init after confirming Linear webhook admin authorization; npm run reset removes local setup state if needed.";
   }
   if (cause === "runner_authority_failed") {
-    return "Rerun npm run init after repairing the hosted runner credential issue; npm run reset removes local setup state if needed.";
+    return "Rerun npm run init after repairing the local runner authority issue; npm run reset removes local setup state if needed.";
   }
   if (cause === "credential_promotion_failed") {
     return "Rerun npm run init to move the setup OAuth credential into the domain-scoped credential target; npm run reset removes local setup state if needed.";

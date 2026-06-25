@@ -42,7 +42,7 @@ The demo shows:
 
 The demo does not claim that a real Linear workspace was mutated during this
 package build. It also does not claim branch creation, pull-request creation,
-merge, accepted behavior change, or hosted setup readiness. The resource-binding
+merge, accepted behavior change, or account-connected setup readiness. The resource-binding
 proof covers landed local `git_repo` binding behavior from source and tests; it
 does not expose or rely on a private product checkout.
 

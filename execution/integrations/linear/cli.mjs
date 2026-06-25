@@ -76,7 +76,7 @@ async function main() {
     await runCliCommand({ repoRoot, command, args });
   } else if (command === "phoenix:stop") {
     await runCliCommand({ repoRoot, command, args });
-  } else if (command === "runner") {
+  } else if (command === "gateway" || command === "runner") {
     await runCliCommand({ repoRoot, command, args });
   } else if (command === "runtime-smoke") {
     await runCliCommand({ repoRoot, command, args });
@@ -91,7 +91,6 @@ export {
   authorizeLinearSetupWorkspace,
   explicitInitDomainName,
   promptLinearWorkspacePicker,
-  refreshGitHubResumeSetupGrant,
   resolveInitDomainName,
   resolveGitHubPhaseResumeDomain,
   resolveLinearWorkspaceSelection,

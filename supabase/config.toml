@@ -1,5 +1,0 @@
-[functions.agentic-factory-inbox]
-verify_jwt = false
-
-[functions.agentic-factory-github-broker]
-verify_jwt = false

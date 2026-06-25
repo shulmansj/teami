@@ -1,5 +1,4 @@
 import {
-  collectHostedWakeResumeItems,
   collectLocalProposalResumeItems,
   collectLocalRunResumeItems,
   collectScannerResumeItems,
@@ -20,8 +19,6 @@ const DEFAULT_NEXT_RESUME_AGED_MS = 2 * 60 * 60_000;
 
 export async function collectNextResumeReconciliation({
   repoRoot = process.cwd(),
-  hostedWakeViews = null,
-  hostedWakeViewLoader = null,
   now = () => new Date(),
   agedAfterMs = DEFAULT_NEXT_RESUME_AGED_MS,
 } = {}) {
@@ -53,14 +50,6 @@ export async function collectNextResumeReconciliation({
   collectScannerResumeItems({ repoRoot, observedAtDate, agedAfterMs, sources, addItem });
   collectLocalRunResumeItems({ repoRoot, sources, addItem });
   collectLocalProposalResumeItems({ repoRoot, sources, addItem });
-  const hostedWakeSource = await collectHostedWakeResumeItems({
-    hostedWakeViews,
-    hostedWakeViewLoader,
-    observedAtDate,
-    agedAfterMs,
-    sources,
-    addItem,
-  });
 
   const items = [...itemsById.values()].sort(compareReconciliationItems);
   const summary = {
@@ -78,7 +67,6 @@ export async function collectNextResumeReconciliation({
     summary,
     items,
     sources,
-    hosted_wake_source: hostedWakeSource,
   };
 }
 
@@ -105,7 +93,7 @@ export function formatNextResumeReconciliationReport(report) {
     if (item.detail) lines.push(`    ${item.detail}`);
     if (item.next_surface) lines.push(`    surface: ${item.next_surface}`);
   }
-  lines.push("  external actions: no hosted wakes claimed, no Linear writes, no GitHub writes");
+  lines.push("  external actions: no gateway work claimed, no Linear writes, no GitHub writes");
   return lines;
 }
 

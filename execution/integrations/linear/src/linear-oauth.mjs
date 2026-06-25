@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import http from "node:http";
 
+import { redactGitHubSecrets } from "./github-secret-hygiene.mjs";
+
 const DEFAULT_AUTHORIZATION_ENDPOINT = "https://linear.app/oauth/authorize";
 const DEFAULT_TOKEN_ENDPOINT = "https://api.linear.app/oauth/token";
 const DEFAULT_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
@@ -251,7 +253,7 @@ export function redactOAuthSecrets(message, secretValues = []) {
     /\b(access_token|refresh_token|client_secret|code|code_verifier)=([^&\s]+)/gi,
     "$1=[redacted]",
   );
-  return redacted;
+  return redactGitHubSecrets(redacted);
 }
 
 async function requestOAuthToken({

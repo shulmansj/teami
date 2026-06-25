@@ -3,10 +3,8 @@
 .github/ISSUE_TEMPLATE/** @shulmansj
 CODEOWNERS @shulmansj
 package.json @shulmansj
-deno.lock @shulmansj
 .gitleaks.toml @shulmansj
 scripts/security-scan.mjs @shulmansj
-scripts/edge-deps.mjs @shulmansj
 SOURCE-VISIBLE.md @shulmansj
 SECURITY.md @shulmansj
 CONTRIBUTING.md @shulmansj
@@ -20,20 +18,10 @@ docs/self-improvement.md @shulmansj
 execution/README.md @shulmansj
 execution/integrations/linear/README.md @shulmansj
 execution/integrations/linear/config.example.json @shulmansj
-supabase/README.md @shulmansj
 
-# Hosted setup and behavior-repo GitHub broker surfaces.
-supabase/config.toml @shulmansj
-supabase/functions/** @shulmansj
-supabase/migrations/** @shulmansj
-execution/integrations/linear/src/broker-credential.mjs @shulmansj
+# Local setup and GitHub authority surfaces.
 execution/integrations/linear/src/github-setup.mjs @shulmansj
-execution/integrations/linear/src/github-token-broker-client.mjs @shulmansj
-execution/integrations/linear/src/hosted-inbox-client.mjs @shulmansj
-execution/integrations/linear/src/inbox-store.mjs @shulmansj
 execution/integrations/linear/src/linear-setup-auth.mjs @shulmansj
-execution/integrations/linear/src/linear-webhook-inbox.mjs @shulmansj
-execution/integrations/linear/src/runner-inbox-credential.mjs @shulmansj
 execution/integrations/linear/src/cli/github-command-options.mjs @shulmansj
 execution/integrations/linear/src/cli/linear-setup-command.mjs @shulmansj
 

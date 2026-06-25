@@ -34,7 +34,7 @@ export const CUSTODY_CLASSES = Object.freeze({
   INFERENCE_TRANSIENT: "inference-transient",
   REPO_RECORDABLE: "repo-recordable",
   PHOENIX_RECORDABLE: "phoenix-recordable",
-  BROKER_AUDIT_RECORDABLE: "broker-audit-recordable",
+  EXTERNAL_AUDIT_RECORDABLE: "external-audit-recordable",
   EXPORTABLE: "exportable",
 });
 

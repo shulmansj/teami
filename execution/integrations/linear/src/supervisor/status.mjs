@@ -25,18 +25,14 @@ export async function localSupervisorDoctorChecks({
   repoRoot = process.cwd(),
   config,
   cachePath,
-  runnerCredentialStore,
   env = process.env,
-  hostedWakeViewLoader = null,
   now = () => new Date(),
 } = {}) {
   const status = await readLocalSupervisorStatus({
     repoRoot,
     config,
     cachePath,
-    runnerCredentialStore,
     env,
-    hostedWakeViewLoader,
     now,
   });
   const checks = [];
@@ -69,10 +65,7 @@ export async function localSupervisorDoctorChecks({
   checks.push({
     name: "next-resume reconciliation",
     ok: blockedCount === 0,
-    message: formatPmStateCounts(status.reconciliation.summary.by_pm_state)
-      + (status.reconciliation.hosted_wake_source.status === "unavailable"
-        ? `; hosted wake views unavailable (${status.reconciliation.hosted_wake_source.reason})`
-        : ""),
+    message: formatPmStateCounts(status.reconciliation.summary.by_pm_state),
   });
   return checks;
 }
@@ -81,9 +74,7 @@ export async function readLocalSupervisorStatus({
   repoRoot = process.cwd(),
   config,
   cachePath,
-  runnerCredentialStore,
   env = process.env,
-  hostedWakeViewLoader = null,
   now = () => new Date(),
 } = {}) {
   const registration = readLocalSupervisorRegistration({ repoRoot });
@@ -95,11 +86,9 @@ export async function readLocalSupervisorStatus({
     repoRoot,
     config,
     cachePath,
-    runnerCredentialStore,
   });
   const reconciliation = await collectNextResumeReconciliation({
     repoRoot,
-    hostedWakeViewLoader,
     now,
   });
   return {

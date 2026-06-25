@@ -21,10 +21,9 @@ export async function runLocalSupervisorLoop({
   repoRoot = process.cwd(),
   config,
   cachePath,
-  runnerCredentialStore,
   runRunnerOnce = null,
   scanPromotionCandidatesFn = scanPromotionCandidates,
-  allowHostedWakeClaims = false,
+  allowGatewayWakeClaims = false,
   env = process.env,
   now = () => new Date(),
   sleep = defaultSleep,
@@ -39,10 +38,9 @@ export async function runLocalSupervisorLoop({
       repoRoot,
       config,
       cachePath,
-      runnerCredentialStore,
       runRunnerOnce,
       scanPromotionCandidatesFn,
-      allowHostedWakeClaims,
+      allowGatewayWakeClaims,
       env,
       now,
       onProgress,
@@ -69,10 +67,9 @@ export async function runLocalSupervisorIteration({
   repoRoot = process.cwd(),
   config,
   cachePath,
-  runnerCredentialStore,
   runRunnerOnce = null,
   scanPromotionCandidatesFn = scanPromotionCandidates,
-  allowHostedWakeClaims = false,
+  allowGatewayWakeClaims = false,
   env = process.env,
   now = () => new Date(),
   onProgress = () => {},
@@ -113,7 +110,6 @@ export async function runLocalSupervisorIteration({
     repoRoot,
     config,
     cachePath,
-    runnerCredentialStore,
   });
   if (!preflight.ok) {
     const finishedAt = now().toISOString();
@@ -140,7 +136,7 @@ export async function runLocalSupervisorIteration({
   try {
     onProgress("local supervisor: preflight passed");
     const runner = await runSupervisorRunnerStep({
-      allowHostedWakeClaims,
+      allowGatewayWakeClaims,
       runRunnerOnce,
       disable,
       onProgress,

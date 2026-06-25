@@ -6,6 +6,7 @@ import {
   runtimeCommandEnvironmentProof,
   scrubChildEnv,
 } from "../../../engine/runtime-environment.mjs";
+import { redactGitHubSecrets } from "./github-secret-hygiene.mjs";
 export {
   REPAIR_RETRY_TIMEOUT_MS,
   runtimeCommandEnvironmentProof,
@@ -16,10 +17,8 @@ export const DEFAULT_RUNTIME_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_MAX_RUNTIME_OUTPUT_BYTES = 1024 * 1024;
 
 export function sanitizeRuntimeDiagnostic(text) {
-  return String(text || "")
+  return redactGitHubSecrets(String(text || ""))
     .replace(/(sk-[A-Za-z0-9_-]{8,})/g, "[redacted]")
-    .replace(/(gh[pousr]_[A-Za-z0-9_]{8,})/g, "[redacted]")
-    .replace(/(github_pat_[A-Za-z0-9_]{8,})/gi, "[redacted]")
     .replace(/((?:OPENAI|ANTHROPIC|CLAUDE|CODEX|GITHUB|GH|LINEAR|AF_LINEAR|AGENTIC_FACTORY|NPM|AWS)[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*[=:]\s*)([^\s'"]+)/gi, "$1[redacted]")
     .replace(/((?:token|api[_-]?key|secret|password|credential)\s*[=:]\s*)([^\s'"]+)/gi, "$1[redacted]");
 }

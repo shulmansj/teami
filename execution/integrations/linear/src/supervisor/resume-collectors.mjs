@@ -226,8 +226,29 @@ function collectLocalRunResumeItems({ repoRoot, sources, addItem }) {
     reason: null,
     count: local.runs.filter((run) => run.artifact_kind).length,
   });
+  const mutationIntentDir = path.join(local.artifactsDir, "unconfirmed-linear-mutation-intents");
+  sources.push({
+    id: "local_mutation_intents",
+    status: fs.existsSync(mutationIntentDir) ? "ok" : "missing",
+    path: mutationIntentDir,
+    reason: fs.existsSync(mutationIntentDir) ? null : "missing_mutation_intents",
+  });
   for (const run of local.runs) {
     const artifact = readJsonIfExists(path.join(local.artifactsDir, `${safeFileName(run.run_id)}.json`));
+    const mutationIntent = readJsonIfExists(path.join(mutationIntentDir, `${safeFileName(run.run_id)}.json`));
+    if (run.artifact_kind === "commit" && mutationIntent?.artifact_kind === "commit") {
+      addItem({
+        id: `run:${run.run_id}:commit`,
+        pm_state: "Blocked but safe",
+        classification: "attention",
+        source: "local_mutation_intents",
+        ref: `run ${run.run_id}`,
+        reason: "commit_mutation_unconfirmed",
+        detail: "a commit artifact was durably written before Linear mutation confirmation; replay or verify by run_id",
+        observed_at: mutationIntent.started_at || run.observed_at,
+        next_surface: "gateway status or run_id replay",
+      });
+    }
     if (run.artifact_kind === "pause") {
       addItem({
         id: `run:${run.run_id}:pause`,
@@ -341,158 +362,6 @@ function collectLocalProposalResumeItems({ repoRoot, sources, addItem }) {
   }
 }
 
-async function collectHostedWakeResumeItems({
-  hostedWakeViews,
-  hostedWakeViewLoader,
-  observedAtDate,
-  agedAfterMs,
-  sources,
-  addItem,
-}) {
-  let views = hostedWakeViews;
-  let source = {
-    id: "hosted_wake_views",
-    status: Array.isArray(views) ? "ok" : "not_configured",
-    path: "hosted inbox /v1/wakeups/views via trigger-status store path",
-    reason: Array.isArray(views) ? null : "no_hosted_wake_loader",
-    count: Array.isArray(views) ? views.length : 0,
-  };
-  if (!Array.isArray(views) && typeof hostedWakeViewLoader === "function") {
-    try {
-      views = await hostedWakeViewLoader();
-      source = {
-        ...source,
-        status: "ok",
-        reason: null,
-        count: Array.isArray(views) ? views.length : 0,
-      };
-    } catch (error) {
-      source = {
-        ...source,
-        status: "unavailable",
-        reason: redactHostedSourceReason(error?.message || String(error)),
-        count: 0,
-      };
-      views = [];
-    }
-  }
-  sources.push(source);
-  for (const wake of Array.isArray(views) ? views : []) {
-    const status = wake.derived_status || wake.status || "unknown";
-    const ref = wake.object_id || wake.wake_key || wake.id || "hosted wake";
-    const createdOrStartedAt = wake.started_at || wake.claimed_at || wake.created_at || wake.terminal_at || null;
-    const ageMs = millisecondsSince(createdOrStartedAt, observedAtDate);
-    const expired = ["leased", "running"].includes(wake.status)
-      && wake.lease_expires_at
-      && Date.parse(wake.lease_expires_at) <= observedAtDate.getTime();
-    if (wake.status === "dead_letter" || status === "dead_letter") {
-      addItem({
-        id: `wake:${wake.id || ref}:dead-lettered`,
-        pm_state: "Blocked but safe",
-        classification: "dead-lettered",
-        source: "hosted_wake_views",
-        ref,
-        reason: wake.reason || "dead_letter",
-        detail: "hosted wake is terminally dead-lettered; local artifacts/receipts are the recovery evidence",
-        observed_at: wake.terminal_at || createdOrStartedAt,
-        age_ms: millisecondsSince(wake.terminal_at || createdOrStartedAt, observedAtDate),
-        next_surface: "trigger-status or agent session",
-      });
-      continue;
-    }
-    if (expired) {
-      addItem({
-        id: `wake:${wake.id || ref}:expired`,
-        pm_state: "Blocked but safe",
-        classification: "expired",
-        source: "hosted_wake_views",
-        ref,
-        reason: "hosted_wake_lease_expired",
-        detail: `lease expired at ${wake.lease_expires_at}; stale runners have no mutation authority after lease expiry`,
-        observed_at: wake.lease_expires_at,
-        age_ms: millisecondsSince(wake.lease_expires_at, observedAtDate),
-        next_surface: "trigger-status or foreground runner",
-      });
-      continue;
-    }
-    if (status === "paused") {
-      addItem({
-        id: `wake:${wake.id || ref}:paused`,
-        pm_state: "Needs your decision",
-        classification: "attention",
-        source: "hosted_wake_views",
-        ref,
-        reason: wake.reason || "wake_paused",
-        detail: "hosted wake terminal status says the decomposition paused for human input",
-        observed_at: wake.terminal_at || createdOrStartedAt,
-        age_ms: millisecondsSince(wake.terminal_at || createdOrStartedAt, observedAtDate),
-        next_surface: "Linear project update or trigger-status",
-      });
-      continue;
-    }
-    if (status === "rejected") {
-      addItem({
-        id: `wake:${wake.id || ref}:rejected`,
-        pm_state: "Blocked but safe",
-        classification: "attention",
-        source: "hosted_wake_views",
-        ref,
-        reason: wake.reason || "wake_rejected",
-        detail: "hosted wake failed before a successful terminal run",
-        observed_at: wake.terminal_at || createdOrStartedAt,
-        age_ms: millisecondsSince(wake.terminal_at || createdOrStartedAt, observedAtDate),
-        next_surface: "trigger-status or agent session",
-      });
-      continue;
-    }
-    if (status === "waiting_for_runner") {
-      addItem({
-        id: `wake:${wake.id || ref}:waiting`,
-        pm_state: "Blocked but safe",
-        classification: ageMs !== null && ageMs > agedAfterMs ? "aged" : "attention",
-        source: "hosted_wake_views",
-        ref,
-        reason: "hosted_wake_waiting_for_runner",
-        detail: "a queued wake has no fresh compatible runner heartbeat; supervisor does not claim hosted wakes under tonight's hard floor",
-        observed_at: createdOrStartedAt,
-        age_ms: ageMs,
-        next_surface: "trigger-status or foreground runner",
-      });
-      continue;
-    }
-    if (ageMs !== null && ageMs > agedAfterMs && ["queued", "leased", "running"].includes(status)) {
-      addItem({
-        id: `wake:${wake.id || ref}:aged`,
-        pm_state: "Blocked but safe",
-        classification: "aged",
-        source: "hosted_wake_views",
-        ref,
-        reason: `hosted_wake_${status}_aged`,
-        detail: "hosted wake is non-terminal and older than the resume reconciliation threshold",
-        observed_at: createdOrStartedAt,
-        age_ms: ageMs,
-        next_surface: "trigger-status or foreground runner",
-      });
-      continue;
-    }
-    if (["queued", "leased", "running"].includes(status)) {
-      addItem({
-        id: `wake:${wake.id || ref}:working`,
-        pm_state: "Working",
-        classification: "working",
-        source: "hosted_wake_views",
-        ref,
-        reason: `hosted_wake_${status}`,
-        detail: "hosted wake is active in the existing wake surface",
-        observed_at: createdOrStartedAt,
-        age_ms: ageMs,
-        next_surface: "trigger-status",
-      });
-    }
-  }
-  return source;
-}
-
 function millisecondsSince(value, nowDate) {
   if (!value) return null;
   const parsed = Date.parse(value);
@@ -515,12 +384,7 @@ function safeFileName(value) {
   return String(value || "unknown").replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
-function redactHostedSourceReason(value) {
-  return String(value || "unknown").replace(/token=[^)\s]+/gi, "token=[redacted]");
-}
-
 export {
-  collectHostedWakeResumeItems,
   collectLocalProposalResumeItems,
   collectLocalRunResumeItems,
   collectScannerResumeItems,

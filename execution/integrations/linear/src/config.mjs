@@ -26,9 +26,12 @@ const ACCEPTED_RUNTIME_ROLES_SCHEMA_VERSION = "agentic-factory-accepted-runtime-
 const DECOMPOSITION_WORKFLOW_TYPE = "decomposition";
 const CONFIG_SHAPE_OUTDATED_MESSAGE =
   "config_shape_outdated: move decomposition.runtime.adapters to runtime.adapters, decomposition.runtime.default_invocation to runtime.default_invocation, and decomposition.runtime.roles to workflows.decomposition.roles (see maintainers/contracts/workflow-definition.md).";
+const REQUIRED_LINEAR_OAUTH_SCOPES = Object.freeze(["read", "write"]);
 const RUNTIME_ROLE_FIELDS = Object.freeze(["runtime", "model"]);
 const RUNTIME_ROLE_SOURCE_ADOPTER_CONFIG = "adopter_config";
 const RUNTIME_ROLE_SOURCE_ACCEPTED_DEFAULTS = "accepted_defaults";
+export const DEFAULT_POLL_INTERVAL_MS = 10_000;
+export const MIN_POLL_INTERVAL_MS = 2_000;
 export const UNPINNED_RUNTIME_DEV_FLAG = "AGENTIC_FACTORY_ALLOW_UNPINNED_RUNTIME";
 
 export function loadLinearConfig({
@@ -56,8 +59,8 @@ export function validateLinearConfig(
   } = {},
 ) {
   assertCurrentConfigShape(config);
+  applyPollDefaults(config);
   const linear = config?.linear;
-  const inbox = config?.inbox;
   const oauth = linear?.oauth;
   const runtime = resolveWorkflowRuntime(config, DECOMPOSITION_WORKFLOW_TYPE);
   const workflow = config?.workflows?.[DECOMPOSITION_WORKFLOW_TYPE];
@@ -89,17 +92,6 @@ export function validateLinearConfig(
   if (!linear?.project?.template_name) {
     missing.push("linear.project.template_name");
   }
-  if (!inbox?.base_url) missing.push("inbox.base_url");
-  if (!inbox?.webhook_url) missing.push("inbox.webhook_url");
-  if (!inbox?.dashboard_url) missing.push("inbox.dashboard_url");
-  if (!inbox?.credential_storage) missing.push("inbox.credential_storage");
-  if (!inbox?.linear?.webhook_label) missing.push("inbox.linear.webhook_label");
-  if (!Array.isArray(inbox?.linear?.resource_types) || inbox.linear.resource_types.length === 0) {
-    missing.push("inbox.linear.resource_types");
-  }
-  if (!Array.isArray(inbox?.runner?.required_capabilities) || inbox.runner.required_capabilities.length === 0) {
-    missing.push("inbox.runner.required_capabilities");
-  }
   if (!workflow) missing.push(`workflows.${DECOMPOSITION_WORKFLOW_TYPE}`);
   if (!workflow?.roles || typeof workflow.roles !== "object" || Array.isArray(workflow.roles)) {
     missing.push(`workflows.${DECOMPOSITION_WORKFLOW_TYPE}.roles`);
@@ -111,18 +103,12 @@ export function validateLinearConfig(
       failures: missing,
     });
   }
-  if (!Number.isInteger(inbox?.runner?.lease_duration_ms)) {
-    missing.push("inbox.runner.lease_duration_ms");
-  }
-  if (!Number.isInteger(inbox?.runner?.heartbeat_stale_ms)) {
-    missing.push("inbox.runner.heartbeat_stale_ms");
-  }
   if (missing.length > 0) {
     throw new Error(`${source} is missing required fields: ${missing.join(", ")}`);
   }
 
   validateOAuthConfig(oauth, source);
-  validateInboxConfig(inbox, source);
+  validatePollConfig(config.poll, source);
 
   if (
     runtime?.default_invocation &&
@@ -236,24 +222,6 @@ export function formatRuntimeRoleAssignmentsSection(config) {
     }
   }
   return lines;
-}
-
-export function assertRunnableHostedSetupConfig(config, source = "config") {
-  const urls = {
-    "inbox.base_url": config?.inbox?.base_url,
-    "inbox.webhook_url": config?.inbox?.webhook_url,
-    "inbox.dashboard_url": config?.inbox?.dashboard_url,
-    "github.token_broker.base_url": config?.github?.token_broker?.base_url,
-  };
-  const reserved = Object.entries(urls)
-    .filter(([, value]) => typeof value === "string" && isReservedInvalidHost(value))
-    .map(([field]) => field);
-  if (reserved.length > 0) {
-    throw new Error(
-      `hosted_setup_url_not_runnable: ${source} uses reserved .invalid hosted setup URL(s) for ${reserved.join(", ")}; configure a real hosted setup endpoint before running setup.`,
-    );
-  }
-  return true;
 }
 
 export function cachePathForConfig(config, repoRoot = process.cwd()) {
@@ -489,7 +457,12 @@ function validateOAuthConfig(oauth, source) {
   }
 
   const scopes = new Set(oauth.scopes);
-  for (const requiredScope of ["read", "write", "admin"]) {
+  for (const scope of scopes) {
+    if (!REQUIRED_LINEAR_OAUTH_SCOPES.includes(scope)) {
+      throw new Error(`${source} has unsupported Linear OAuth scope ${scope}.`);
+    }
+  }
+  for (const requiredScope of REQUIRED_LINEAR_OAUTH_SCOPES) {
     if (!scopes.has(requiredScope)) {
       throw new Error(`${source} must request Linear OAuth scope ${requiredScope}.`);
     }
@@ -504,34 +477,31 @@ function validateOAuthConfig(oauth, source) {
   }
 }
 
-function validateInboxConfig(inbox, source) {
-  for (const [field, value] of Object.entries({
-    "inbox.base_url": inbox.base_url,
-    "inbox.webhook_url": inbox.webhook_url,
-    "inbox.dashboard_url": inbox.dashboard_url,
-  })) {
-    const parsed = parseUrl(value, field);
-    if (parsed.protocol !== "https:") {
-      throw new Error(`${source} ${field} must be an HTTPS URL for the hosted inbox.`);
-    }
+function applyPollDefaults(config) {
+  if (!Object.hasOwn(config || {}, "poll") || config.poll === undefined) {
+    config.poll = {};
   }
-
-  if (!["os", "file"].includes(inbox.credential_storage)) {
-    throw new Error(`${source} has unsupported inbox credential_storage: ${inbox.credential_storage}`);
-  }
-  if (inbox.runner.lease_duration_ms < 30_000) {
-    throw new Error(`${source} inbox.runner.lease_duration_ms must be at least 30000.`);
-  }
-  if (inbox.runner.heartbeat_stale_ms < 30_000) {
-    throw new Error(`${source} inbox.runner.heartbeat_stale_ms must be at least 30000.`);
+  if (!config.poll || typeof config.poll !== "object" || Array.isArray(config.poll)) return;
+  if (!Object.hasOwn(config.poll, "interval_ms") || config.poll.interval_ms === undefined) {
+    config.poll.interval_ms = DEFAULT_POLL_INTERVAL_MS;
   }
 }
 
-function parseUrl(value, label) {
-  try {
-    return new URL(value);
-  } catch {
-    throw new Error(`${label} must be a valid URL.`);
+function validatePollConfig(poll, source) {
+  if (!poll || typeof poll !== "object" || Array.isArray(poll)) {
+    throw new Error(`${source} poll must be an object.`);
+  }
+  const unknownKeys = Object.keys(poll).filter((key) => key !== "interval_ms");
+  if (unknownKeys.length > 0) {
+    throw new Error(
+      `${source} has unsupported poll config field(s): ${unknownKeys.map((key) => `poll.${key}`).join(", ")}`,
+    );
+  }
+  if (!Number.isInteger(poll.interval_ms)) {
+    throw new Error(`${source} poll.interval_ms must be an integer.`);
+  }
+  if (poll.interval_ms < MIN_POLL_INTERVAL_MS) {
+    throw new Error(`${source} poll.interval_ms must be at least ${MIN_POLL_INTERVAL_MS}.`);
   }
 }
 
@@ -540,13 +510,5 @@ function parseRedirectUri(redirectUri) {
     return new URL(redirectUri);
   } catch {
     throw new Error("Linear OAuth redirect_uri must be a valid URL.");
-  }
-}
-
-function isReservedInvalidHost(value) {
-  try {
-    return new URL(value).hostname.endsWith(".invalid");
-  } catch {
-    return false;
   }
 }

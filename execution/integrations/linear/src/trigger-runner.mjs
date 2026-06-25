@@ -159,8 +159,8 @@ export async function runTriggeredDecomposition(options = {}) {
     };
   }
 
-  // The hosted claim response carries the source event directly; the
-  // store-array lookup remains as the in-memory store fallback so the wake
+  // The local claim response carries the source event directly; the store-array
+  // lookup remains as the in-memory store fallback so the wake
   // queue contract does not need to expose internal storage.
   const sourceEvent =
     claim.event ||
@@ -321,14 +321,20 @@ export async function runTriggeredDecomposition(options = {}) {
       },
       domainContext: resolvedDomainContext,
       qualityJudge,
-      onBeforeLinearMutation: async ({ trace }) => {
+      onBeforeLinearMutation: async ({ artifactKind, runId: artifactRunId, trace }) => {
         await traceSink?.forceFlush?.({
           session: traceSession,
           trace,
           result: { status: "running" },
           stage: "pre_mutation",
         }).catch(() => {});
-        const mutation = await store.markMutationStarted({ wakeId: wake.id, runnerId, leaseToken });
+        const mutation = await store.markMutationStarted({
+          wakeId: wake.id,
+          runnerId,
+          leaseToken,
+          runId: artifactRunId || runId,
+          artifactKind,
+        });
         if (!mutation.ok) throw new Error(`Could not mark wake mutation start: ${mutation.reason}`);
       },
     });
@@ -419,7 +425,7 @@ export async function finishWakeFromRunnerResult({ store, wake, runnerId, leaseT
   };
 }
 
-// CONSTRAINTS #27: eval-mode NEVER mutates Linear and NEVER claims hosted
+// CONSTRAINTS #27: eval-mode NEVER mutates Linear and NEVER claims gateway
 // wakes. Eval mode is made structurally incapable of mutation regardless of
 // the client a caller supplies: every Linear client used by eval mode is
 // wrapped in this read-only guard, which passes through only the known read
@@ -427,7 +433,7 @@ export async function finishWakeFromRunnerResult({ store, wake, runnerId, leaseT
 // member with a thrower. The eval CLI task additionally constructs a
 // snapshot-backed client that has NO mutation methods at all
 // (createSnapshotEvalLinearClient in decomposition-eval-cli.mjs), so this
-// guard is the second wall, not the only one. Hosted wakes are structurally
+// guard is the second wall, not the only one. Gateway wakes are structurally
 // out of reach too: eval mode takes no wake-queue store parameter and the
 // only "wake" it knows is the local `eval_<run_id>` pseudo-wake below.
 const EVAL_MODE_ALLOWED_LINEAR_READS = new Set([

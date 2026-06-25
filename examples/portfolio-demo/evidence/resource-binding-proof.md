@@ -61,8 +61,8 @@ path or running against a private product repository.
 
 ## Outside Scope
 
-- Public hosted endpoint, key, and GitHub App settings proof.
-- Live hosted queue handoff.
+- Account-connected setup proof.
+- Live local gateway handoff.
 - Live Linear workspace mutation from this demo package.
 - Local Phoenix trace delivery from this demo package.
 - Live product-repo agent execution or product-repo commits from this demo

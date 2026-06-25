@@ -548,16 +548,16 @@ test("eval-mode Linear client guard throws on mutation methods and the snapshot 
   assert.deepEqual(calls, []);
 });
 
-test("eval-mode never claims hosted wakes: no inbox/lease surface exists on the eval path", async () => {
-  // Structural pin: the eval CLI module has no hosted inbox / wake-queue /
-  // lease imports or calls at all.
+test("eval-mode never claims gateway wakes: no lease surface exists on the eval path", async () => {
+  // Structural pin: the eval CLI module has no local trigger-store / lease
+  // imports or calls at all.
   const evalSource = fs.readFileSync(
     path.resolve(import.meta.dirname, "..", "src", "decomposition-eval-cli.mjs"),
     "utf8",
   );
   for (const banned of [
-    "hosted-inbox-client",
-    "hosted-wake-queue-store",
+    "local-trigger-store",
+    "createLocalTriggerStore",
     "claimNextWake",
     "markWakeRunning",
     "completeWake",
