@@ -6,9 +6,11 @@ title = "Agentic Factory public secret scanner"
 # SEC-U1-SCANNER-CONFIG: the scanner config and implementation may contain
 #   detection regexes and synthetic examples needed to test the rules.
 # SEC-U1-SOURCE-PRIVATE-BUILD-TRAIL: the private build repo still contains
-#   planning, review, breakdown, and publication-control files that are
-#   excluded from the public artifact by the manifest. This allowlist is active
-#   only while the private publication manifest exists.
+#   planning, review, breakdown, publication-control, and internal maintainer-doc
+#   files (e.g. maintainers/repo-topology.md, which intentionally names the private
+#   repos and dogfood checkout path) that are excluded from the public artifact by
+#   the manifest. This allowlist is active only while the private publication
+#   manifest exists.
 # SEC-U1-SOURCE-PRELAUNCH-HOSTED-HANDLE: the private build repo may temporarily
 #   contain pre-CFG-U1 hosted handles in config.example.json. The public export
 #   does not contain the private manifest marker, so this source-only exception
@@ -32,10 +34,11 @@ paths = [
 [agentic_factory.source_mode]
 marker_path = "maintainers/publication/public-surface-manifest.csv"
 allowlist_id = "SEC-U1-SOURCE-PRIVATE-BUILD-TRAIL"
-description = "Private source-only planning and publication-control surfaces are excluded from the public artifact."
+description = "Private source-only planning, publication-control, and internal maintainer-doc surfaces are excluded from the public artifact."
 paths = [
   '''^docs/(?:plans|reviews|breakdowns)/''',
   '''^maintainers/(?:plans|reviews|publication|scripts)/''',
+  '''^maintainers/[^/]+\.md$''',
   '''^execution/integrations/linear/spikes/''',
 ]
 

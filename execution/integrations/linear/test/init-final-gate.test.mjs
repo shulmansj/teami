@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  factoryLauncherCommand,
   finishSetupOutput,
   runFinalGate,
 } from "../src/cli/linear-setup-command.mjs";
@@ -98,7 +99,7 @@ test("finishSetupOutput prints closeout on green gate and resumable warning on r
     assert.ok(
       greenOutput.calls.some((call) =>
         call.method === "nextSteps" &&
-        call.args[0].some((item) => item?.text === "factory gateway start")),
+        call.args[0].some((item) => item?.text === factoryLauncherCommand("gateway start"))),
     );
 
     const redOutput = createRecordingOutput();
@@ -149,6 +150,14 @@ test("finishSetupOutput fires from both normal finish and GitHub resume paths", 
   assert.match(resumeBlock, /await finishSetupOutput\(/);
   assert.match(resumeBlock, /domainId:\s*githubResumeDomain\.id/);
   assert.match(source, /domainId:\s*result\.domain\.id/);
+});
+
+test("factoryLauncherCommand returns the platform launcher form and appends the subcommand", () => {
+  const prefix = factoryLauncherCommand();
+  // Windows (PowerShell/cmd.exe) needs `.\factory.cmd`; POSIX shells use `./factory`.
+  assert.match(prefix, /^(\.\\factory\.cmd|\.\/factory)$/);
+  assert.equal(factoryLauncherCommand("gateway start"), `${prefix} gateway start`);
+  assert.equal(prefix, process.platform === "win32" ? ".\\factory.cmd" : "./factory");
 });
 
 function createRecordingOutput() {

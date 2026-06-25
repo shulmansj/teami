@@ -14,6 +14,7 @@ import {
   LOCAL_SUPERVISOR_STATE_SCHEMA_VERSION,
   localSupervisorStatePath,
   LOCAL_SUPERVISOR_HARDFLOOR_RUNNER_STUB_REASON,
+  localSupervisorDoctorChecks,
   NEXT_RESUME_RECONCILIATION_SCHEMA_VERSION,
   PROVISIONAL_PM_STATES,
   readLocalSupervisorStatus,
@@ -55,6 +56,27 @@ function writeWorkspaceCache(repoRoot) {
   );
   return cachePath;
 }
+
+test("localSupervisorDoctorChecks names are clean: no double prefix, single consent", async () => {
+  const repoRoot = tempRepo();
+  const cachePath = writeWorkspaceCache(repoRoot);
+  const checks = await localSupervisorDoctorChecks({ repoRoot, config: testConfig(), cachePath });
+  const names = checks.map((check) => check.name);
+  assert.equal(
+    names.filter((name) => name.includes("local supervisor local supervisor")).length,
+    0,
+    `double-prefixed supervisor check name(s): ${names.join(", ")}`,
+  );
+  assert.equal(
+    names.filter((name) => name === "local supervisor consent").length,
+    1,
+    `expected exactly one consent check: ${names.join(", ")}`,
+  );
+  assert.ok(
+    names.includes("local supervisor workspace cache"),
+    `expected consistently prefixed workspace-cache check: ${names.join(", ")}`,
+  );
+});
 
 function writeJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

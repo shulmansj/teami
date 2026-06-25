@@ -37,13 +37,6 @@ export async function localSupervisorDoctorChecks({
   });
   const checks = [];
   checks.push({
-    name: "local supervisor consent",
-    ok: status.registration.ok,
-    message: status.registration.ok
-      ? `recorded ${status.registration.registration.status}`
-      : "not registered; run npm run supervisor:register -- --consent-local-supervisor",
-  });
-  checks.push({
     name: "local supervisor OS autostart",
     ok: false,
     message:
@@ -54,12 +47,10 @@ export async function localSupervisorDoctorChecks({
     ok: !status.disable.disabled,
     message: status.disable.disabled ? `disabled (${status.disable.reason})` : "not disabled",
   });
+  // Preflight checks already carry the "local supervisor" prefix; surface them as-is (no second
+  // prefix) and let the preflight consent check be the single source of truth for consent.
   for (const check of status.preflight.checks) {
-    checks.push({
-      name: `local supervisor ${check.name}`,
-      ok: check.ok,
-      message: check.message,
-    });
+    checks.push({ name: check.name, ok: check.ok, message: check.message });
   }
   const blockedCount = status.reconciliation.summary.by_pm_state["Blocked but safe"] || 0;
   checks.push({

@@ -26,14 +26,14 @@ export async function preflightLocalSupervisor({
   try {
     cache = readLinearCache(cachePath);
     checks.push({
-      name: "workspace cache",
+      name: "local supervisor workspace cache",
       ok: Boolean(cache?.workspaceId && cache?.teamId),
       message: cache?.workspaceId && cache?.teamId
         ? `workspace ${cache.workspaceId}, team ${cache.teamId}`
         : "missing workspace cache; run npm run init",
     });
   } catch (error) {
-    checks.push({ name: "workspace cache", ok: false, message: error.message });
+    checks.push({ name: "local supervisor workspace cache", ok: false, message: error.message });
   }
 
   return {

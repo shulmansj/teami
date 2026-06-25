@@ -328,6 +328,16 @@ async function runFinalGate({
   return { ok: doctorGreen, smokeOk: Boolean(smoke.ok), doctorOk: doctorGreen };
 }
 
+// The repo-local launcher is invoked differently per OS: PowerShell and cmd.exe need the
+// `.\factory.cmd` form (PowerShell will not run a current-dir command by bare name, and
+// `.\factory.cmd` works in both Windows shells), while POSIX shells use `./factory`. Adopter-facing
+// next-step copy must show the form that actually runs on the host, so a fresh setup never hands back
+// a command the user's own shell rejects.
+export function factoryLauncherCommand(subcommand = "") {
+  const launcher = process.platform === "win32" ? ".\\factory.cmd" : "./factory";
+  return subcommand ? `${launcher} ${subcommand}` : launcher;
+}
+
 async function finishSetupOutput({
   output,
   commandOptions,
@@ -357,8 +367,8 @@ async function finishSetupOutput({
   output.done(commandOptions.runGithubPhase ? "Setup complete." : `${commandOptions.readyLabel} connected.`);
   output.nextSteps([
     'Move a Linear project to "Planned" to start your first run',
-    { text: "factory gateway start", hint: "open your factory for business (polls Linear; Ctrl-C to stop)" },
-    { text: "factory doctor", hint: "re-check everything's healthy" },
+    { text: factoryLauncherCommand("gateway start"), hint: "open your factory for business (polls Linear; Ctrl-C to stop)" },
+    { text: factoryLauncherCommand("doctor"), hint: "re-check everything's healthy" },
     { text: "Local Phoenix (traces)", hint: phoenixAppUrl || "run npm run phoenix:start" },
   ]);
   if (!output.verbose) {
