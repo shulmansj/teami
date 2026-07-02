@@ -12,12 +12,16 @@ import {
   judgeAnnotationIdentifier,
   loadJudgePromptContract,
 } from "./decomposition-quality-judge.mjs";
-import { DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY } from "./promotion-target-keys.mjs";
 import {
   collectEnumValues,
   resolveSchemaRef,
 } from "./deterministic-check-emission.mjs";
-import { PHOENIX_ASSETS_PATH, QUALITY_LABELS } from "./eval-annotation-contract.mjs";
+import {
+  DEFAULT_ANNOTATION_NAME,
+  PHOENIX_ASSETS_PATH,
+  QUALITY_LABELS,
+  resolveEvalContract,
+} from "./eval-annotation-contract.mjs";
 import {
   fetchPhoenixTraceAnnotations,
   normalizePhoenixAnnotation,
@@ -31,7 +35,8 @@ import {
   loadWorkspaceEvalPolicy,
   WORKSPACE_EVAL_POLICY_PATH,
 } from "./workspace-eval-policy.mjs";
-import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.mjs";
+import { decompositionDefinition } from "./workflows/decomposition/definition.mjs";
+import { evalNamespacePaths } from "../../../engine/eval-namespace.mjs";
 
 // Track F: the thin, agent-callable Phoenix experiment wrapper
 // (`npm run phoenix:experiment-decomposition`) plus managed-experiment
@@ -49,7 +54,7 @@ import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.m
 //      POST /v1/experiments/{id}/runs, POST /v1/experiment_evaluations) —
 //      evaluators are run and passed EXPLICITLY, never assumed to auto-run,
 //   4. writes the local managed-experiment receipt under
-//      .agentic-factory/experiments/ (the receipt is provenance/intent
+//      .teami/experiments/ (the receipt is provenance/intent
 //      custody, not an experiment store: results live in Phoenix).
 //
 // Receipts are append-only (CONSTRAINTS #21): launch facts are immutable
@@ -69,7 +74,7 @@ import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.m
 // baseline later differs from the current accepted pin, that is the
 // stale-baseline case owned by the step-12 scanner.
 
-export const EXPERIMENT_RECEIPT_SCHEMA_VERSION = "agentic-factory-managed-experiment-receipt/v1";
+export const EXPERIMENT_RECEIPT_SCHEMA_VERSION = "teami-managed-experiment-receipt/v1";
 export const EXPERIMENT_RECEIPT_SOURCE_MANAGED_MANUAL = "managed_manual";
 export const EXPERIMENT_INTENTS = Object.freeze(["exploratory", "promotion_candidate"]);
 export const EXPERIMENT_AMENDMENT_ACTIONS = Object.freeze(["register", "reclassify", "withdraw"]);
@@ -78,18 +83,19 @@ export const EXPERIMENT_SPLIT_CHOICES = Object.freeze(["train", "test"]);
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+const MODULE_REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
 const LABEL_RANK = Object.fromEntries(
   [...QUALITY_LABELS].reverse().map((label, index) => [label, index]),
 );
 
 // ---------------------------------------------------------------------------
-// Receipt store (.agentic-factory/experiments/<receipt_id>.json; gitignored
-// local custody via the existing .agentic-factory/ ignore; atomic writes
+// Receipt store (.teami/experiments/<receipt_id>.json; gitignored
+// local custody via the existing .teami/ ignore; atomic writes
 // matching the run-store conventions).
 // ---------------------------------------------------------------------------
 
 export function defaultExperimentReceiptDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "experiments");
+  return path.resolve(repoRoot, ".teami", "experiments");
 }
 
 export function experimentReceiptPath({ receiptId, repoRoot = process.cwd(), receiptDir = null } = {}) {
@@ -204,7 +210,7 @@ export function deriveExperimentReceiptState(receipt) {
     launch_baseline_id: receipt.launch.launch_baseline.accepted_baseline_id,
     dataset: receipt.launch.dataset,
     registered_dataset_version_id: registeredDatasetVersionId,
-    agentic_factory_run_id: receipt.launch.agentic_factory_run_id,
+    teami_run_id: receipt.launch.teami_run_id,
     amendment_count: amendments.length,
   };
 }
@@ -230,19 +236,47 @@ export function resolveExperimentIntent({ intentFlag = null } = {}) {
   return { ok: true, intent: intentFlag, source: "explicit_flag" };
 }
 
+function workflowScope(definition = decompositionDefinition) {
+  const scope = typeof definition?.workflow_type === "string" ? definition.workflow_type.trim() : "";
+  return scope || "decomposition";
+}
+
+function evaluatorPromptRoleForDefinition(definition = decompositionDefinition) {
+  const roles = Array.isArray(definition?.engine_owned_evaluator_roles)
+    ? definition.engine_owned_evaluator_roles
+    : [];
+  return roles.findLast((role) => typeof role === "string" && role.trim() && role.trim() !== "judge")
+    || roles.find((role) => typeof role === "string" && role.trim())
+    || "decomposition_quality_judge";
+}
+
+function judgeCandidateTargetKeyForDefinition(definition = decompositionDefinition) {
+  const scope = workflowScope(definition);
+  const role = evaluatorPromptRoleForDefinition(definition);
+  return `prompt/${scope}/${role}`;
+}
+
+function runtimeRoleAssignmentsTargetKeyForDefinition(definition = decompositionDefinition) {
+  return `rule/${workflowScope(definition)}/runtime_role_assignments`;
+}
+
+function acceptedBaselineTargetKeyForDefinition(definition = decompositionDefinition) {
+  return `policy/${workflowScope(definition)}/accepted_baseline`;
+}
+
 // candidate_target_key per the canonical grammar
 // <candidate_kind>/<scope>/<artifact_slot> (proposal template README). The
 // variant is the experiment identity; the target key names the accepted
 // artifact the experiment is about.
-export function deriveCandidateTargetKey(variant) {
-  const behaviorChange = resolveSingleAgentBehaviorChange(variant);
+export function deriveCandidateTargetKey(variant, definition = decompositionDefinition) {
+  const behaviorChange = resolveSingleAgentBehaviorChange(variant, definition);
   if (behaviorChange.ok) return behaviorChange.targetKey;
   // Zero-override baseline runs still need a stable, parseable target key for
   // receipts; multi-concern promotion candidates are rejected before launch.
-  return "policy/decomposition/accepted_baseline";
+  return acceptedBaselineTargetKeyForDefinition(definition);
 }
 
-function agentBehaviorChangeConcerns(variant) {
+function agentBehaviorChangeConcerns(variant, definition = decompositionDefinition) {
   const concerns = [];
   for (const [targetKey, override] of Object.entries(variant?.prompt_overrides || {})) {
     if (override?.candidate_prompt_version_id) {
@@ -254,26 +288,28 @@ function agentBehaviorChangeConcerns(variant) {
     }
   }
   if (variant?.judge_candidate_prompt_version_id) {
+    const targetKey = judgeCandidateTargetKeyForDefinition(definition);
     concerns.push({
-      label: "prompt:decomposition_quality_judge",
-      targetKey: "prompt/decomposition/decomposition_quality_judge",
+      label: `prompt:${targetKey}`,
+      targetKey,
       candidateVersionId: variant.judge_candidate_prompt_version_id,
     });
   }
   if (variant?.role_overrides && Object.keys(variant.role_overrides).length > 0) {
     // Runtime/model role overrides target the accepted runtime role
     // assignment rules (accepting one is a config process change).
+    const targetKey = runtimeRoleAssignmentsTargetKeyForDefinition(definition);
     concerns.push({
       label: "rule:runtime_role_assignments",
-      targetKey: "rule/decomposition/runtime_role_assignments",
+      targetKey,
       candidateVersionId: variant?.id,
     });
   }
   return concerns;
 }
 
-function resolveSingleAgentBehaviorChange(variant) {
-  const concerns = agentBehaviorChangeConcerns(variant);
+function resolveSingleAgentBehaviorChange(variant, definition = decompositionDefinition) {
+  const concerns = agentBehaviorChangeConcerns(variant, definition);
   if (concerns.length === 0) {
     return {
       ok: false,
@@ -293,8 +329,8 @@ function resolveSingleAgentBehaviorChange(variant) {
   return { ok: true, ...concerns[0] };
 }
 
-function validateSingleAgentBehaviorChange(variant) {
-  return resolveSingleAgentBehaviorChange(variant);
+function validateSingleAgentBehaviorChange(variant, definition = decompositionDefinition) {
+  return resolveSingleAgentBehaviorChange(variant, definition);
 }
 
 function singlePromptOverrideEntry(variant) {
@@ -305,8 +341,8 @@ function singlePromptOverrideEntry(variant) {
   return { targetKey, candidatePromptVersionId: override.candidate_prompt_version_id };
 }
 
-function candidateVersionIdForVariant(variant) {
-  const behaviorChange = resolveSingleAgentBehaviorChange(variant);
+function candidateVersionIdForVariant(variant, definition = decompositionDefinition) {
+  const behaviorChange = resolveSingleAgentBehaviorChange(variant, definition);
   if (behaviorChange.ok && behaviorChange.candidateVersionId) {
     return behaviorChange.candidateVersionId;
   }
@@ -346,7 +382,7 @@ function normalizeDerivedVariant(derivedVariant) {
 }
 
 function writeDerivedVariantTempConfig({ variant, repoRoot }) {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-derived-variant-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-derived-variant-"));
   const variantsPath = path.join(tempDir, "variants.json");
   const config = {
     schema_version: "decomposition-eval-variants/v2",
@@ -373,9 +409,24 @@ function writeDerivedVariantTempConfig({ variant, repoRoot }) {
   };
 }
 
-function activePhoenixAssetsPath(repoRoot) {
-  const candidatePath = path.resolve(repoRoot, DECOMPOSITION_EVAL_PATHS.manifest);
-  return fs.existsSync(candidatePath) ? candidatePath : PHOENIX_ASSETS_PATH;
+function activePhoenixAssetsPath(repoRoot, definition = decompositionDefinition) {
+  const namespacePaths = evalNamespacePaths(definition);
+  const candidatePath = path.resolve(repoRoot, namespacePaths.manifest);
+  if (fs.existsSync(candidatePath)) return candidatePath;
+  if (workflowScope(definition) === "decomposition") return PHOENIX_ASSETS_PATH;
+  return candidatePath;
+}
+
+function manifestRepoRootForPath(manifestPath) {
+  return path.resolve(manifestPath, "..", "..", "..", "..");
+}
+
+function evalRepoRootForDefinition(repoRoot, definition = decompositionDefinition) {
+  const manifestPath = activePhoenixAssetsPath(repoRoot, definition);
+  if (workflowScope(definition) === "decomposition" && path.resolve(manifestPath) === path.resolve(PHOENIX_ASSETS_PATH)) {
+    return MODULE_REPO_ROOT;
+  }
+  return manifestRepoRootForPath(manifestPath);
 }
 
 function mapLaunchBaselineResolutionFailure(resolution, candidateTargetKey) {
@@ -432,24 +483,60 @@ function baselineEntryMatchesDataset(entry, dataset = {}) {
   return true;
 }
 
-function baselineEntryMatchesCandidateTarget(entry, candidateTargetKey) {
+function baselineEntryMatchesCandidateTarget(entry, candidateTargetKey, definition = decompositionDefinition) {
   if (entry?.candidate_target_key) return entry.candidate_target_key === candidateTargetKey;
-  return candidateTargetKey === DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY;
+  return candidateTargetKey === judgeCandidateTargetKeyForDefinition(definition);
 }
 
-function selectBaselineExperimentForSummary({ manifest, candidateTargetKey, dataset } = {}) {
+function selectBaselineExperimentForSummary({
+  manifest,
+  candidateTargetKey,
+  dataset,
+  definition = decompositionDefinition,
+} = {}) {
   return (manifest.experiments || []).find((entry) =>
     entry?.purpose === "baseline"
       && baselineEntryMatchesDataset(entry, dataset)
-      && baselineEntryMatchesCandidateTarget(entry, candidateTargetKey)) || null;
+      && baselineEntryMatchesCandidateTarget(entry, candidateTargetKey, definition)) || null;
 }
 
 // Launch baseline identity: derived from the repo-owned phoenix-assets
 // manifest ONLY (CONSTRAINTS #35) — there is deliberately no parameter
 // through which a caller could supply a baseline. Reuses the step-6 contract
 // loader so the judge prompt path keeps its pinned behavior.
-export function deriveLaunchBaselineFromManifest({ candidateTargetKey = null, repoRoot = process.cwd() } = {}) {
-  const contract = loadJudgePromptContract();
+export function deriveLaunchBaselineFromManifest({
+  candidateTargetKey = null,
+  repoRoot = process.cwd(),
+  definition = decompositionDefinition,
+} = {}) {
+  let evalContract;
+  let contract;
+  try {
+    let evalRepoRoot = evalRepoRootForDefinition(repoRoot, definition);
+    evalContract = resolveEvalContract(definition, evalRepoRoot);
+    if (
+      !evalContract.eval_configured
+      && workflowScope(definition) === "decomposition"
+      && evalRepoRoot !== MODULE_REPO_ROOT
+    ) {
+      evalRepoRoot = MODULE_REPO_ROOT;
+      evalContract = resolveEvalContract(definition, evalRepoRoot);
+    }
+    if (!evalContract.eval_configured || !evalContract.judge_prompt) {
+      return {
+        ok: false,
+        reason: evalContract.reason || `workflow_eval_not_configured:${workflowScope(definition)}`,
+        detail: `workflow ${workflowScope(definition)} has no configured Judge eval contract.`,
+      };
+    }
+    contract = loadJudgePromptContract({ definition, repoRoot: evalRepoRoot, evalContract });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "judge_prompt_contract_unavailable",
+      detail: error.message,
+    };
+  }
   if (contract.drift) {
     return {
       ok: false,
@@ -458,14 +545,14 @@ export function deriveLaunchBaselineFromManifest({ candidateTargetKey = null, re
     };
   }
 
-  if (!candidateTargetKey || candidateTargetKey === DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY) {
-    const manifestBytes = fs.readFileSync(PHOENIX_ASSETS_PATH);
+  const judgeTargetKey = contract.targetKey || judgeCandidateTargetKeyForDefinition(definition);
+  if (!candidateTargetKey || candidateTargetKey === judgeTargetKey) {
+    const manifestFilePath = contract.manifestPath || activePhoenixAssetsPath(repoRoot, definition);
+    const manifestBytes = fs.readFileSync(manifestFilePath);
     const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
     const datasetEntries = contract.manifest.datasets || [];
-    const manifestPath = path.relative(
-      path.resolve(PHOENIX_ASSETS_PATH, "..", "..", "..", ".."),
-      PHOENIX_ASSETS_PATH,
-    ).replaceAll("\\", "/");
+    const manifestPath = path.relative(manifestRepoRootForPath(manifestFilePath), manifestFilePath)
+      .replaceAll("\\", "/");
     return {
       ok: true,
       manifest: contract.manifest,
@@ -484,10 +571,10 @@ export function deriveLaunchBaselineFromManifest({ candidateTargetKey = null, re
     };
   }
 
-  const resolvedManifestPath = activePhoenixAssetsPath(repoRoot);
+  const resolvedManifestPath = activePhoenixAssetsPath(repoRoot, definition);
   const manifestBytes = fs.readFileSync(resolvedManifestPath);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
-  const manifestRepoRoot = path.resolve(resolvedManifestPath, "..", "..", "..", "..");
+  const manifestRepoRoot = manifestRepoRootForPath(resolvedManifestPath);
   const manifestPath = path.relative(manifestRepoRoot, resolvedManifestPath).replaceAll("\\", "/");
   const manifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
   const resolution = resolveAcceptedBaseline({
@@ -809,7 +896,19 @@ function humanLabelRegressions(perExample) {
 // The experiment wrapper.
 // ---------------------------------------------------------------------------
 
-export async function runDecompositionExperiment({
+export async function runDecompositionExperiment(options = {}) {
+  return runWorkflowExperiment(decompositionDefinition, {
+    variantsPath: DEFAULT_EVAL_VARIANTS_PATH,
+    ...options,
+  });
+}
+
+function experimentDescription({ definition = decompositionDefinition, variant, intent }) {
+  const workflowType = workflowScope(definition);
+  return `Teami managed ${workflowType} experiment (variant ${variant.id}, intent ${intent.intent}).`;
+}
+
+export async function runWorkflowExperiment(definition = decompositionDefinition, {
   repoRoot = process.cwd(),
   config,
   datasetName,
@@ -819,7 +918,7 @@ export async function runDecompositionExperiment({
   draftedBy = null,
   split = null,
   exampleIds = null,
-  variantsPath = DEFAULT_EVAL_VARIANTS_PATH,
+  variantsPath = null,
   receiptDir = null,
   policyPath = undefined,
   runEvalTaskFn = runDecompositionEvalTask,
@@ -833,6 +932,7 @@ export async function runDecompositionExperiment({
   onProgress = () => {},
   now = () => new Date(),
 } = {}) {
+  const resolvedDefinition = definition || decompositionDefinition;
   if (!config) return { ok: false, status: "not_run", reason: "missing_config" };
   if (!datasetName || typeof datasetName !== "string") {
     return { ok: false, status: "not_run", reason: "missing_dataset_name" };
@@ -859,9 +959,11 @@ export async function runDecompositionExperiment({
       detail: "supply either variantId or derivedVariant, not both.",
     };
   }
+  const resolvedVariantsPath = variantsPath
+    || path.resolve(repoRoot, evalNamespacePaths(resolvedDefinition).variants);
   const variantResolution = derivedVariant
     ? normalizeDerivedVariant(derivedVariant)
-    : resolveEvalVariant({ variantId, variantsPath });
+    : resolveEvalVariant({ variantId, variantsPath: resolvedVariantsPath, repoRoot });
   if (!variantResolution.ok) return { ok: false, status: "not_run", ...variantResolution };
   const variant = variantResolution.variant;
 
@@ -875,9 +977,9 @@ export async function runDecompositionExperiment({
     return { ok: false, status: "not_run", reason: "workspace_eval_policy_unavailable", detail: error.message };
   }
 
-  const candidateTargetKey = deriveCandidateTargetKey(variant);
+  const candidateTargetKey = deriveCandidateTargetKey(variant, resolvedDefinition);
   if (intent.intent === "promotion_candidate") {
-    const behaviorChange = validateSingleAgentBehaviorChange(variant);
+    const behaviorChange = validateSingleAgentBehaviorChange(variant, resolvedDefinition);
     if (!behaviorChange.ok) {
       return {
         ok: false,
@@ -887,19 +989,25 @@ export async function runDecompositionExperiment({
       };
     }
   }
-  const baselineResolution = deriveLaunchBaselineFromManifest({ candidateTargetKey, repoRoot });
+  const baselineResolution = deriveLaunchBaselineFromManifest({
+    candidateTargetKey,
+    repoRoot,
+    definition: resolvedDefinition,
+  });
   if (!baselineResolution.ok) return { ok: false, status: "not_run", ...baselineResolution };
   const { baseline, manifest, contract } = baselineResolution;
 
   // Judge identity is a required receipt fact (evaluator versions), so a
   // missing judge model fails closed here rather than per example.
-  const judgeAssignment = resolveJudgeRuntimeAssignment(config);
+  const judgeAssignment = resolveJudgeRuntimeAssignment(config, resolvedDefinition);
   if (!judgeAssignment.model) {
+    const workflowType = workflowScope(resolvedDefinition);
+    const role = evaluatorPromptRoleForDefinition(resolvedDefinition);
     return {
       ok: false,
       status: "not_run",
       reason: "judge_model_not_configured",
-      detail: "configure workflows.decomposition.roles.judge.model before launching experiments.",
+      detail: `configure workflows.${workflowType}.roles.${role}.model before launching experiments.`,
     };
   }
   const codeEvaluatorIds = (manifest.evaluators || [])
@@ -909,7 +1017,7 @@ export async function runDecompositionExperiment({
     || contract.entry.accepted_prompt_version_id
     || `sha256:${contract.snapshotSha256}`;
   const candidatePromptOverride = singlePromptOverrideEntry(variant);
-  const candidateVersionId = candidateVersionIdForVariant(variant);
+  const candidateVersionId = candidateVersionIdForVariant(variant, resolvedDefinition);
   const evaluators = {
     code: codeEvaluatorIds,
     judge: {
@@ -1018,7 +1126,7 @@ export async function runDecompositionExperiment({
       actor,
       launched_at: launchedAt,
       phoenix_scope: { origin: appUrl, project_name: projectName },
-      agentic_factory_run_id: agenticFactoryRunId,
+      teami_run_id: agenticFactoryRunId,
       ...(typeof draftedBy === "string" && draftedBy.trim() !== ""
         ? { drafted_by: draftedBy.trim() }
         : {}),
@@ -1035,15 +1143,15 @@ export async function runDecompositionExperiment({
   // capabilities Q5 — and the stamp is best-effort provenance, never
   // authority: the receipt-side experiment id remains the primary join).
   const metadataStamp = {
-    agentic_factory_receipt_id: receiptId,
-    agentic_factory_run_id: agenticFactoryRunId,
-    agentic_factory_source: EXPERIMENT_RECEIPT_SOURCE_MANAGED_MANUAL,
-    agentic_factory_variant_id: variant.id,
-    agentic_factory_candidate_version_id: candidateVersionId,
+    teami_receipt_id: receiptId,
+    teami_run_id: agenticFactoryRunId,
+    teami_source: EXPERIMENT_RECEIPT_SOURCE_MANAGED_MANUAL,
+    teami_variant_id: variant.id,
+    teami_candidate_version_id: candidateVersionId,
   };
   const createPayloadBase = {
     name: receiptId,
-    description: `Agentic Factory managed decomposition experiment (variant ${variant.id}, intent ${intent.intent}).`,
+    description: experimentDescription({ definition: resolvedDefinition, variant, intent }),
     version_id: datasetVersionId,
     repetitions: 1,
     ...(split && selected.selection === "native_split_filter" ? { splits: [split] } : {}),
@@ -1136,7 +1244,8 @@ export async function runDecompositionExperiment({
           datasetName,
           datasetExampleId: record.id,
           variantId: derivedVariantTaskConfig ? variant.id : variantId,
-          variantsPath: derivedVariantTaskConfig?.variantsPath || variantsPath,
+          variantsPath: derivedVariantTaskConfig?.variantsPath || resolvedVariantsPath,
+          definition: resolvedDefinition,
           ...(variant.source === "derived_variant" ? { derivedVariant: structuredClone(variant.derived_variant) } : {}),
           emitChecks: true,
           judge: true,
@@ -1294,7 +1403,7 @@ export async function runDecompositionExperiment({
       const judgeResult = taskResult.judge;
       if (judgeResult?.judge_state === "judged" && judgeResult.judge) {
         await postEvaluation({
-          name: "decomposition_quality",
+          name: DEFAULT_ANNOTATION_NAME,
           annotatorKind: "LLM",
           result: {
             label: judgeResult.judge.label,
@@ -1313,7 +1422,7 @@ export async function runDecompositionExperiment({
       } else if (judgeResult
         && (judgeResult.judge_state === "judge_missing" || judgeResult.judge_state === "judge_invalid")) {
         await postEvaluation({
-          name: "decomposition_quality",
+          name: DEFAULT_ANNOTATION_NAME,
           annotatorKind: "LLM",
           error: `${judgeResult.judge_state}:${judgeResult.reason || "unknown"}`,
           metadata: {
@@ -1351,7 +1460,7 @@ export async function runDecompositionExperiment({
         .map((annotation) => normalizePhoenixAnnotation(annotation))
         .filter(
           (annotation) =>
-            annotation.annotator_kind === "HUMAN" && annotation.name === "decomposition_quality",
+            annotation.annotator_kind === "HUMAN" && annotation.name === DEFAULT_ANNOTATION_NAME,
         );
       if (humans.length > 0) {
         entry.human_label = humans.at(-1).label;
@@ -1380,6 +1489,7 @@ export async function runDecompositionExperiment({
         manifest,
         candidateTargetKey,
         dataset: { dataset_id: datasetId, dataset_version_id: datasetVersionId, name: datasetName },
+        definition: resolvedDefinition,
       });
   if (baselineEntry?.experiment_id) {
     try {
@@ -1435,7 +1545,7 @@ export async function runDecompositionExperiment({
     status,
     receipt_id: receiptId,
     receipt_path: receiptPath,
-    agentic_factory_run_id: agenticFactoryRunId,
+    teami_run_id: agenticFactoryRunId,
     phoenix_experiment_id: experiment.id,
     intent: intent.intent,
     intent_source: intent.source,

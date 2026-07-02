@@ -4,9 +4,14 @@ import test from "node:test";
 
 import { loadLinearConfig } from "../src/config.mjs";
 import { resolveForegroundDomainCache } from "../src/domain-command-context.mjs";
-import { makeDomainRecord } from "../src/domain-registry.mjs";
 import {
+  DOMAIN_REGISTRY_SCHEMA_VERSION,
+  makeDomainRecord,
+} from "../src/domain-registry.mjs";
+import {
+  allowedRepoPacketFromDomainResources,
   behaviorRepoIdForRepoRoot,
+  buildDomainContext,
   resolveForegroundDomainContext,
   resolveWakeDomainContext,
 } from "../src/domain-resolver.mjs";
@@ -29,7 +34,7 @@ test("Exactly-one-intersection resolves; zero returns no context; two-plus activ
   });
   assert.equal(resolved.ok, true);
   assert.equal(resolved.context.domainId, "domain-a");
-  assert.equal(resolved.context.linear.cachePath, path.join(repoRoot, ".agentic-factory", "domains", "domain-a", "linear.json"));
+  assert.equal(resolved.context.linear.cachePath, path.join(repoRoot, ".teami", "domains", "domain-a", "linear.json"));
   assert.equal(Object.isFrozen(resolved.context), true);
   assert.equal(Object.isFrozen(resolved.context.linear), true);
 
@@ -251,9 +256,9 @@ test("doctor and gateway foreground startup read per-domain cache, not legacy ca
   assert.deepEqual(
     seen.map((item) => [item.commandName, item.cachePath.replace(/\\/g, "/")]),
     [
-      ["doctor", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
-      ["gateway", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
-      ["gateway status", `${tempRoot.replace(/\\/g, "/")}/.agentic-factory/domains/support-ops/linear.json`],
+      ["doctor", `${tempRoot.replace(/\\/g, "/")}/.teami/domains/support-ops/linear.json`],
+      ["gateway", `${tempRoot.replace(/\\/g, "/")}/.teami/domains/support-ops/linear.json`],
+      ["gateway status", `${tempRoot.replace(/\\/g, "/")}/.teami/domains/support-ops/linear.json`],
     ],
   );
 });
@@ -301,9 +306,70 @@ test("DomainContext trace contains stable IDs and no domain name", () => {
   assert.equal(Object.hasOwn(resolved.context.trace, "domain_name"), false);
 });
 
+test("allowed repo packet exposes the S1 wire shape from domain resources", () => {
+  const resources = [
+    {
+      id: "git_repo:acme/portal",
+      kind: "git_repo",
+      role: "primary",
+      binding: {
+        owner: "Acme",
+        repo: "Portal",
+        default_branch: "main",
+      },
+    },
+    {
+      id: "git_repo:acme/api",
+      kind: "git_repo",
+      role: "secondary",
+      binding: {
+        owner: "Acme",
+        repo: "Api",
+        default_branch: "trunk",
+        repo_scope: "automation",
+      },
+    },
+    {
+      id: "linear_project",
+      kind: "linear_project",
+      role: "context",
+      binding: {
+        owner: "ignored",
+        repo: "ignored",
+        default_branch: "ignored",
+      },
+    },
+  ];
+  const expected = [
+    {
+      resource_id: "git_repo:acme/portal",
+      owner: "Acme",
+      repo: "Portal",
+      default_branch: "main",
+    },
+    {
+      resource_id: "git_repo:acme/api",
+      owner: "Acme",
+      repo: "Api",
+      default_branch: "trunk",
+      repo_scope: "automation",
+    },
+  ];
+
+  assert.deepEqual(allowedRepoPacketFromDomainResources(resources), expected);
+
+  const domainRecord = {
+    ...domain("domain-a", { workspaceId: "workspace-1", teamId: "team-a", webhookId: "webhook-a" }),
+    resources,
+  };
+  const context = buildDomainContext({ domain: domainRecord, config: null, repoRoot });
+  assert.deepEqual(context.allowedRepoPacket, allowedRepoPacketFromDomainResources(domainRecord.resources));
+  assert.deepEqual(context.allowedRepoPacket, expected);
+});
+
 function registryWithDomains(domains) {
   return {
-    schema_version: "agentic-factory-domain-registry/v1",
+    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
     domains,
   };
 }
@@ -312,7 +378,7 @@ function domain(id, {
   workspaceId,
   teamId,
   teamKey = "AF",
-  teamName = "Agentic Factory",
+  teamName = "Teami",
   webhookId,
   status = "active",
 } = {}) {

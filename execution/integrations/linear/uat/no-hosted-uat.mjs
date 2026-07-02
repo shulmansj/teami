@@ -6,6 +6,7 @@ import { defaultRunStoreDir } from "../../../engine/run-store.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import { readDomainRegistry } from "../src/domain-registry.mjs";
 import { buildDomainContext } from "../src/domain-resolver.mjs";
+import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import { readGitHubConnectionState, resolveBehaviorRepoIdentity } from "../src/github-setup.mjs";
 import { redactGitHubSecrets } from "../src/github-secret-hygiene.mjs";
 import { createLinearCredentialStore } from "../src/linear-credential-store.mjs";
@@ -47,40 +48,40 @@ class NoHostedUatUserError extends Error {
 export function parseNoHostedUatArgs(argv = process.argv.slice(2), env = process.env) {
   const options = {
     repoRoot: path.resolve(
-      env.AGENTIC_FACTORY_NO_HOSTED_UAT_REPO_ROOT
-        || env.AGENTIC_FACTORY_UAT_REPO_ROOT
+      env.TEAMI_NO_HOSTED_UAT_REPO_ROOT
+        || env.TEAMI_UAT_REPO_ROOT
         || REPO_ROOT,
     ),
-    domainId: env.AGENTIC_FACTORY_NO_HOSTED_UAT_DOMAIN || env.AGENTIC_FACTORY_UAT_DOMAIN || null,
-    prefix: env.AGENTIC_FACTORY_NO_HOSTED_UAT_PREFIX || env.AGENTIC_FACTORY_UAT_PREFIX || DEFAULT_NO_HOSTED_PREFIX,
+    domainId: env.TEAMI_NO_HOSTED_UAT_DOMAIN || env.TEAMI_UAT_DOMAIN || null,
+    prefix: env.TEAMI_NO_HOSTED_UAT_PREFIX || env.TEAMI_UAT_PREFIX || DEFAULT_NO_HOSTED_PREFIX,
     consecutive: parsePositiveInteger(
-      env.AGENTIC_FACTORY_NO_HOSTED_UAT_CONSECUTIVE || env.AGENTIC_FACTORY_UAT_CONSECUTIVE,
+      env.TEAMI_NO_HOSTED_UAT_CONSECUTIVE || env.TEAMI_UAT_CONSECUTIVE,
       DEFAULT_CONSECUTIVE_COMMITS,
     ),
     pollIntervalMs: parsePositiveInteger(
-      env.AGENTIC_FACTORY_NO_HOSTED_UAT_POLL_INTERVAL_MS || env.AGENTIC_FACTORY_UAT_POLL_INTERVAL_MS,
+      env.TEAMI_NO_HOSTED_UAT_POLL_INTERVAL_MS || env.TEAMI_UAT_POLL_INTERVAL_MS,
       null,
     ),
     pollGraceMs: parsePositiveInteger(
-      env.AGENTIC_FACTORY_NO_HOSTED_UAT_POLL_GRACE_MS || env.AGENTIC_FACTORY_UAT_POLL_GRACE_MS,
+      env.TEAMI_NO_HOSTED_UAT_POLL_GRACE_MS || env.TEAMI_UAT_POLL_GRACE_MS,
       DEFAULT_POLL_GRACE_MS,
     ),
     timeoutMs: parsePositiveInteger(
-      env.AGENTIC_FACTORY_NO_HOSTED_UAT_TIMEOUT_MS || env.AGENTIC_FACTORY_UAT_TIMEOUT_MS,
+      env.TEAMI_NO_HOSTED_UAT_TIMEOUT_MS || env.TEAMI_UAT_TIMEOUT_MS,
       DEFAULT_TIMEOUT_MS,
     ),
-    workspaceDir: env.AGENTIC_FACTORY_NO_HOSTED_UAT_WORKSPACE_DIR
-      ? path.resolve(env.AGENTIC_FACTORY_NO_HOSTED_UAT_WORKSPACE_DIR)
-      : env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_WORKSPACE_DIR
-        ? path.resolve(env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_WORKSPACE_DIR)
+    workspaceDir: env.TEAMI_NO_HOSTED_UAT_WORKSPACE_DIR
+      ? path.resolve(env.TEAMI_NO_HOSTED_UAT_WORKSPACE_DIR)
+      : env.TEAMI_GITHUB_LOCAL_UAT_WORKSPACE_DIR
+        ? path.resolve(env.TEAMI_GITHUB_LOCAL_UAT_WORKSPACE_DIR)
         : null,
-    branchPrefix: env.AGENTIC_FACTORY_NO_HOSTED_UAT_BRANCH_PREFIX
-      || env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_BRANCH_PREFIX
+    branchPrefix: env.TEAMI_NO_HOSTED_UAT_BRANCH_PREFIX
+      || env.TEAMI_GITHUB_LOCAL_UAT_BRANCH_PREFIX
       || DEFAULT_GITHUB_LOCAL_UAT_BRANCH_PREFIX,
     keepArtifacts: truthy(
-      env.AGENTIC_FACTORY_NO_HOSTED_UAT_KEEP_ARTIFACTS
-        || env.AGENTIC_FACTORY_UAT_KEEP_ARTIFACTS
-        || env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS,
+      env.TEAMI_NO_HOSTED_UAT_KEEP_ARTIFACTS
+        || env.TEAMI_UAT_KEEP_ARTIFACTS
+        || env.TEAMI_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS,
     ),
     help: false,
   };
@@ -131,9 +132,9 @@ export function buildNoHostedUatUsage() {
     "- Local git and gh auth can push a disposable branch and open a PR.",
     "",
     "Environment equivalents:",
-    "- AGENTIC_FACTORY_NO_HOSTED_UAT_DOMAIN or AGENTIC_FACTORY_UAT_DOMAIN selects the Linear domain.",
-    "- AGENTIC_FACTORY_NO_HOSTED_UAT_REPO_ROOT or AGENTIC_FACTORY_UAT_REPO_ROOT selects the checkout.",
-    "- AGENTIC_FACTORY_NO_HOSTED_UAT_KEEP_ARTIFACTS=1 keeps disposable artifacts where child harnesses allow it.",
+    "- TEAMI_NO_HOSTED_UAT_DOMAIN or TEAMI_UAT_DOMAIN selects the Linear domain.",
+    "- TEAMI_NO_HOSTED_UAT_REPO_ROOT or TEAMI_UAT_REPO_ROOT selects the checkout.",
+    "- TEAMI_NO_HOSTED_UAT_KEEP_ARTIFACTS=1 keeps disposable artifacts where child harnesses allow it.",
   ].join("\n");
 }
 
@@ -234,6 +235,9 @@ export async function assertNoHostedLivePrerequisites({
 
 export function assertNoHostedPreconditions({ repoRoot = process.cwd() } = {}) {
   const config = loadLinearConfig({ repoRoot });
+  // Register the git_repo resource kind before reading a registry that may bind git_repo
+  // resources (since #90), or readDomainRegistry throws unknown_resource_kind:git_repo.
+  registerGitRepoResourceKind();
   const domainRegistry = readDomainRegistry({ repoRoot });
   const githubConnectionRead = readGitHubConnectionState({ repoRoot });
   const githubConnection = githubConnectionRead.ok ? githubConnectionRead.connection : null;

@@ -6,15 +6,28 @@ import {
   FAILURE_TAXONOMY_VERSION,
   findBannedWorkflowStateMetadataKeys,
   RICH_EXAMPLE_DATASET_NAME,
+  resolveEvalContract,
   RUBRIC_VERSION,
 } from "./eval-annotation-contract.mjs";
+import {
+  fetchPhoenixTraceAnnotations,
+  normalizePhoenixAnnotation,
+} from "./eval-status.mjs";
+import {
+  buildJudgeFixtureInput,
+  buildJudgeInputs,
+  judgeAllowedFailureModes,
+} from "./decomposition-quality-judge.mjs";
 import {
   findTokenShapedContent,
   RICH_EXAMPLE_CONTENT_POLICY,
   sanitizeAndClassifyContent,
 } from "./eval-content-gate.mjs";
 import { schemaErrors } from "./eval-structural-validator.mjs";
-import { ensurePhoenixReady } from "./local-phoenix-manager.mjs";
+import {
+  DEFAULT_PHOENIX_PROJECT,
+  ensurePhoenixReady,
+} from "./local-phoenix-manager.mjs";
 import {
   canonicalJsonStringify,
   loadCapturedProjectSnapshot,
@@ -34,6 +47,7 @@ import {
   decompositionEvalNamespacePath,
   resolveDecompositionEvalPath,
 } from "./workflows/decomposition/eval-paths.mjs";
+import { decompositionDefinition } from "./workflows/decomposition/definition.mjs";
 
 // Rich decomposition example promotion (Track B), behind the explicit
 // `npm run phoenix:promote-decomposition` command. Pipeline per the plan's
@@ -70,7 +84,7 @@ const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export function richExampleId(runId) {
-  return `agentic_factory:${runId}`;
+  return `teami:${runId}`;
 }
 
 export function promotionReceiptPath({ runId, repoRoot = process.cwd(), runStoreDir = null } = {}) {
@@ -187,9 +201,214 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function decompositionEvalContract(repoRoot = MODULE_REPO_ROOT) {
+  const contract = resolveEvalContract(decompositionDefinition, repoRoot);
+  if (contract.eval_configured === true || path.resolve(repoRoot) === MODULE_REPO_ROOT) return contract;
+  return resolveEvalContract(decompositionDefinition, MODULE_REPO_ROOT);
+}
+
+function labelAliasToNamespaceLabel(label, contract) {
+  const raw = String(label ?? "").trim();
+  if (!raw) throw new Error("human_fixture_label_required");
+  if (contract.quality_labels.includes(raw)) return raw;
+  const normalized = raw.toLowerCase();
+  if (normalized === "good" && contract.quality_labels.includes("pass")) return "pass";
+  if (normalized === "bad") {
+    const negativeLabels = contract.quality_labels.filter((candidate) => candidate !== "pass");
+    if (negativeLabels.length === 1) return negativeLabels[0];
+    throw new Error("human_fixture_label_ambiguous:bad");
+  }
+  throw new Error(`human_fixture_label_outside_namespace:${raw}`);
+}
+
+export function freezeHumanFixtureLabel({
+  label,
+  score = null,
+  annotatorId = null,
+  labeledAt = null,
+  evalContract = decompositionEvalContract(),
+} = {}) {
+  if (!evalContract || evalContract.eval_configured !== true) {
+    throw new Error(evalContract?.reason || "workflow_eval_not_configured");
+  }
+  const expectedLabel = labelAliasToNamespaceLabel(label, evalContract);
+  const frozen = {
+    expected_label: expectedLabel,
+    provenance: {
+      label_source: "explicit_human",
+      label_status: "GOLD",
+      labeled_at: normalizeIsoTimestamp(labeledAt, "labeled_at"),
+      ...(textOrNull(annotatorId) ? { annotator_id: textOrNull(annotatorId) } : {}),
+    },
+  };
+  if (score !== null && score !== undefined) {
+    const numericScore = Number(score);
+    if (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > 1) {
+      throw new Error("expected_score_must_be_number_in_0_1");
+    }
+    frozen.expected_score = numericScore;
+  }
+  return frozen;
+}
+
+function freezeHumanFixtureLabelResult(options = {}) {
+  try {
+    return { ok: true, frozen: freezeHumanFixtureLabel(options) };
+  } catch (error) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: error.message || "human_fixture_label_invalid",
+    };
+  }
+}
+
+async function resolveFrozenHumanFixtureLabelFromPhoenix({
+  annotationIds = [],
+  traceId,
+  appUrl,
+  projectName,
+  fetchImpl,
+  evalContract,
+  now,
+} = {}) {
+  const requestedIds = [...new Set(annotationIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  if (requestedIds.length === 0) return { ok: true, frozen: null };
+  if (!traceId) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: "human_fixture_label_source_trace_missing",
+      detail: "Annotation ids were supplied, but the run has no source trace id to resolve and freeze the HUMAN label.",
+    };
+  }
+  let rawAnnotations;
+  try {
+    rawAnnotations = await fetchPhoenixTraceAnnotations({
+      appUrl,
+      projectName,
+      traceId,
+      fetchImpl,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: "human_fixture_annotations_unreadable",
+      detail: error.message,
+    };
+  }
+  const requested = new Set(requestedIds);
+  const selected = rawAnnotations
+    .filter((entry) => requested.has(String(entry?.id ?? "")))
+    .map((entry) => ({
+      raw: entry,
+      normalized: normalizePhoenixAnnotation(entry),
+    }));
+  const resolvedIds = new Set(selected.map((entry) => String(entry.raw?.id ?? "")));
+  const unresolved = requestedIds.filter((id) => !resolvedIds.has(id));
+  if (unresolved.length > 0) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: "human_fixture_annotation_ids_unresolved",
+      missing_annotation_ids: unresolved,
+    };
+  }
+  const nonHuman = selected.filter((entry) => entry.normalized.annotator_kind !== "HUMAN");
+  if (nonHuman.length > 0) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: "human_fixture_label_requires_human_annotation",
+      annotation_ids: nonHuman.map((entry) => entry.raw?.id).filter(Boolean),
+    };
+  }
+  const rollUpName = evalContract.roll_up_annotation_name;
+  const rollUps = selected.filter((entry) => entry.normalized.name === rollUpName);
+  if (rollUps.length !== 1) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: rollUps.length === 0
+        ? "human_fixture_rollup_annotation_missing"
+        : "human_fixture_rollup_annotation_ambiguous",
+      annotation_name: rollUpName,
+    };
+  }
+  const annotation = rollUps[0];
+  return freezeHumanFixtureLabelResult({
+    label: annotation.normalized.label,
+    score: annotation.normalized.score,
+    annotatorId: annotation.normalized.identifier,
+    labeledAt: annotationTimestamp(annotation.raw) || now(),
+    evalContract,
+  });
+}
+
+function annotationTimestamp(raw = {}) {
+  const candidates = [
+    raw?.metadata?.labeled_at,
+    raw?.created_at,
+    raw?.updated_at,
+    raw?.inserted_at,
+  ];
+  return candidates.find((candidate) =>
+    typeof candidate === "string" && candidate.trim() !== "" && !Number.isNaN(Date.parse(candidate))) || null;
+}
+
+function normalizeIsoTimestamp(value, fieldName) {
+  const text = String(value ?? "").trim();
+  if (!text || Number.isNaN(Date.parse(text))) {
+    throw new Error(`${fieldName}_invalid`);
+  }
+  return new Date(text).toISOString();
+}
+
+function textOrNull(value) {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
+
+function producedIdentityRefsFromArtifact(artifact = {}) {
+  if (!Array.isArray(artifact?.produced_identities)) return [];
+  const refs = [];
+  for (const entry of artifact.produced_identities) {
+    if (!isRecord(entry)) continue;
+    const effectId = textOrNull(entry.effect_id);
+    const provider = textOrNull(entry.provider);
+    const resourceKind = textOrNull(entry.resource_kind);
+    const targetIds = Array.isArray(entry.target_ids)
+      ? [...new Set(entry.target_ids.map(textOrNull).filter(Boolean))]
+      : [];
+    if (!effectId || !provider || !resourceKind) continue;
+    refs.push({
+      effect_id: effectId,
+      provider,
+      resource_kind: resourceKind,
+      target_ids: targetIds,
+    });
+  }
+  return refs;
+}
+
+function sourceTargetIdsFromProducedRefs(producedIdentityRefs = []) {
+  return [
+    ...new Set(
+      producedIdentityRefs
+        .flatMap((entry) => Array.isArray(entry.target_ids) ? entry.target_ids : [])
+        .map(textOrNull)
+        .filter(Boolean),
+    ),
+  ];
+}
+
 // Assembles, gates, and validates one rich decomposition example. Pure with
-// respect to Phoenix: no network access here. Returns fail-closed result
-// objects (never partially assembled examples).
+// respect to Phoenix: no network access here. This is the D-capture projection
+// for decomposition fixtures: it projects the captured run through
+// resolveEvalContract(...).judge_input_contract via buildJudgeInputs, and a
+// short Judge input is quarantined as cannot_promote rather than uploaded.
+// Returns fail-closed result objects (never partially assembled examples).
 export function buildRichDecompositionExample({
   receipt,
   artifact,
@@ -197,7 +416,9 @@ export function buildRichDecompositionExample({
   policy,
   explicitSplit = null,
   annotationIds = [],
+  humanFixtureLabel = null,
   additionalMetadata = {},
+  evalContract = decompositionEvalContract(),
 } = {}) {
   const terminal = terminalStateFromArtifact(artifact);
   if (!terminal.ok) {
@@ -220,7 +441,32 @@ export function buildRichDecompositionExample({
     projectId: snapshot.project?.id,
     projectName: snapshot.project?.name,
   });
+  const builtJudgeInput = buildJudgeInputs({
+    artifact,
+    snapshot,
+    allowedFailureModes: judgeAllowedFailureModes(),
+  });
+  if (!builtJudgeInput.ok) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: builtJudgeInput.reason,
+      run_id: artifact.run_id,
+      failures: builtJudgeInput.failures || [],
+    };
+  }
+  const fixtureInput = buildJudgeFixtureInput({ judgeInputs: builtJudgeInput.inputs });
+  if (!fixtureInput.ok) {
+    return {
+      ok: false,
+      state: "cannot_promote",
+      reason: fixtureInput.reason,
+      run_id: artifact.run_id,
+      failures: fixtureInput.failures || [],
+    };
+  }
 
+  const producedIdentityRefs = producedIdentityRefsFromArtifact(artifact);
   const metadata = {
     workspace_maturity: policy.workspace_maturity,
     project_category: category.value,
@@ -234,6 +480,8 @@ export function buildRichDecompositionExample({
     source_run_id: artifact.run_id,
     content_retention: "rich_local",
     ...additionalMetadata,
+    source_target_ids: sourceTargetIdsFromProducedRefs(producedIdentityRefs),
+    produced_identity_refs: producedIdentityRefs,
   };
   const bannedKeys = findBannedWorkflowStateMetadataKeys(metadata);
   if (bannedKeys.length > 0) {
@@ -247,9 +495,25 @@ export function buildRichDecompositionExample({
   // Raw assembly copies source records WHOLE; the content gate owns every
   // removal/transform so nothing is dropped silently and unknown fields
   // reject into needs_sanitization.
+  let frozenHumanLabel = null;
+  if (humanFixtureLabel) {
+    const freeze = freezeHumanFixtureLabelResult({
+      label: humanFixtureLabel.expected_label ?? humanFixtureLabel.label,
+      score: humanFixtureLabel.expected_score ?? humanFixtureLabel.score ?? null,
+      annotatorId: humanFixtureLabel.provenance?.annotator_id ?? humanFixtureLabel.annotator_id ?? humanFixtureLabel.annotatorId ?? null,
+      labeledAt: humanFixtureLabel.provenance?.labeled_at ?? humanFixtureLabel.labeled_at ?? humanFixtureLabel.labeledAt ?? null,
+      evalContract,
+    });
+    if (!freeze.ok) return freeze;
+    frozenHumanLabel = freeze.frozen;
+  }
+
   const rawExample = {
     schema_version: EXAMPLE_SCHEMA_ID,
     input: {
+      gradeability: fixtureInput.gradeability,
+      judge_fixture_input: fixtureInput.judge_fixture_input,
+      maintainer_supplied_context: fixtureInput.maintainer_supplied_context,
       source_type: "linear_project_snapshot",
       project: snapshot.project,
       run_envelope: {
@@ -281,6 +545,7 @@ export function buildRichDecompositionExample({
       // carries asserted annotation IDs when explicitly supplied.
       human_annotations: [],
       ...(annotationIds.length > 0 ? { human_annotation_ids: [...annotationIds] } : {}),
+      ...(frozenHumanLabel || {}),
     },
     metadata,
   };
@@ -326,7 +591,7 @@ export function buildRichDatasetUploadPayload({
   const payload = {
     name: datasetName,
     action,
-    description: "Agentic Factory curated decomposition examples (rich, policy-gated, local custody).",
+    description: "Teami curated decomposition examples (rich, policy-gated, local custody).",
     inputs: [example.input],
     outputs: [example.output],
     metadata: [{
@@ -389,7 +654,7 @@ export async function promoteRichDecompositionExample({
     };
   }
 
-  // 2. Local run artifact (.agentic-factory/runs/<run_id>.json).
+  // 2. Local run artifact (.teami/runs/<run_id>.json).
   let artifact;
   try {
     artifact = readRunArtifact({ runId, repoRoot, runStoreDir });
@@ -402,7 +667,7 @@ export async function promoteRichDecompositionExample({
       state: "cannot_promote",
       reason: "missing_run_artifact",
       run_id: runId,
-      detail: `No local run artifact found for run ${runId} under .agentic-factory/runs/.`,
+      detail: `No local run artifact found for run ${runId} under .teami/runs/.`,
     };
   }
 
@@ -423,6 +688,27 @@ export async function promoteRichDecompositionExample({
   // 4. Repo-owned workspace eval policy (human-set values + split rule).
   const policy = loadWorkspaceEvalPolicy(policyPath ? { policyPath } : {});
 
+  const evalContract = decompositionEvalContract(repoRoot);
+  let ready = null;
+  let humanFixtureLabel = null;
+  if (annotationIds.length > 0) {
+    ready = await ensureReady({ repoRoot, fetchImpl, onProgress });
+    if (!ready.ok) {
+      return { ok: false, state: "cannot_promote", reason: ready.reason || "local_phoenix_unavailable", run_id: runId };
+    }
+    const freeze = await resolveFrozenHumanFixtureLabelFromPhoenix({
+      annotationIds,
+      traceId: receipt.trace_id || null,
+      appUrl: ready.appUrl,
+      projectName: ready.projectName || DEFAULT_PHOENIX_PROJECT,
+      fetchImpl,
+      evalContract,
+      now,
+    });
+    if (!freeze.ok) return { run_id: runId, ...freeze };
+    humanFixtureLabel = freeze.frozen;
+  }
+
   // 5. Assemble + gate + validate.
   const build = buildRichDecompositionExample({
     receipt,
@@ -431,7 +717,9 @@ export async function promoteRichDecompositionExample({
     policy,
     explicitSplit,
     annotationIds,
+    humanFixtureLabel,
     additionalMetadata,
+    evalContract,
   });
   if (!build.ok) return { run_id: runId, ...build };
 
@@ -478,7 +766,7 @@ export async function promoteRichDecompositionExample({
   }
 
   // 7. Upload to local Phoenix with native split assignment.
-  const ready = await ensureReady({ repoRoot, fetchImpl, onProgress });
+  ready = ready || await ensureReady({ repoRoot, fetchImpl, onProgress });
   if (!ready.ok) {
     return { ok: false, state: "cannot_promote", reason: ready.reason || "local_phoenix_unavailable", run_id: runId };
   }

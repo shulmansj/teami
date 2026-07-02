@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to agentic-factory are documented here.
+All notable changes to teami are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/) flavored; versions are
 the `version` field in `package.json`.
 
@@ -8,7 +8,7 @@ the `version` field in `package.json`.
 
 ### Changed
 
-- Public setup defaults and setup docs now target the Agentic Factory-operated
+- Public setup defaults and setup docs now target the Teami-operated
   hosted public beta endpoint instead of the reserved launch-gated host.
 
 ### Fixed
@@ -74,7 +74,7 @@ checkouts.
 
 ### Fixed
 
-- `config.example.json` now includes `https://github.com/shulmansj/agentic-factory` as
+- `config.example.json` now includes `https://github.com/shulmansj/teami` as
   a starter remote URL, so a plain fresh clone from the source repo can preserve
   that remote as `upstream` and create the dedicated behavior repo at `origin`.
 
@@ -84,7 +84,7 @@ GitHub setup now handles already-installed App connections.
 
 ### Fixed
 
-- GitHub setup detects when the Agentic Factory GitHub App already covers the
+- GitHub setup detects when the Teami GitHub App already covers the
   selected behavior repo, then runs a normal GitHub authorization step instead
   of sending adopters back through the install settings page.
 - The hosted callback now binds the GitHub installation discovered by the
@@ -140,7 +140,7 @@ GitHub setup reruns now resume repos created by a prior failed install step.
 
 ### Fixed
 
-- If init created `agentic-factory` but failed while starting the hosted GitHub
+- If init created `teami` but failed while starting the hosted GitHub
   App install flow, a plain `npm run init` rerun now treats that repo as its
   own prior work and continues verification instead of reporting a repo-name
   collision.
@@ -152,10 +152,10 @@ checks.
 
 ### Fixed
 
-- If a prior dummy behavior repo was renamed away from `agentic-factory`, `gh
+- If a prior dummy behavior repo was renamed away from `teami`, `gh
   repo view` may still follow GitHub's redirect from the old name. Init now
   treats that redirected repo as not occupying the requested default name, so
-  the no-flags adopter setup can create a fresh `agentic-factory` repo.
+  the no-flags adopter setup can create a fresh `teami` repo.
 
 ## [0.3.10] - 2026-06-14
 
@@ -188,7 +188,7 @@ for input.
 
 ### Changed
 
-- The interactive GitHub setup prompt now says that Agentic Factory needs a
+- The interactive GitHub setup prompt now says that Teami needs a
   GitHub repo for generated PRs, explains that Enter accepts the signed-in
   GitHub CLI account, and allows typing a different user or org.
 - The GitHub setup phase now prints the selected repo target before creating or
@@ -202,7 +202,7 @@ punctuation in its own message.
 ### Fixed
 
 - `teamCreate` setup failures no longer print double punctuation between
-  Linear's user-facing error and Agentic Factory's repair guidance.
+  Linear's user-facing error and Teami's repair guidance.
 
 ## [0.3.6] - 2026-06-14
 
@@ -274,7 +274,7 @@ Post-Milestone-C onboarding accuracy. Both changes were codex-reviewed (SHIP/SHI
   Linear setup contract, and the config template no longer describe a
   maintainer-supplied setup token. `init` registers the Linear webhook secret and
   mints the runner credential with the self-issued setup grant;
-  `AGENTIC_FACTORY_INBOX_ADMIN_TOKEN` is break-glass only and never required for
+  `TEAMI_INBOX_ADMIN_TOKEN` is break-glass only and never required for
   adopter setup. Removed the misleading `setup_token_file` from the adopter config
   template.
 

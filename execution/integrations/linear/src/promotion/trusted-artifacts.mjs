@@ -10,6 +10,8 @@ import {
 import { resolveDefaultBranchRef } from "../promotion-policy.mjs";
 import { defaultRunGit } from "../promotion-workspace.mjs";
 import { newTraceId } from "../../../../engine/trace-contract.mjs";
+import { evalNamespacePaths } from "../../../../engine/eval-namespace.mjs";
+import { getWorkflowDefinition } from "../../../../engine/workflow-registry.mjs";
 import {
   PROMOTION_OUTCOME_ANNOTATION_NAME,
   PROMOTION_OUTCOME_IDENTIFIER,
@@ -20,9 +22,26 @@ import {
   waitForPhoenixTraceVisible,
 } from "./request-contract.mjs";
 import { readJsonTolerant } from "./registry-store.mjs";
-import { DECOMPOSITION_EVAL_PATHS } from "../workflows/decomposition/eval-paths.mjs";
+import "../trigger-registry.mjs";
 
 const MODULE_REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..", "..");
+
+function workflowTypeFromTargetKey(candidateTargetKey) {
+  const segments = String(candidateTargetKey ?? "").split("/");
+  return segments.length >= 3 && segments[1] ? segments[1] : "decomposition";
+}
+
+function evalPathsForCandidateTargetKey(candidateTargetKey) {
+  const workflowType = workflowTypeFromTargetKey(candidateTargetKey);
+  try {
+    return evalNamespacePaths(getWorkflowDefinition(workflowType));
+  } catch {
+    return evalNamespacePaths({
+      workflow_type: workflowType,
+      eval_namespace: `execution/evals/${workflowType}`,
+    });
+  }
+}
 
 export function findReceiptByExperimentId({
   repoRoot = process.cwd(),
@@ -35,7 +54,7 @@ export function findReceiptByExperimentId({
   for (const name of fs.readdirSync(dir)) {
     if (!name.endsWith(".json")) continue;
     const receipt = readJsonTolerant(path.join(dir, name));
-    if (receipt?.schema_version !== "agentic-factory-managed-experiment-receipt/v1") continue;
+    if (receipt?.schema_version !== "teami-managed-experiment-receipt/v1") continue;
     let state;
     try {
       state = deriveExperimentReceiptState(receipt);
@@ -119,7 +138,7 @@ export async function recordPhoenixOutcomeObservation({
         appUrl,
         pathname: "/v1/projects",
         method: "POST",
-        payload: { name: projectName, description: "Agentic Factory local traces" },
+        payload: { name: projectName, description: "Teami local traces" },
         fetchImpl,
       });
     }
@@ -129,7 +148,7 @@ export async function recordPhoenixOutcomeObservation({
       method: "POST",
       payload: {
         data: [{
-          name: "agentic_factory.promote_candidate",
+          name: "teami.promote_candidate",
           context: { trace_id: traceId, span_id: spanId },
           span_kind: "CHAIN",
           start_time: at,
@@ -137,9 +156,9 @@ export async function recordPhoenixOutcomeObservation({
           status_code: "OK",
           status_message: "",
           attributes: {
-            "agentic_factory.proposal_instance_id": proposalInstanceId,
-            "agentic_factory.candidate_target_key": candidateTargetKey,
-            "agentic_factory.outcome": label,
+            "teami.proposal_instance_id": proposalInstanceId,
+            "teami.candidate_target_key": candidateTargetKey,
+            "teami.outcome": label,
           },
           events: [],
         }],
@@ -284,31 +303,32 @@ export function resolveTrustedPromotionArtifacts({
   internalCloneDir,
   runGit = defaultRunGit,
 } = {}) {
+  const evalPaths = evalPathsForCandidateTargetKey(candidateTargetKey);
   const manifestRead = readTrustedArtifactText({
     mode,
     repoRoot,
-    relativePath: DECOMPOSITION_EVAL_PATHS.manifest,
+    relativePath: evalPaths.manifest,
     internalCloneDir,
     runGit,
   });
   if (!manifestRead.ok) return manifestRead;
   const manifestParsed = parseTrustedJsonArtifact({
     content: manifestRead.content,
-    relativePath: DECOMPOSITION_EVAL_PATHS.manifest,
+    relativePath: evalPaths.manifest,
   });
   if (!manifestParsed.ok) return manifestParsed;
 
   const taxonomyRead = readTrustedArtifactText({
     mode,
     repoRoot,
-    relativePath: DECOMPOSITION_EVAL_PATHS.taxonomy,
+    relativePath: evalPaths.taxonomy,
     internalCloneDir,
     runGit,
   });
   if (!taxonomyRead.ok) return taxonomyRead;
   const taxonomyParsed = parseTrustedJsonArtifact({
     content: taxonomyRead.content,
-    relativePath: DECOMPOSITION_EVAL_PATHS.taxonomy,
+    relativePath: evalPaths.taxonomy,
   });
   if (!taxonomyParsed.ok) return taxonomyParsed;
 

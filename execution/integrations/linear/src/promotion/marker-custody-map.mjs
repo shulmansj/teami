@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
 // B-CUSTODY: the machine-readable field -> custody-class map for the PR
-// promotion marker (`agentic_factory_promotion`, built by
+// promotion marker (`teami_promotion`, built by
 // `pr-marker.mjs buildPromotionMarker`).
 //
 // The marker is COMMITTED into the repo: it is rendered into the PR body. The
-// 0B custody contract (`maintainers/contracts/authority-custody-defaults.md`,
+// 0B custody contract (`docs/contracts/authority-custody-defaults.md`,
 // "Capture-Time Field Classes") says only redacted, repo-recordable facts may
 // be committed. This module is the single source that classifies every field
 // the marker commits by its capture-time custody class, so the custody fixture
@@ -46,7 +46,7 @@ export const REPO_COMMITTABLE_CLASSES = Object.freeze(
 );
 
 // field path -> { class, why }. Paths use dotted notation rooted at the marker
-// object (the value under the `agentic_factory_promotion` key). The walker
+// object (the value under the `teami_promotion` key). The walker
 // DEEP-WALKS to leaves:
 //   - Nested objects descend by `path.subkey` to their scalar leaves.
 //   - Arrays OF SCALARS are classified at the array field itself (every element
@@ -280,8 +280,8 @@ export const MARKER_FIELD_CUSTODY = Object.freeze({
   },
 });
 
-// Walk a BUILT marker object (the value under the `agentic_factory_promotion`
-// key, OR the full `{ agentic_factory_promotion: {...} }` wrapper) and return the
+// Walk a BUILT marker object (the value under the `teami_promotion`
+// key, OR the full `{ teami_promotion: {...} }` wrapper) and return the
 // committed leaf field paths, in dotted notation rooted at the marker object.
 //
 // DEEP-WALK to leaves (no per-field allowlist — the SHAPE decides the
@@ -297,7 +297,7 @@ export const MARKER_FIELD_CUSTODY = Object.freeze({
 // This is what makes the fixture catch a NEW committed field at ANY depth: every
 // leaf the marker emits surfaces here, and the fixture asserts each has a class
 // entry. An empty array contributes no leaf (it commits no handle).
-const PROMOTION_MARKER_KEY = "agentic_factory_promotion";
+const PROMOTION_MARKER_KEY = "teami_promotion";
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);

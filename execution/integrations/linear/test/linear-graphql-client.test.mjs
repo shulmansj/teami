@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createLinearGraphqlClient, isLinearRateLimited } from "../src/linear-graphql-client.mjs";
 import { findIssueByDecompositionKey } from "../src/linear-service.mjs";
+import { renderResourceTargetBlock } from "../src/resource-target.mjs";
 
 test("GraphQL project update creation sends OAuth bearer auth and exact authored body", async () => {
   const calls = [];
@@ -122,7 +123,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
       if (body.query.includes("query LinearTeams")) {
         return jsonResponse({
           data: {
-            teams: connection([{ id: "team-1", key: "AF", name: "Agentic Factory" }]),
+            teams: connection([{ id: "team-1", key: "AF", name: "Teami" }]),
           },
         });
       }
@@ -182,7 +183,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
               {
                 id: "template-1",
                 type: "project",
-                name: "Agentic Factory Roadmap Item",
+                name: "Teami Roadmap Item",
                 description: null,
                 templateData: JSON.stringify({ content: "## Open Questions\n" }),
                 team: { id: "team-1" },
@@ -205,7 +206,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
         return payloadResponse("templateUpdate", "template", {
           id: body.variables.id,
           type: "project",
-          name: "Agentic Factory Roadmap Item",
+          name: "Teami Roadmap Item",
           description: null,
           templateData: body.variables.input.templateData,
           team: { id: "team-1" },
@@ -218,11 +219,11 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
               {
                 id: "webhook-1",
                 url: "https://inbox.test/v1/webhooks/linear",
-                label: "Agentic Factory local gateway",
+                label: "Teami local gateway",
                 enabled: true,
                 allPublicTeams: false,
                 resourceTypes: ["Project"],
-                team: { id: "team-1", key: "AF", name: "Agentic Factory" },
+                team: { id: "team-1", key: "AF", name: "Teami" },
               },
             ]),
           },
@@ -236,7 +237,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
           enabled: body.variables.input.enabled,
           allPublicTeams: Boolean(body.variables.input.allPublicTeams),
           resourceTypes: body.variables.input.resourceTypes,
-          team: { id: body.variables.input.teamId, key: "AF", name: "Agentic Factory" },
+          team: { id: body.variables.input.teamId, key: "AF", name: "Teami" },
         });
       }
       if (body.query.includes("mutation UpdateWebhook")) {
@@ -249,7 +250,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
           enabled: body.variables.input.enabled,
           allPublicTeams: false,
           resourceTypes: body.variables.input.resourceTypes,
-          team: { id: "team-1", key: "AF", name: "Agentic Factory" },
+          team: { id: "team-1", key: "AF", name: "Teami" },
         });
       }
       if (body.query.includes("mutation DeleteWebhook")) {
@@ -260,9 +261,9 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   });
 
   assert.deepEqual(await client.listTeams(), [
-    { id: "team-1", key: "AF", name: "Agentic Factory", description: null },
+    { id: "team-1", key: "AF", name: "Teami", description: null },
   ]);
-  assert.equal((await client.createTeam({ key: "AF2", name: "Agentic Factory 2" })).key, "AF2");
+  assert.equal((await client.createTeam({ key: "AF2", name: "Teami 2" })).key, "AF2");
   assert.equal((await client.findProjectLabelsByName("Has Open Questions"))[0].id, "plabel-1");
   assert.equal((await client.createProjectLabel({ name: "Has Open Questions" })).id, "plabel-2");
   assert.equal((await client.findIssueLabelsByName("Discovery", "team-1"))[0].teamId, "team-1");
@@ -270,13 +271,13 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   assert.equal((await client.listProjectStatuses())[0].type, "planned");
   assert.equal((await client.listWorkflowStates("team-1"))[0].name, "Ready");
   assert.equal(
-    (await client.findTemplatesByName("Agentic Factory Roadmap Item", "project", "team-1"))[0]
+    (await client.findTemplatesByName("Teami Roadmap Item", "project", "team-1"))[0]
       .templateData.content,
     "## Open Questions\n",
   );
   assert.equal(
     (await client.createTemplate({
-      name: "Agentic Factory Roadmap Item",
+      name: "Teami Roadmap Item",
       type: "project",
       teamId: "team-1",
       templateData: { content: "draft" },
@@ -292,7 +293,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   assert.equal(
     (await client.createWebhook({
       url: "https://inbox.test/v1/webhooks/linear",
-      label: "Agentic Factory local gateway",
+      label: "Teami local gateway",
       teamId: "team-1",
       resourceTypes: ["Project"],
       secret: "secret-1",
@@ -303,7 +304,7 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   assert.equal(
     (await client.updateWebhook("webhook-1", {
       url: "https://inbox.test/v1/webhooks/linear",
-      label: "Agentic Factory local gateway",
+      label: "Teami local gateway",
       teamId: "team-1",
       allPublicTeams: false,
       resourceTypes: ["Project"],
@@ -320,6 +321,51 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   assert.deepEqual(issueLabelQuery.variables.filter, {
     name: { eq: "Discovery" },
     team: { id: { eq: "team-1" } },
+  });
+});
+
+test("GraphQL workflow state creation sends required input and normalizes read-back", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("mutation CreateWorkflowState")) {
+        return payloadResponse("workflowStateCreate", "workflowState", {
+          id: "state-in-review",
+          name: body.variables.input.name,
+          type: body.variables.input.type,
+          team: { id: body.variables.input.teamId },
+        });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  const state = await client.createWorkflowState({
+    name: "In Review",
+    type: "started",
+    teamId: "team-1",
+    color: "#f2c94c",
+    description: "Ready for human review.",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].query, /mutation CreateWorkflowState\(\$input: WorkflowStateCreateInput!\)/);
+  assert.match(calls[0].query, /workflowStateCreate\(input: \$input\)/);
+  assert.deepEqual(calls[0].variables.input, {
+    name: "In Review",
+    type: "started",
+    teamId: "team-1",
+    color: "#f2c94c",
+    description: "Ready for human review.",
+  });
+  assert.deepEqual(state, {
+    id: "state-in-review",
+    name: "In Review",
+    type: "started",
+    teamId: "team-1",
   });
 });
 
@@ -343,7 +389,7 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
               content: "## Open Questions\n",
               status: { id: "status-planned", name: "Planned", type: "planned" },
               labels: connection([{ id: "plabel-1", name: "Has Open Questions" }]),
-              teams: connection([{ id: "team-1", key: "AF", name: "Agentic Factory" }]),
+              teams: connection([{ id: "team-1", key: "AF", name: "Teami" }]),
               issues: connection(
                 firstPage
                   ? [issueNode({ id: "issue-1", key: "frontend", title: "Build UI" })]
@@ -363,7 +409,7 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
           content: body.variables.input.content,
           status: { id: body.variables.input.statusId, name: "Started", type: "started" },
           labels: connection([{ id: "plabel-1", name: "Has Open Questions" }]),
-          teams: connection([{ id: "team-1", key: "AF", name: "Agentic Factory" }]),
+          teams: connection([{ id: "team-1", key: "AF", name: "Teami" }]),
         });
       }
       if (body.query.includes("mutation CreateProject")) {
@@ -375,7 +421,7 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
           content: body.variables.input.content,
           status: { id: body.variables.input.statusId, name: "Planned", type: "planned" },
           labels: connection([]),
-          teams: connection([{ id: "team-1", key: "AF", name: "Agentic Factory" }]),
+          teams: connection([{ id: "team-1", key: "AF", name: "Teami" }]),
         });
       }
       if (body.query.includes("query IssueContext")) {
@@ -488,6 +534,116 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
     relatedIssueId: "issue-new-dependent",
     type: "blocks",
   });
+});
+
+test("GraphQL archive mutations send ids and return normalized archived entities", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("mutation ArchiveIssue")) {
+        return jsonResponse({
+          data: {
+            issueArchive: {
+              success: true,
+              entity: issueNode({
+                id: body.variables.id,
+                key: "archive",
+                title: "Archived issue",
+                body: "Archived issue body.",
+              }),
+            },
+          },
+        });
+      }
+      if (body.query.includes("mutation ArchiveProject")) {
+        return jsonResponse({
+          data: {
+            projectArchive: {
+              success: true,
+              entity: projectNode({
+                id: body.variables.id,
+                name: "Archived project",
+                description: "Archived project intent.",
+                content: "Archived project content.",
+              }),
+            },
+          },
+        });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  const issue = await client.archiveIssue("issue-archive");
+  const project = await client.archiveProject("project-archive");
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].query, /mutation ArchiveIssue\(\$id: String!\)/);
+  assert.match(calls[0].query, /issueArchive\(id:\s*\$id\)/);
+  assert.deepEqual(calls[0].variables, { id: "issue-archive" });
+  assert.match(calls[1].query, /mutation ArchiveProject\(\$id: String!\)/);
+  assert.match(calls[1].query, /projectArchive\(id:\s*\$id\)/);
+  assert.deepEqual(calls[1].variables, { id: "project-archive" });
+  assert.deepEqual(
+    {
+      id: issue.id,
+      title: issue.title,
+      description: issue.description,
+      teamId: issue.teamId,
+      projectId: issue.projectId,
+      labelTeamId: issue.labels[0].teamId,
+    },
+    {
+      id: "issue-archive",
+      title: "Archived issue",
+      description: "Archived issue body.",
+      teamId: "team-1",
+      projectId: "project-1",
+      labelTeamId: "team-1",
+    },
+  );
+  assert.deepEqual(project, {
+    id: "project-archive",
+    name: "Archived project",
+    url: "https://linear.test/project/project-archive",
+    description: "Archived project intent.",
+    content: "Archived project content.",
+    status: { id: "status-planned", name: "Planned", type: "planned" },
+    labels: [{ id: "plabel-1", name: "Has Open Questions" }],
+    teams: [{ id: "team-1", key: "AF", name: "Teami", description: null }],
+    teamIds: ["team-1"],
+  });
+});
+
+test("GraphQL archive mutations throw when Linear reports unsuccessful payloads", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("mutation ArchiveIssue")) {
+        return jsonResponse({ data: { issueArchive: { success: false, entity: null } } });
+      }
+      if (body.query.includes("mutation ArchiveProject")) {
+        return jsonResponse({ data: { projectArchive: { success: false, entity: null } } });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  await assert.rejects(() => client.archiveIssue("issue-archive"), /Linear issue archive failed\./);
+  await assert.rejects(
+    () => client.archiveProject("project-archive"),
+    /Linear project archive failed\./,
+  );
+  assert.deepEqual(calls.map((call) => call.variables), [
+    { id: "issue-archive" },
+    { id: "project-archive" },
+  ]);
 });
 
 test("GraphQL planned project candidates query is cheap, server-filtered, and client-guarded", async () => {
@@ -657,9 +813,15 @@ test("GraphQL issue reads give agents mediated project-scoped context", async ()
         });
       }
       if (body.query.includes("query IssueContext")) {
+        const resourceTarget = { kind: "git_repo", id: "repo-main", repo_scope: "apps/web" };
         return jsonResponse({
           data: {
-            issue: issueNode({ id: body.variables.issueId, key: "context", title: "Issue context" }),
+            issue: issueNode({
+              id: body.variables.issueId,
+              key: "context",
+              title: "Issue context",
+              body: `- Decomposition key: context\n\nExact body.\n\n${renderResourceTargetBlock(resourceTarget)}`,
+            }),
           },
         });
       }
@@ -676,6 +838,7 @@ test("GraphQL issue reads give agents mediated project-scoped context", async ()
 
   assert.equal(issues[0].projectId, "project-1");
   assert.equal(issue.title, "Issue context");
+  assert.deepEqual(issue.resource_target, { kind: "git_repo", id: "repo-main", repo_scope: "apps/web" });
   assert.equal(calls[0].headers.authorization, "Bearer oauth-token");
   assert.deepEqual(calls[0].body.variables.filter, {
     and: [
@@ -869,7 +1032,7 @@ function issueNode({
     title,
     description: body,
     url: `https://linear.test/${id}`,
-    team: { id: "team-1", key: "AF", name: "Agentic Factory" },
+    team: { id: "team-1", key: "AF", name: "Teami" },
     project: { id: "project-1", name: "Project", url: "https://linear.test/project/1" },
     assignee: null,
     state: { id: "state-backlog", name: "Backlog", type: "unstarted" },
@@ -885,6 +1048,27 @@ function relatedIssue(id, title) {
     identifier: `AF-${id.replace(/\D/g, "") || "1"}`,
     title,
     url: `https://linear.test/${id}`,
+  };
+}
+
+function projectNode({
+  id,
+  name = "Project",
+  description = "Intent",
+  content = "## Open Questions\n",
+  status = { id: "status-planned", name: "Planned", type: "planned" },
+  labels = [{ id: "plabel-1", name: "Has Open Questions" }],
+  teamIds = ["team-1"],
+} = {}) {
+  return {
+    id,
+    name,
+    url: `https://linear.test/project/${id}`,
+    description,
+    content,
+    status,
+    labels: connection(labels),
+    teams: connection(teamIds.map((teamId) => ({ id: teamId, key: "AF", name: "Teami" }))),
   };
 }
 

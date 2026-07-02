@@ -139,14 +139,14 @@ test("activation state defaults to pre-activation report-only unless owner-held 
   );
   assert.equal(
     resolvePromotionWriteGuardActivationState({
-      env: { AGENTIC_FACTORY_PROMOTION_WRITE_GUARD: "fail_closed" },
+      env: { TEAMI_PROMOTION_WRITE_GUARD: "fail_closed" },
     }).mode,
     PROMOTION_WRITE_GUARD_FAIL_CLOSED,
   );
   for (const enabledValue of ["true", "1", "on", "yes", "enabled"]) {
     assert.equal(
       resolvePromotionWriteGuardActivationState({
-        env: { AGENTIC_FACTORY_PROMOTION_WRITE_GUARD: enabledValue },
+        env: { TEAMI_PROMOTION_WRITE_GUARD: enabledValue },
       }).mode,
       PROMOTION_WRITE_GUARD_FAIL_CLOSED,
       enabledValue,
@@ -166,8 +166,8 @@ test("materialized manifest-declared agent behavior changes classify ordinary, w
       snapshot_sha256: "oldsha",
       accepted_prompt_version_id: null,
       prompt_version: "unpinned-initial",
-      accepted_tag: "agentic_factory_accepted",
-      candidate_tag: "agentic_factory_promotion_candidate",
+      accepted_tag: "teami_accepted",
+      candidate_tag: "teami_promotion_candidate",
     }],
   };
   const afterManifest = {
@@ -352,7 +352,7 @@ test("genuine mixed ordinary + ADVISORY-ONLY factory passes the write guard; ord
     mixed_classes: ["ordinary_semantic", "meta_change"],
     reasons: [
       { id: "ordinary_unprotected_path", class: "ordinary_semantic" },
-      { id: "protected_path_meta_change", class: "meta_change", path: "maintainers/contracts/some-protected.md" },
+      { id: "protected_path_meta_change", class: "meta_change", path: "docs/contracts/some-protected.md" },
     ],
   };
   const advisoryGuard = resolvePromotionWriteGuard({
@@ -415,7 +415,7 @@ test("(a) a change whose only factory class is an advisory prompt-prose escalati
 
   // The advisory is recorded on the classification result and the marker.
   assert.ok(Array.isArray(classification.advisory_reasons) && classification.advisory_reasons.length >= 1);
-  assert.equal(classification.advisories.schema_version, "agentic-factory-factory-change-advisory/v1");
+  assert.equal(classification.advisories.schema_version, "teami-factory-change-advisory/v1");
   const marker = buildPromotionMarker({
     proposalInstanceId: "prop-advisory-0001",
     candidateTargetKey: "prompt/decomposition/pm_synthesis",
@@ -427,7 +427,7 @@ test("(a) a change whose only factory class is an advisory prompt-prose escalati
     phoenixScope: { origin: "https://phoenix.example", project_name: "proj" },
     evidenceIds: { experiments: [], datasets: [], annotations: [] },
     advisories: advisorySchemaFor(classification),
-  }).agentic_factory_promotion;
+  }).teami_promotion;
   assert.ok(marker.advisories, "advisories present on marker");
   assert.ok(marker.advisories.advisory_reasons.some((r) => r.id === "ordinary_prompt_meta_escalation"));
 });

@@ -14,14 +14,24 @@ import { defaultRunGit } from "./promotion-workspace.mjs";
 // The CLI defaults to the adopter's ambient local git/gh auth. Dry-run remains
 // available as an explicit rehearsal path and records intents only.
 // Setup uses only the adopter's local git/gh auth. No GitHub secret is stored
-// by Agentic Factory; dry-run remains available as an explicit rehearsal path.
+// by Teami; dry-run remains available as an explicit rehearsal path.
 
-export const GITHUB_CONNECTION_SCHEMA_VERSION = "agentic-factory-github-connection/v1";
+export const GITHUB_CONNECTION_SCHEMA_VERSION = "teami-github-connection/v1";
 
-export const DEFAULT_BEHAVIOR_REPO_NAME = "agentic-factory";
+export const DEFAULT_BEHAVIOR_REPO_NAME = "teami";
 export const DRY_RUN_OWNER_PLACEHOLDER = "your-github-owner";
 const SECRET_FILE_NAME_PATTERN =
   /(^\.env(?:\.|$)|(^|[_\-.])(token|secret|api[_\-.]?key|authorization|password|passwd|credential|private[_\-.]?key|oauth|client[_\-.]?secret|cookie|session[_\-.]?key)(?:$|\.(?:env|json|ya?ml|toml|ini|conf|cfg|pem|key|p12|pfx|crt|txt)$))/i;
+
+// Frozen synthetic gate/scanner fixtures are intentionally secret-shaped — fake
+// tokens plus descriptive paths like "planted-secret/" — so downstream gate
+// modules can prove they fire. They carry no live secret and are already
+// allowlisted in .gitleaks.toml for the same reason; exempt them here too so the
+// repo's own tracked tree stays pushable.
+const SECRET_FIXTURE_ALLOWLIST_PREFIXES = [
+  "test/fixtures/staged-build/",
+  "test/fixtures/security-scan-dir/",
+];
 
 export const GITHUB_CONNECTION_STATUSES = Object.freeze([
   "verified",
@@ -271,7 +281,7 @@ function safeBranchName(branch) {
     : null;
 }
 
-function ghJsonWithAmbientAuth({ runCommand, args, missingOk = false }) {
+export function ghJsonWithAmbientAuth({ runCommand, args, missingOk = false }) {
   const auth = runCommand("gh", ["auth", "status", "--hostname", "github.com"], {
     env: promptDisabledEnv(),
   });
@@ -365,7 +375,7 @@ export function createLocalAmbientGitHubSetupTransport({
 }
 
 // ---------------------------------------------------------------------------
-// Local connection state (.agentic-factory/github-connection.json).
+// Local connection state (.teami/github-connection.json).
 //
 // This file is the LOCAL system of record for "which behavior repo this
 // workspace is connected to": selected repo, owner, default branch, App
@@ -376,7 +386,7 @@ export function createLocalAmbientGitHubSetupTransport({
 // ---------------------------------------------------------------------------
 
 export function githubConnectionStatePath(repoRoot = process.cwd()) {
-  return path.join(repoRoot, ".agentic-factory", "github-connection.json");
+  return path.join(repoRoot, ".teami", "github-connection.json");
 }
 
 export function readGitHubConnectionState({ repoRoot = process.cwd(), statePath = null } = {}) {
@@ -439,7 +449,6 @@ export function resolveBehaviorRepoIdentity({ repoRoot = process.cwd(), statePat
     repo: { owner: connection.repo.owner, repo: connection.repo.name },
     repo_id: connection.repo.id ?? null,
     default_branch: connection.default_branch ?? null,
-    checkout_path: connection.local_checkout_path ?? null,
     push_auth: connection.push_auth ?? connection.remotes?.origin?.push_auth ?? "https",
     real_push_enabled: connection.local_auth?.real_push_enabled === true,
   };
@@ -538,7 +547,7 @@ export async function resolveGitHubSetupSettings({
 
 function formatGitHubOwnerPrompt({ defaultOwner, repoName, visibility }) {
   return [
-    `  Agentic Factory needs a ${visibility} GitHub repo named "${repoName}" where generated PRs will live.`,
+    `  Teami needs a ${visibility} GitHub repo named "${repoName}" where generated PRs will live.`,
     `  Press Enter to create it under ${defaultOwner} (your signed-in GitHub CLI account), or type a different GitHub user/org.`,
     `  Create repo under [${defaultOwner}]: `,
   ].join("\n");
@@ -828,6 +837,9 @@ export function scanTrackedTreeForSecrets({ repoRoot = process.cwd(), runGit = d
   let scannedCount = 0;
   let skippedBinaryCount = 0;
   for (const relative of files) {
+    if (SECRET_FIXTURE_ALLOWLIST_PREFIXES.some((prefix) => relative.startsWith(prefix))) {
+      continue;
+    }
     for (const segment of relative.split("/")) {
       if (SECRET_FILE_NAME_PATTERN.test(segment)) {
         findings.push({ path: relative, rule: "secret_shaped_path" });
@@ -1019,7 +1031,6 @@ export async function runGitHubInitPhase({
       url: null,
     },
     default_branch: null,
-    local_checkout_path: path.resolve(repoRoot),
     push_auth: "https",
     local_auth: null,
     remotes: null,
@@ -1047,7 +1058,8 @@ export async function runGitHubInitPhase({
   const finishFailure = async ({ status, reason, repair, detail = null, extra = {} }) => {
     const safeDetail = detail ? redactGitHubSecrets(detail) : null;
     detail = safeDetail;
-    // Preserve the local state of the attempted binding so doctor can give a`r`n    // concrete repair instead of leaving setup failures opaque.
+    // Preserve the local state of the attempted binding so doctor can give a
+    // concrete repair instead of leaving setup failures opaque.
     state.status = status;
     state.failures = [{ reason, repair, ...(safeDetail ? { detail: safeDetail } : {}) }];
     try {
@@ -1316,7 +1328,7 @@ export async function runGitHubInitPhase({
       status: "failed",
       reason: "github_connection_state_write_failed",
       detail: error.message,
-      repair: "fix the .agentic-factory/ write failure and re-run npm run init",
+      repair: "fix the .teami/ write failure and re-run npm run init",
     });
   }
   if (connectionMode === "dry_run") {
@@ -1354,6 +1366,7 @@ export async function githubConnectionDoctorChecks({
       message: read.reason === "missing_github_connection_state"
         ? "no GitHub connection state; run npm run init to create and connect the dedicated behavior repo (connect-GitHub repair path)"
         : `${read.reason}${read.detail ? ` (${read.detail})` : ""}; re-run npm run init to rewrite the GitHub connection state`,
+      fix: "npm run init",
     });
     return checks;
   }
@@ -1480,10 +1493,9 @@ function evaluateRemoteShapeCheck({ repoRoot, runGit, connection }) {
 }
 
 function evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }) {
-  const checkoutPath = connection.local_checkout_path || repoRoot;
-  const branch = "refs/heads/agentic-factory/doctor-write-check";
+  const branch = "refs/heads/teami/doctor-write-check";
   const result = runGit(["push", "--dry-run", "origin", `HEAD:${branch}`], {
-    cwd: checkoutPath,
+    cwd: repoRoot,
     env: promptDisabledEnv({}, { pushAuth: connection.push_auth }),
   });
   if (result.ok) {

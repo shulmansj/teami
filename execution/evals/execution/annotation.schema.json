@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-eval-annotation/v1",
+  "title": "Execution eval annotation",
+  "description": "Canonical contract for execution quality annotations. Logical annotations and Phoenix wire annotation payload entries both use the uniform quality roll-up name. Human and model Judges share the execution rubric in rubrics/execution-quality.md.",
+  "oneOf": [
+    { "$ref": "#/$defs/logical_annotation" },
+    { "$ref": "#/$defs/phoenix_wire_annotation" }
+  ],
+  "$defs": {
+    "annotation_name": {
+      "description": "Canonical execution annotation names. quality is the roll-up used for default gates. accepted_packet_sufficiency and pause_state_correctness remain reserved deterministic-check names required by the shared resolver contract.",
+      "enum": [
+        "quality",
+        "correctness",
+        "scope_fit",
+        "acceptance_criteria_met",
+        "test_coverage",
+        "no_unrelated_churn",
+        "code_quality_fit",
+        "safety_and_side_effects",
+        "escalation_judgment",
+        "accepted_packet_sufficiency",
+        "pause_state_correctness"
+      ]
+    },
+    "annotator_kind": {
+      "description": "CODE is reserved for deterministic-check storage. HUMAN and LLM are peer judgments over the same rubric.",
+      "enum": ["HUMAN", "LLM", "CODE"]
+    },
+    "quality_label": {
+      "description": "Default-Judge label set: pass | needs_revision | blocking_failure. Default score bands for HUMAN and LLM quality annotations: pass 0.80-1.00, needs_revision 0.40-0.79, blocking_failure 0.00-0.39 or any critical failure mode that invalidates the PR.",
+      "enum": ["pass", "needs_revision", "blocking_failure"]
+    },
+    "quality_score": {
+      "description": "Quality score in [0, 1].",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "pass_band": {
+      "description": "Default score band for the pass label.",
+      "type": "number",
+      "minimum": 0.8,
+      "maximum": 1
+    },
+    "needs_revision_band": {
+      "description": "Default score band for the needs_revision label.",
+      "type": "number",
+      "minimum": 0.4,
+      "exclusiveMaximum": 0.8
+    },
+    "blocking_failure_band": {
+      "description": "Default score band for the blocking_failure label.",
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMaximum": 0.4
+    },
+    "no_workflow_state_keys": {
+      "description": "Denylist for Phoenix-bound metadata: no Teami workflow or queue state may be stored in Phoenix.",
+      "properties": {
+        "needs_relabel": false,
+        "pending_promotion": false,
+        "accepted_by_factory": false,
+        "propose_repo_change": false,
+        "proposal_state": false,
+        "queue_state": false,
+        "workflow_status": false,
+        "assigned": false,
+        "resolved": false
+      }
+    },
+    "annotation_metadata": {
+      "description": "Shared annotation metadata. HUMAN and LLM quality annotations must record rubric and failure taxonomy versions.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["failure_modes"],
+      "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+      "properties": {
+        "failure_modes": {
+          "description": "Failure mode ids drawn from failure-taxonomy.json.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "failure_mode_details": {
+          "description": "Optional parameterized details for deterministic checks.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "workspace_maturity": { "enum": ["new", "calibrating", "stable"] }
+      }
+    },
+    "identifier": {
+      "description": "Human/user id, Judge id, or code evaluator id. Required and non-empty because Phoenix upserts by name, target, and identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "human_or_llm_metadata_requirement": {
+      "if": {
+        "properties": { "annotator_kind": { "enum": ["HUMAN", "LLM"] } },
+        "required": ["annotator_kind"]
+      },
+      "then": {
+        "properties": {
+          "metadata": {
+            "required": ["failure_modes", "rubric_version", "failure_taxonomy_version"]
+          }
+        },
+        "required": ["metadata"]
+      }
+    },
+    "logical_annotation": {
+      "title": "Logical annotation shape",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "label", "score", "explanation", "metadata", "identifier"],
+      "properties": {
+        "name": { "$ref": "#/$defs/annotation_name" },
+        "annotator_kind": { "$ref": "#/$defs/annotator_kind" },
+        "label": { "$ref": "#/$defs/quality_label" },
+        "score": { "$ref": "#/$defs/quality_score" },
+        "explanation": { "type": "string", "minLength": 1 },
+        "metadata": { "$ref": "#/$defs/annotation_metadata" },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      },
+      "allOf": [{ "$ref": "#/$defs/human_or_llm_metadata_requirement" }]
+    },
+    "phoenix_wire_annotation": {
+      "title": "Phoenix wire annotation shape",
+      "description": "One entry of the data array sent to the Phoenix REST annotation endpoints.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "result", "identifier"],
+      "anyOf": [{ "required": ["trace_id"] }, { "required": ["span_id"] }],
+      "properties": {
+        "name": { "$ref": "#/$defs/annotation_name" },
+        "annotator_kind": { "$ref": "#/$defs/annotator_kind" },
+        "trace_id": { "type": "string", "minLength": 1 },
+        "span_id": { "type": "string", "minLength": 1 },
+        "result": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label", "score", "explanation"],
+          "properties": {
+            "label": { "$ref": "#/$defs/quality_label" },
+            "score": { "$ref": "#/$defs/quality_score" },
+            "explanation": { "type": "string", "minLength": 1 }
+          }
+        },
+        "metadata": { "$ref": "#/$defs/annotation_metadata" },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      },
+      "allOf": [{ "$ref": "#/$defs/human_or_llm_metadata_requirement" }]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentic-factory-orchestrator-control-action/v1",
+  "$id": "teami-orchestrator-control-action/v1",
   "title": "decomposition orchestrator control action",
   "description": "Structured-output generation schema for ONE orchestrator decision turn. The free orchestrator agent emits exactly one control action per turn: invoke_library (run a named library subagent), invoke_one_off (run an improvised inline subagent), or terminate (end the run). The harness validates this control envelope ONLY — never a per-turn payload; the orchestrator's authored output rides on the turn result as producedContent and is gated only at the single commit. This schema is the generation-time guardrail; orchestrator-control-action.mjs parseControlAction is the contract of record (it enforces the per-action field + enum rules, e.g. the one-off runtime_role whitelist and the terminate outcome/reason pairs).",
   "type": "object",
@@ -13,6 +13,12 @@
       "type": "string",
       "minLength": 1,
       "description": "invoke_library only: the accepted-prompt manifest target_key of the library subagent to run."
+    },
+    "instance_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9:_-]+(#[A-Za-z0-9:_-]+)?$",
+      "description": "invoke_library/invoke_one_off optional: subagent instance address. Omit for the role's default instance; supply a fresh safe id to spawn a non-default same-role instance; reuse a prior resolved instance_id to continue it."
     },
     "role_label": {
       "type": "string",

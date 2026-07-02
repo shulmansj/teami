@@ -17,19 +17,30 @@ const repoCheckout = path.resolve(import.meta.dirname, "../../../..");
 const phoenixAssetsPath = "execution/evals/decomposition/phoenix-assets.json";
 const acceptedPromptPath = "execution/evals/decomposition/accepted-prompts/decomposition-quality-judge.md";
 const acceptedRuntimeRolesPath = "execution/evals/decomposition/accepted-runtime-roles.json";
+const reviewPhoenixAssetsPath = "execution/evals/review/phoenix-assets.json";
+const reviewReviewerPromptPath = "execution/evals/review/accepted-prompts/reviewer.md";
 const phoenixAssetsText = fs.readFileSync(path.join(repoCheckout, phoenixAssetsPath), "utf8");
 const acceptedPromptText = fs.readFileSync(path.join(repoCheckout, acceptedPromptPath), "utf8");
 const acceptedRuntimeRolesText = fs.readFileSync(path.join(repoCheckout, acceptedRuntimeRolesPath), "utf8");
+const reviewPhoenixAssetsText = fs.readFileSync(path.join(repoCheckout, reviewPhoenixAssetsPath), "utf8");
+const reviewReviewerPromptText = fs.readFileSync(path.join(repoCheckout, reviewReviewerPromptPath), "utf8");
 const phoenixAssets = JSON.parse(phoenixAssetsText);
+const reviewPhoenixAssets = JSON.parse(reviewPhoenixAssetsText);
 const failureTaxonomy = JSON.parse(
   fs.readFileSync(
     path.join(repoCheckout, "execution", "evals", "decomposition", "failure-taxonomy.json"),
     "utf8",
   ),
 );
+const reviewFailureTaxonomy = JSON.parse(
+  fs.readFileSync(
+    path.join(repoCheckout, "execution", "evals", "review", "failure-taxonomy.json"),
+    "utf8",
+  ),
+);
 
 test("trusted promotion artifact reads fail closed on rule snapshot drift", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-trusted-artifacts-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-trusted-artifacts-"));
   const manifestPath = path.join(root, phoenixAssetsPath);
   const taxonomyPath = path.join(root, "execution", "evals", "decomposition", "failure-taxonomy.json");
   const runtimeRolesPath = path.join(root, acceptedRuntimeRolesPath);
@@ -235,6 +246,81 @@ test("runtime role rule target resolves from manifest metadata", () => {
   assert.equal(result.target.artifact_kind, "runtime_role_defaults");
   assert.equal(result.target.materializer, "eval_variant_to_runtime_role_defaults");
   assert.ok(result.target.mapped_artifact_paths.includes(acceptedRuntimeRolesPath));
+});
+
+test("review reviewer prompt materializer updates the review snapshot and review manifest pin", async () => {
+  const candidateTargetKey = "prompt/review/reviewer";
+  const target = resolveMaterializerTarget({
+    manifest: reviewPhoenixAssets,
+    candidateTargetKey,
+  });
+  assert.equal(target.ok, true);
+  assert.equal(target.target.snapshot_path, reviewReviewerPromptPath);
+  assert.equal(target.target.manifest_path, reviewPhoenixAssetsPath);
+  assert.ok(target.target.mapped_artifact_paths.includes(reviewPhoenixAssetsPath));
+
+  const candidateVersionId = "PV-REVIEW-REVIEWER-1";
+  const candidateContent = [
+    reviewReviewerPromptText.replace(/\n+$/g, ""),
+    "",
+    "## Candidate Calibration",
+    "",
+    "Name concrete blocking evidence before requesting changes.",
+  ].join("\n");
+  const result = await materializePromotionCandidate({
+    candidateTargetKey,
+    candidateKind: "prompt",
+    candidateVersionId,
+    acceptedBaselineId: target.target.accepted_prompt_version_id || `sha256:${target.target.snapshot_sha256}`,
+    resolvedCandidate: promptVersionResponse({
+      id: candidateVersionId,
+      content: candidateContent,
+    }),
+    resolvedBaseline: {
+      files: {
+        [reviewReviewerPromptPath]: reviewReviewerPromptText,
+        [reviewPhoenixAssetsPath]: reviewPhoenixAssetsText,
+      },
+    },
+    currentAcceptedSnapshotContent: reviewReviewerPromptText,
+    manifestContent: reviewPhoenixAssetsText,
+    gateReport: {
+      failure_modes: ["review_missed_regression"],
+    },
+    policy: { failure_taxonomy: reviewFailureTaxonomy },
+    manifest: reviewPhoenixAssets,
+  });
+
+  assert.equal(result.kind, "behavior_diff", JSON.stringify(result));
+  assert.deepEqual(
+    Object.keys(result.files).sort(),
+    [reviewReviewerPromptPath, reviewPhoenixAssetsPath].sort(),
+  );
+
+  const snapshotBytes = result.files[reviewReviewerPromptPath];
+  const snapshotSha256 = sha256Hex(snapshotBytes);
+  assert.equal(snapshotBytes, `${candidateContent}\n`);
+
+  const manifestBytes = result.files[reviewPhoenixAssetsPath];
+  const manifest = JSON.parse(manifestBytes);
+  const promptEntry = manifest.prompts.find((entry) => entry.target_key === candidateTargetKey);
+  assert.equal(promptEntry.accepted_prompt_version_id, candidateVersionId);
+  assert.equal(promptEntry.snapshot_sha256, snapshotSha256);
+  assert.equal(promptEntry.prompt_version, candidateVersionId);
+  assert.equal(promptEntry.manifest_path, reviewPhoenixAssetsPath);
+  assertOnlyPromptEntryPinsChanged({
+    before: reviewPhoenixAssets,
+    after: manifest,
+    targetKey: candidateTargetKey,
+  });
+
+  assert.deepEqual(result.changedArtifacts.map((entry) => entry.path), [
+    reviewReviewerPromptPath,
+    reviewPhoenixAssetsPath,
+  ]);
+  assert.equal(result.changedArtifacts[0].kind, "accepted_prompt");
+  assert.equal(result.changedArtifacts[1].kind, "manifest_pin");
+  assert.deepEqual(validateBehaviorDiff({ files: result.files, target: target.target }), { ok: true });
 });
 
 test("prompt candidate routing targets are derived from materializer manifest metadata", () => {

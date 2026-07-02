@@ -2,7 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import "./workflows/decomposition/definition.mjs";
-import { getWorkflowDefinition } from "../../../engine/workflow-registry.mjs";
+import {
+  getWorkflowDefinition,
+  registeredWorkflowTypes,
+} from "../../../engine/workflow-registry.mjs";
+import { evalNamespacePaths } from "../../../engine/eval-namespace.mjs";
 import { resolveWorkflowRuntime } from "./workflow-runtime-config.mjs";
 import {
   resolveAcceptedRefForTarget,
@@ -22,21 +26,23 @@ export const DEFAULT_CONFIG_PATH = path.join(
 export const ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH = DECOMPOSITION_EVAL_PATHS.accepted_runtime;
 
 const MODULE_REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
-const ACCEPTED_RUNTIME_ROLES_SCHEMA_VERSION = "agentic-factory-accepted-runtime-roles/v1";
+const ACCEPTED_RUNTIME_ROLES_SCHEMA_VERSION = "teami-accepted-runtime-roles/v1";
 const DECOMPOSITION_WORKFLOW_TYPE = "decomposition";
 const CONFIG_SHAPE_OUTDATED_MESSAGE =
-  "config_shape_outdated: move decomposition.runtime.adapters to runtime.adapters, decomposition.runtime.default_invocation to runtime.default_invocation, and decomposition.runtime.roles to workflows.decomposition.roles (see maintainers/contracts/workflow-definition.md).";
+  "config_shape_outdated: move decomposition.runtime.adapters to runtime.adapters, decomposition.runtime.default_invocation to runtime.default_invocation, and decomposition.runtime.roles to workflows.decomposition.roles (see docs/contracts/workflow-definition.md).";
 const REQUIRED_LINEAR_OAUTH_SCOPES = Object.freeze(["read", "write"]);
 const RUNTIME_ROLE_FIELDS = Object.freeze(["runtime", "model"]);
 const RUNTIME_ROLE_SOURCE_ADOPTER_CONFIG = "adopter_config";
 const RUNTIME_ROLE_SOURCE_ACCEPTED_DEFAULTS = "accepted_defaults";
+const PROJECT_STATUS_ROLES = Object.freeze(["backlog", "planned", "in_progress", "completed"]);
+const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "blocked", "done"]);
 export const DEFAULT_POLL_INTERVAL_MS = 10_000;
 export const MIN_POLL_INTERVAL_MS = 2_000;
-export const UNPINNED_RUNTIME_DEV_FLAG = "AGENTIC_FACTORY_ALLOW_UNPINNED_RUNTIME";
+export const UNPINNED_RUNTIME_DEV_FLAG = "TEAMI_ALLOW_UNPINNED_RUNTIME";
 
 export function loadLinearConfig({
   repoRoot = process.cwd(),
-  configPath = process.env.AGENTIC_FACTORY_LINEAR_CONFIG,
+  configPath = process.env.TEAMI_LINEAR_CONFIG,
 } = {}) {
   const resolvedPath = path.resolve(repoRoot, configPath || DEFAULT_CONFIG_PATH);
   if (!fs.existsSync(resolvedPath)) {
@@ -53,7 +59,7 @@ export function validateLinearConfig(
   source = "config",
   {
     repoRoot = process.cwd(),
-    acceptedRuntimeRolesPath = ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH,
+    acceptedRuntimeRolesPath = null,
     moduleRootFallback = true,
     env = process.env,
   } = {},
@@ -62,9 +68,6 @@ export function validateLinearConfig(
   applyPollDefaults(config);
   const linear = config?.linear;
   const oauth = linear?.oauth;
-  const runtime = resolveWorkflowRuntime(config, DECOMPOSITION_WORKFLOW_TYPE);
-  const workflow = config?.workflows?.[DECOMPOSITION_WORKFLOW_TYPE];
-  const workflowRoleNames = roleNamesForWorkflow(DECOMPOSITION_WORKFLOW_TYPE);
   const missing = [];
 
   if (!oauth?.client_id) missing.push("linear.oauth.client_id");
@@ -80,28 +83,26 @@ export function validateLinearConfig(
     missing.push("linear.project.labels.has_open_questions");
   }
   if (!linear?.issue?.labels?.discovery) missing.push("linear.issue.labels.discovery");
-  if (!linear?.project?.status_types?.backlog) {
-    missing.push("linear.project.status_types.backlog");
-  }
-  if (!linear?.project?.status_types?.planned) {
-    missing.push("linear.project.status_types.planned");
-  }
-  if (!linear?.project?.status_types?.started) {
-    missing.push("linear.project.status_types.started");
-  }
+  if (!linear?.issue?.labels?.needs_principal) missing.push("linear.issue.labels.needs_principal");
+  collectStatusConfigMissingFields(linear?.project?.statuses, "linear.project.statuses", PROJECT_STATUS_ROLES, missing);
   if (!linear?.project?.template_name) {
     missing.push("linear.project.template_name");
   }
-  if (!workflow) missing.push(`workflows.${DECOMPOSITION_WORKFLOW_TYPE}`);
-  if (!workflow?.roles || typeof workflow.roles !== "object" || Array.isArray(workflow.roles)) {
-    missing.push(`workflows.${DECOMPOSITION_WORKFLOW_TYPE}.roles`);
-  } else {
-    validateRoleKeySet({
-      roles: workflow.roles,
-      expectedRoleNames: workflowRoleNames,
-      label: `workflows.${DECOMPOSITION_WORKFLOW_TYPE}.roles`,
-      failures: missing,
-    });
+  const workflowRuntimeRoleValidations = registeredWorkflowTypes().map((workflowType) =>
+    validateWorkflowRuntimeRoles(config, {
+      source,
+      repoRoot,
+      moduleRootFallback,
+      env,
+      workflowType,
+      acceptedRuntimeRolesPath: acceptedRuntimeRolesPathForWorkflow(
+        workflowType,
+        acceptedRuntimeRolesPath,
+      ),
+    }),
+  );
+  for (const validation of workflowRuntimeRoleValidations) {
+    missing.push(...validation.missing);
   }
   if (missing.length > 0) {
     throw new Error(`${source} is missing required fields: ${missing.join(", ")}`);
@@ -109,55 +110,108 @@ export function validateLinearConfig(
 
   validateOAuthConfig(oauth, source);
   validatePollConfig(config.poll, source);
+  validateReviewWorkflowConfig(config.workflows?.review, source);
+  validateIssueTargetConfig(linear.issue, source);
 
-  if (
-    runtime?.default_invocation &&
-    !["session_start", "warm_required"].includes(runtime.default_invocation)
-  ) {
-    throw new Error(
-      `${source} has unsupported runtime.default_invocation=${runtime.default_invocation}; expected session_start.`,
-    );
-  }
-
-  resolveRuntimeRoleFields(config, {
-    source,
-    repoRoot,
-    acceptedRuntimeRolesPath,
-    moduleRootFallback,
-    workflowType: DECOMPOSITION_WORKFLOW_TYPE,
-    workflowRoleNames,
-    allowUnpinnedRuntimeOverrides: unpinnedRuntimeDevFlagEnabled(env),
-  });
-
-  for (const role of workflowRoleNames) {
-    const roleRuntime = runtime.roles[role].runtime;
-    if (!["codex", "claude"].includes(roleRuntime)) {
-      throw new Error(`${source} has unsupported runtime for ${role}: ${roleRuntime}`);
-    }
+  for (const validation of workflowRuntimeRoleValidations) {
+    validation.validateRuntimeRoles();
   }
 
   return true;
 }
 
-export function loadAcceptedRuntimeRoleDefaults({
-  repoRoot = process.cwd(),
-  acceptedRuntimeRolesPath = ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH,
-  moduleRootFallback = true,
-} = {}) {
-  const resolution = resolveAcceptedRuntimeRoleDefaults({
+function validateWorkflowRuntimeRoles(
+  config,
+  {
+    source,
     repoRoot,
     acceptedRuntimeRolesPath,
     moduleRootFallback,
+    env,
+    workflowType,
+  },
+) {
+  const runtime = resolveWorkflowRuntime(config, workflowType);
+  const workflow = config?.workflows?.[workflowType];
+  const workflowRoleNames = roleNamesForWorkflow(workflowType);
+  const missing = [];
+
+  if (!workflow) missing.push(`workflows.${workflowType}`);
+  if (!workflow?.roles || typeof workflow.roles !== "object" || Array.isArray(workflow.roles)) {
+    missing.push(`workflows.${workflowType}.roles`);
+  } else {
+    validateRoleKeySet({
+      roles: workflow.roles,
+      expectedRoleNames: workflowRoleNames,
+      label: `workflows.${workflowType}.roles`,
+      failures: missing,
+    });
+  }
+
+  return {
+    missing,
+    validateRuntimeRoles() {
+      if (
+        runtime?.default_invocation &&
+        !["session_start", "warm_required"].includes(runtime.default_invocation)
+      ) {
+        throw new Error(
+          `${source} has unsupported runtime.default_invocation=${runtime.default_invocation}; expected session_start.`,
+        );
+      }
+
+      resolveRuntimeRoleFields(config, {
+        source,
+        repoRoot,
+        acceptedRuntimeRolesPath,
+        moduleRootFallback,
+        workflowType,
+        workflowRoleNames,
+        allowUnpinnedRuntimeOverrides: unpinnedRuntimeDevFlagEnabled(env),
+      });
+
+      for (const role of workflowRoleNames) {
+        const roleRuntime = runtime.roles[role].runtime;
+        if (!["codex", "claude"].includes(roleRuntime)) {
+          throw new Error(`${source} has unsupported runtime for ${role}: ${roleRuntime}`);
+        }
+      }
+    },
+  };
+}
+
+export function loadAcceptedRuntimeRoleDefaults({
+  repoRoot = process.cwd(),
+  acceptedRuntimeRolesPath = null,
+  moduleRootFallback = true,
+  workflowType = DECOMPOSITION_WORKFLOW_TYPE,
+} = {}) {
+  const resolvedAcceptedRuntimeRolesPath = acceptedRuntimeRolesPathForWorkflow(
+    workflowType,
+    acceptedRuntimeRolesPath,
+  );
+  const resolution = resolveAcceptedRuntimeRoleDefaults({
+    repoRoot,
+    acceptedRuntimeRolesPath: resolvedAcceptedRuntimeRolesPath,
+    moduleRootFallback,
+    workflowType,
   });
   if (!resolution.ok) {
     throw new Error(
-      `${resolution.reason}: ${resolution.relative_path || acceptedRuntimeRolesPath}`,
+      `${resolution.reason}: ${resolution.relative_path || resolvedAcceptedRuntimeRolesPath}`,
     );
   }
   return resolution;
 }
 
-export function validateAcceptedRuntimeRoleDefaults(defaults, source = ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH) {
+export function validateAcceptedRuntimeRoleDefaults(
+  defaults,
+  source = ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH,
+  {
+    workflowType = DECOMPOSITION_WORKFLOW_TYPE,
+    expectedRoleNames = acceptedRuntimeRoleNamesForWorkflow(workflowType),
+  } = {},
+) {
   const failures = [];
   requireExactKeys(defaults, ["schema_version", "_note", "roles"], source, failures);
   if (defaults?.schema_version !== ACCEPTED_RUNTIME_ROLES_SCHEMA_VERSION) {
@@ -170,7 +224,7 @@ export function validateAcceptedRuntimeRoleDefaults(defaults, source = ACCEPTED_
     defaults?.roles,
     source,
     failures,
-    roleNamesForWorkflow(DECOMPOSITION_WORKFLOW_TYPE),
+    expectedRoleNames,
   );
   for (const role of roleNames) {
     const roleDefaults = defaults?.roles?.[role];
@@ -225,7 +279,7 @@ export function formatRuntimeRoleAssignmentsSection(config) {
 }
 
 export function cachePathForConfig(config, repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, config.linear.cache_path || ".agentic-factory/linear.json");
+  return path.resolve(repoRoot, config.linear.cache_path || ".teami/linear.json");
 }
 
 export function unpinnedRuntimeTraceAttributes(config, workflowType = DECOMPOSITION_WORKFLOW_TYPE) {
@@ -233,7 +287,7 @@ export function unpinnedRuntimeTraceAttributes(config, workflowType = DECOMPOSIT
   if (!unpinnedRuntime || typeof unpinnedRuntime !== "object" || Array.isArray(unpinnedRuntime)) return {};
   if (Object.keys(unpinnedRuntime).length === 0) return {};
   return {
-    "agentic_factory.unpinned_runtime": stableJsonValue(unpinnedRuntime),
+    "teami.unpinned_runtime": stableJsonValue(unpinnedRuntime),
   };
 }
 
@@ -269,6 +323,7 @@ function resolveRuntimeRoleFields(
         repoRoot,
         acceptedRuntimeRolesPath,
         moduleRootFallback,
+        workflowType,
       });
     }
     return defaultsResolution.ok ? defaultsResolution.defaults : null;
@@ -284,7 +339,7 @@ function resolveRuntimeRoleFields(
       const defaultValue = defaults?.roles?.[role]?.[field];
       if (!hasNonEmptyString(defaultValue)) {
         throw new Error(
-          `runtime_role_unresolved:${role}.${field} - not in ${ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH}; stampable runtime/model fields must resolve from accepted defaults`,
+          `runtime_role_unresolved:${role}.${field} - not in ${acceptedRuntimeRolesLabelForWorkflow(workflowType)}; stampable runtime/model fields must resolve from accepted defaults`,
         );
       }
 
@@ -334,7 +389,7 @@ function resolveRuntimeRoleFields(
     Object.values(fields).some((src) => src === RUNTIME_ROLE_SOURCE_ACCEPTED_DEFAULTS));
   const acceptedRuntimeDefaultsRef = consumedAcceptedDefaults
     ? resolveAcceptedRefForTarget({
-        targetKey: RUNTIME_ROLE_DEFAULTS_TARGET_KEY,
+        targetKey: runtimeRoleDefaultsTargetKey(workflowType),
         repoRoot,
         definition: getWorkflowDefinition(workflowType),
         resolveAcceptedBaseline,
@@ -356,6 +411,42 @@ function assertCurrentConfigShape(config) {
 
 function roleNamesForWorkflow(workflowType) {
   return getWorkflowDefinition(workflowType).roles;
+}
+
+function acceptedRuntimeRoleNamesForWorkflow(workflowType) {
+  const definition = getWorkflowDefinition(workflowType);
+  const workflowRoles = definition.roles || [];
+  const evaluatorRoles = definition.engine_owned_evaluator_roles || [];
+  const hasEvaluatorRuntimeRole = evaluatorRoles.some((role) => workflowRoles.includes(role));
+  return [
+    ...new Set([
+      ...workflowRoles,
+      ...(!hasEvaluatorRuntimeRole && evaluatorRoles[0] ? [evaluatorRoles[0]] : []),
+    ]),
+  ];
+}
+
+export function acceptedRuntimeRolesPathForWorkflow(workflowType, overridePath = null) {
+  if (overridePath && typeof overridePath === "object" && !Array.isArray(overridePath)) {
+    const workflowOverride = overridePath[workflowType];
+    if (typeof workflowOverride === "string" && workflowOverride.trim() !== "") {
+      return workflowOverride;
+    }
+  }
+  if (typeof overridePath === "string" && overridePath.trim() !== "") {
+    return overridePath;
+  }
+  return acceptedRuntimeRolesLabelForWorkflow(workflowType);
+}
+
+function acceptedRuntimeRolesLabelForWorkflow(workflowType) {
+  return evalNamespacePaths(getWorkflowDefinition(workflowType)).accepted_runtime;
+}
+
+function runtimeRoleDefaultsTargetKey(workflowType) {
+  return workflowType === DECOMPOSITION_WORKFLOW_TYPE
+    ? RUNTIME_ROLE_DEFAULTS_TARGET_KEY
+    : `rule/${workflowType}/runtime_role_assignments`;
 }
 
 function engineOwnedEvaluatorRoleSet(workflowType, workflowRoleNames) {
@@ -382,16 +473,21 @@ function validateRoleKeySet({ roles, expectedRoleNames, label, failures }) {
 
 function resolveAcceptedRuntimeRoleDefaults({
   repoRoot,
-  acceptedRuntimeRolesPath = ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH,
+  acceptedRuntimeRolesPath = null,
   moduleRootFallback = true,
+  workflowType = DECOMPOSITION_WORKFLOW_TYPE,
 } = {}) {
+  const resolvedAcceptedRuntimeRolesPath = acceptedRuntimeRolesPathForWorkflow(
+    workflowType,
+    acceptedRuntimeRolesPath,
+  );
   const candidates = [];
-  if (path.isAbsolute(acceptedRuntimeRolesPath)) {
-    candidates.push(acceptedRuntimeRolesPath);
+  if (path.isAbsolute(resolvedAcceptedRuntimeRolesPath)) {
+    candidates.push(resolvedAcceptedRuntimeRolesPath);
   } else {
-    candidates.push(path.resolve(repoRoot || process.cwd(), acceptedRuntimeRolesPath));
+    candidates.push(path.resolve(repoRoot || process.cwd(), resolvedAcceptedRuntimeRolesPath));
     if (moduleRootFallback) {
-      candidates.push(path.resolve(MODULE_REPO_ROOT, acceptedRuntimeRolesPath));
+      candidates.push(path.resolve(MODULE_REPO_ROOT, resolvedAcceptedRuntimeRolesPath));
     }
   }
 
@@ -404,18 +500,18 @@ function resolveAcceptedRuntimeRoleDefaults({
     } catch (error) {
       throw new Error(`accepted_runtime_roles_json_unparseable:${candidatePath} - ${error.message}`);
     }
-    validateAcceptedRuntimeRoleDefaults(parsed, candidatePath);
+    validateAcceptedRuntimeRoleDefaults(parsed, candidatePath, { workflowType });
     return {
       ok: true,
       defaults: parsed,
       path: candidatePath,
-      relative_path: acceptedRuntimeRolesPath,
+      relative_path: resolvedAcceptedRuntimeRolesPath,
     };
   }
   return {
     ok: false,
     reason: "accepted_runtime_roles_not_found",
-    relative_path: acceptedRuntimeRolesPath,
+    relative_path: resolvedAcceptedRuntimeRolesPath,
   };
 }
 
@@ -502,6 +598,59 @@ function validatePollConfig(poll, source) {
   }
   if (poll.interval_ms < MIN_POLL_INTERVAL_MS) {
     throw new Error(`${source} poll.interval_ms must be at least ${MIN_POLL_INTERVAL_MS}.`);
+  }
+}
+
+function validateReviewWorkflowConfig(review, source) {
+  const maxRounds = review?.max_autonomous_fix_rounds;
+  if (maxRounds === undefined) return;
+  if (!Number.isInteger(maxRounds) || maxRounds < 0) {
+    throw new Error(`${source} workflows.review.max_autonomous_fix_rounds must be a non-negative integer.`);
+  }
+}
+
+function validateIssueTargetConfig(issue, source) {
+  for (const statusKey of ISSUE_STATUS_ROLES) {
+    validateRequiredIssueStatus(issue, source, statusKey);
+  }
+
+  if (Object.hasOwn(issue?.labels || {}, "needs_principal") && !hasNonEmptyString(issue.labels.needs_principal)) {
+    throw new Error(`${source} linear.issue.labels.needs_principal must be a non-empty string.`);
+  }
+  if (Object.hasOwn(issue?.labels || {}, "work_type_code") && !hasNonEmptyString(issue.labels.work_type_code)) {
+    throw new Error(`${source} linear.issue.labels.work_type_code must be a non-empty string.`);
+  }
+  if (Object.hasOwn(issue?.labels || {}, "work_type_non_code") && !hasNonEmptyString(issue.labels.work_type_non_code)) {
+    throw new Error(`${source} linear.issue.labels.work_type_non_code must be a non-empty string.`);
+  }
+  if (Object.hasOwn(issue?.labels || {}, "in_review") && !hasNonEmptyString(issue.labels.in_review)) {
+    throw new Error(`${source} linear.issue.labels.in_review must be a non-empty string.`);
+  }
+}
+
+function validateRequiredIssueStatus(issue, source, statusKey) {
+  const status = issue?.statuses?.[statusKey];
+  if (!status || typeof status !== "object" || Array.isArray(status)) {
+    throw new Error(`${source} linear.issue.statuses.${statusKey} must be an object.`);
+  }
+  if (!hasNonEmptyString(status.name)) {
+    throw new Error(`${source} linear.issue.statuses.${statusKey}.name must be a non-empty string.`);
+  }
+  if (!hasNonEmptyString(status.type)) {
+    throw new Error(`${source} linear.issue.statuses.${statusKey}.type must be a non-empty string.`);
+  }
+}
+
+function collectStatusConfigMissingFields(statuses, basePath, statusKeys, missing) {
+  for (const statusKey of statusKeys) {
+    const status = statuses?.[statusKey];
+    const statusPath = `${basePath}.${statusKey}`;
+    if (!status || typeof status !== "object" || Array.isArray(status)) {
+      missing.push(statusPath);
+      continue;
+    }
+    if (!hasNonEmptyString(status.name)) missing.push(`${statusPath}.name`);
+    if (!hasNonEmptyString(status.type)) missing.push(`${statusPath}.type`);
   }
 }
 

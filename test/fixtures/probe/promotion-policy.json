@@ -1,0 +1,52 @@
+{
+  "schema_version": "teami-promotion-policy/v1",
+  "policy_version": "probe-policy-v1",
+  "disabled": false,
+  "lookback_days": 14,
+  "max_open_proposals": 1,
+  "proposal_budget": {
+    "max_proposals": 1,
+    "period_days": 7
+  },
+  "eligible_launch_sources": [
+    "managed_manual",
+    "managed_automated",
+    "phoenix_native_registered"
+  ],
+  "drafting": {
+    "max_drafts_per_target_per_period": 1,
+    "period_days": 7
+  },
+  "scanner_routing": {
+    "enabled": true,
+    "freshness_window_days": 7,
+    "eligible_phoenix": {
+      "project_names": [
+        "teami"
+      ],
+      "dataset_names": [
+        "teami-probe-examples"
+      ],
+      "split_names": [
+        "train",
+        "test"
+      ]
+    },
+    "explicit_intent_signals": {
+      "managed_experiment_receipt_intent": "promotion_candidate",
+      "prompt_version_candidate_tag": "teami_promotion_candidate",
+      "repo_candidate_artifact_intent": "promotion_candidate",
+      "authenticated_registration": "deferred"
+    },
+    "repo_candidate_artifact_stubs": [],
+    "phoenix_native_auto_proposal": false
+  },
+  "required_evidence_id_kinds": [
+    "experiment_id",
+    "dataset_id",
+    "dataset_version_id"
+  ],
+  "risk_defaults": {
+    "prior_test_split_exposure_defaults_high_risk": true
+  }
+}

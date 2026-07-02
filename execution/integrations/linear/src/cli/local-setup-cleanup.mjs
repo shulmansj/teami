@@ -41,8 +41,8 @@ export async function runLocalSetupCleanupCommand({ context, command, args }) {
     const commandOptions = LOCAL_SETUP_COMMAND_OPTIONS[command] || LOCAL_SETUP_COMMAND_OPTIONS.uninstall;
     output.heading(
       command === "reset"
-        ? `Agentic Factory ${output.symbols.separator} reset`
-        : `Agentic Factory ${output.symbols.separator} uninstall`,
+        ? `Teami ${output.symbols.separator} reset`
+        : `Teami ${output.symbols.separator} uninstall`,
     );
     output.detail(commandOptions.startMessage);
     const result = await removeLocalLinearSetup(cachePath, setupStatePath, {
@@ -326,10 +326,10 @@ function removeRetiredEventPathLocalState({
 } = {}) {
   const inbox = config?.inbox || {};
   const files = [
-    path.resolve(repoRoot, inbox.setup_grant_file || path.join(".agentic-factory", "inbox-setup-grant.env")),
+    path.resolve(repoRoot, inbox.setup_grant_file || path.join(".teami", "inbox-setup-grant.env")),
     domainId
-      ? path.resolve(repoRoot, ".agentic-factory", "domains", domainId, "inbox-runner-credential.json")
-      : path.resolve(repoRoot, inbox.credential_file || path.join(".agentic-factory", "inbox-runner-credential.json")),
+      ? path.resolve(repoRoot, ".teami", "domains", domainId, "inbox-runner-credential.json")
+      : path.resolve(repoRoot, inbox.credential_file || path.join(".teami", "inbox-runner-credential.json")),
   ];
   for (const filePath of files) {
     if (fs.existsSync(filePath)) {

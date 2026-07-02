@@ -26,7 +26,7 @@ test("the per-turn orchestrator output is engine-stamped and engine-versioned", 
   // The wire field is named workflow_version for back-compat, but it is the
   // engine's per-turn stamp, validated against ENGINE_VERSION — distinct from the
   // function's persisted function_version, and from the output schema id.
-  assert.equal(ORCHESTRATOR_OUTPUT_SCHEMA_VERSION, "agentic-factory-orchestrator-turn-output/v1");
+  assert.equal(ORCHESTRATOR_OUTPUT_SCHEMA_VERSION, "teami-orchestrator-turn-output/v1");
   assert.notEqual(ORCHESTRATOR_OUTPUT_SCHEMA_VERSION, ENGINE_VERSION);
 });
 

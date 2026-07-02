@@ -62,8 +62,8 @@ const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const config = loadLinearConfig({ repoRoot });
 
 const APP_URL = "http://127.0.0.1:6006";
-const PROJECT_NAME = "agentic-factory";
-const RUN_ID = "run-step17-bad-0";
+const PROJECT_NAME = "teami";
+const RUN_ID = "run-step17-bad-4";
 const SOURCE_TRACE_ID = "17171717171717171717171717171717";
 const EVAL_TRACE_ID = "27171717171717171717171717171717";
 const TRACE_IDENTITY = Object.freeze({
@@ -84,7 +84,7 @@ const BASELINE_EXPERIMENT_ID = "BASE17";
 const CANDIDATE_PROMPT_VERSION_ID = "PV-step17-candidate";
 const DRAFTED_SR_ENG_PROMPT_VERSION_ID = "PV-step18-drafted-sr-eng";
 const DRAFTED_SR_ENG_PROMPT_ID = "P-step18-sr-eng-grounding";
-const DRAFTED_BY = "agentic_factory_drafter_v1:claude-opus-4-8";
+const DRAFTED_BY = "teami_drafter_v1:claude-opus-4-8";
 const RUNTIME_ROLE_VARIANT_ID = "runtime-role-step17-candidate";
 const ZERO_OVERRIDE_VARIANT_ID = "zero-override-step17-baseline";
 const ACCEPTED_SNAPSHOT_PATH =
@@ -109,7 +109,7 @@ const DRAFTED_SR_ENG_PROMPT_CONTENT = [
   "",
   "## Runtime instructions",
   "",
-  "You are an Agentic Factory decomposition runtime. Do not mutate Linear or use tools.",
+  "You are an Teami decomposition runtime. Do not mutate Linear or use tools.",
   "Return exactly one JSON object that satisfies the provided schema and the local phase contract.",
   "Use these exact top-level fields: schema_version, run_id, phase, status, reason, context_digest, source_refs, assumptions, constraints, risks.",
   "Do not use alias fields such as role, outcome, decision, explanation, or questions instead of the required fields.",
@@ -135,7 +135,7 @@ const DRAFTED_SR_ENG_PROMPT_CONTENT = [
 ].join("\n");
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-step17-e2e-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-step17-e2e-"));
 }
 
 function recordTestTraceStatus(options) {
@@ -163,7 +163,7 @@ function splitGitLines(stdout) {
 }
 
 function internalCloneDir(root) {
-  return path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  return path.join(root, ".teami", "promotion-workspace", "repo");
 }
 
 function copyRepoFile(root, relativePath) {
@@ -427,11 +427,11 @@ function createStep17PhoenixFixture() {
   };
 
   const baselineRows = () => {
-    const exampleId = state.datasetExamples[0]?.id || `agentic_factory:${RUN_ID}`;
+    const exampleId = state.datasetExamples[0]?.id || `teami:${RUN_ID}`;
     return [{
       example_id: exampleId,
       annotations: [{
-        name: "decomposition_quality",
+        name: "quality",
         annotator_kind: "LLM",
         label: "needs_revision",
         score: 0.4,
@@ -553,7 +553,7 @@ function createStep17PhoenixFixture() {
       const content = promptVersionId === DRAFTED_SR_ENG_PROMPT_VERSION_ID
         ? DRAFTED_SR_ENG_PROMPT_CONTENT
         : [
-            "# Accepted Judge Prompt: decomposition_quality",
+            "# Accepted Judge Prompt: quality",
             "",
             "Candidate revision: treat missing or non-observable acceptance",
             "criteria as a material issue-executability failure and map them",
@@ -584,7 +584,7 @@ function createStep17PhoenixFixture() {
 
     if (
       method === "GET"
-      && parsed.pathname === `/v1/prompts/${DRAFTED_SR_ENG_PROMPT_ID}/tags/agentic_factory_promotion_candidate`
+      && parsed.pathname === `/v1/prompts/${DRAFTED_SR_ENG_PROMPT_ID}/tags/teami_promotion_candidate`
     ) {
       if (!state.promptCandidateTagVersionId) return jsonResponse({ detail: "not found" }, 404);
       return jsonResponse({ data: { id: state.promptCandidateTagVersionId } });
@@ -778,7 +778,7 @@ function writeStep18OpportunityRecord(root) {
   const opportunityHash = createHash("sha256")
     .update("step18-sr-eng-grounding-opportunity", "utf8")
     .digest("hex");
-  const registryDir = path.join(root, ".agentic-factory", "promotion-candidates");
+  const registryDir = path.join(root, ".teami", "promotion-candidates");
   fs.mkdirSync(registryDir, { recursive: true });
   fs.writeFileSync(
     path.join(registryDir, `${opportunityHash}.json`),
@@ -822,10 +822,10 @@ function createStep18DraftExperimentImpl() {
         version_id: DATASET_VERSION_ID,
         repetitions: 1,
         metadata: {
-          agentic_factory_receipt_id: "expr-step18-drafted-sr-eng",
-          agentic_factory_source: "managed_manual",
-          agentic_factory_variant_id: options.derivedVariant.id,
-          agentic_factory_candidate_version_id: DRAFTED_SR_ENG_PROMPT_VERSION_ID,
+          teami_receipt_id: "expr-step18-drafted-sr-eng",
+          teami_source: "managed_manual",
+          teami_variant_id: options.derivedVariant.id,
+          teami_candidate_version_id: DRAFTED_SR_ENG_PROMPT_VERSION_ID,
         },
       }),
     });
@@ -833,7 +833,7 @@ function createStep18DraftExperimentImpl() {
     const experimentBody = JSON.parse(await created.text());
     assert.equal(experimentBody.data.id, EXPERIMENT_ID);
 
-    const exampleId = `agentic_factory:${RUN_ID}`;
+    const exampleId = `teami:${RUN_ID}`;
     const taskOutput = fakeCandidateEvalTask({
       datasetExampleId: exampleId,
       variantId: options.derivedVariant.id,
@@ -856,7 +856,7 @@ function createStep18DraftExperimentImpl() {
       method: "POST",
       body: JSON.stringify({
         experiment_run_id: runBody.data.id,
-        name: "decomposition_quality",
+        name: "quality",
         annotator_kind: "LLM",
         result: {
           label: taskOutput.judge.judge.label,
@@ -871,7 +871,7 @@ function createStep18DraftExperimentImpl() {
 
     const now = options.now();
     const receiptId = "expr-step18-drafted-sr-eng";
-    const receiptPath = path.join(options.repoRoot, ".agentic-factory", "experiments", `${receiptId}.json`);
+    const receiptPath = path.join(options.repoRoot, ".teami", "experiments", `${receiptId}.json`);
     const manifestBytes = fs.readFileSync(path.join(options.repoRoot, PHOENIX_ASSETS_MANIFEST_PATH));
     const workspacePolicyPath = path.join(options.repoRoot, "execution/evals/decomposition/workspace-eval-policy.json");
     const workspacePolicy = JSON.parse(fs.readFileSync(workspacePolicyPath, "utf8"));
@@ -939,7 +939,7 @@ function createStep18DraftExperimentImpl() {
         actor: { os_username: "fixture", authenticity: "asserted" },
         launched_at: now.toISOString(),
         phoenix_scope: { origin: APP_URL, project_name: PROJECT_NAME },
-        agentic_factory_run_id: "afexp-step18-drafted-sr-eng",
+        teami_run_id: "afexp-step18-drafted-sr-eng",
         drafted_by: DRAFTED_BY,
       },
       phoenix_experiment_id: EXPERIMENT_ID,
@@ -957,7 +957,7 @@ function createStep18DraftExperimentImpl() {
               computable: true,
               baseline_experiment_id: BASELINE_EXPERIMENT_ID,
               deltas: {
-                decomposition_quality: { baseline: 0.4, current: 0.62, delta: 0.21999999999999997 },
+                quality: { baseline: 0.4, current: 0.62, delta: 0.21999999999999997 },
               },
               regressions: [],
             },
@@ -1012,7 +1012,7 @@ test("Step 17 offline fixture proves a judge experiment runs but its promotion i
     ensureReady: readyUp,
     fetchImpl,
     traceId: SOURCE_TRACE_ID,
-    name: "decomposition_quality",
+    name: "quality",
     label: "needs_revision",
     score: 0.52,
     explanation: "The billing setup issue is not ready for another agent because it has no acceptance criteria.",
@@ -1035,7 +1035,7 @@ test("Step 17 offline fixture proves a judge experiment runs but its promotion i
   assert.equal(promoted.datasetName, DEFAULT_RICH_DATASET_NAME);
   assert.equal(promoted.dataset_id, DATASET_ID);
   assert.equal(promoted.dataset_version_id, DATASET_VERSION_ID);
-  assert.equal(promoted.split, "test", "run-step17-bad-0 is intentionally hash-assigned to the held-out test split");
+  assert.equal(promoted.split, "test", "run-step17-bad-4 is intentionally hash-assigned to the held-out test split");
   assert.equal(state.datasetExamples.length, 1);
   assert.equal(state.datasetExamples[0].metadata.source_trace_id, SOURCE_TRACE_ID);
   assert.deepEqual(state.datasetExamples[0].metadata.reference.human_annotation_ids, [HUMAN_ANNOTATION_ID]);
@@ -1062,7 +1062,7 @@ test("Step 17 offline fixture proves a judge experiment runs but its promotion i
   assert.equal(experiment.candidate_target_key, "prompt/decomposition/decomposition_quality_judge");
   assert.equal(experiment.summary.evidence_counts.test_human_labeled_examples, 1);
   assert.equal(experiment.summary.baseline_comparison.computable, true);
-  assert.equal(experiment.summary.baseline_comparison.deltas.decomposition_quality.delta, 0.21999999999999997);
+  assert.equal(experiment.summary.baseline_comparison.deltas.quality.delta, 0.21999999999999997);
 
   const storedReceipt = readExperimentReceipt({ repoRoot: root, receiptId: experiment.receipt_id });
   assert.equal(storedReceipt.exists, true);
@@ -1216,7 +1216,7 @@ test("Step 17 offline fixture rejects zero-override baseline runs as promotion c
     ensureReady: readyUp,
     fetchImpl,
     traceId: SOURCE_TRACE_ID,
-    name: "decomposition_quality",
+    name: "quality",
     label: "needs_revision",
     score: 0.52,
     explanation: "The billing setup issue is not ready for another agent because it has no acceptance criteria.",
@@ -1290,7 +1290,7 @@ test("Step 17 offline fixture routes runtime-role evidence to an accepted-defaul
     ensureReady: readyUp,
     fetchImpl,
     traceId: SOURCE_TRACE_ID,
-    name: "decomposition_quality",
+    name: "quality",
     label: "needs_revision",
     score: 0.52,
     explanation: "The billing setup issue is not ready for another agent because it has no acceptance criteria.",
@@ -1540,7 +1540,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
     ensureReady: readyUp,
     fetchImpl,
     traceId: SOURCE_TRACE_ID,
-    name: "decomposition_quality",
+    name: "quality",
     label: "needs_revision",
     score: 0.52,
     explanation: "The billing setup issue is not ready for another agent because it has no acceptance criteria.",
@@ -1582,8 +1582,8 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
   const drafterHarness = createImprovementDrafterTestHarness({
     config,
     policyPath: path.join(root, "execution/evals/decomposition/promotion-policy.json"),
-    draftDir: path.join(root, ".agentic-factory", "drafts"),
-    registryDir: path.join(root, ".agentic-factory", "promotion-candidates"),
+    draftDir: path.join(root, ".teami", "drafts"),
+    registryDir: path.join(root, ".teami", "promotion-candidates"),
     githubTransport: drafterGithubTransport,
     resolveRepoIdentity: () => ({
       ok: true,
@@ -1615,7 +1615,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
         prompt_name: "sr_eng_grounding_pass",
         prompt_id: DRAFTED_SR_ENG_PROMPT_ID,
         prompt_version_id: DRAFTED_SR_ENG_PROMPT_VERSION_ID,
-        receipt_path: path.join(root, ".agentic-factory", "phoenix-prompt-registrations.json"),
+        receipt_path: path.join(root, ".teami", "phoenix-prompt-registrations.json"),
         manifest_mutated: false,
       };
     },
@@ -1624,7 +1624,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
     fetchImpl,
     now: () => new Date("2026-06-10T04:02:00.000Z"),
     randomHex: () => "180001",
-    env: { AGENTIC_FACTORY_PHOENIX_URL: APP_URL },
+    env: { TEAMI_PHOENIX_URL: APP_URL },
   });
 
   const draft = await drafterHarness.runImprovementDrafter({
@@ -1641,10 +1641,10 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
   assert.equal(registerCalls.length, 1);
   assert.equal(registerCalls[0].contentText, DRAFTED_SR_ENG_PROMPT_CONTENT);
   assert.equal(state.writes.promptTags.length, 1);
-  assert.equal(state.writes.promptTags[0].body.name, "agentic_factory_promotion_candidate");
+  assert.equal(state.writes.promptTags[0].body.name, "teami_promotion_candidate");
 
   const storedDraft = readImprovementDraftReceipt({
-    draftDir: path.join(root, ".agentic-factory", "drafts"),
+    draftDir: path.join(root, ".teami", "drafts"),
     draftId: draft.draft_id,
   });
   assert.equal(storedDraft.exists, true);

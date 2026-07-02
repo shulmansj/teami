@@ -1,27 +1,42 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CONFIG_PATH = ".gitleaks.toml";
 const SEED_PATH = ".security-scan-seed.tmp";
 const MAX_FINDINGS = 50;
-const mode = process.argv[2];
+const SCANNER_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-try {
-  if (mode === "tree") {
-    const result = scanTree();
-    reportAndExit(result, "tree");
-  } else if (mode === "history") {
-    const result = scanHistory();
-    reportAndExit(result, "history");
-  } else if (mode === "seed") {
-    runSeedCheck();
-  } else {
-    fail(`Unknown security scan command: ${mode || "(missing)"}`);
+if (isDirectRun()) runCli(process.argv.slice(2));
+
+export { scanDir, scanHistory, scanTree };
+
+function runCli(argv) {
+  const mode = argv[0];
+  try {
+    if (mode === "tree") {
+      const result = scanTree();
+      reportAndExit(result, "tree");
+    } else if (mode === "dir") {
+      const result = scanDir(argv[1]);
+      reportAndExit(result, "dir");
+    } else if (mode === "history") {
+      const result = scanHistory();
+      reportAndExit(result, "history");
+    } else if (mode === "seed") {
+      runSeedCheck();
+    } else {
+      fail(`Unknown security scan command: ${mode || "(missing)"}`);
+    }
+  } catch (error) {
+    fail(error?.message || String(error));
   }
-} catch (error) {
-  fail(error?.message || String(error));
+}
+
+function isDirectRun() {
+  return process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 }
 
 function scanTree(options = {}) {
@@ -29,6 +44,24 @@ function scanTree(options = {}) {
   const config = loadConfig(repoRoot);
   const files = options.files || trackedAndUntrackedFiles(repoRoot);
   const activeSourceMode = sourceModeActive(repoRoot, config);
+  return scanFiles({ scanRoot: repoRoot, files, config, activeSourceMode });
+}
+
+function scanDir(dirPath) {
+  if (!dirPath) fail("dir scan requires a path.");
+  const scanRoot = path.resolve(dirPath);
+  if (!existsSync(scanRoot)) fail(`dir scan target does not exist: ${dirPath}`);
+  if (!statSync(scanRoot).isDirectory()) fail(`dir scan target is not a directory: ${dirPath}`);
+  const config = loadConfig(SCANNER_REPO_ROOT);
+  return scanFiles({
+    scanRoot,
+    files: directoryFiles(scanRoot),
+    config,
+    activeSourceMode: false,
+  });
+}
+
+function scanFiles({ scanRoot, files, config, activeSourceMode }) {
   const findings = [];
   let scannedFiles = 0;
 
@@ -37,7 +70,7 @@ function scanTree(options = {}) {
     if (pathAllowed(config.globalAllowlist, normalizedPath)) continue;
     if (activeSourceMode && pathAllowed(config.sourceMode, normalizedPath)) continue;
 
-    const fullPath = path.join(repoRoot, normalizedPath);
+    const fullPath = path.join(scanRoot, normalizedPath);
     if (!existsSync(fullPath) || !statSync(fullPath).isFile()) continue;
     const buffer = readFileSync(fullPath);
     if (looksBinary(buffer)) continue;
@@ -82,6 +115,34 @@ function scanTree(options = {}) {
   };
 }
 
+function directoryFiles(scanRoot) {
+  const files = [];
+
+  walk(scanRoot, "");
+  return files.sort((a, b) => a.localeCompare(b));
+
+  function walk(directory, prefix) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath, relativePath);
+      } else if (entry.isFile() || isFileSymlink(fullPath, entry)) {
+        files.push(relativePath);
+      }
+    }
+  }
+}
+
+function isFileSymlink(fullPath, entry) {
+  if (!entry.isSymbolicLink()) return false;
+  try {
+    return statSync(fullPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function scanHistory() {
   const repoRoot = gitOutput(["rev-parse", "--show-toplevel"]).trim();
   const config = loadConfig(repoRoot);
@@ -89,13 +150,7 @@ function scanHistory() {
   const excludedPathspecs = [
     ":(exclude).gitleaks.toml",
     ":(exclude)scripts/security-scan.mjs",
-    ":(exclude)docs/plans/**",
-    ":(exclude)docs/reviews/**",
-    ":(exclude)docs/breakdowns/**",
-    ":(exclude)maintainers/plans/**",
-    ":(exclude)maintainers/reviews/**",
-    ":(exclude)maintainers/publication/**",
-    ":(exclude)maintainers/scripts/**",
+    ":(exclude)private/**",
   ];
 
   for (const rule of config.rules.filter((candidate) => candidate.history !== false && !candidate.pathRegex)) {
@@ -158,10 +213,10 @@ function runSeedCheck() {
   const seedValue = (...parts) => parts.join("");
   const seedLocalPath = seedValue("C:/", "Users/example/private-repo");
   const seed = [
-    "AGENTIC_FACTORY_GITHUB_BROKER_TOKEN=afp_live_FAKE_DO_NOT_USE_0123456789abcdef",
-    "AGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY=broker_signing_fake_0123456789abcdef0123456789",
-    "setup_grant=af_setup_v1_sg123456789abc_FAKESECRET0123456789abcdef0123456789",
-    "broker=af_broker_v1.segment0123456789abcdef.signature0123456789abcdef0123456789",
+    "TEAMI_GITHUB_BROKER_TOKEN=afp_live_FAKE_DO_NOT_USE_0123456789abcdef",
+    "TEAMI_BROKER_CREDENTIAL_SIGNING_KEY=broker_signing_fake_0123456789abcdef0123456789",
+    "setup_grant=tm_setup_v1_sg123456789abc_FAKESECRET0123456789abcdef0123456789",
+    "broker=tm_broker_v1.segment0123456789abcdef.signature0123456789abcdef0123456789",
     "runner=ri_runner0123456789abcdef.secret0123456789abcdef",
     `service_role_key=${seedValue(
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
@@ -172,7 +227,7 @@ function runSeedCheck() {
     )}`,
     `private_key=${seedValue("-----BEGIN ", "PRIVATE KEY", "-----")}`,
     `local_checkout_path = "${seedLocalPath}"`,
-    `domain:bind-repo --domain support --path ${seedLocalPath}`,
+    "teami domain grant support --repo example/private-repo",
   ].join("\n");
 
   try {
@@ -264,13 +319,13 @@ function parseTomlSubset(text) {
       currentRule = null;
       continue;
     }
-    if (line === "[agentic_factory.source_mode]") {
+    if (line === "[teami.source_mode]") {
       root.sourceMode = {};
       target = root.sourceMode;
       currentRule = null;
       continue;
     }
-    if (line === "[[agentic_factory.source_rule_allowlists]]") {
+    if (line === "[[teami.source_rule_allowlists]]") {
       const allowlist = {};
       root.sourceRuleAllowlists.push(allowlist);
       target = allowlist;

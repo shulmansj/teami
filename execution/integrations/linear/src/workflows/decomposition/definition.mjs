@@ -11,10 +11,13 @@ import {
   RUN_ARTIFACT_SCHEMA_VERSION,
 } from "../../../../../engine/engine-contract-constants.mjs";
 import { RUN_ARTIFACT_KINDS } from "../../../../../engine/run-store.mjs";
-import { JUDGE_ROLE_NAMES } from "../../promotion/agent-behavior-scope.mjs";
 export const DECOMPOSITION_WORKFLOW_TYPE = "decomposition";
 export const DECOMPOSITION_WAKE_KEY_TEMPLATE = "linear:project:{project_id}:decomposition";
 export const DECOMPOSITION_ROLES = Object.freeze(["pm", "sr_eng", "judge", "drafter", "orchestrator"]);
+export const DECOMPOSITION_ENGINE_OWNED_EVALUATOR_ROLES = Object.freeze([
+  "judge",
+  "decomposition_quality_judge",
+]);
 export const DECOMPOSITION_REQUIRED_CAPABILITIES = Object.freeze([
   "linear.project.planned",
   "decomposition.trigger_runner.v1",
@@ -44,7 +47,37 @@ async function runTriggeredDecompositionFromDefinition(options) {
 
 export const decompositionDefinition = Object.freeze({
   workflow_type: DECOMPOSITION_WORKFLOW_TYPE,
+  trace_descriptor: Object.freeze({
+    trace_name: "decomposition_run",
+    // Documents the stable root attributes; dynamic runtime attributes still
+    // pass through the existing trace builders.
+    attribute_keys: Object.freeze([
+      "workflow.name",
+      "workflow.version",
+      "teami.domain_id",
+      "teami.behavior_repo_id",
+      "linear.workspace_id",
+      "linear.team_id",
+      "linear.project_id",
+      "linear_project_id",
+      "run_id",
+      "event_id",
+      "wake_id",
+      "trace_id",
+      "attempt",
+      "workspace_id",
+      "domain_id",
+      "team_id",
+      "behavior_repo_id",
+      "source_provider",
+      "source_object_id",
+      "trigger_type",
+      "runner_id",
+      "runner_version",
+    ]),
+  }),
   triggers: Object.freeze([DECOMPOSITION_TRIGGER]),
+  input_status: "Planned",
   required_capabilities: DECOMPOSITION_REQUIRED_CAPABILITIES,
   roles: DECOMPOSITION_ROLES,
   driver: "orchestrator",
@@ -52,7 +85,7 @@ export const decompositionDefinition = Object.freeze({
   invocable_runtime_roles: Object.freeze(["pm", "sr_eng", "judge", "drafter"]),
   runtime_assignment_roles: DECOMPOSITION_ROLES,
   get engine_owned_evaluator_roles() {
-    return JUDGE_ROLE_NAMES;
+    return DECOMPOSITION_ENGINE_OWNED_EVALUATOR_ROLES;
   },
   // Placed role_capabilities/tool_policy seam: agent write credentials stay
   // absent from contained environments; the engine owns the single validated commit.

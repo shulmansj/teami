@@ -204,7 +204,7 @@ function step8EnvelopeForPolicyHash(policyHash, overrides = {}) {
     policyHash,
     evidenceIds: STEP8_EVIDENCE_IDS,
     requestedAction: "propose_repo_change",
-    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     ...overrides,
   });
 }
@@ -213,10 +213,10 @@ const T1 = "d".repeat(31) + "1";
 const T2 = "d".repeat(31) + "2";
 const T3 = "d".repeat(31) + "3";
 
-const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "agentic-factory" });
+const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" });
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-promote-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-promote-"));
 }
 
 function runGitOrThrow(args, cwd) {
@@ -241,7 +241,7 @@ function writeVerifiedGitHubState(root, {
   realPushEnabled = false,
   pushAuth = "https",
 } = {}) {
-  const filePath = path.join(root, ".agentic-factory", "github-connection.json");
+  const filePath = path.join(root, ".teami", "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -391,9 +391,9 @@ function validPromotionTrailerFacts(overrides = {}) {
 function promotionTrailerParagraph(facts = {}) {
   const normalized = validPromotionTrailerFacts(facts);
   return [
-    `Agentic-Factory-Promotion-Envelope: ${normalized.normalizedEnvelopeHash}`,
-    `Agentic-Factory-Promotion-Instance: ${normalized.proposalInstanceId}`,
-    `Agentic-Factory-Promotion-Target: ${normalized.candidateTargetKey}`,
+    `Teami-Promotion-Envelope: ${normalized.normalizedEnvelopeHash}`,
+    `Teami-Promotion-Instance: ${normalized.proposalInstanceId}`,
+    `Teami-Promotion-Target: ${normalized.candidateTargetKey}`,
   ].join("\n");
 }
 
@@ -422,7 +422,7 @@ function amendTipPromotionMessage(cloneDir, subject, trailerParagraph = null) {
 function reconcileRegistryCommitShaToTip(cloneDir) {
   const branch = runGitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], cloneDir).stdout.trim();
   const tipSha = runGitOrThrow(["rev-parse", "HEAD"], cloneDir).stdout.trim();
-  // cloneDir is <root>/.agentic-factory/promotion-workspace/repo.
+  // cloneDir is <root>/.teami/promotion-workspace/repo.
   const root = path.resolve(cloneDir, "..", "..", "..");
   const registryDir = defaultPromotionRegistryDir(root);
   if (!fs.existsSync(registryDir)) return;
@@ -512,7 +512,7 @@ function humanAnnotation({
 } = {}) {
   return {
     id,
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "HUMAN",
     identifier: "steve",
     result: { label, score, explanation },
@@ -560,7 +560,7 @@ function experimentRow({ exampleId, judge = null, code = null, traceId = null })
   const annotations = [];
   if (judge) {
     annotations.push({
-      name: "decomposition_quality",
+      name: "quality",
       annotator_kind: "LLM",
       label: judge.label,
       score: judge.score,
@@ -604,7 +604,7 @@ function baselineRow(exampleId, score) {
   return {
     example_id: exampleId,
     annotations: [{
-      name: "decomposition_quality",
+      name: "quality",
       annotator_kind: "LLM",
       label: score >= 0.8 ? "pass" : "needs_revision",
       score,
@@ -623,17 +623,17 @@ function writeReceiptFixture(root, {
   splitRequested = null,
   selection = "all_examples",
   origin = "http://127.0.0.1:6006",
-  projectName = "agentic-factory",
+  projectName = "teami",
   launchedAt = "2026-06-10T01:00:00.000Z",
   intent = "promotion_candidate",
   intentSource = "explicit_flag",
   draftedBy = null,
   amendments = [],
 } = {}) {
-  const dir = path.join(root, ".agentic-factory", "experiments");
+  const dir = path.join(root, ".teami", "experiments");
   fs.mkdirSync(dir, { recursive: true });
   const receipt = {
-    schema_version: "agentic-factory-managed-experiment-receipt/v1",
+    schema_version: "teami-managed-experiment-receipt/v1",
     receipt_id: receiptId,
     source: "managed_manual",
     created_at: launchedAt,
@@ -686,14 +686,14 @@ function writeReceiptFixture(root, {
       },
       promotion_policy: null,
       workspace_eval_policy: {
-        schema_version: "agentic-factory-workspace-eval-policy/v1",
+        schema_version: "teami-workspace-eval-policy/v1",
         sha256: POLICY_SHA256,
         path: "workspace-eval-policy.json",
       },
       actor: { os_username: "test-user", authenticity: "asserted" },
       launched_at: launchedAt,
       phoenix_scope: { origin, project_name: projectName },
-      agentic_factory_run_id: `afexp-${receiptId}`,
+      teami_run_id: `afexp-${receiptId}`,
       ...(draftedBy ? { drafted_by: draftedBy } : {}),
     },
     phoenix_experiment_id: experimentId,
@@ -770,15 +770,15 @@ function controllerRoutes(
   return {
     "GET /openapi.json": jsonResponse({ paths: openapiPaths }),
     "GET /v1/experiments/EXP1": jsonResponse({
-      data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "agentic-factory", metadata: {} },
+      data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "teami", metadata: {} },
     }),
     "GET /v1/experiments/EXP1/json": jsonResponse(rows),
     "GET /v1/datasets/DS1/examples": jsonResponse({ data: { examples: records } }),
     "GET /v1/datasets/DS1/versions": jsonResponse({ data: [{ version_id: "DSV9" }] }),
-    "GET /v1/projects": jsonResponse({ data: [{ id: "UHJvamVjdDox", name: "agentic-factory" }] }),
+    "GET /v1/projects": jsonResponse({ data: [{ id: "UHJvamVjdDox", name: "teami" }] }),
     "GET /v1/experiments/BASE1/json": jsonResponse(baselineRows),
     "GET /v1/prompt_versions/PV1": jsonResponse(promptVersionResponse()),
-    "POST /v1/projects/agentic-factory/spans": jsonResponse({}),
+    "POST /v1/projects/teami/spans": jsonResponse({}),
     "POST /v1/trace_annotations": () => {
       if (annotationFailuresLeft > 0) {
         annotationFailuresLeft -= 1;
@@ -795,7 +795,7 @@ function promotionRequest(overrides = {}) {
     schema_version: PROMOTE_CANDIDATE_REQUEST_SCHEMA_VERSION,
     source: "agent_session",
     actor_id: "steve",
-    expected_project: "agentic-factory",
+    expected_project: "teami",
     experiment_id: "EXP1",
     prompt_version_id: "PV1",
     evaluator_id: "decomposition_quality_judge_v1",
@@ -811,7 +811,7 @@ function policyEditRequest(policyEdit = {}, overrides = {}) {
     schema_version: PROMOTE_CANDIDATE_REQUEST_SCHEMA_VERSION,
     source: "agent_session",
     actor_id: "steve",
-    expected_project: "agentic-factory",
+    expected_project: "teami",
     requested_action: "propose_repo_change",
     policy_edit: {
       field_path: "lookback_days",
@@ -1317,7 +1317,7 @@ test("Phoenix-generated experiment run projects do not override the configured s
   assert.equal(result.outcome, "route_to_hitl");
   assert.deepEqual(result.phoenix_scope, {
     origin: "http://127.0.0.1:6006",
-    project_name: "agentic-factory",
+    project_name: "teami",
   });
 });
 
@@ -1381,13 +1381,13 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
       envelopeHash: result.normalized_envelope_hash,
     }),
   );
-  assert.match(result.branch, /^agentic-factory\/promotion\/prompt-decomposition-sr-eng-grounding-pass\/[0-9a-f]{12}$/);
+  assert.match(result.branch, /^teami\/promotion\/prompt-decomposition-sr-eng-grounding-pass\/[0-9a-f]{12}$/);
   assert.ok(result.commit_sha);
 
   // The commit is attributed to the bot identity placeholder, never the adopter.
-  const workspaceClone = path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  const workspaceClone = path.join(root, ".teami", "promotion-workspace", "repo");
   const author = runGitOrThrow(["log", "-1", "--format=%an <%ae>"], workspaceClone).stdout.trim();
-  assert.equal(author, "agentic-factory[bot] (placeholder) <agentic-factory-bot@placeholder.invalid>");
+  assert.equal(author, "teami[bot] (placeholder) <teami-bot@placeholder.invalid>");
   const commitBody = runGitOrThrow(["log", "-1", "--pretty=%B"], workspaceClone).stdout.replace(/\r\n/g, "\n");
   const commitParagraphs = commitBody.split(/\n[ \t]*\n/).map((paragraph) => paragraph.trim()).filter(Boolean);
   assert.equal(
@@ -1464,13 +1464,13 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
   assert.equal(marker.candidate_kind, "prompt");
   assert.equal(marker.candidate_version_id, "PV1");
   assert.equal(marker.accepted_baseline_id, EXPECTED_BASELINE_ID);
-  assert.equal(marker.packet.schema_version, "agentic-factory-proposal-packet/v1");
+  assert.equal(marker.packet.schema_version, "teami-proposal-packet/v1");
   assert.equal(marker.packet.source, "structured_packet");
   assert.equal(marker.packet.guard_status, "passed");
   assert.equal(marker.packet.before_after_examples_present, true);
   assert.equal(marker.normalized_envelope_hash, result.normalized_envelope_hash);
   assert.equal(marker.policy_hash, result.policy.policy_hash);
-  assert.deepEqual(marker.phoenix_scope, { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" });
+  assert.deepEqual(marker.phoenix_scope, { origin: "http://127.0.0.1:6006", project_name: "teami" });
   assert.deepEqual(marker.evidence_ids.experiments, ["EXP1"]);
   assert.deepEqual(marker.evidence_ids.datasets, [{ dataset_id: "DS1", dataset_version_id: "DSV9" }]);
   assert.deepEqual(marker.evidence_ids.annotations, ["anno-h1", "anno-h2", "anno-h3"]);
@@ -1519,7 +1519,7 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
   );
   assert.equal(annotationPosts.length, 1);
   const annotationBody = JSON.parse(annotationPosts[0].body);
-  assert.equal(annotationBody.data[0].name, "agentic_factory_promotion_outcome");
+  assert.equal(annotationBody.data[0].name, "teami_promotion_outcome");
   assert.equal(annotationBody.data[0].annotator_kind, "CODE");
   assert.equal(annotationBody.data[0].result.label, "route_to_hitl");
   assert.equal(annotationBody.data[0].metadata.normalized_envelope_hash, result.normalized_envelope_hash);
@@ -1544,7 +1544,7 @@ test("PROOF-01: fixed trace run produces a guarded packet, survives rerun, decli
   const receiptOverrides = {
     receiptId: "expr-proof-01",
     launchedAt: "2026-06-17T12:00:00.000Z",
-    draftedBy: "agentic_factory_drafter_v1:test-model",
+    draftedBy: "teami_drafter_v1:test-model",
   };
 
   const first = await runController({
@@ -1566,7 +1566,7 @@ test("PROOF-01: fixed trace run produces a guarded packet, survives rerun, decli
   assert.match(first.result.pr_body, /Affected teams: Support Ops/);
   assert.match(first.result.pr_body, /Safe Phoenix evidence handles: experiment EXP1; dataset DS1 version DSV9; baseline BASE1/);
   assert.match(first.result.pr_body, /Phoenix deep link: http:\/\/127\.0\.0\.1:6006\/datasets\/DS1\/experiments\/EXP1/);
-  assert.match(first.result.pr_body, /Machine-drafted candidate \(agentic_factory_drafter_v1:test-model\)/);
+  assert.match(first.result.pr_body, /Machine-drafted candidate \(teami_drafter_v1:test-model\)/);
   assert.match(first.result.pr_body, /Before approval: Closing or declining the PR changes nothing/);
   assert.match(first.result.pr_body, /After approval: Undo requires a follow-up owner-reviewed proposal/);
 
@@ -1661,7 +1661,7 @@ test("PROOF-01: fixed trace run produces a guarded packet, survives rerun, decli
     receiptId: "expr-proof-01-new-evidence",
     experimentId: null,
     launchedAt: "2026-06-17T13:18:00.000Z",
-    draftedBy: "agentic_factory_drafter_v1:test-model",
+    draftedBy: "teami_drafter_v1:test-model",
     amendments: [{
       action: "register",
       reason: "PROOF-01 materially new experiment fixture",
@@ -1674,7 +1674,7 @@ test("PROOF-01: fixed trace run produces a guarded packet, survives rerun, decli
           id: "EXP2",
           dataset_id: "DS1",
           dataset_version_id: "DSV9",
-          project_name: "agentic-factory",
+          project_name: "teami",
         },
         dataset_version_matches_launch: true,
         candidate_prompt_version_resolved: true,
@@ -1687,7 +1687,7 @@ test("PROOF-01: fixed trace run produces a guarded packet, survives rerun, decli
         id: "EXP2",
         dataset_id: "DS1",
         dataset_version_id: "DSV9",
-        project_name: "agentic-factory",
+        project_name: "teami",
         metadata: {},
       },
     }),
@@ -1858,7 +1858,7 @@ test("legacy open PRs without a passed packet marker are marked blocked-for-repa
         },
         packet: null,
       }),
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/legacy-pkt" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/legacy-pkt" },
       created_at: "2026-06-10T02:00:00.000Z",
       merged_at: null,
       closed_at: null,
@@ -1916,7 +1916,7 @@ test("fail-closed guard allows manifest-declared agent prompt repins through PR 
       },
     },
     controllerOverrides: {
-      env: { AGENTIC_FACTORY_PROMOTION_WRITE_GUARD: "fail_closed" },
+      env: { TEAMI_PROMOTION_WRITE_GUARD: "fail_closed" },
     },
   });
 
@@ -1952,7 +1952,7 @@ test("writer-originated prompt candidates use the normal controller flow with a 
     root,
     fixture: passFixture(),
     receiptOverrides: {
-      draftedBy: "agentic_factory_drafter_v1:test-model",
+      draftedBy: "teami_drafter_v1:test-model",
     },
   });
 
@@ -1960,7 +1960,7 @@ test("writer-originated prompt candidates use the normal controller flow with a 
   assert.equal(result.outcome, "route_to_hitl");
   assert.match(
     result.pr_body,
-    /Machine-drafted candidate \(agentic_factory_drafter_v1:test-model\)/,
+    /Machine-drafted candidate \(teami_drafter_v1:test-model\)/,
   );
   assert.equal(parsePromotionMarkers(result.pr_body).length, 1);
 });
@@ -2045,7 +2045,7 @@ test("Step 8 migration: the old v1 envelope reuses PR #2 without creating a new 
       merged_at: null,
       closed_at: null,
       html_url: "mock://github/o/r/pull/2",
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/2c48cc7b43ab" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/2c48cc7b43ab" },
     }],
   });
 
@@ -2118,7 +2118,7 @@ test("Step 8 migration: the current v3 envelope supersedes PR #2, and closed sup
     merged_at: null,
     closed_at: null,
     html_url: "mock://github/o/r/pull/2",
-    head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/2c48cc7b43ab" },
+    head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/2c48cc7b43ab" },
   };
   let materializerInvocations = 0;
   const transport = createMockGitHubTransport({ openPullRequests: [pr2] });
@@ -2227,7 +2227,7 @@ test("controller boundary blocks non-agent-behavior targets before proposal work
   assert.deepEqual(githubTransport.calls, []);
   assert.equal(result.branch, undefined);
   assert.equal(
-    fs.existsSync(path.join(root, ".agentic-factory", "promotion-workspace", "repo", ".git")),
+    fs.existsSync(path.join(root, ".teami", "promotion-workspace", "repo", ".git")),
     false,
     "target-boundary assertion must not create a promotion branch workspace",
   );
@@ -2294,7 +2294,7 @@ test("hostile materializer output containing proposals paths is refused before c
   assert.equal(result.terminal, true);
   assert.equal(githubTransport.created.length, 0);
   assert.equal(
-    fs.existsSync(path.join(root, ".agentic-factory", "promotion-workspace", "repo", ".git")),
+    fs.existsSync(path.join(root, ".teami", "promotion-workspace", "repo", ".git")),
     false,
     "controller validation must reject hostile proposal paths before checkout/commit",
   );
@@ -2529,7 +2529,7 @@ test("the normalized envelope hash is order-insensitive over evidence ids and se
       prompt_versions: ["PV1"],
     },
     requestedAction: "propose_repo_change",
-    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
   };
   const first = computeNormalizedEnvelope(base);
   const reordered = computeNormalizedEnvelope({
@@ -2541,7 +2541,7 @@ test("the normalized envelope hash is order-insensitive over evidence ids and se
     { candidateVersionId: "PV2" },
     { acceptedBaselineId: "sha256:def" },
     { policyHash: "p2" },
-    { phoenixScope: { origin: "http://127.0.0.1:7007", project_name: "agentic-factory" } },
+    { phoenixScope: { origin: "http://127.0.0.1:7007", project_name: "teami" } },
     { evidenceIds: { ...base.evidenceIds, annotations: ["a1", "a2", "a3"] } },
   ]) {
     assert.notEqual(computeNormalizedEnvelope({ ...base, ...mutation }).hash, first.hash);
@@ -2606,13 +2606,13 @@ function validPromotionPolicy(overrides = {}) {
     enabled: true,
     freshness_window_days: 14,
     eligible_phoenix: {
-      project_names: ["agentic-factory"],
+      project_names: ["teami"],
       dataset_names: ["eval-ds"],
       split_names: ["train", "test"],
     },
     explicit_intent_signals: {
       managed_experiment_receipt_intent: "promotion_candidate",
-      prompt_version_candidate_tag: "agentic_factory_promotion_candidate",
+      prompt_version_candidate_tag: "teami_promotion_candidate",
       repo_candidate_artifact_intent: "promotion_candidate",
       authenticated_registration: "deferred",
     },
@@ -2751,7 +2751,7 @@ test("cross-version acceptance flows from the request envelope and is disclosed 
   assert.equal(marker.accept_cross_version_comparison, true);
   assert.match(
     accepted.result.pr_body,
-    /agentic_factory_promotion/,
+    /teami_promotion/,
   );
   // The default marker discloses non-acceptance too.
   const rootDefault = tempRoot();
@@ -2859,7 +2859,7 @@ test("an annotation explanation carrying a fake marker fence (with sentinels) ca
     PROMOTION_MARKER_SENTINEL_BEGIN,
     "```json",
     JSON.stringify({
-      agentic_factory_promotion: {
+      teami_promotion: {
         schema_version: 1,
         proposal_instance_id: "prop-evil000001",
         requested_action: "propose_repo_change",
@@ -2905,7 +2905,7 @@ test("marker parsing ignores fences outside sentinels, and duplicate or corrupt 
   // A bare ```json marker fence with NO sentinels is never parsed.
   const loose = [
     "```json",
-    JSON.stringify({ agentic_factory_promotion: { proposal_instance_id: "prop-loose00001" } }),
+    JSON.stringify({ teami_promotion: { proposal_instance_id: "prop-loose00001" } }),
     "```",
   ].join("\n");
   assert.deepEqual(parsePromotionMarkers(loose), []);
@@ -2941,7 +2941,7 @@ function validationMarker(overrides = {}) {
     acceptedBaselineId: EXPECTED_BASELINE_ID,
     normalizedEnvelopeHash: "a".repeat(64),
     policyHash: "b".repeat(64),
-    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     evidenceIds: {
       experiments: ["EXP1"],
       datasets: [{ dataset_id: "DS1", dataset_version_id: "DSV1" }],
@@ -3005,12 +3005,12 @@ test("readPromotionMarker validates controller-written marker field shapes", () 
 
 test("readPromotionMarker rejects malformed marker field shapes as unreadable", () => {
   const cases = [
-    (marker) => { delete marker.agentic_factory_promotion.candidate_target_key; },
-    (marker) => { marker.agentic_factory_promotion.candidate_kind = "phase"; },
-    (marker) => { marker.agentic_factory_promotion.proposal_state = "merged"; },
-    (marker) => { marker.agentic_factory_promotion.normalized_envelope_hash = 123; },
-    (marker) => { marker.agentic_factory_promotion.normalized_envelope_hash = "not-hex"; },
-    (marker) => { marker.agentic_factory_promotion.packet.guard_status = "trusted_because_markdown_says_so"; },
+    (marker) => { delete marker.teami_promotion.candidate_target_key; },
+    (marker) => { marker.teami_promotion.candidate_kind = "phase"; },
+    (marker) => { marker.teami_promotion.proposal_state = "merged"; },
+    (marker) => { marker.teami_promotion.normalized_envelope_hash = 123; },
+    (marker) => { marker.teami_promotion.normalized_envelope_hash = "not-hex"; },
+    (marker) => { marker.teami_promotion.packet.guard_status = "trusted_because_markdown_says_so"; },
   ];
   for (const mutate of cases) {
     const marker = validationMarker();
@@ -3038,7 +3038,7 @@ function markerBody({
   supersededBy = null,
   repairState = "none",
   packet = {
-    schema_version: "agentic-factory-proposal-packet/v1",
+    schema_version: "teami-proposal-packet/v1",
     source: "structured_packet",
     guard_status: "passed",
     copy_class: "decision_ready",
@@ -3055,7 +3055,7 @@ function markerBody({
     PROMOTION_MARKER_SENTINEL_BEGIN,
     "```json",
     JSON.stringify({
-      agentic_factory_promotion: {
+      teami_promotion: {
         schema_version: 1,
         proposal_instance_id: proposalInstanceId,
         requested_action: "propose_repo_change",
@@ -3065,7 +3065,7 @@ function markerBody({
         accepted_baseline_id: acceptedBaselineId,
         normalized_envelope_hash: envelopeHash,
         policy_hash: policyHash,
-        phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+        phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
         evidence_ids: evidenceIds,
         accept_cross_version_comparison: false,
         proposal_state: proposalState,
@@ -3115,7 +3115,7 @@ test("an open same-target proposal with a different envelope is superseded after
       merged_at: null,
       closed_at: null,
       html_url: "mock://github/o/r/pull/41",
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/old000000001" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/old000000001" },
     }],
   });
   const { result } = await runController({ root, fixture: passFixture(), transport });
@@ -3136,7 +3136,7 @@ test("supersede body patch failures return retryable repair and re-invocation re
       number: 42,
       state: "open",
       body: markerBody({ proposalInstanceId: "prop-stale00001" }),
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/stale000001" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/stale000001" },
       created_at: "2026-04-01T00:00:00.000Z",
       merged_at: null,
       closed_at: null,
@@ -3175,7 +3175,7 @@ test("a closed-unmerged same-target PR is human rejection memory and suppresses 
       merged_at: null,
       closed_at: "2026-06-05T00:00:00.000Z",
       html_url: "mock://github/o/r/pull/17",
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000001" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000001" },
     }],
   });
   const { result } = await runController({
@@ -3207,7 +3207,7 @@ test("closed-unmerged PRs whose marker says superseded or blocked are NOT reject
       created_at: "2026-06-01T00:00:00.000Z",
       merged_at: null,
       closed_at: "2026-06-05T00:00:00.000Z",
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/superseded01" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/superseded01" },
     }],
   });
   const { result } = await runController({ root, fixture: passFixture(), transport });
@@ -3225,7 +3225,7 @@ test("a post-rejection register amendment with a different experiment identity o
       created_at: "2026-06-01T00:00:00.000Z",
       merged_at: null,
       closed_at: "2026-06-05T00:00:00.000Z",
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000002" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000002" },
     }],
   });
   const fixtureForRegisteredExperiment = passFixture();
@@ -3248,7 +3248,7 @@ test("a post-rejection register amendment with a different experiment identity o
             id: "EXP9",
             dataset_id: "DS1",
             dataset_version_id: "DSV9",
-            project_name: "agentic-factory",
+            project_name: "teami",
           },
           dataset_version_matches_launch: true,
           candidate_prompt_version_resolved: true,
@@ -3258,7 +3258,7 @@ test("a post-rejection register amendment with a different experiment identity o
     routesOptions: {
       extraRoutes: {
         "GET /v1/experiments/EXP9": jsonResponse({
-          data: { id: "EXP9", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "agentic-factory", metadata: {} },
+          data: { id: "EXP9", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "teami", metadata: {} },
         }),
         "GET /v1/experiments/EXP9/json": jsonResponse(fixtureForRegisteredExperiment.rows),
       },
@@ -3281,7 +3281,7 @@ test("a no-op receipt reclassify after rejection does not override suppression",
       created_at: "2026-06-01T00:00:00.000Z",
       merged_at: null,
       closed_at: "2026-06-05T00:00:00.000Z",
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000003" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000003" },
     }],
   });
   const { result } = await runController({
@@ -3316,7 +3316,7 @@ test("budget and max-open caps derive from repo-visible markers", async () => {
     created_at: "2026-01-01T00:00:00.000Z",
     merged_at: null,
     closed_at: null,
-    head: { ref: `agentic-factory/promotion/rule-decomposition-other-target-${number}/open${number}` },
+    head: { ref: `teami/promotion/rule-decomposition-other-target-${number}/open${number}` },
   });
   const transportA = createMockGitHubTransport({
     openPullRequests: [openPr(1), openPr(2), openPr(3)],
@@ -3338,7 +3338,7 @@ test("budget and max-open caps derive from repo-visible markers", async () => {
     created_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     merged_at: new Date().toISOString(),
     closed_at: new Date().toISOString(),
-    head: { ref: `agentic-factory/promotion/rule-decomposition-merged-target-${number}/merged${number}` },
+    head: { ref: `teami/promotion/rule-decomposition-merged-target-${number}/merged${number}` },
   });
   const transportB = createMockGitHubTransport({
     closedPullRequests: [recentMerged(21), recentMerged(22), recentMerged(23), recentMerged(24), recentMerged(25)],
@@ -3378,7 +3378,7 @@ test("a controller-namespace PR with NO marker blocks as promotion_marker_unread
       number: 60,
       state: "open",
       body: "a human edited this PR body and removed the marker entirely",
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/aaaaaaaaaaaa" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/aaaaaaaaaaaa" },
       created_at: "2026-06-01T00:00:00.000Z",
       merged_at: null,
       closed_at: null,
@@ -3401,7 +3401,7 @@ test("unreadable namespace marker blocks only the current run and is re-read aft
     number: 64,
     state: "open",
     body: `${PROMOTION_MARKER_SENTINEL_BEGIN}\n\`\`\`json\n{ broken json\n\`\`\`\n${PROMOTION_MARKER_SENTINEL_END}`,
-    head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/retry000064" },
+    head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/retry000064" },
     created_at: "2026-06-01T00:00:00.000Z",
     merged_at: null,
     closed_at: null,
@@ -3455,7 +3455,7 @@ test("a controller-namespace PR with a corrupted or duplicated marker blocks as 
       number: 61,
       state: "closed",
       body: corruptBody,
-      head: { ref: "agentic-factory/promotion/rule-decomposition-x/bbbbbbbbbbbb" },
+      head: { ref: "teami/promotion/rule-decomposition-x/bbbbbbbbbbbb" },
       created_at: "2026-06-01T00:00:00.000Z",
       merged_at: null,
       closed_at: "2026-06-05T00:00:00.000Z",
@@ -3473,7 +3473,7 @@ test("a controller-namespace PR with a corrupted or duplicated marker blocks as 
       number: 62,
       state: "open",
       body: `${markerBody()}\n${markerBody({ proposalInstanceId: "prop-existing02" })}`,
-      head: { ref: "agentic-factory/promotion/rule-decomposition-x/cccccccccccc" },
+      head: { ref: "teami/promotion/rule-decomposition-x/cccccccccccc" },
       created_at: "2026-06-01T00:00:00.000Z",
       merged_at: null,
       closed_at: null,
@@ -3551,7 +3551,7 @@ test("valid markers on non-controller PRs are ignored for reuse, rejection, budg
       number: 84,
       state: "closed",
       body: markerBody(),
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000084" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/reject000084" },
       created_at: "2026-06-01T00:00:00.000Z",
       merged_at: null,
       closed_at: "2026-06-05T00:00:00.000Z",
@@ -4010,9 +4010,9 @@ test("real promotion branch push uses ambient git auth with scrubbed HTTPS env",
   const result = pushPromotionBranchWithAmbientAuth({
     cloneDir: "C:\\tmp\\promotion-workspace",
     owner: "state-owner",
-    repo: "agentic-factory",
-    branch: "agentic-factory/promotion/x/abc123abc123",
-    checkoutPath: "C:\\work\\agentic-factory",
+    repo: "teami",
+    branch: "teami/promotion/x/abc123abc123",
+    checkoutPath: "C:\\work\\teami",
     pushAuth: "https",
     env: {
       PATH: "test-path",
@@ -4024,7 +4024,7 @@ test("real promotion branch push uses ambient git auth with scrubbed HTTPS env",
     runGit: (args, options = {}) => {
       calls.push({ args, options });
       if (args.join(" ") === "remote get-url --push origin") {
-        return { ok: true, stdout: "https://github.com/state-owner/agentic-factory.git\n", stderr: "" };
+        return { ok: true, stdout: "https://github.com/state-owner/teami.git\n", stderr: "" };
       }
       return { ok: true, stdout: "", stderr: "" };
     },
@@ -4034,8 +4034,8 @@ test("real promotion branch push uses ambient git auth with scrubbed HTTPS env",
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].args, [
     "push",
-    "https://github.com/state-owner/agentic-factory.git",
-    "refs/heads/agentic-factory/promotion/x/abc123abc123:refs/heads/agentic-factory/promotion/x/abc123abc123",
+    "https://github.com/state-owner/teami.git",
+    "refs/heads/teami/promotion/x/abc123abc123:refs/heads/teami/promotion/x/abc123abc123",
   ]);
   assert.equal(calls[1].options.cwd, "C:\\tmp\\promotion-workspace");
   assert.equal(calls[1].options.exactEnv, true);
@@ -4052,17 +4052,17 @@ test("promotion branch push rejects default, protected, tag, and arbitrary refs 
   const blockedBranches = [
     "main",
     "release/v1",
-    "refs/heads/agentic-factory/promotion/x/abc123abc123",
+    "refs/heads/teami/promotion/x/abc123abc123",
     "refs/tags/v1.0.0",
-    "agentic-factory/promotion/x/abc123abc123:main",
-    "agentic-factory/promotion/x/../main",
+    "teami/promotion/x/abc123abc123:main",
+    "teami/promotion/x/../main",
   ];
   for (const branch of blockedBranches) {
     let gitCalled = false;
     const result = pushPromotionBranchWithAmbientAuth({
       cloneDir: "C:\\tmp\\promotion-workspace",
       owner: "state-owner",
-      repo: "agentic-factory",
+      repo: "teami",
       branch,
       runGit: () => {
         gitCalled = true;
@@ -4073,8 +4073,8 @@ test("promotion branch push rejects default, protected, tag, and arbitrary refs 
     assert.equal(gitCalled, false, `branch ${branch} must fail before git push`);
   }
   assert.equal(
-    validatePromotionBranchRef("agentic-factory/promotion/x/abc123abc123").full_ref,
-    "refs/heads/agentic-factory/promotion/x/abc123abc123",
+    validatePromotionBranchRef("teami/promotion/x/abc123abc123").full_ref,
+    "refs/heads/teami/promotion/x/abc123abc123",
   );
 });
 
@@ -4083,9 +4083,9 @@ test("real promotion branch push uses configured SSH remote and preserves SSH_AU
   const result = pushPromotionBranchWithAmbientAuth({
     cloneDir: "/tmp/promotion-workspace",
     owner: "state-owner",
-    repo: "agentic-factory",
-    branch: "agentic-factory/promotion/x/abc123abc123",
-    checkoutPath: "/work/agentic-factory",
+    repo: "teami",
+    branch: "teami/promotion/x/abc123abc123",
+    checkoutPath: "/work/teami",
     pushAuth: "ssh",
     env: {
       PATH: "test-path",
@@ -4096,18 +4096,18 @@ test("real promotion branch push uses configured SSH remote and preserves SSH_AU
     runGit: (args, options = {}) => {
       calls.push({ args, options });
       if (args.join(" ") === "remote get-url --push origin") {
-        return { ok: true, stdout: "git@github.com:state-owner/agentic-factory.git\n", stderr: "" };
+        return { ok: true, stdout: "git@github.com:state-owner/teami.git\n", stderr: "" };
       }
       return { ok: true, stdout: "", stderr: "" };
     },
   });
   assert.equal(result.ok, true);
-  assert.equal(result.remote, "git@github.com:state-owner/agentic-factory.git");
+  assert.equal(result.remote, "git@github.com:state-owner/teami.git");
   assert.equal(result.push_auth, "ssh");
   assert.deepEqual(calls[1].args, [
     "push",
-    "git@github.com:state-owner/agentic-factory.git",
-    "refs/heads/agentic-factory/promotion/x/abc123abc123:refs/heads/agentic-factory/promotion/x/abc123abc123",
+    "git@github.com:state-owner/teami.git",
+    "refs/heads/teami/promotion/x/abc123abc123:refs/heads/teami/promotion/x/abc123abc123",
   ]);
   assert.equal(calls[1].options.env.GH_TOKEN, undefined);
   assert.equal(calls[1].options.env.GIT_ASKPASS, undefined);
@@ -4362,7 +4362,7 @@ test("promotion controller stale-lock recovery re-verifies lock content before d
   assert.equal(old.ok, true);
   const originalOpenSync = fs.openSync;
   const freshOwner = {
-    schema_version: "agentic-factory-promotion-controller-lock/v1",
+    schema_version: "teami-promotion-controller-lock/v1",
     pid: 999999,
     acquired_at: "2026-06-10T00:15:59.999Z",
     stale_after_ms: 15 * 60 * 1000,
@@ -4420,7 +4420,7 @@ test("an existing branch carrying a different envelope is refused, never overwri
   assert.equal(first.result.outcome, "route_to_hitl");
   // Rewrite the committed promotion trailers on the branch to a different
   // envelope (simulating a corrupted/foreign branch), keep the registry row.
-  const cloneDir = path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
   runGitOrThrow(["checkout", first.result.branch], cloneDir);
   amendTipPromotionMessage(
     cloneDir,
@@ -4494,7 +4494,7 @@ test("an old-style committed branch without trailers resumes via proposal-docume
   assert.equal(first.result.reason, "github_pr_creation_failed");
   const { branch, proposalRelativePath } = promotionBranchFacts(first.result);
 
-  const cloneDir = path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
   writeOldStyleProposalDocument({ cloneDir, branch, result: first.result });
   assert.deepEqual(
     readPromotionCommitTrailers({ cloneDir, branch: "HEAD" }),
@@ -4530,7 +4530,7 @@ test("a trailer mismatch refuses the branch without consulting a matching propos
   assert.equal(first.result.outcome, "blocked");
   assert.equal(first.result.reason, "github_pr_creation_failed");
   const { branch } = promotionBranchFacts(first.result);
-  const cloneDir = path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
   const proposalRelativePath = writeOldStyleProposalDocument({ cloneDir, branch, result: first.result });
   const committedDoc = readFileFromBranch({
     cloneDir,
@@ -4584,7 +4584,7 @@ test("malformed promotion trailers refuse the branch instead of falling back as 
   assert.equal(first.result.reason, "github_pr_creation_failed");
   const { branch, proposalRelativePath } = promotionBranchFacts(first.result);
 
-  const cloneDir = path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
   runGitOrThrow(["checkout", branch], cloneDir);
   amendTipPromotionMessage(
     cloneDir,
@@ -4637,7 +4637,7 @@ test("a crash after commit but before PR resumes by creating the PR without re-d
   assert.equal(second.result.outcome, "route_to_hitl");
   assert.equal(transport.created.length, 1);
   // Exactly one commit beyond the base branch: drafting did not repeat.
-  const cloneDir = path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
   const commits = runGitOrThrow(
     ["rev-list", "--count", `origin/main..${second.result.branch}`],
     cloneDir,
@@ -4676,7 +4676,7 @@ test("a failed Phoenix outcome write leaves the repo authoritative with phoenix_
     parsePromotionMarkers(repairUpdate.params.body)[0].repair_state,
     "phoenix_audit_retry_needed",
   );
-  const cloneDir = path.join(root, ".agentic-factory", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
   const commits = runGitOrThrow(
     ["rev-list", "--count", `origin/main..${first.result.branch}`],
     cloneDir,
@@ -4873,7 +4873,7 @@ test("formatPromotionOutcomeReport uses the Step 6 exact copy for opportunity, e
     }),
     [
       "Improvement opportunity found: Decomposition quality judge",
-      "Evidence suggests Decomposition quality judge could improve on Missing acceptance criteria, Missing assumptions, but Agentic Factory has not drafted a concrete prompt/policy change yet.",
+      "Evidence suggests Decomposition quality judge could improve on Missing acceptance criteria, Missing assumptions, but Teami has not drafted a concrete prompt/policy change yet.",
       "No GitHub PR was opened.",
       "Next step: draft the proposed agent/prompt/policy change, then rerun promotion.",
     ],
@@ -4971,7 +4971,7 @@ test("promotion outcome annotation payload pins the schema's promotion_outcome s
     normalizedEnvelopeHash: "b".repeat(64),
   });
   const annotation = payload.data[0];
-  assert.equal(annotation.name, "agentic_factory_promotion_outcome");
+  assert.equal(annotation.name, "teami_promotion_outcome");
   assert.equal(annotation.annotator_kind, "CODE");
   assert.deepEqual(Object.keys(annotation.metadata).sort(), [
     "candidate_target_key",
@@ -5002,12 +5002,12 @@ test("escapeGitHubMarkdownProse neutralizes mentions, autolinks, and link syntax
 test("controller resolves the behavior-repo identity from the local GitHub connection state", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const stateDir = path.join(root, ".agentic-factory");
+  const stateDir = path.join(root, ".teami");
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
     path.join(stateDir, "github-connection.json"),
     `${JSON.stringify({
-      schema_version: "agentic-factory-github-connection/v1",
+      schema_version: "teami-github-connection/v1",
       connection_mode: "dry_run",
       status: "verified",
       adoption_complete: false,
@@ -5065,7 +5065,7 @@ test("controller real local-ambient mode pushes the promotion branch with scrubb
       PATH: "test-path",
       GH_TOKEN: "ghs_sensitive",
       GIT_ASKPASS: "askpass-helper",
-      SSH_AUTH_SOCK: "/tmp/agentic-factory-ssh.sock",
+      SSH_AUTH_SOCK: "/tmp/teami-ssh.sock",
     },
     runGit: (args, options = {}) => {
       gitCalls.push({ args, options });
@@ -5117,12 +5117,12 @@ test("controller real local-ambient mode pushes the promotion branch with scrubb
     "git@github.com:factory-owner/behavior-rules.git",
     `${result.push.ref}:${result.push.ref}`,
   ]);
-  assert.equal(pushCall.options.cwd, path.join(root, ".agentic-factory", "promotion-workspace", "repo"));
+  assert.equal(pushCall.options.cwd, path.join(root, ".teami", "promotion-workspace", "repo"));
   assert.equal(pushCall.options.exactEnv, true);
   assert.equal(pushCall.options.env.GIT_TERMINAL_PROMPT, "0");
   assert.equal(pushCall.options.env.GH_TOKEN, undefined);
   assert.equal(pushCall.options.env.GIT_ASKPASS, undefined);
-  assert.equal(pushCall.options.env.SSH_AUTH_SOCK, "/tmp/agentic-factory-ssh.sock");
+  assert.equal(pushCall.options.env.SSH_AUTH_SOCK, "/tmp/teami-ssh.sock");
 });
 
 test("without a verified GitHub connection the controller falls back to the neutral placeholder identity", async () => {
@@ -5133,6 +5133,6 @@ test("without a verified GitHub connection the controller falls back to the neut
   assert.ok(githubTransport.calls.length > 0);
   for (const call of githubTransport.calls) {
     assert.equal(call.owner, "your-github-owner");
-    assert.equal(call.repo, "agentic-factory");
+    assert.equal(call.repo, "teami");
   }
 });

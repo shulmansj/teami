@@ -2,7 +2,7 @@
 
 Provenance: hand-curated from current output.
 
-This summary uses synthetic renewal-risk evidence to show how Agentic Factory
+This summary uses synthetic renewal-risk evidence to show how Teami
 would connect decomposition quality to a reviewable process-improvement
 proposal. It is not a live Phoenix export and it is not an accepted behavior
 change.
@@ -13,7 +13,7 @@ change.
 | --- | --- |
 | Workflow | `roadmap_decomposition` |
 | Demo case | `renewal-risk-triage` |
-| Evaluator | `decomposition_quality` |
+| Evaluator | `quality` |
 | Evidence quality | `medium` |
 | Promotion risk | `low_risk` |
 
@@ -48,7 +48,6 @@ evidence mapping into the project update instead of each execution issue.
 - The scores are synthetic demo data.
 - No live Phoenix experiment is claimed.
 - No repository proposal was opened from this package.
-- No accepted Agentic Factory behavior changed.
+- No accepted Teami behavior changed.
 - Linear remains the live work-state surface; Phoenix remains the local eval
   evidence surface.
-

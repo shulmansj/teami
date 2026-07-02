@@ -1,0 +1,27 @@
+{
+  "schema_version": "teami-failure-taxonomy/v1",
+  "failure_taxonomy_version": "1.0.0",
+  "_note": "Canonical versioned failure taxonomy for execution quality annotations. Human and model Judge annotations use the execution workflow section. The structural section is intentionally empty until execution owns deterministic CODE checks.",
+  "structural": {
+    "_note": "No execution CODE evaluators are registered in this namespace yet.",
+    "failure_modes": []
+  },
+  "workflows": {
+    "execution": {
+      "failure_modes": [
+        "exec_introduced_regression",
+        "exec_logic_error",
+        "exec_missing_scope",
+        "exec_scope_creep",
+        "exec_acceptance_criteria_unmet",
+        "exec_inadequate_tests",
+        "exec_tests_do_not_exercise_change",
+        "exec_unrelated_churn",
+        "exec_style_mismatch",
+        "exec_committed_secret",
+        "exec_unsafe_side_effect",
+        "exec_product_question_not_escalated"
+      ]
+    }
+  }
+}

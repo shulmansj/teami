@@ -12,7 +12,7 @@ const {
 
 const MERGE_SHAPED = /merge|ready|approve|review/i;
 const REPO = { owner: "test-owner", repo: "test-repo" };
-const PROPOSAL_HEAD = "agentic-factory/promotion/x/abc123abc123";
+const PROPOSAL_HEAD = "teami/promotion/x/abc123abc123";
 
 // ---------------------------------------------------------------------------
 // CONSTRAINTS #8: the MVP no-merge promise is enforced in the client. The
@@ -149,8 +149,8 @@ test("promotion PR creation rejects maintainer-origin or non-proposal heads befo
   const client = createGitHubPromotionClient({ transport, repo: REPO });
   for (const head of [
     "feature/manual-branch",
-    "maintainer:agentic-factory/promotion/x/abc123abc123",
-    "refs/heads/agentic-factory/promotion/x/abc123abc123",
+    "maintainer:teami/promotion/x/abc123abc123",
+    "refs/heads/teami/promotion/x/abc123abc123",
   ]) {
     await assert.rejects(
       client.createPullRequest({ title: "t", head, base: "main", body: "b" }),

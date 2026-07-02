@@ -163,7 +163,7 @@ function makeFixtureRunCommand(runId, scriptedTurns) {
 
 function buildRealExecutors(config, runId, scriptedTurns) {
   const { runCommand, calls } = makeFixtureRunCommand(runId, scriptedTurns);
-  const orchestratorAssignment = resolveRoleRuntimeAssignments(config).orchestrator;
+  const orchestratorAssignment = resolveRoleRuntimeAssignments(config, "decomposition").orchestrator;
   // The REAL orchestrator-turn executor + the REAL runtime, with only the
   // subprocess (runCommand) faked. executeOrchestratorTurn nulls `assignment` when
   // a custom runtime is supplied, so the wrapper re-supplies it.
@@ -258,7 +258,7 @@ test("orchestrator machinery E2E: the engine turns the proposal into the right c
   // The proposal the loop assembles (same shape the loop committed above).
   const issues = commitProducedContent(runId).final_issues;
   const client = capturingLinearClient();
-  const shape = { team: { id: "team-1" }, issueStatuses: { ready: { id: "state-ready" } } };
+  const shape = { team: { id: "team-1" }, issueStatuses: { todo: { id: "state-todo" } } };
 
   const result = await createOrReuseExecutionIssues({ client, config, project: PROJECT, shape, issues });
 
@@ -272,11 +272,11 @@ test("orchestrator machinery E2E: the engine turns the proposal into the right c
     "Expose operator-visible status for every event",
   ]);
 
-  // Each create targets the project + the resolved "ready" state, and embeds its
+  // Each create targets the project + the resolved "todo" state, and embeds its
   // decomposition_key into the rendered body (the idempotency anchor).
   for (const c of client.created) {
     assert.equal(c.projectId, PROJECT.id);
-    assert.equal(c.stateId, "state-ready");
+    assert.equal(c.stateId, "state-todo");
   }
   assert.match(client.created[0].description, /webhook-inbox-core/);
   assert.match(client.created[2].description, /webhook-inbox-status/);
@@ -309,7 +309,7 @@ test("orchestrator machinery E2E: a run that never terminates fails closed at th
   const config = loadLinearConfig({ repoRoot: REPO_ROOT });
   const runId = "run_e2e_bounds_breach";
   const runCommand = makeAlwaysInvokeRunCommand(runId);
-  const orchestratorAssignment = resolveRoleRuntimeAssignments(config).orchestrator;
+  const orchestratorAssignment = resolveRoleRuntimeAssignments(config, "decomposition").orchestrator;
   const orchestratorTurnExecutor = (args) =>
     executeOrchestratorTurn({
       ...args,

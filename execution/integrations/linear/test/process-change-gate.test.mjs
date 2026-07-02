@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { COMMAND_INDEX } from "../src/cli/dispatch.mjs";
 import {
   FAILURE_TAXONOMY_VERSION,
   RUBRIC_VERSION,
@@ -43,10 +44,10 @@ const T1 = "d".repeat(31) + "1";
 const T2 = "d".repeat(31) + "2";
 const T3 = "d".repeat(31) + "3";
 
-const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "agentic-factory" });
+const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" });
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-gate-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-gate-"));
 }
 
 function writeManifestFixture(root, mutateManifest = () => {}) {
@@ -123,7 +124,7 @@ function fetchRouter(routes, { annotationsByTrace = {} } = {}) {
 function humanAnnotation({ label = "pass", score = 0.9, failureModes = [], id = "anno-h1" } = {}) {
   return {
     id,
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "HUMAN",
     identifier: "steve",
     result: { label, score, explanation: "human taste judgment" },
@@ -173,7 +174,7 @@ function experimentRow({ exampleId, judge = null, judgeError = null, code = null
   const annotations = [];
   if (judge) {
     annotations.push({
-      name: "decomposition_quality",
+      name: "quality",
       annotator_kind: "LLM",
       label: judge.label,
       score: judge.score,
@@ -188,7 +189,7 @@ function experimentRow({ exampleId, judge = null, judgeError = null, code = null
   }
   if (judgeError) {
     annotations.push({
-      name: "decomposition_quality",
+      name: "quality",
       annotator_kind: "LLM",
       label: null,
       score: null,
@@ -232,7 +233,7 @@ function baselineRow(exampleId, score) {
   return {
     example_id: exampleId,
     annotations: [{
-      name: "decomposition_quality",
+      name: "quality",
       annotator_kind: "LLM",
       label: score >= 0.8 ? "pass" : "needs_revision",
       score,
@@ -251,14 +252,14 @@ function writeReceiptFixture(root, {
   splitRequested = null,
   selection = "all_examples",
   origin = "http://127.0.0.1:6006",
-  projectName = "agentic-factory",
+  projectName = "teami",
   launchedAt = "2026-06-10T01:00:00.000Z",
   amendments = [],
 } = {}) {
-  const dir = path.join(root, ".agentic-factory", "experiments");
+  const dir = path.join(root, ".teami", "experiments");
   fs.mkdirSync(dir, { recursive: true });
   const receipt = {
-    schema_version: "agentic-factory-managed-experiment-receipt/v1",
+    schema_version: "teami-managed-experiment-receipt/v1",
     receipt_id: receiptId,
     source: "managed_manual",
     created_at: launchedAt,
@@ -296,14 +297,14 @@ function writeReceiptFixture(root, {
       },
       promotion_policy: null,
       workspace_eval_policy: {
-        schema_version: "agentic-factory-workspace-eval-policy/v1",
+        schema_version: "teami-workspace-eval-policy/v1",
         sha256: POLICY_SHA256,
         path: "workspace-eval-policy.json",
       },
       actor: { os_username: "test-user", authenticity: "asserted" },
       launched_at: launchedAt,
       phoenix_scope: { origin, project_name: projectName },
-      agentic_factory_run_id: `afexp-${receiptId}`,
+      teami_run_id: `afexp-${receiptId}`,
     },
     phoenix_experiment_id: experimentId,
     events: [{ type: "launched", at: launchedAt }],
@@ -342,11 +343,11 @@ function passFixture() {
 function gateRoutes({ records, rows, baselineRows }) {
   return {
     "GET /v1/experiments/EXP1": jsonResponse({
-      data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "agentic-factory", metadata: {} },
+      data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "teami", metadata: {} },
     }),
     "GET /v1/experiments/EXP1/json": jsonResponse(rows),
     "GET /v1/datasets/DS1/examples": jsonResponse({ data: { examples: records } }),
-    "GET /v1/projects": jsonResponse({ data: [{ id: "UHJvamVjdDox", name: "agentic-factory" }] }),
+    "GET /v1/projects": jsonResponse({ data: [{ id: "UHJvamVjdDox", name: "teami" }] }),
     "GET /v1/experiments/BASE1/json": jsonResponse(baselineRows),
     "GET /v1/prompt_versions/PV1": jsonResponse({ data: { id: "PV1" } }),
   };
@@ -401,7 +402,7 @@ test("gate passes a well-formed fixture experiment and writes the product-terms 
   assert.equal(result.test_split_exposure.history_complete, false);
 
   // Product-terms report (plan ~1738-1748).
-  assert.ok(result.product_report.behavior_improved[0].includes("decomposition_quality"));
+  assert.ok(result.product_report.behavior_improved[0].includes("quality"));
   assert.deepEqual(result.product_report.categories_tested, ["code"]);
   assert.equal(result.product_report.human_decision_load.items_requiring_human_judgment, 0);
   assert.equal(result.product_report.phoenix_assets_evidence.experiment_id, "EXP1");
@@ -1018,7 +1019,7 @@ test("prior test-split exposure on the same target lineage is disclosed machine-
     selection: "native_split_filter",
     launchedAt: "2026-06-09T01:00:00.000Z",
   });
-  const evalRunsDir = path.join(root, ".agentic-factory", "eval-runs");
+  const evalRunsDir = path.join(root, ".teami", "eval-runs");
   fs.mkdirSync(evalRunsDir, { recursive: true });
   fs.writeFileSync(path.join(evalRunsDir, "eval-1.json"), JSON.stringify({
     schema_version: "linear-decomposition-eval-run/v1",
@@ -1065,7 +1066,7 @@ test("computeTestSplitExposureHistory classifies none/possible/definite conserva
 
   // A dataset-mode eval run with unknown split is POSSIBLE exposure (when
   // unsure -> high risk downstream).
-  const evalRunsDir = path.join(root, ".agentic-factory", "eval-runs");
+  const evalRunsDir = path.join(root, ".teami", "eval-runs");
   fs.mkdirSync(evalRunsDir, { recursive: true });
   fs.writeFileSync(path.join(evalRunsDir, "eval-2.json"), JSON.stringify({
     schema_version: "linear-decomposition-eval-run/v1",
@@ -1112,10 +1113,6 @@ test("eval:disagreements and eval:gate are wired as first-class CLI tasks", () =
     packageJson.scripts["eval:gate"],
     "node execution/integrations/linear/cli.mjs eval:gate",
   );
-  const cliSource = fs.readFileSync(
-    path.join(repoCheckout, "execution", "integrations", "linear", "cli.mjs"),
-    "utf8",
-  );
-  assert.ok(cliSource.includes('command === "eval:disagreements"'));
-  assert.ok(cliSource.includes('command === "eval:gate"'));
+  assert.ok(COMMAND_INDEX.has("eval:disagreements"));
+  assert.ok(COMMAND_INDEX.has("eval:gate"));
 });

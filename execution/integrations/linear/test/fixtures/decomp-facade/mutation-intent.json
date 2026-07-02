@@ -1,0 +1,13 @@
+{
+  "schema_version": "teami-unconfirmed-linear-mutation-intent/v2",
+  "run_id": "run_decomp_facade_commit",
+  "artifact_kind": "commit",
+  "object_type": "project",
+  "object_id": "project-webhook-inbox",
+  "workflow_type": "decomposition",
+  "trigger_type": "linear.project.planned",
+  "domain_id": "support-ops",
+  "wake_id": "wake-decomp-facade",
+  "started_at": "2026-06-26T12:00:01.000Z",
+  "linear_project_id": "project-webhook-inbox"
+}

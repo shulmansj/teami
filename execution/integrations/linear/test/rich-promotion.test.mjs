@@ -58,7 +58,7 @@ const TERMINAL_AUDIT_FIELDS = Object.freeze({
 });
 
 function tempRepoRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `agentic-factory-rich-promotion-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-rich-promotion-${label}-`));
 }
 
 function commitArtifact(runId, overrides = {}) {
@@ -194,7 +194,12 @@ function setUpPromotableRun({ repoRoot, runId, artifact = null, project = sample
   });
 }
 
-function phoenixFetchMock({ datasetExists = false, failSplits = false, calls = [] } = {}) {
+function phoenixFetchMock({
+  datasetExists = false,
+  failSplits = false,
+  calls = [],
+  traceAnnotations = [],
+} = {}) {
   return async (url, init = {}) => {
     const call = {
       url: String(url),
@@ -206,6 +211,9 @@ function phoenixFetchMock({ datasetExists = false, failSplits = false, calls = [
       return new Response(JSON.stringify({
         data: datasetExists ? [{ name: DEFAULT_RICH_DATASET_NAME, id: "RGF0YXNldDox" }] : [],
       }), { status: 200 });
+    }
+    if (call.url.includes("/v1/projects/teami/trace_annotations")) {
+      return new Response(JSON.stringify({ data: traceAnnotations, next_cursor: null }), { status: 200 });
     }
     assert.match(call.url, /\/v1\/datasets\/upload\?sync=true$/);
     if (failSplits && call.body.splits) {
@@ -224,7 +232,7 @@ const policy = loadWorkspaceEvalPolicy();
 // ---------------------------------------------------------------------------
 
 test("workspace eval policy artifact is valid, human-set, and structurally pinned", () => {
-  assert.equal(policy.schema_version, "agentic-factory-workspace-eval-policy/v1");
+  assert.equal(policy.schema_version, "teami-workspace-eval-policy/v1");
   assert.equal(policy.workspace_maturity, "new");
   assert.equal(policy.project_category.default, "code");
   assert.equal(policy.project_impact_level.default, "low");
@@ -254,13 +262,13 @@ test("workspace eval policy artifact is valid, human-set, and structurally pinne
 });
 
 test("split assignment is deterministic by example id and flag-only for calibration/regression", () => {
-  const first = assignDatasetSplit(policy, { exampleId: "agentic_factory:run-stable" });
-  const second = assignDatasetSplit(policy, { exampleId: "agentic_factory:run-stable" });
+  const first = assignDatasetSplit(policy, { exampleId: "teami:run-stable" });
+  const second = assignDatasetSplit(policy, { exampleId: "teami:run-stable" });
   assert.deepEqual(first, second, "same example id must always produce the same assignment");
   assert.ok(["train", "test"].includes(first.split));
 
   // The hash rule matches its documented definition exactly.
-  const digest = createHash("sha256").update("agentic_factory:run-stable", "utf8").digest();
+  const digest = createHash("sha256").update("teami:run-stable", "utf8").digest();
   const expectedBucket = Number(digest.readBigUInt64BE(0) % 5n);
   assert.equal(first.bucket, expectedBucket);
   assert.equal(first.split, expectedBucket < 1 ? "test" : "train");
@@ -268,13 +276,13 @@ test("split assignment is deterministic by example id and flag-only for calibrat
   // Both splits occur across many ids (deterministic spread, no counter).
   const splits = new Set();
   for (let index = 0; index < 64; index += 1) {
-    splits.add(assignDatasetSplit(policy, { exampleId: `agentic_factory:run-${index}` }).split);
+    splits.add(assignDatasetSplit(policy, { exampleId: `teami:run-${index}` }).split);
   }
   assert.deepEqual([...splits].sort(), ["test", "train"]);
 
   // calibration/regression are explicit-flag-only; train/test can never be forced.
   const calibration = assignDatasetSplit(policy, {
-    exampleId: "agentic_factory:run-stable",
+    exampleId: "teami:run-stable",
     explicitSplit: "calibration",
   });
   assert.equal(calibration.split, "calibration");
@@ -367,7 +375,7 @@ test("content gate removes denylisted content classes and reports every removal 
           tool_transcript: ["call 1", "call 2"],
           shell_output: "$ rm -rf",
           repo_snippet: "function secretSauce() {}",
-          source_refs: ["repo:agentic-factory:execution/x.mjs"],
+          source_refs: ["repo:teami:execution/x.mjs"],
           project_update_markdown: "See http://127.0.0.1:6006/projects/p/traces/t and https://linear.app/team/issue/ENG-1",
         }],
       },
@@ -475,6 +483,28 @@ test("rich promotion fails closed on missing receipt, artifact, or snapshot, nam
   assert.match(noSnapshot.detail, /live Linear state is never used/);
 });
 
+test("rich promotion rejects a short Judge-input capture before upload", () => {
+  const runId = "run-rich-short-capture-1";
+  const artifact = commitArtifact(runId);
+  delete artifact.project_update_markdown;
+  const result = buildRichDecompositionExample({
+    receipt: { run_id: runId, trace_id: TRACE_ID },
+    artifact,
+    snapshot: {
+      project: {
+        ...sampleProject(),
+        status: "Planned",
+        existing_issues: [],
+      },
+    },
+    policy,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.state, "cannot_promote");
+  assert.equal(result.reason, "judge_input_incomplete");
+  assert.ok(result.failures.includes("missing:project_update_markdown"));
+});
+
 test("rich promotion assembles a schema-valid example field-for-field, uploads with native splits, and records the receipt", async () => {
   const repoRoot = tempRepoRoot("happy");
   const runId = "run-rich-commit-1";
@@ -486,7 +516,42 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
     runId,
     annotationIds: ["anno-1", "anno-2"],
     ensureReady: async () => ({ ok: true, appUrl: "http://127.0.0.1:6006" }),
-    fetchImpl: phoenixFetchMock({ calls }),
+    fetchImpl: phoenixFetchMock({
+      calls,
+      traceAnnotations: [{
+        id: "anno-1",
+        name: "quality",
+        annotator_kind: "HUMAN",
+        identifier: "adopter-fixture-owner",
+        result: {
+          label: "pass",
+          score: 0.9,
+          explanation: "The decomposition is executable and preserves the project intent.",
+        },
+        metadata: {
+          failure_modes: [],
+          rubric_version: "1.0.0",
+          failure_taxonomy_version: "1.0.0",
+        },
+        created_at: "2026-06-10T00:05:00.000Z",
+      }, {
+        id: "anno-2",
+        name: "human_decision_load",
+        annotator_kind: "HUMAN",
+        identifier: "adopter-fixture-owner",
+        result: {
+          label: "pass",
+          score: 0.9,
+          explanation: "The human has little residual decision load.",
+        },
+        metadata: {
+          failure_modes: [],
+          rubric_version: "1.0.0",
+          failure_taxonomy_version: "1.0.0",
+        },
+        created_at: "2026-06-10T00:05:01.000Z",
+      }],
+    }),
     now: () => "2026-06-10T01:00:00.000Z",
   });
 
@@ -500,7 +565,7 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
   assert.equal(result.split_assignment, "native");
   assert.match(result.example_content_hash, /^[0-9a-f]{64}$/);
 
-  const expectedSplit = assignDatasetSplit(policy, { exampleId: `agentic_factory:${runId}` }).split;
+  const expectedSplit = assignDatasetSplit(policy, { exampleId: `teami:${runId}` }).split;
   assert.equal(result.split, expectedSplit);
 
   // Upload call shape: native per-example splits at upload time.
@@ -523,23 +588,71 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
     risks: ["copy approval may slip"],
     project_update_markdown: `run_id: ${runId}\nDecomposed the refresh into two sequenced issues.`,
   });
+  const expectedProject = {
+    id: "proj-1",
+    name: "Onboarding email refresh",
+    description: "Refresh the onboarding sequence.",
+    content: "## Goal\nReach the first useful action within one session.",
+    status: "Planned",
+    labels: [{ id: "lbl-web", name: "web" }],
+    existing_issues: [{
+      id: "issue-1",
+      identifier: "ENG-1",
+      title: "Existing tracking issue",
+      state: { id: "state-1", name: "Todo", type: "unstarted" },
+      labels: [],
+    }],
+  };
+  const expectedFinalIssues = [
+    {
+      decomposition_key: "area/copy",
+      title: "Draft refreshed copy",
+      issue_body_markdown: "Write replacement copy.\n\n**Acceptance**\n- observable check",
+      depends_on: [],
+    },
+    {
+      decomposition_key: "area/wire",
+      title: "Wire refreshed copy",
+      issue_body_markdown: "Update templates. Spec: https://example.com/spec",
+      depends_on: ["area/copy"],
+    },
+  ];
+  const expectedMaintainerContext = upload.body.inputs[0].maintainer_supplied_context;
+  assert.deepEqual(Object.keys(expectedMaintainerContext), [
+    "rubric_version",
+    "failure_taxonomy_version",
+    "allowed_failure_modes",
+  ]);
+  assert.ok(expectedMaintainerContext.allowed_failure_modes.includes("missing_acceptance_criteria"));
   assert.deepEqual(upload.body.inputs[0], {
-    source_type: "linear_project_snapshot",
-    project: {
-      id: "proj-1",
-      name: "Onboarding email refresh",
-      description: "Refresh the onboarding sequence.",
-      content: "## Goal\nReach the first useful action within one session.",
-      status: "Planned",
-      labels: [{ id: "lbl-web", name: "web" }],
-      existing_issues: [{
-        id: "issue-1",
-        identifier: "ENG-1",
-        title: "Existing tracking issue",
-        state: { id: "state-1", name: "Todo", type: "unstarted" },
-        labels: [],
+    gradeability: "full_input",
+    judge_fixture_input: {
+      project_intent: expectedProject,
+      terminal_status: "completed",
+      terminal_reason: "synthesis_complete",
+      final_issues: expectedFinalIssues,
+      discovery_issues: [],
+      dependency_relations: [{ blocking: "area/copy", blocked: "area/wire" }],
+      project_update_markdown: `run_id: ${runId}\nDecomposed the refresh into two sequenced issues.`,
+      open_questions_markdown: null,
+      phase_packet_summaries: [{
+        phase: "orchestrator_terminal",
+        status: "commit",
+        reason: "synthesis_complete",
+        context_digest: "digest-of-loaded-context",
+        source_refs: ["linear:project:proj-1"],
+        assumptions: ["existing provider stays"],
+        constraints: ["no new tracking domains"],
+        risks: ["copy approval may slip"],
+        perspectives_run: [
+          { role: "pm", outcome: "synthesis_complete" },
+          { role: "sr_eng", outcome: "no_blockers" },
+        ],
       }],
     },
+    maintainer_supplied_context: expectedMaintainerContext,
+    source_type: "linear_project_snapshot",
+    project: expectedProject,
     run_envelope: {
       workflow_version: "0.2.0",
       allowed_source_boundaries: [],
@@ -551,20 +664,7 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
     terminal_status: "completed",
     terminal_reason: "synthesis_complete",
     phase_packets: [terminalOutputSummary()],
-    final_issues: [
-      {
-        decomposition_key: "area/copy",
-        title: "Draft refreshed copy",
-        issue_body_markdown: "Write replacement copy.\n\n**Acceptance**\n- observable check",
-        depends_on: [],
-      },
-      {
-        decomposition_key: "area/wire",
-        title: "Wire refreshed copy",
-        issue_body_markdown: "Update templates. Spec: https://example.com/spec",
-        depends_on: ["area/copy"],
-      },
-    ],
+    final_issues: expectedFinalIssues,
     discovery_issues: [],
     dependency_relations: [{ blocking: "area/copy", blocked: "area/wire" }],
     project_update_markdown: `run_id: ${runId}\nDecomposed the refresh into two sequenced issues.`,
@@ -580,9 +680,22 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
     failure_taxonomy_version: "1.0.0",
     source_trace_id: TRACE_ID,
     source_run_id: runId,
+    source_target_ids: [],
+    produced_identity_refs: [],
     content_retention: "rich_local",
     schema_version: "decomposition-eval-example/v1",
-    reference: { human_annotations: [], human_annotation_ids: ["anno-1", "anno-2"] },
+    reference: {
+      human_annotations: [],
+      human_annotation_ids: ["anno-1", "anno-2"],
+      expected_label: "pass",
+      expected_score: 0.9,
+      provenance: {
+        label_source: "explicit_human",
+        label_status: "GOLD",
+        labeled_at: "2026-06-10T00:05:00.000Z",
+        annotator_id: "adopter-fixture-owner",
+      },
+    },
   });
   // The sanitizer report and raw denylisted fields never reach Phoenix.
   const uploadJson = JSON.stringify(upload.body);
@@ -599,6 +712,12 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
     },
     policy,
     annotationIds: ["anno-1", "anno-2"],
+    humanFixtureLabel: {
+      label: "pass",
+      score: 0.9,
+      labeled_at: "2026-06-10T00:05:00.000Z",
+      annotator_id: "adopter-fixture-owner",
+    },
   });
   assert.equal(build.ok, true);
   assert.deepEqual(validateExampleAgainstSchema(build.example), []);
@@ -911,7 +1030,7 @@ test("bounded receipt promotion stays bounded even when the receipt is polluted 
       prompt: "raw prompt",
       shell_output: "$ rm -rf",
     },
-    datasetName: "agentic-factory-decomposition-runs",
+    datasetName: "teami-decomposition-runs",
     action: "create",
   });
   const json = JSON.stringify(payload);

@@ -5,11 +5,11 @@ import path from "node:path";
 import { renameWithRetry } from "../../../../engine/run-store.mjs";
 
 export const PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION =
-  "agentic-factory-promotion-scanner-ledger/v2";
+  "teami-promotion-scanner-ledger/v2";
 export const PROMOTION_SCANNER_HEALTH_SCHEMA_VERSION =
-  "agentic-factory-promotion-scanner-health/v2";
+  "teami-promotion-scanner-health/v2";
 const PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION_V1 =
-  "agentic-factory-promotion-scanner-ledger/v1";
+  "teami-promotion-scanner-ledger/v1";
 export const PROMOTION_SCANNER_CACHE_NOTE =
   "Scanner ledger is cache/status only. Budgets, caps, dedupe, and rejection memory derive from repo-visible PR markers, never this file.";
 const POLICY_BUDGET_BLOCK_REASONS = new Set([
@@ -27,7 +27,7 @@ const VERIFIED_REPO_STATE_BLOCK_REASONS = new Set([
 ]);
 
 export function defaultPromotionCandidateLedgerDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "promotion-candidates");
+  return path.resolve(repoRoot, ".teami", "promotion-candidates");
 }
 
 export function promotionScannerLedgerPath(ledgerDir) {
@@ -110,6 +110,9 @@ function controllerResultFromRowLike(row) {
     evidence_repair: Boolean(row.controller_result?.evidence_repair ?? row.evidence_repair),
     improvement_opportunity:
       row.controller_result?.improvement_opportunity ?? row.improvement_opportunity ?? null,
+    opportunity_hash: row.controller_result?.opportunity_hash ?? row.opportunity_hash ?? null,
+    normalized_envelope_hash:
+      row.controller_result?.normalized_envelope_hash ?? row.normalized_envelope_hash ?? null,
     pr_title: row.controller_result?.pr_title ?? row.pr_title ?? row.pr?.title ?? null,
     pr: row.controller_result?.pr ?? row.pr ?? null,
   };
@@ -150,6 +153,10 @@ export function withDerivedLedgerRowFields(row) {
   }
   if (status === "improvement_opportunity" && controller.improvement_opportunity) {
     entry.improvement_opportunity = controller.improvement_opportunity;
+    entry.opportunity_hash = controller.opportunity_hash ?? controller.normalized_envelope_hash ?? null;
+  }
+  if (controller.normalized_envelope_hash) {
+    entry.normalized_envelope_hash = controller.normalized_envelope_hash;
   }
   return entry;
 }

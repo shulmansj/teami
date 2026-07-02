@@ -50,7 +50,8 @@ test("a test-only dummy resource kind declares through domain validation and mat
     });
     teardownAll = materialized.teardownAll;
 
-    assert.equal(materialized.runContext.resources.dummy.handle.read(), DUMMY_VALUE);
+    assert.equal(materialized.runContext.selectedResourceId, "dummy-resource");
+    assert.equal(materialized.runContext.selectedResource.handle.read(), DUMMY_VALUE);
     assert.deepEqual(materialized.runContext.resourceManifest, [{
       kind: "dummy",
       id: "dummy-resource",

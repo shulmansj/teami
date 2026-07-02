@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { renameWithRetry } from "../../../engine/run-store.mjs";
+import { readRunArtifact, renameWithRetry } from "../../../engine/run-store.mjs";
 import {
   DECOMPOSITION_REQUIRED_CAPABILITIES,
   DECOMPOSITION_WORKFLOW_TYPE,
 } from "./workflows/decomposition/definition.mjs";
 
-export const LOCAL_TRIGGER_STORE_SCHEMA_VERSION = "agentic-factory-local-trigger-store/v1";
+export const LOCAL_TRIGGER_STORE_SCHEMA_VERSION = "teami-local-trigger-store/v1";
 
 const LINEAR_PROJECT_PLANNED_TRIGGER = "linear.project.planned";
 const PROJECT_OBJECT_TYPE = "project";
@@ -33,9 +33,43 @@ const ROUTING_ERROR_REASONS = new Set([
   "workspace_id_mismatch",
   "unknown_workflow_type",
 ]);
+const SESSION_HANDLE_POINTER_SOURCE = "run_artifact.runtime_metadata";
 
 export function localTriggerStorePath(repoRoot = process.cwd()) {
-  return path.join(repoRoot, ".agentic-factory", "local-trigger-store.json");
+  return path.join(repoRoot, ".teami", "local-trigger-store.json");
+}
+
+export function deriveSessionHandlePointerFromRuntimeMetadata(runtimeMetadata) {
+  if (!runtimeMetadata || typeof runtimeMetadata !== "object" || Array.isArray(runtimeMetadata)) {
+    return null;
+  }
+  const runtimeMetadataPaths = Object.entries(runtimeMetadata)
+    .filter(([role, metadata]) => isNonEmptyString(role) && hasSessionHandle(metadata?.session_handle))
+    .map(([role]) => ["runtime_metadata", role, "session_handle"]);
+  if (runtimeMetadataPaths.length === 0) return null;
+  return {
+    source: SESSION_HANDLE_POINTER_SOURCE,
+    runtime_metadata_paths: runtimeMetadataPaths,
+  };
+}
+
+// NS-9 exposes only the stored handle location. Future resume work belongs in a
+// separate path: on resume, re-clone the resource from the pushed REMOTE branch.
+export function runIsResumable(runRecord) {
+  return hasSessionHandlePointer(runRecord?.session_handle_pointer);
+}
+
+export function resolveDriverSessionHandle(runRecord, { repoRoot = process.cwd(), runStoreDir = null } = {}) {
+  const pointer = normalizeSessionHandlePointer(runRecord?.session_handle_pointer);
+  if (!pointer || !isNonEmptyString(runRecord?.run_id)) return null;
+  const artifact = readRunArtifactForRecord(runRecord, { repoRoot, runStoreDir });
+  if (!artifact) return null;
+  for (const runtimeMetadataPath of pointer.runtime_metadata_paths) {
+    const candidate = valueAtPath(artifact, runtimeMetadataPath);
+    const handle = normalizeDriverSessionHandle(candidate);
+    if (handle) return handle;
+  }
+  return null;
 }
 
 export function createLocalTriggerStore({
@@ -135,6 +169,66 @@ export function createLocalTriggerStore({
       return { ok: true, wake: clone(wake), leaseToken, event: clone(event) };
     },
 
+    async claimSyntheticIssueWake({
+      domainId,
+      workspaceId,
+      teamId,
+      objectId,
+      workflowType,
+      triggerType,
+      objectType = "issue",
+    } = {}) {
+      requireString(domainId, "domainId");
+      requireString(workspaceId, "workspaceId");
+      requireString(teamId, "teamId");
+      requireString(objectId, "objectId");
+      requireString(workflowType, "workflowType");
+      requireString(triggerType, "triggerType");
+      const createdAt = isoNow();
+      const event = {
+        id: idGenerator("event"),
+        workspace_id: workspaceId,
+        domain_id: domainId,
+        trigger_type: triggerType,
+        workflow_type: workflowType,
+        object_type: objectType,
+        object_id: objectId,
+        team_ids: [teamId],
+        created_at: createdAt,
+      };
+      const leaseToken = idGenerator("lease");
+      const wake = {
+        id: idGenerator("wake"),
+        workspace_id: workspaceId,
+        domain_id: domainId,
+        trigger_type: triggerType,
+        workflow_type: workflowType,
+        object_type: objectType,
+        object_id: objectId,
+        team_ids: [teamId],
+        created_at: createdAt,
+        attempt_count: 0,
+        source_event_id: event.id,
+        status: "leased",
+        claimed_at: createdAt,
+        runner_id: null,
+        lease_token: leaseToken,
+        lease_expires_at: null,
+        started_at: null,
+        mutation_started_at: null,
+        mutation_artifact_kind: null,
+        terminal_at: null,
+        run_id: null,
+        reason: null,
+        routing_error_reason: null,
+        routing_candidates: [],
+      };
+      state.events.push(event);
+      state.wakes.push(wake);
+      persist();
+      return { ok: true, wake: clone(wake), leaseToken, event: clone(event) };
+    },
+
     async claimNextWake(input = {}) {
       const {
         workspaceId,
@@ -202,7 +296,15 @@ export function createLocalTriggerStore({
 
     async renewLease(input = {}) {
       const wake = getRawWake(input.wakeId);
-      return { ok: true, wake: wake ? clone(wake) : null };
+      const token = assertLeaseToken(wake, input.runnerId, input.leaseToken);
+      if (!token.ok) return token;
+      if (!["leased", "running"].includes(wake.status)) {
+        return { ok: false, reason: `wake_not_renewable:${wake.status}`, wake: clone(wake) };
+      }
+      const at = input.at || isoNow();
+      wake.lease_expires_at = input.leaseDurationMs ? plusMsIso(at, input.leaseDurationMs) : wake.lease_expires_at;
+      persist();
+      return { ok: true, wake: clone(wake) };
     },
 
     async markWakeRunning(input = {}) {
@@ -214,6 +316,10 @@ export function createLocalTriggerStore({
         domainId,
         at = isoNow(),
         artifactPointer = null,
+        runtimeMetadata = null,
+        runtime_metadata = null,
+        sessionHandlePointer = null,
+        session_handle_pointer = null,
       } = input;
       requireString(runId, "runId");
       const wake = getRawWake(wakeId);
@@ -226,7 +332,9 @@ export function createLocalTriggerStore({
       wake.runner_id = runnerId;
       wake.run_id = runId;
       wake.domain_id = domainId;
-      upsertRun({
+      const metadataForPointer = runtimeMetadata ?? runtime_metadata;
+      const explicitSessionHandlePointer = sessionHandlePointer ?? session_handle_pointer;
+      const runRecord = {
         run_id: runId,
         workspace_id: wake.workspace_id,
         domain_id: domainId,
@@ -239,7 +347,12 @@ export function createLocalTriggerStore({
         terminal_reason: null,
         artifact_pointer: artifactPointer,
         provider_update_ids: [],
-      });
+      };
+      if (metadataForPointer != null) runRecord.runtime_metadata = metadataForPointer;
+      if (explicitSessionHandlePointer != null) {
+        runRecord.session_handle_pointer = explicitSessionHandlePointer;
+      }
+      upsertRun(runRecord);
       persist();
       return { ok: true, wake: clone(wake) };
     },
@@ -251,6 +364,7 @@ export function createLocalTriggerStore({
         leaseToken,
         runId,
         artifactKind,
+        git = null,
         at = isoNow(),
       } = input;
       requireString(runId, "runId");
@@ -260,14 +374,33 @@ export function createLocalTriggerStore({
       if (!token.ok) return token;
       if (!isNonEmptyString(wake.domain_id)) return { ok: false, reason: "missing_domain_id", wake: clone(wake) };
       const write = await resolveWriteMutationIntent();
-      await write({
-        domainId: wake.domain_id,
-        projectId: wake.object_id,
-        runId,
-        artifactKind,
-        wakeId: wake.id,
-        startedAt: at,
-      });
+      const objectType = wake.object_type || PROJECT_OBJECT_TYPE;
+      if (objectType === "issue") {
+        if (!git || typeof git !== "object" || Array.isArray(git)) {
+          throw new Error("git_identity_required_for_issue_mutation");
+        }
+        await write({
+          domainId: wake.domain_id,
+          objectType: "issue",
+          objectId: wake.object_id,
+          runId,
+          artifactKind,
+          wakeId: wake.id,
+          startedAt: at,
+          workflowType: wake.workflow_type,
+          triggerType: wake.trigger_type,
+          git,
+        });
+      } else {
+        await write({
+          domainId: wake.domain_id,
+          projectId: wake.object_id,
+          runId,
+          artifactKind,
+          wakeId: wake.id,
+          startedAt: at,
+        });
+      }
       wake.mutation_started_at = at;
       wake.mutation_artifact_kind = artifactKind;
       wake.run_id ||= runId;
@@ -284,13 +417,22 @@ export function createLocalTriggerStore({
         reason = null,
         providerUpdateIds = [],
         at = isoNow(),
+        artifact = null,
+        artifactPointer = undefined,
+        runtimeMetadata = null,
+        runtime_metadata = null,
+        sessionHandlePointer = null,
+        session_handle_pointer = null,
       } = input;
       if (!TERMINAL_WAKE_STATUSES.has(status)) throw new Error(`Invalid terminal wake status: ${status}`);
       const wake = getRawWake(wakeId);
       const token = assertLeaseToken(wake, runnerId, leaseToken);
       if (!token.ok) return token;
       const runId = wake.run_id;
+      const objectType = wake.object_type || PROJECT_OBJECT_TYPE;
+      const shouldClearAtTerminal = objectType !== "issue";
       if (
+        shouldClearAtTerminal &&
         (wake.mutation_started_at || typeof clearMutationIntent === "function") &&
         isNonEmptyString(wake.domain_id) &&
         isNonEmptyString(wake.object_id) &&
@@ -310,10 +452,20 @@ export function createLocalTriggerStore({
       wake.lease_token = null;
       const run = runForWake(wake);
       if (run) {
-        run.status = status;
-        run.terminal_at = at;
-        run.terminal_reason = reason;
-        run.provider_update_ids = providerUpdateIds;
+        const metadataForPointer = runtimeMetadata ?? runtime_metadata ?? artifact?.runtime_metadata;
+        const explicitSessionHandlePointer = sessionHandlePointer ?? session_handle_pointer;
+        const runUpdate = {
+          status,
+          terminal_at: at,
+          terminal_reason: reason,
+          provider_update_ids: providerUpdateIds,
+        };
+        if (metadataForPointer != null) runUpdate.runtime_metadata = metadataForPointer;
+        if (explicitSessionHandlePointer != null) {
+          runUpdate.session_handle_pointer = explicitSessionHandlePointer;
+        }
+        if (artifactPointer !== undefined) runUpdate.artifact_pointer = artifactPointer;
+        updateRunRecord(run, runUpdate);
       }
       persist();
       return { ok: true, wake: clone(wake), run: clone(run) };
@@ -338,9 +490,11 @@ export function createLocalTriggerStore({
       state.dead_letters.push({ wake_id: wake.id, reason: wake.reason, created_at: at });
       const run = runForWake(wake);
       if (run) {
-        run.status = "dead_letter";
-        run.terminal_at = at;
-        run.terminal_reason = wake.reason;
+        updateRunRecord(run, {
+          status: "dead_letter",
+          terminal_at: at,
+          terminal_reason: wake.reason,
+        });
       }
       persist();
       return { ok: true, wake: clone(wake), run: clone(run) };
@@ -422,6 +576,18 @@ export function createLocalTriggerStore({
         .filter((wake) => !workspaceId || wake.workspace_id === workspaceId)
         .map((wake) => clone(wake));
     },
+
+    findLatestRunForObject(objectId) {
+      if (!isNonEmptyString(objectId)) return null;
+      const candidates = state.runs
+        .map((run) => normalizeRunRecord(run))
+        .filter((run) =>
+          run.object_id === objectId &&
+          run.workflow_type === "execution" &&
+          Number.isFinite(Date.parse(run.started_at)));
+      candidates.sort(compareRunsLatestFirst);
+      return candidates[0] ? clone(candidates[0]) : null;
+    },
   };
 
   function getRawWake(wakeId) {
@@ -438,11 +604,12 @@ export function createLocalTriggerStore({
   }
 
   function upsertRun(run) {
+    const normalized = normalizeRunRecord(run);
     const existing = state.runs.find(
-      (candidate) => candidate.wake_id === run.wake_id && candidate.run_id === run.run_id,
+      (candidate) => candidate.wake_id === normalized.wake_id && candidate.run_id === normalized.run_id,
     );
-    if (existing) Object.assign(existing, run);
-    else state.runs.push(run);
+    if (existing) replaceRunRecord(existing, { ...existing, ...normalized });
+    else state.runs.push(normalized);
   }
 
   return store;
@@ -493,6 +660,116 @@ function normalizeLocalTriggerState(state) {
     runs: Array.isArray(state.runs) ? state.runs : [],
     dead_letters: Array.isArray(state.dead_letters) ? state.dead_letters : [],
   };
+}
+
+function updateRunRecord(run, update) {
+  replaceRunRecord(run, { ...run, ...update });
+}
+
+function replaceRunRecord(target, value) {
+  const normalized = normalizeRunRecord(value);
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, normalized);
+}
+
+function normalizeRunRecord(run) {
+  const normalized = { ...(run || {}) };
+  const hasRuntimeMetadata = Object.hasOwn(normalized, "runtime_metadata");
+  const sessionHandlePointer = hasRuntimeMetadata
+    ? deriveSessionHandlePointerFromRuntimeMetadata(normalized.runtime_metadata)
+    : normalizeSessionHandlePointer(normalized.session_handle_pointer);
+  delete normalized.runtime_metadata;
+  delete normalized.resumable;
+  delete normalized.resume_from;
+  if (sessionHandlePointer) normalized.session_handle_pointer = sessionHandlePointer;
+  else delete normalized.session_handle_pointer;
+  return normalized;
+}
+
+function normalizeSessionHandlePointer(pointer) {
+  if (!pointer || typeof pointer !== "object" || Array.isArray(pointer)) return null;
+  const runtimeMetadataPaths = Array.isArray(pointer.runtime_metadata_paths)
+    ? pointer.runtime_metadata_paths
+      .filter((entry) => Array.isArray(entry) && entry.every(isNonEmptyString))
+      .map((entry) => [...entry])
+    : [];
+  if (runtimeMetadataPaths.length === 0) return null;
+  return {
+    source: isNonEmptyString(pointer.source) ? pointer.source : SESSION_HANDLE_POINTER_SOURCE,
+    runtime_metadata_paths: runtimeMetadataPaths,
+  };
+}
+
+function hasSessionHandlePointer(pointer) {
+  return normalizeSessionHandlePointer(pointer) !== null;
+}
+
+function hasSessionHandle(handle) {
+  return Boolean(handle && typeof handle === "object" && !Array.isArray(handle) && isNonEmptyString(handle.id));
+}
+
+function normalizeDriverSessionHandle(handle) {
+  if (!handle || typeof handle !== "object" || Array.isArray(handle)) return null;
+  if (
+    !isNonEmptyString(handle.id) ||
+    handle.role !== "orchestrator" ||
+    !isNonEmptyString(handle.run_id) ||
+    !isNonEmptyString(handle.runtime)
+  ) {
+    return null;
+  }
+  return {
+    id: handle.id,
+    role: handle.role,
+    run_id: handle.run_id,
+    runtime: handle.runtime,
+  };
+}
+
+function readRunArtifactForRecord(runRecord, { repoRoot, runStoreDir } = {}) {
+  const options = { runId: runRecord.run_id, repoRoot };
+  if (runStoreDir) options.runStoreDir = runStoreDir;
+  try {
+    const artifact = readRunArtifact(options);
+    if (artifact) return artifact;
+  } catch {
+    // Fall through to the artifact pointer path when available.
+  }
+
+  const artifactPath = runRecord?.artifact_pointer?.artifact_path;
+  if (!isNonEmptyString(artifactPath)) return null;
+  try {
+    const resolvedArtifactPath = path.resolve(repoRoot || process.cwd(), artifactPath);
+    return readRunArtifact({
+      runId: runRecord.run_id,
+      repoRoot,
+      runStoreDir: path.dirname(resolvedArtifactPath),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function valueAtPath(value, pathParts) {
+  let current = value;
+  for (const part of pathParts || []) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+function compareRunsLatestFirst(left, right) {
+  const startedDiff = Date.parse(right.started_at) - Date.parse(left.started_at);
+  if (startedDiff !== 0) return startedDiff;
+  const terminalDiff = parseOptionalDateDesc(right.terminal_at) - parseOptionalDateDesc(left.terminal_at);
+  if (terminalDiff !== 0) return terminalDiff;
+  return String(right.run_id || "").localeCompare(String(left.run_id || ""));
+}
+
+function parseOptionalDateDesc(value) {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
 function assertLeaseToken(wake, runnerId, leaseToken) {

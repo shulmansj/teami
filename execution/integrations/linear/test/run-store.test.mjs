@@ -392,7 +392,7 @@ function validFinalIssue() {
 }
 
 function tempRunStore() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-run-store-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-run-store-"));
 }
 
 function runArtifactFixturePath(name) {

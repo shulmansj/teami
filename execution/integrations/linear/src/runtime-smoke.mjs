@@ -18,9 +18,10 @@ import {
   strictParseSubagentTurn,
 } from "./runtime-adapters.mjs";
 import { runRuntimeCommand } from "./runtime-command.mjs";
+import "./workflows/execution/definition.mjs";
 
 export const RUNTIME_SMOKE_SCHEMA_VERSION = 4;
-const DEFAULT_RUNTIME_SMOKE_PATH = path.join(".agentic-factory", "runtime-smoke.json");
+const DEFAULT_RUNTIME_SMOKE_PATH = path.join(".teami", "runtime-smoke.json");
 const DEFAULT_RUNTIME_SMOKE_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function runtimeSmokeCachePath(config, repoRoot = process.cwd()) {
@@ -57,7 +58,7 @@ export async function runRuntimeSmokeChecks({
   now = () => new Date(),
   timeoutMs = DEFAULT_RUNTIME_SMOKE_TIMEOUT_MS,
 } = {}) {
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = runtimeSmokeAssignments(config);
   const existing = force ? null : readRuntimeSmokeCache(cachePath);
   const smokeTests = structuredClone(smokeTestsFromRuntimeSmokeCache(existing));
   const runtimeVersions = structuredClone(runtimeVersionsFromRuntimeSmokeCache(existing));
@@ -75,12 +76,17 @@ export async function runRuntimeSmokeChecks({
     runtimeVersions[assignment.runtime] = version;
     const smokeKey = runtimeAssignmentSmokeKey(assignment, version);
     const cached = smokeTests?.[smokeKey];
+    const requiresWarm = warmContinuationRequired(assignment);
+    const cachedWarmReady =
+      !requiresWarm ||
+      (cached?.warm_continuation === true && cached?.explicit_handle === true);
     if (
       !force &&
       cached?.session_start === true &&
       cached?.schema_output === true &&
       cached?.runtime_version === version &&
-      cached?.assignment_key === runtimeAssignmentConfigKey(assignment)
+      cached?.assignment_key === runtimeAssignmentConfigKey(assignment) &&
+      cachedWarmReady
     ) {
       results.push({
         runtime: assignment.runtime,
@@ -256,10 +262,10 @@ export async function runtimeSmokeDoctorChecks({
   runCommand = runRuntimeCommand,
   timeoutMs = 30_000,
 } = {}) {
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = runtimeSmokeAssignments(config);
   const smokeTests = smokeTestsFromRuntimeSmokeCache(cache);
   const checks = [];
-  for (const [role, assignment] of Object.entries(assignments)) {
+  for (const { role, assignment } of uniqueRuntimeAssignments(assignments)) {
     let version;
     try {
       version = await detectRuntimeVersion({ assignment, runCommand, timeoutMs });
@@ -272,11 +278,13 @@ export async function runtimeSmokeDoctorChecks({
       continue;
     }
     const result = smokeTests?.[runtimeAssignmentSmokeKey(assignment, version)];
+    const requiresWarm = warmContinuationRequired(assignment);
     const ok =
       result?.session_start === true &&
       result?.schema_output === true &&
       result?.runtime_version === version &&
-      result?.assignment_key === runtimeAssignmentConfigKey(assignment);
+      result?.assignment_key === runtimeAssignmentConfigKey(assignment) &&
+      (!requiresWarm || (result?.warm_continuation === true && result?.explicit_handle === true));
     const warmMessage = result?.warm_continuation === true
       ? "; warm continuation smoke also passed"
       : "";
@@ -286,21 +294,48 @@ export async function runtimeSmokeDoctorChecks({
       message: ok
         ? `version ${version} passed session_start schema-valid subagent-turn readiness${warmMessage}`
         : "missing or failed; run npm run runtime-smoke",
+      fix: ok ? null : "npm run runtime-smoke",
     });
   }
   return checks;
 }
 
+function runtimeSmokeAssignments(config) {
+  const assignments = Object.entries(resolveRoleRuntimeAssignments(config, "decomposition"))
+    .map(([role, assignment]) => ({ workflowType: "decomposition", role, assignment }));
+  try {
+    const executionAssignments = resolveRoleRuntimeAssignments(config, "execution");
+    const orchestrator = executionAssignments.orchestrator;
+    if (warmContinuationRequired(orchestrator)) {
+      assignments.push({
+        workflowType: "execution",
+        role: "orchestrator",
+        assignment: orchestrator,
+      });
+    }
+  } catch {
+    // Execution is optional for legacy/minimal smoke fixtures.
+  }
+  return assignments;
+}
+
 function uniqueRuntimeAssignments(assignments) {
   const seen = new Set();
   const unique = [];
-  for (const [role, assignment] of Object.entries(assignments)) {
-    const key = runtimeAssignmentConfigKey(assignment);
+  for (const entry of assignments) {
+    const { role, assignment } = Array.isArray(entry)
+      ? { role: entry[0], assignment: entry[1] }
+      : entry;
+    const key = `${runtimeAssignmentConfigKey(assignment)}:warm=${warmContinuationRequired(assignment)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push({ role, assignment });
   }
   return unique;
+}
+
+function warmContinuationRequired(assignment) {
+  return assignment?.warm_continuation?.enabled === true && assignment?.warm_continuation?.required === true;
 }
 
 // Validate the runtime's smoke output as a structured subagent turn — the SAME

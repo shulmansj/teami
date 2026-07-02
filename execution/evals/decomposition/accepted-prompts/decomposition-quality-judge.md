@@ -1,4 +1,4 @@
-# Accepted Judge Prompt: decomposition_quality
+# Accepted Judge Prompt: quality
 
 ```yaml
 prompt_version: unpinned-initial
@@ -7,7 +7,7 @@ failure_taxonomy_version: 1.0.0
 phoenix_prompt_role: decomposition_quality_judge
 ```
 
-This file is the repo-owned snapshot of the accepted `decomposition_quality`
+This file is the repo-owned snapshot of the accepted `quality`
 model-judge prompt. `prompt_version: unpinned-initial` means the prompt has not
 yet been registered as a Phoenix prompt version; Phoenix pinning happens when
 the judge is first registered, and the exact accepted version id then lands in
@@ -43,7 +43,7 @@ A single JSON object, no surrounding prose:
 }
 ```
 
-The wrapper stores this as a Phoenix annotation named `decomposition_quality`
+The wrapper stores this as a Phoenix annotation named `quality`
 with `annotator_kind: LLM`, the judge identifier, and metadata carrying
 `failure_modes`, `rubric_version`, and `failure_taxonomy_version`, per
 [`../annotation.schema.json`](../annotation.schema.json).

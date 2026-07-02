@@ -19,7 +19,16 @@ function validDefinition(overrides = {}) {
     roles: ["worker", "orchestrator"],
     invocable_runtime_roles: ["worker"],
     runtime_assignment_roles: ["worker", "orchestrator"],
-    commit_effects: [],
+    commit_effects: [{
+      id: "linear_issues",
+      provider: "linear",
+      op: "create_issues",
+      producedIdentity: {
+        resource_kind: "linear_issue",
+        target_ids: (identity) => identity?.ids || [],
+        identity: (identity) => ({ ids: identity?.ids || [] }),
+      },
+    }],
     driver: "orchestrator",
     driver_governing_target_key: "prompt/probe/orchestrator_governing",
     eval_namespace: "test/fixtures/probe",
@@ -44,6 +53,32 @@ test("registerWorkflow indexes a complete definition by workflow_type", () => {
 
 test("validateWorkflowDefinition returns the workflow_type for a valid definition", () => {
   assert.equal(validateWorkflowDefinition(validDefinition()), "probe");
+});
+
+test("registerWorkflow accepts an optional outcome_observations declaration", () => {
+  resetRegistry();
+  const definition = validDefinition({
+    outcome_observations: [
+      {
+        id: "issue_resolution_observed",
+        produced_identity_effect_id: "linear_issues",
+        label: "Issue resolution observed",
+      },
+      {
+        id: "issue_state_observed",
+        produced_identity_effect_id: "linear_issues",
+        label: ["Issue state", "Linear state"],
+      },
+      {
+        id: "issue_owner_observed",
+        produced_identity_effect_id: "linear_issues",
+      },
+    ],
+  });
+  registerWorkflow(definition);
+  assert.deepEqual(registeredWorkflowTypes(), ["probe"]);
+  assert.equal(getWorkflowDefinition("probe"), definition);
+  resetRegistry();
 });
 
 const FAILURE_CASES = [
@@ -86,6 +121,55 @@ const FAILURE_CASES = [
     "workflow_definition_commitPayload_qualityGateInput_required:probe",
   ],
   ["missing artifact_schema", validDefinition({ artifact_schema: null }), "workflow_definition_artifact_schema_required:probe"],
+  [
+    "non-object trace_descriptor",
+    validDefinition({ trace_descriptor: "probe" }),
+    "workflow_definition_trace_descriptor_must_be_object:probe",
+  ],
+  [
+    "empty trace_descriptor trace_name",
+    validDefinition({ trace_descriptor: { trace_name: "", attribute_keys: [] } }),
+    "workflow_definition_trace_descriptor_trace_name_required:probe",
+  ],
+  [
+    "non-array trace_descriptor attribute_keys",
+    validDefinition({ trace_descriptor: { trace_name: "probe_trace", attribute_keys: null } }),
+    "workflow_definition_trace_descriptor_attribute_keys_must_be_array:probe",
+  ],
+  [
+    "non-string trace_descriptor attribute key",
+    validDefinition({ trace_descriptor: { trace_name: "probe_trace", attribute_keys: ["workflow.name", ""] } }),
+    "workflow_definition_trace_descriptor_attribute_keys_must_be_strings:probe",
+  ],
+  [
+    "non-array outcome_observations",
+    validDefinition({ outcome_observations: {} }),
+    "workflow_definition_outcome_observations_must_be_array:probe",
+  ],
+  [
+    "non-object outcome_observations entry",
+    validDefinition({ outcome_observations: ["issue_resolution_observed"] }),
+    "workflow_definition_outcome_observations_entries_must_be_objects:probe",
+  ],
+  [
+    "empty outcome_observations id",
+    validDefinition({ outcome_observations: [{ id: "", produced_identity_effect_id: "linear_issues" }] }),
+    "workflow_definition_outcome_observations_id_required:probe",
+  ],
+  [
+    "empty outcome_observations produced_identity_effect_id",
+    validDefinition({ outcome_observations: [{ id: "issue_resolution_observed", produced_identity_effect_id: " " }] }),
+    "workflow_definition_outcome_observations_produced_identity_effect_id_required:probe",
+  ],
+  [
+    "invalid outcome_observations label",
+    validDefinition({
+      outcome_observations: [
+        { id: "issue_resolution_observed", produced_identity_effect_id: "linear_issues", label: ["ok", 7] },
+      ],
+    }),
+    "workflow_definition_outcome_observations_label_must_be_string_or_string_array:probe",
+  ],
 ];
 
 for (const [label, definition, expectedMessage] of FAILURE_CASES) {

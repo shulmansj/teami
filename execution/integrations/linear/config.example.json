@@ -1,6 +1,6 @@
 {
   "linear": {
-    "cache_path": ".agentic-factory/linear.json",
+    "cache_path": ".teami/linear.json",
     "oauth": {
       "client_id": "00117f8c7dba0a3adf8d2a7398f5f64f",
       "redirect_uri": "http://127.0.0.1:8723/linear/oauth/callback",
@@ -10,27 +10,64 @@
     },
     "team": {
       "key": "AF",
-      "name": "Agentic Factory",
+      "name": "Teami",
       "description": "Linear team for agent-executed work from Linear projects."
     },
     "project": {
       "labels": {
         "has_open_questions": "Has Open Questions"
       },
-      "status_types": {
-        "backlog": "backlog",
-        "planned": "planned",
-        "started": "started"
+      "statuses": {
+        "backlog": {
+          "name": "Backlog",
+          "type": "backlog"
+        },
+        "planned": {
+          "name": "Planned",
+          "type": "planned"
+        },
+        "in_progress": {
+          "name": "In Progress",
+          "type": "started"
+        },
+        "completed": {
+          "name": "Completed",
+          "type": "completed"
+        }
       },
-      "template_name": "Agentic Factory Roadmap Item"
+      "template_name": "Teami Roadmap Item"
     },
     "issue": {
       "labels": {
-        "discovery": "Discovery"
+        "discovery": "Discovery",
+        "needs_principal": "Needs Principal",
+        "work_type_code": "Code",
+        "work_type_non_code": "Non-code"
       },
       "statuses": {
-        "unstarted": {
-          "name": "Backlog"
+        "backlog": {
+          "name": "Backlog",
+          "type": "backlog"
+        },
+        "todo": {
+          "name": "Todo",
+          "type": "unstarted"
+        },
+        "in_progress": {
+          "name": "In Progress",
+          "type": "started"
+        },
+        "in_review": {
+          "name": "In Review",
+          "type": "started"
+        },
+        "blocked": {
+          "name": "Blocked",
+          "type": "started"
+        },
+        "done": {
+          "name": "Done",
+          "type": "completed"
         }
       }
     }
@@ -41,10 +78,10 @@
   "github": {
     "behavior_repo": {
       "owner": null,
-      "name": "agentic-factory",
+      "name": "teami",
       "visibility": "private"
     },
-    "starter_remote_urls": ["https://github.com/shulmansj/agentic-factory"]
+    "starter_remote_urls": ["https://github.com/shulmansj/teami"]
   },
   "runtime": {
     "default_invocation": "session_start",
@@ -76,6 +113,30 @@
         "judge": {},
         "drafter": {},
         "orchestrator": {}
+      }
+    },
+    "execution": {
+      "roles": {
+        "worker": {},
+        "execution_quality_judge": {},
+        "orchestrator": {
+          "warm_continuation": {
+            "enabled": true,
+            "required": true
+          }
+        }
+      }
+    },
+    "review": {
+      "max_autonomous_fix_rounds": 99,
+      "roles": {
+        "reviewer": {},
+        "orchestrator": {
+          "warm_continuation": {
+            "enabled": true,
+            "required": true
+          }
+        }
       }
     }
   }

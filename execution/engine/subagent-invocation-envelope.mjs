@@ -12,6 +12,7 @@ export function buildSubagentInvocationEnvelope({
   role,
   task,
   project,
+  allowedRepoPacket = [],
   priorDigest,
   allowedOutcomes,
 } = {}) {
@@ -20,6 +21,7 @@ export function buildSubagentInvocationEnvelope({
     JSON.stringify(orchestratorProjectSummary(project), null, 2),
     PROJECT_BLOCK_MAX_BYTES,
   );
+  const allowedRepoPacketBlock = allowedRepoPacketText(allowedRepoPacket);
   const priorDigestBlock = digestText(priorDigest);
   const parts = [
     valueText(body).trim(),
@@ -32,6 +34,13 @@ export function buildSubagentInvocationEnvelope({
     "",
     "Project context JSON (length-capped):",
     projectBlock,
+    ...(allowedRepoPacketBlock
+      ? [
+          "",
+          "Allowed repo packet (JSON):",
+          allowedRepoPacketBlock,
+        ]
+      : []),
     ...(priorDigestBlock
       ? [
           "",
@@ -134,6 +143,12 @@ function digestText(value) {
   if (Array.isArray(value) && value.length === 0) return "";
   if (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0) return "";
   return valueText(value).trim();
+}
+
+function allowedRepoPacketText(allowedRepoPacket) {
+  const packet = Array.isArray(allowedRepoPacket) ? allowedRepoPacket : [];
+  if (packet.length === 0) return "";
+  return JSON.stringify(packet, null, 2);
 }
 
 function valueText(value) {

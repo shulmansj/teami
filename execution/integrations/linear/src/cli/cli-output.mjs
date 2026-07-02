@@ -20,6 +20,8 @@ const UNICODE_SYMBOLS = Object.freeze({
   arrow: "→",
   separator: "·",
   ellipsis: "…",
+  running: "●",
+  stopped: "○",
 });
 // Strictly ASCII (no code-page or font dependency) so it renders on any console,
 // including the oldest Windows conhost. Color (green/red/yellow) still carries the
@@ -32,7 +34,21 @@ const ASCII_SYMBOLS = Object.freeze({
   arrow: "->",
   separator: "-",
   ellipsis: "...",
+  running: "[on]",
+  stopped: "[off]",
 });
+
+// Spinner frames for output.progress(): a braille dot-cycle on Unicode-capable terminals, a
+// classic ASCII spinner everywhere else. Selected by the same Unicode detection as the glyph
+// set, so a legacy Windows console never shows tofu mid-spin.
+const UNICODE_SPINNER_FRAMES = Object.freeze(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+const ASCII_SPINNER_FRAMES = Object.freeze(["|", "/", "-", "\\"]);
+// Animated redraw cadence + the clear-to-end-of-line escape used to erase the current frame
+// before redrawing it or before printing a terminal line. These are the ONLY cursor escapes in
+// the module and are emitted strictly inside the animated gate (TTY + color + !CI), so they
+// never land on a piped / no-color / legacy stream.
+const SPINNER_INTERVAL_MS = 80;
+const CLEAR_TO_EOL = "\x1b[K";
 
 // Mirror of the well-worn `is-unicode-supported` heuristic (kept dependency-free):
 // the fancy glyphs are only assumed safe on Windows when a known-good terminal is
@@ -190,6 +206,83 @@ function createCliOutput({
     },
     raw(text) {
       stream.write(String(text));
+    },
+    // A live "still working" signal for long waits. On an animated target (TTY + color + not
+    // CI) it draws a one-line spinner redrawn in place via `\r`; otherwise it emits one durable
+    // line on start, on each update(), and on the terminal call — no animation, no `\r`, no
+    // ANSI — so piped/CI logs stay clean and legible. It is interrupt-safe and unobtrusive: it
+    // clears only its own timer, line, and exit listener, never installs a signal handler, and
+    // never changes the process exit code (the gateway loop owns SIGINT/SIGTERM).
+    progress(label = "") {
+      const frames = useUnicode ? UNICODE_SPINNER_FRAMES : ASCII_SPINNER_FRAMES;
+      const animated = stream.isTTY === true && useColor === true && !process.env.CI;
+      let currentLabel = String(label ?? "");
+      let frameIndex = 0;
+      let timer = null;
+      let exitHandler = null;
+      let done = false;
+
+      const drawFrame = () => {
+        const frame = frames[frameIndex % frames.length];
+        frameIndex += 1;
+        stream.write(`\r  ${cyan(frame)} ${currentLabel}${CLEAR_TO_EOL}`);
+      };
+      const emitDurable = (text) => {
+        writeLine(stream, `  ${symbols.step} ${text}`);
+      };
+      const finalize = () => {
+        if (done) return;
+        done = true;
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+        if (exitHandler) {
+          process.removeListener("exit", exitHandler);
+          exitHandler = null;
+        }
+        if (animated) stream.write(`\r${CLEAR_TO_EOL}`);
+      };
+
+      if (animated) {
+        drawFrame();
+        timer = setInterval(drawFrame, SPINNER_INTERVAL_MS);
+        // Never let the heartbeat alone keep the process alive — the caller's work owns that.
+        if (typeof timer.unref === "function") timer.unref();
+        // Erase a half-drawn frame if the process exits while spinning, without touching
+        // signals or the exit code.
+        exitHandler = () => {
+          if (timer) clearInterval(timer);
+          stream.write(`\r${CLEAR_TO_EOL}`);
+        };
+        process.once("exit", exitHandler);
+      } else {
+        emitDurable(currentLabel);
+      }
+
+      return {
+        update(nextLabel) {
+          if (done) return;
+          if (nextLabel !== undefined) currentLabel = String(nextLabel);
+          if (animated) drawFrame();
+          else emitDurable(currentLabel);
+        },
+        succeed(text) {
+          if (done) return;
+          const finalText = text === undefined ? currentLabel : String(text);
+          finalize();
+          writeLine(stream, `  ${green(`${symbols.success} ${finalText}`)}`);
+        },
+        fail(text) {
+          if (done) return;
+          const finalText = text === undefined ? currentLabel : String(text);
+          finalize();
+          writeLine(stream, `  ${red(`${symbols.error} ${finalText}`)}`);
+        },
+        stop() {
+          finalize();
+        },
+      };
     },
   };
 

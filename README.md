@@ -1,8 +1,8 @@
-# Agentic Factory
+# Teami
 
 Self-improving control plane for agents.
 
-Agentic Factory turns product intent in Linear into agent-ready execution work,
+Teami turns product intent in Linear into agent-ready execution work,
 reviewable process improvements, and local eval evidence. It is for founders,
 product and engineering leaders, and agent teams evaluating how agent workflows
 can coordinate Linear, GitHub, local runners, and Phoenix without making the
@@ -18,7 +18,7 @@ local domain `git_repo` binding for one existing checkout per domain.
 Primary trust boundary: live paths run from the adopter's checkout. The local
 gateway polls Linear with the adopter's OAuth grant, records local wake state,
 and hands work to the local runner. Behavior-repo proposal writes use the
-adopter's ambient git/`gh` auth. Agentic Factory stores no GitHub secret; run
+adopter's ambient git/`gh` auth. Teami stores no GitHub secret; run
 evidence and PR bodies carry provenance for review.
 
 - See It Work: [portfolio demo](examples/portfolio-demo/README.md)
@@ -43,7 +43,7 @@ Start with the portfolio demo before connecting an account:
 
 Use this path for a technical evaluation. Use disposable evaluation Linear and
 GitHub resources for a first run; setup creates or reuses Linear workspace
-objects and connects a dedicated Agentic Factory behavior repo using your local
+objects and connects a dedicated Teami behavior repo using your local
 git/`gh` auth. The live external authorities are your Linear OAuth grant and
 your own GitHub session.
 
@@ -51,22 +51,22 @@ Two commands:
 
 ```bash
 npm install
-./factory init
+./teami init
 ```
 
-`factory` is a repo-local launcher (no global install). Run it per shell from
+`teami` is a repo-local launcher (no global install). Run it per shell from
 the repo directory:
 
-- macOS/Linux: `./factory <command>`
-- Windows cmd.exe: `factory <command>`
-- Windows PowerShell: `.\factory.cmd <command>`
+- macOS/Linux: `./teami <command>`
+- Windows cmd.exe: `teami <command>`
+- Windows PowerShell: `.\teami.cmd <command>`
 
-(The `npm run <script>` forms still work as a fallback, e.g. `npm run init`.)
+(The `npm run <script>` forms still work as a fallback.)
 
-`factory init` opens the Linear browser authorization flow, provisions the
-Agentic Factory Linear team/template/labels/status mapping through GraphQL,
+`teami init` opens the Linear browser authorization flow, provisions the
+Teami Linear team/template/labels/status mapping through GraphQL,
 prepares local gateway state and local Phoenix, and connects the dedicated
-Agentic Factory behavior repo through your local git/`gh` auth. It then runs a
+Teami behavior repo through your local git/`gh` auth. It then runs a
 runtime check and a final health gate and ends on a green summary — no separate
 `doctor` or `runtime-smoke` step. It is idempotent and resumable: re-run it to
 repair.
@@ -74,13 +74,13 @@ repair.
 Then open your factory for business:
 
 ```bash
-./factory gateway start
+./teami gateway start
 ```
 
-`factory gateway start` polls Linear and runs a decomposition whenever you move
+`teami gateway start` polls Linear and runs a decomposition whenever you move
 a project to `Planned`. It runs until you press Ctrl-C, so keep the terminal
 open while you want the factory listening. Check state any time with
-`factory gateway status`.
+`teami gateway status`.
 
 ### The companion
 
@@ -95,19 +95,19 @@ holds no credential.
 
 Every step is a standalone command, so you can repair without starting over:
 
-- `factory doctor` — health check; it names the exact repair command for any red
+- `teami doctor` — health check; it names the exact repair command for any red
   check.
-- `factory init` — reconnect Linear or finish an interrupted setup
+- `teami init` — reconnect Linear or finish an interrupted setup
   (idempotent/resumable).
-- `npm run runtime-smoke` — re-verify your claude/codex runtime.
-- `factory domain add --domain "<name>" --workspace "<ws>"` — connect another
+- `teami runtime-smoke` — re-verify your claude/codex runtime.
+- `teami domain add --domain "<name>" --workspace "<ws>"` — connect another
   Linear workspace as a new domain.
 
-Binding a product code repo
-(`npm run domain:bind-repo -- --domain main --path ../product-app`) is separate
-from setup and is prep for a later code-shipping capability; today's
-decomposition workflow does not require it, and it grants Agentic Factory no new
-GitHub secret.
+Granting a product code repo
+(`teami domain grant main --repo owner/product-app`) is separate from the
+behavior-repo setup and is prep for code-scoped work; today's decomposition
+workflow does not require it, and it grants Teami no new GitHub
+secret.
 
 If setup reports a Linear OAuth, local git, or `gh` authorization error, repair
 that local authority directly. Do not paste private credentials into public
@@ -125,9 +125,9 @@ npm run security:secrets
 Runtime and local observability checks:
 
 ```bash
-npm run runtime-smoke
-npm run phoenix:status
-npm run preflight:phoenix
+./teami runtime-smoke
+./teami phoenix status
+./teami phoenix:preflight
 ```
 
 `npm test` is credential-free and covers the Linear workflow contracts,
@@ -151,7 +151,7 @@ Human product intent
 Behavior changes use a separate GitHub path:
 
 ```text
-Agentic Factory behavior repo
+Teami behavior repo
   <- adopter's local git/gh auth pushes proposal branches
   <- local proposal controller packages eval evidence for human-reviewed PRs
   <- run evidence and PR body record provenance for review
@@ -162,13 +162,13 @@ Product repo access stays local:
 ```text
 domain.resources[]
   -> git_repo resource
-  -> one existing local checkout per domain
-  -> local cwd/worktree selection for domain-scoped work
+  -> one selected GitHub repo identity per domain
+  -> fresh per-run clone for domain-scoped work
 ```
 
 The local gateway and runner coordinate wake-ups and Linear mutations from the
-adopter machine. Product-repo checkout access and behavior-repo proposal access
-both stay local and explicit.
+adopter machine. Product-repo clone authority and behavior-repo proposal access
+both use the adopter's local ambient GitHub authority and stay explicit.
 
 ## Security/Permissions
 
@@ -176,12 +176,12 @@ both stay local and explicit.
   read/write; Linear writes are performed by the local runner after
   deterministic gates pass.
 - The local gateway records trigger fingerprints, wake leases, mutation intent,
-  suppression records, and replay records under local Agentic Factory state.
+  suppression records, and replay records under local Teami state.
   Linear remains the live queue because the gateway polls current project
   state before starting work.
 - Behavior-repo proposal writes use the adopter's own git/`gh` auth for
   proposal branches and PRs. They are distinct from product-repo binding, and
-  Agentic Factory stores no GitHub secret.
+  Teami stores no GitHub secret.
 - Local Phoenix is local custody. Traces, annotations, datasets, and eval
   evidence stay on the adopter machine unless the adopter chooses otherwise.
 - Security reports should use GitHub private vulnerability reporting when the
@@ -195,7 +195,7 @@ both stay local and explicit.
 - No npm release is available; this repo is not a package distribution channel.
 - External PRs are not supported yet. Feedback through issues is welcome after
   launch, but maintainers may apply changes privately.
-- Product-repo binding supports one existing local checkout per domain.
+- Product-repo binding supports one selected GitHub repo per domain.
 - There is no multi-repo selector, no cloud resource kind, and no greenfield
   checkout bootstrap.
 - There is no OS/container isolation boundary for local agent execution.
@@ -203,11 +203,11 @@ both stay local and explicit.
   later capability is landed, verified, and documented. Behavior-repo proposal
   PRs remain human-reviewed process-change proposals.
 - Background supervisor and OS autostart are not the current launch path; use
-  foreground `factory gateway start` for sandbox evaluation.
+  foreground `teami gateway start` for sandbox evaluation.
 
 ## Reuse/License
 
-Agentic Factory is source-visible for evaluation, review, and portfolio
+Teami is source-visible for evaluation, review, and portfolio
 visibility. Package metadata is `UNLICENSED` and `private: true`; there is no
 reuse grant in this repository.
 

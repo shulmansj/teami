@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "_note": "Accepted Phoenix asset manifest for the execution workflow. Null Phoenix pins mean the repo snapshot is the accepted behavior until a prompt/version is registered and accepted through the process-change path.",
+  "phoenix": {
+    "expected_origin": "http://127.0.0.1:6006",
+    "server_package_pin": "arize-phoenix==14.13.0",
+    "project_name": "teami"
+  },
+  "prompts": [
+    {
+      "role": "worker",
+      "target_key": "prompt/execution/code_worker",
+      "human_name": "Execution code worker prompt",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
+      "snapshot_path": "execution/evals/execution/accepted-prompts/code-worker.md",
+      "snapshot_sha256": "3d0a38fa5118de12552921ebf4c1cc957c9f1fba6937d38e4ed62aa85546b6ea",
+      "prompt_version": "unpinned-initial"
+    },
+    {
+      "role": "orchestrator",
+      "target_key": "prompt/execution/orchestrator_governing",
+      "human_name": "Execution orchestrator governing prompt",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
+      "snapshot_path": "execution/evals/execution/accepted-prompts/orchestrator-governing.md",
+      "snapshot_sha256": "92c76933e2b98a9987572994c47fee16e0a55248a83754bf15718ceae5500fc1",
+      "prompt_version": "unpinned-initial",
+      "_note": "The governing prompt is adopter-tunable accepted behavior, but it is excluded from the selectable worker roster by the execution workflow definition's driver_governing_target_key."
+    },
+    {
+      "role": "execution_quality_judge",
+      "target_key": "prompt/execution/execution_quality_judge",
+      "human_name": "Execution quality Judge",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "teami_accepted",
+      "snapshot_path": "execution/evals/execution/accepted-prompts/execution-quality-judge.md",
+      "snapshot_sha256": "809ddd647a2e19da6bea090a213fc4b5029e7ce72cbc36283dd2fbd55501bccb",
+      "prompt_version": "unpinned-initial",
+      "rubric_version": "1.0.0",
+      "failure_taxonomy_version": "1.0.0",
+      "_note": "The execution quality Judge is the maintainer-owned evaluator. It carries no promotion-candidate tag and is excluded from adopter self-improvement targets by executionDefinition.engine_owned_evaluator_roles."
+    }
+  ],
+  "evaluators": [
+    {
+      "id": "execution_quality_judge_v1",
+      "kind": "llm",
+      "prompt_role": "execution_quality_judge",
+      "prompt_version_id": null,
+      "model": null,
+      "_note": "Evaluator identity is repo-owned; prompt_version_id and model are pinned when the Judge is first registered and run."
+    }
+  ],
+  "rules": [
+    {
+      "target_key": "rule/execution/runtime_role_assignments",
+      "human_name": "Execution runtime role assignments",
+      "artifact_kind": "runtime_role_defaults",
+      "materializer": "eval_variant_to_runtime_role_defaults",
+      "artifact_path": "execution/evals/execution/accepted-runtime-roles.json",
+      "snapshot_sha256": "22525d111a94f0b930ef69a340e60dc0e656b49f1d67e4afe46b223944a961fb"
+    }
+  ],
+  "datasets": [
+    {
+      "name": "teami-execution-examples",
+      "dataset_id": null,
+      "accepted_dataset_version_id": null,
+      "splits": {
+        "train": {
+          "name": "train",
+          "split_id": null
+        },
+        "test": {
+          "name": "test",
+          "split_id": null
+        }
+      },
+      "split_representation": "native",
+      "_note": "Curated execution example dataset. Pins are null until adopter-labeled fixtures are uploaded and accepted."
+    }
+  ],
+  "experiments": [],
+  "evidence": {
+    "annotation_ids": [],
+    "receipt_run_ids": [],
+    "pr_urls": []
+  }
+}

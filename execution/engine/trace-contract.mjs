@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 export const BASE_RUNNER_CAPABILITIES = Object.freeze([
   "linear.project.planned",
@@ -13,14 +13,17 @@ export const LOCAL_TRACE_STATUSES = Object.freeze([
 ]);
 export const TRACE_RECEIPT_SCHEMA_VERSION = 2;
 export const CANONICAL_DOMAIN_TRACE_ATTRIBUTES = Object.freeze([
-  "agentic_factory.behavior_repo_id",
-  "agentic_factory.domain_id",
+  "teami.behavior_repo_id",
+  "teami.domain_id",
   "linear.workspace_id",
   "linear.team_id",
   "linear.project_id",
   "resource.kind",
   "resource.id",
   "resource.label",
+  "work_type",
+  "selected_resource_id",
+  "resource_id",
   "github.behavior_repo_id",
   "github.behavior_repo_label",
 ]);
@@ -29,6 +32,9 @@ export const DEFAULT_LOCAL_TRACE_POLICY = Object.freeze({
   rich_traces_enabled: false,
   max_trace_payload_bytes: 64 * 1024,
   max_spans_per_export: 200,
+});
+export const LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS = Object.freeze({
+  allowRichTraceContent: true,
 });
 
 const SECRET_KEY_PATTERN = /(^|[_\-.])(token|secret|api[_\-.]?key|authorization|password|credential|private[_\-.]?key)($|[_\-.])/i;
@@ -126,6 +132,21 @@ export function findRichContentKeys(value, path = []) {
   return [...new Set(matches)];
 }
 
+export function digestTraceField(value) {
+  return `sha256:${createHash("sha256").update(traceDigestInput(value), "utf8").digest("hex")}`;
+}
+
+export function traceDigestInput(value) {
+  if (typeof value === "string") return value;
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized === "string") return serialized;
+  } catch {
+    // Best-effort observability: fall through to a stable primitive string.
+  }
+  return String(value ?? "");
+}
+
 export function boundedRunReceiptProjection({
   run,
   trace,
@@ -141,23 +162,37 @@ export function boundedRunReceiptProjection({
   }
   const domainId =
     run?.domain_id ||
-    trace?.attributes?.["agentic_factory.domain_id"] ||
+    trace?.attributes?.["teami.domain_id"] ||
     trace?.attributes?.domain_id ||
     null;
   if (!domainId) throw new Error("domain_id is required for local trace receipts.");
+  const resource = receiptResourceProjection({ run, trace });
+  const requiresLinearIdentity = requiresLinearReceiptIdentity(resource?.kind);
   const workspaceId =
     run?.workspace_id ||
     trace?.attributes?.["linear.workspace_id"] ||
     trace?.attributes?.workspace_id ||
     null;
-  if (!workspaceId) throw new Error("workspace_id is required for local trace receipts.");
+  if (requiresLinearIdentity && !workspaceId) throw new Error("workspace_id is required for local trace receipts.");
   const teamId =
     run?.team_id ||
     trace?.attributes?.["linear.team_id"] ||
     trace?.attributes?.team_id ||
     null;
-  if (!teamId) throw new Error("team_id is required for local trace receipts.");
-  return {
+  if (requiresLinearIdentity && !teamId) throw new Error("team_id is required for local trace receipts.");
+  const githubBehaviorRepoId = firstPresent(
+    run?.github_behavior_repo_id,
+    run?.github?.behavior_repo_id,
+    trace?.attributes?.["github.behavior_repo_id"],
+    trace?.attributes?.github_behavior_repo_id,
+  );
+  const githubBehaviorRepoLabel = firstPresent(
+    run?.github_behavior_repo_label,
+    run?.github?.behavior_repo_label,
+    trace?.attributes?.["github.behavior_repo_label"],
+    trace?.attributes?.github_behavior_repo_label,
+  );
+  const receipt = {
     schema_version: TRACE_RECEIPT_SCHEMA_VERSION,
     run_id: run?.run_id || trace?.attributes?.run_id || null,
     domain_id: domainId,
@@ -175,8 +210,50 @@ export function boundedRunReceiptProjection({
     provider_update_ids: providerUpdateIds || run?.provider_update_ids || [],
     repair_hint: repairHint,
   };
+  if (resource) receipt.resource = resource;
+  if (githubBehaviorRepoId) receipt.github_behavior_repo_id = githubBehaviorRepoId;
+  if (githubBehaviorRepoLabel) receipt.github_behavior_repo_label = githubBehaviorRepoLabel;
+  return receipt;
 }
 
 function defaultRandomBytes(size) {
   return randomBytes(size);
+}
+
+function receiptResourceProjection({ run, trace } = {}) {
+  const kind = firstPresent(
+    run?.resource?.kind,
+    run?.resource_kind,
+    trace?.attributes?.["resource.kind"],
+    trace?.attributes?.resource_kind,
+  );
+  const id = firstPresent(
+    run?.resource?.id,
+    run?.resource_id,
+    trace?.attributes?.["resource.id"],
+    trace?.attributes?.resource_id,
+  );
+  const label = firstPresent(
+    run?.resource?.label,
+    run?.resource_label,
+    trace?.attributes?.["resource.label"],
+    trace?.attributes?.resource_label,
+  );
+  if (!kind && !id && !label) return null;
+  return {
+    kind: kind || null,
+    id: id || null,
+    label: label || null,
+  };
+}
+
+function requiresLinearReceiptIdentity(resourceKind) {
+  return !resourceKind || String(resourceKind).toLowerCase() === "linear";
+}
+
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "") return value;
+  }
+  return null;
 }

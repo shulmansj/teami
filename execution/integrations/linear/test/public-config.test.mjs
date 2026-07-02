@@ -118,17 +118,28 @@ test("poll interval config defaults and validates the single public knob", () =>
   );
 });
 
+test("issue lifecycle statuses required for execution and review setup", () => {
+  for (const statusKey of ["todo", "in_review", "blocked"]) {
+    const config = readJson(configExamplePath);
+    delete config.linear.issue.statuses[statusKey];
+    assert.throws(
+      () => validateLinearConfig(config, "test-config", { repoRoot }),
+      new RegExp(`linear\\.issue\\.statuses\\.${statusKey} must be an object`),
+    );
+  }
+});
+
 test("public config separates behavior-repo GitHub setup from domain git repo binding", () => {
   const config = loadLinearConfig({ repoRoot });
 
   assert.equal(Object.hasOwn(config.github, "behavior_repo"), true);
   assert.equal(config.github.behavior_repo.owner, null);
-  assert.equal(config.github.behavior_repo.name, "agentic-factory");
+  assert.equal(config.github.behavior_repo.name, "teami");
   assert.equal(config.github.behavior_repo.visibility, "private");
   assert.equal(Object.hasOwn(config.github, ["token", "broker"].join("_")), false);
   assert.equal(Object.hasOwn(config.github, "git_repo"), false);
   assert.equal(Object.hasOwn(config, "git_repo"), false);
-  assert.deepEqual(config.github.starter_remote_urls, ["https://github.com/shulmansj/agentic-factory"]);
+  assert.deepEqual(config.github.starter_remote_urls, ["https://github.com/shulmansj/teami"]);
   assert.equal(config.github.starter_remote_urls.includes(privateRepoUrlDefault), false);
 });
 

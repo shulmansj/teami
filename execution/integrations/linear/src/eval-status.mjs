@@ -3,10 +3,8 @@ import path from "node:path";
 
 import {
   CANONICAL_ANNOTATION_NAMES,
-  QUALITY_LABELS,
-  scoreAtBandBoundary,
-  scoreWithinLabelBand,
 } from "./eval-annotation-contract.mjs";
+import { detectLowConfidenceReasons as detectLowConfidenceReasonsCore } from "../../../engine/eval-low-confidence.mjs";
 import { resolvePhoenixConfig } from "./local-phoenix-manager.mjs";
 import { normalizeFailureMode } from "./quality.mjs";
 import { defaultRunStoreDir } from "../../../engine/run-store.mjs";
@@ -17,7 +15,7 @@ import { traceTelemetryPaths } from "./trace-status-store.mjs";
 // The statuses computed here (needs_human | has_human | disagreement_open) are
 // a DERIVED, read-time view (CONSTRAINTS #3, #33): they are recomputed on
 // every invocation from local trace receipts (.agent-shell/telemetry/runs/),
-// local run artifacts (.agentic-factory/runs/), Phoenix annotations read via
+// local run artifacts (.teami/runs/), Phoenix annotations read via
 // the verified REST GET paths, and local dataset-membership receipts when
 // present. Nothing here is ever persisted: no Phoenix writes, no Linear
 // access, no local queue/worklist files. This module is read-only by
@@ -185,48 +183,7 @@ export function normalizePhoenixAnnotation(entry = {}) {
   };
 }
 
-// Deterministic low-confidence judge heuristics (PHOENIX-CAPABILITIES Q13):
-// malformed output, label/score band mismatch, score at a band boundary,
-// missing rationale/failure modes, judge-vs-CODE and judge-vs-HUMAN conflicts.
-export function detectLowConfidenceReasons({
-  annotation,
-  codeAnnotations = [],
-  humanAnnotations = [],
-} = {}) {
-  const reasons = [];
-  const label = annotation?.label;
-  const score = annotation?.score;
-  const malformed = !QUALITY_LABELS.includes(label)
-    || !Number.isFinite(score) || score < 0 || score > 1;
-  if (malformed) {
-    reasons.push("judge_output_malformed");
-  } else {
-    if (!scoreWithinLabelBand(label, score)) reasons.push("label_score_band_mismatch");
-    if (scoreAtBandBoundary(score)) reasons.push("score_at_band_boundary");
-  }
-  if (!String(annotation?.explanation ?? "").trim()) reasons.push("missing_explanation");
-  const failureModes = Array.isArray(annotation?.metadata?.failure_modes)
-    ? annotation.metadata.failure_modes
-    : [];
-  if (!malformed && label !== "pass" && failureModes.length === 0) {
-    reasons.push("missing_failure_modes");
-  }
-  const codeFailureModes = codeAnnotations.flatMap((code) =>
-    Array.isArray(code?.metadata?.failure_modes) ? code.metadata.failure_modes : []);
-  if (!malformed && codeAnnotations.length > 0) {
-    if (label === "pass" && codeFailureModes.length > 0) {
-      reasons.push("judge_code_failure_mode_conflict");
-    }
-    if (label !== "pass" && codeFailureModes.length === 0) {
-      reasons.push("judge_code_failure_mode_conflict");
-    }
-  }
-  if (humanAnnotations.some((human) =>
-    human.name === annotation?.name && human.label && label && human.label !== label)) {
-    reasons.push("judge_human_label_conflict");
-  }
-  return [...new Set(reasons)];
-}
+export const detectLowConfidenceReasons = detectLowConfidenceReasonsCore;
 
 // The ONE canonical disagreement detector (CONSTRAINTS #33: derived views
 // only). Step 3's worklist, the step 9 disagreement report, and the step 9

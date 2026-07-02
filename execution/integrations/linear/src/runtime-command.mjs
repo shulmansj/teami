@@ -30,11 +30,12 @@ export function runRuntimeCommand(command, {
   platform = process.platform,
   nodePath = process.execPath,
   cwd = undefined,
+  envAugment = {},
   includeEnvironmentProof = false,
   spawnImpl = spawn,
 } = {}) {
   if (!command?.command) throw new Error("Runtime command is missing an executable.");
-  const childEnv = scrubChildEnv(env);
+  const childEnv = { ...scrubChildEnv(env), ...envAugment };
   const environment = runtimeCommandEnvironmentProof(childEnv);
   const spawnCommand = resolveRuntimeSpawnCommand(command.command, command.args || [], {
     env: childEnv,

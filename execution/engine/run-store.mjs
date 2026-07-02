@@ -39,7 +39,7 @@ export const RUN_ARTIFACT_KINDS = Object.freeze(["checkpoint", "pause", "commit"
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export function defaultRunStoreDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "runs");
+  return path.resolve(repoRoot, ".teami", "runs");
 }
 
 export function runArtifactPath({ runId, repoRoot = process.cwd(), runStoreDir } = {}) {
@@ -228,7 +228,7 @@ export function normalizeRunArtifact(artifact, options = {}) {
     normalized.workflow_version = normalized.workflow_version || normalized.function_version;
     if (isTerminalRunArtifactKind(normalized.kind)) {
       normalized.payload_schema_id =
-        normalized.payload_schema_id || options.payloadSchemaId || "agentic-factory-flat-run-payload/v1";
+        normalized.payload_schema_id || options.payloadSchemaId || "teami-flat-run-payload/v1";
       normalized.payload = isRecord(normalized.payload)
         ? normalized.payload
         : payloadFromMirroredTerminalFields(normalized);

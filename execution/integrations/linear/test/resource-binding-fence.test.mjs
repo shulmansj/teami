@@ -35,14 +35,8 @@ test("materialized run contexts expose only the selected domain resource by id",
       absentResource: resourceA,
     });
 
-    assert.equal(
-      Object.values(runContextA.resources).some((record) => record.handle === runContextB.resources.dummy.handle),
-      false,
-    );
-    assert.equal(
-      Object.values(runContextB.resources).some((record) => record.handle === runContextA.resources.dummy.handle),
-      false,
-    );
+    assert.notEqual(runContextA.selectedResource.handle, runContextB.selectedResource.handle);
+    assert.equal(runContextA.selectedResource.handle === runContextB.selectedResource.handle, false);
   });
 });
 
@@ -50,6 +44,7 @@ test("commit effects derive write targets from the bound resource record, not ag
   await withMaterializedDummyDomains(async ({ runContextA }) => {
     const recordedTargets = [];
     const ctx = {
+      runContext: runContextA,
       resources: runContextA.resources,
       payload: {
         target: RESOURCE_B_ID,
@@ -71,7 +66,7 @@ test("commit effects derive write targets from the bound resource record, not ag
           assert.equal(receivedCtx.payload.target, RESOURCE_B_ID);
           assert.equal(receivedCtx.artifact.payload.target, RESOURCE_B_ID);
 
-          const bound = receivedCtx.resources.dummy;
+          const bound = receivedCtx.runContext.selectedResource;
           if (!bound) {
             return { ok: false, reason: "bound_dummy_missing" };
           }
@@ -85,8 +80,9 @@ test("commit effects derive write targets from the bound resource record, not ag
     });
 
     assert.deepEqual(result, {
-      ok: true,
+      outcome: "ok",
       applied: [{ id: "bind-target", identity: RESOURCE_A_ID }],
+      produced_identities: [],
     });
     assert.deepEqual(recordedTargets, [RESOURCE_A_ID]);
     assert.notEqual(recordedTargets[0], ctx.payload.target);
@@ -143,12 +139,12 @@ function dummyDomain(domainId, resourceId) {
 }
 
 function assertRunContextContainsOnly({ runContext, expectedResource, absentResource }) {
-  const resourceRecords = Object.values(runContext.resources);
-  assert.deepEqual(Object.keys(runContext.resources), [dummyResourceKind.kind]);
-  assert.deepEqual(resourceRecords.map((record) => record.id), [expectedResource.id]);
-  assert.equal(resourceRecords.some((record) => record.id === absentResource.id), false);
+  assert.deepEqual(Object.keys(runContext.resources), [expectedResource.id]);
+  assert.equal(Object.hasOwn(runContext.resources, absentResource.id), false);
+  assert.equal(runContext.selectedResourceId, expectedResource.id);
+  assert.equal(runContext.selectedResource, runContext.resources[expectedResource.id]);
 
-  const bound = runContext.resources.dummy;
+  const bound = runContext.selectedResource;
   assert.equal(bound.id, expectedResource.id);
   assert.equal(bound.kind, dummyResourceKind.kind);
   assert.equal(bound.role, expectedResource.role);

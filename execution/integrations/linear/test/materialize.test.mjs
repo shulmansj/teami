@@ -20,7 +20,7 @@ test("materializeDomainResources builds a lean run-context for selected resource
     const { runContext, teardownAll } = await materializeDomainResources({
       domainResources: [fakeResource({ kind: "fake", id: "resource-1", role: "primary" })],
       runId: "run-1",
-      engineRepoRoot: "C:/agentic-factory",
+      engineRepoRoot: "C:/teami",
       runGit,
     });
 
@@ -30,18 +30,22 @@ test("materializeDomainResources builds a lean run-context for selected resource
       "resources",
       "runGit",
       "runId",
+      "selectedResource",
+      "selectedResourceId",
     ]);
     assert.equal(runContext.runId, "run-1");
-    assert.equal(runContext.engineRepoRoot, "C:/agentic-factory");
+    assert.equal(runContext.engineRepoRoot, "C:/teami");
     assert.equal(runContext.runGit, runGit);
-    assert.deepEqual(Object.keys(runContext.resources), ["fake"]);
-    assert.deepEqual(runContext.resources.fake, {
+    assert.deepEqual(Object.keys(runContext.resources), ["resource-1"]);
+    assert.deepEqual(runContext.resources["resource-1"], {
       id: "resource-1",
       kind: "fake",
       role: "primary",
       handle,
     });
-    assert.equal(Object.hasOwn(runContext.resources.fake, "teardown"), false);
+    assert.equal(runContext.selectedResourceId, "resource-1");
+    assert.equal(runContext.selectedResource, runContext.resources["resource-1"]);
+    assert.equal(Object.hasOwn(runContext.selectedResource, "teardown"), false);
 
     assert.deepEqual(runContext.resourceManifest, [{
       kind: "fake",
@@ -81,7 +85,7 @@ test("teardownAll is async, idempotent, and tears down resources in reverse orde
         fakeResource({ kind: "second" }),
       ],
       runId: "run-2",
-      engineRepoRoot: "C:/agentic-factory",
+      engineRepoRoot: "C:/teami",
     });
 
     const teardownPromise = teardownAll();
@@ -118,7 +122,7 @@ test("teardownAll attempts all teardowns and throws an aggregate when one fails"
         fakeResource({ kind: "bad" }),
       ],
       runId: "run-3",
-      engineRepoRoot: "C:/agentic-factory",
+      engineRepoRoot: "C:/teami",
     });
 
     await assert.rejects(
@@ -160,7 +164,7 @@ test("materializeDomainResources tears down built resources and propagates the o
           fakeResource({ kind: "broken" }),
         ],
         runId: "run-4",
-        engineRepoRoot: "C:/agentic-factory",
+        engineRepoRoot: "C:/teami",
       }),
       materializeFailure,
     );

@@ -5,7 +5,7 @@ import path from "node:path";
 import { renameWithRetry } from "../../../../engine/run-store.mjs";
 
 export const PROMOTION_REGISTRY_SCHEMA_VERSION =
-  "agentic-factory-promotion-candidate-registry/v1";
+  "teami-promotion-candidate-registry/v1";
 
 export const PROMOTION_REGISTRY_STAGES = Object.freeze([
   "validated", "gate_evaluated", "improvement_opportunity", "drafted", "committed", "pr_created", "blocked",
@@ -76,14 +76,14 @@ export function computeNormalizedEnvelope({
 }
 
 // ---------------------------------------------------------------------------
-// Durable local registry (.agentic-factory/promotion-candidates/
+// Durable local registry (.teami/promotion-candidates/
 // <envelope-hash>.json): atomic writes, append-only events, one row per
 // normalized envelope. The registry is recovery state and a budget CACHE —
 // budgets/dedupe truth stays with repo-visible PR markers (CONSTRAINTS #10).
 // ---------------------------------------------------------------------------
 
 export function defaultPromotionRegistryDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "promotion-candidates");
+  return path.resolve(repoRoot, ".teami", "promotion-candidates");
 }
 
 export function promotionRegistryPath({ registryDir, envelopeHash }) {

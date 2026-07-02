@@ -17,13 +17,19 @@ import {
 } from "../disagreement-report.mjs";
 import { resolveForegroundDomainCache } from "../domain-command-context.mjs";
 import {
+  emptyDomainRegistry,
+  readDomainRegistry,
+} from "../domain-registry.mjs";
+import {
   collectEvalStatuses,
   rankEvalWorklist,
 } from "../eval-status.mjs";
 import {
   runImprovementDrafter,
 } from "../improvement-drafter.mjs";
+import { createLinearCredentialStore } from "../linear-credential-store.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
+import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
 import { setupStatePathForCache } from "../local-state.mjs";
 import {
   ensurePhoenixReady,
@@ -32,7 +38,9 @@ import {
 } from "../local-phoenix-manager.mjs";
 import {
   runLocalPhoenixTracePreflight,
+  createLocalPhoenixTraceSink,
 } from "../local-phoenix-trace-sink.mjs";
+import { createLocalTriggerStore } from "../local-trigger-store.mjs";
 import {
   amendExperimentReceipt,
   runDecompositionExperiment,
@@ -61,20 +69,41 @@ import {
   DEFAULT_RICH_DATASET_NAME,
   promoteRichDecompositionExample,
 } from "../rich-promotion.mjs";
+import {
+  readRuntimeSmokeCache,
+  runtimeSmokeCachePath,
+  smokeTestsFromRuntimeSmokeCache,
+} from "../runtime-smoke.mjs";
+import {
+  createProcessRuntimeExecutor,
+  runTriggeredExecution,
+  runTriggeredReview,
+} from "../trigger-runner.mjs";
 import { readTraceHealth, readTraceReceipt } from "../trace-status-store.mjs";
+import { materializeDomainResources } from "../../../../engine/materialize.mjs";
 import { runGitHubInitPhase } from "../github-setup.mjs";
 import {
   defaultRunGit,
   registerGitRepoResourceKind,
 } from "../../../git/git-repo-materializer.mjs";
 import {
-  runDomainBindRepoCommand,
-} from "./domain-bind-repo-command.mjs";
+  EXECUTION_REQUIRED_CAPABILITIES,
+} from "../workflows/execution/definition.mjs";
+import {
+  REVIEW_REQUIRED_CAPABILITIES,
+} from "../workflows/review/definition.mjs";
+import {
+  runDomainCommand,
+} from "./domain-command.mjs";
 import {
   runDoctorCommand,
   runDoctorLinearCommand,
 } from "./doctor-command.mjs";
 import { createCliOutput } from "./cli-output.mjs";
+import {
+  buildCommandIndex,
+  validateCommandDescriptor,
+} from "./command-registry.mjs";
 import { flagValue, parseCliFlags } from "./flags.mjs";
 import {
   configWithGithubFlags,
@@ -106,93 +135,653 @@ import {
 import {
   agenticFactoryHeading,
   compactPairs,
+  formatCommand,
   humanizeToken,
   printVerboseHint,
   yesNo,
 } from "./operator-output.mjs";
-
-const CLI_USAGE = "Usage: node execution/integrations/linear/cli.mjs <init|domain:add|domain:bind-repo|github:init|doctor|doctor:linear|phoenix:start|phoenix:doctor|phoenix:status|phoenix:preflight|phoenix:annotate-trace|phoenix:promote-run|phoenix:promote-decomposition|phoenix:experiment-decomposition|phoenix:experiment-amend|eval:decomposition|eval:disagreements|eval:emit-checks|eval:gate|eval:judge|eval:register-prompt|eval:register-judge-prompt|promote-candidate|draft-improvement|promotion:scan|supervisor:register|supervisor:run|supervisor:status|supervisor:reconcile|supervisor:disable|supervisor:enable|supervisor:unregister|phoenix:stop|gateway|runner|runtime-smoke|trigger-status|worklist|uninstall|reset>";
-
-const COMMAND_TABLE = new Map([
-  ["uninstall", runLocalSetupCleanupCommand],
-  ["reset", runLocalSetupCleanupCommand],
-  ["init", runLinearSetupCommand],
-  ["domain:add", runLinearSetupCommand],
-  ["domain:bind-repo", runDomainBindRepoCommand],
-  ["github:init", runGithubInitCommand],
-  ["doctor", runDoctorCommand],
-  ["doctor:linear", runDoctorLinearCommand],
-  ["phoenix:start", runPhoenixStartCommand],
-  ["phoenix:doctor", runPhoenixDoctorCommand],
-  ["phoenix:status", runPhoenixStatusCommand],
-  ["phoenix:preflight", runPhoenixPreflightCommand],
-  ["phoenix:annotate-trace", runPhoenixAnnotateTraceCommand],
-  ["worklist", runWorklistCommand],
-  ["phoenix:promote-run", runPhoenixPromoteRunCommand],
-  ["phoenix:promote-decomposition", runPhoenixPromoteDecompositionCommand],
-  ["eval:emit-checks", runEvalEmitChecksCommand],
-  ["eval:judge", runEvalJudgeCommand],
-  ["eval:decomposition", runEvalDecompositionCommand],
-  ["phoenix:experiment-decomposition", runPhoenixExperimentDecompositionCommand],
-  ["phoenix:experiment-amend", runPhoenixExperimentAmendCommand],
-  ["eval:disagreements", runEvalDisagreementsCommand],
-  ["eval:gate", runEvalGateCommand],
-  ["draft-improvement", runDraftImprovementCommand],
-  ["promote-candidate", runPromoteCandidateCommand],
-  ["promotion:scan", runPromotionScanCommand],
-  ["supervisor:register", runSupervisorRegisterCommand],
-  ["supervisor:run", runSupervisorRunCommand],
-  ["supervisor", runSupervisorRunCommand],
-  ["supervisor:status", runSupervisorStatusCommand],
-  ["supervisor:reconcile", runSupervisorReconcileCommand],
-  ["supervisor:disable", runSupervisorDisableCommand],
-  ["supervisor:enable", runSupervisorEnableCommand],
-  ["supervisor:unregister", runSupervisorUnregisterCommand],
-  ["eval:register-prompt", runEvalRegisterPromptCommand],
-  ["eval:register-judge-prompt", runEvalRegisterPromptCommand],
-  ["phoenix:stop", runPhoenixStopCommand],
-  ["gateway", runGatewayCommand],
-  ["runner", runRunnerCommand],
-  ["runtime-smoke", runRuntimeSmokeCommand],
-  ["trigger-status", runTriggerStatusCommand],
-]);
-
-const NOUN_VERB_COMMANDS = new Map([
-  ["gateway", new Map([
-    ["start", { command: "gateway", consumeVerb: true }],
-    ["status", { command: "gateway", consumeVerb: false }],
-  ])],
-  ["domain", new Map([
-    ["add", { command: "domain:add", consumeVerb: true }],
-    ["bind-repo", { command: "domain:bind-repo", consumeVerb: true }],
-  ])],
-]);
+import { homeStateProbe } from "./home-state.mjs";
 
 // Normalize `<noun> <verb>` invocations to the real command token. Single-token and colon commands
 // pass through unchanged. A leading global flag (or no verb) means a bare noun - pass through. An
 // unknown verb passes through unchanged so the existing unknown-command/usage path (exit 2) still fires.
 export function normalizeCommandInvocation({ command, args = [] } = {}) {
-  const verbs = NOUN_VERB_COMMANDS.get(command);
-  if (!verbs) return { command, args };
   const verb = args[0];
   if (!verb || verb.startsWith("--")) return { command, args };
-  const mapping = verbs.get(verb);
-  if (!mapping) return { command, args };
-  return { command: mapping.command, args: mapping.consumeVerb ? args.slice(1) : args };
+  const descriptor = COMMAND_REGISTRY.find((candidate) =>
+    candidate.noun === command
+    && candidate.verb === verb
+    && candidate.acceptNounVerb === true
+  );
+  if (!descriptor) return { command, args };
+  return {
+    command: descriptor.invokeCommand,
+    args: descriptor.consumeVerb ? args.slice(1) : args,
+  };
 }
 
-const COMMAND_HELP = new Map([
-  ["init", "Usage: npm run init -- --domain <name> [--workspace <name-or-id>] [--github-dry-run] [--verbose]"],
-  ["domain:add", "Usage: npm run domain:add -- --domain <name> [--workspace <name-or-id>] [--verbose]"],
-  ["domain:bind-repo", "Usage: npm run domain:bind-repo -- --domain <id> --path <existing checkout>"],
-  ["github:init", "Usage: npm run github:init -- [--github-dry-run] [--github-owner <owner>] [--github-repo <repo>]"],
-  ["doctor", "Usage: npm run doctor -- [--domain <id>] [--verbose]"],
-  ["doctor:linear", "Usage: npm run doctor:linear -- [--domain <id>] [--verbose]"],
-  ["gateway", "Usage: npm run gateway -- [status] [--domain <id>] [--verbose]"],
-  ["runtime-smoke", "Usage: npm run runtime-smoke -- [--domain <id>] [--verbose]"],
-  ["reset", "Usage: npm run reset -- [--domain <id>] [--verbose]"],
-  ["uninstall", "Usage: npm run uninstall -- --domain <id> [--verbose]"],
+// Seam S5: the adopter command descriptors. Lists the curated noun-verb surface.
+const ADOPTER_COMMANDS = Object.freeze([
+  {
+    noun: "init",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "init",
+    handler: runLinearSetupCommand,
+    tier: "adopter",
+    summary: "set up your factory (Linear auth, first domain, GitHub)",
+    usageTail: "--domain <name> [--workspace <name-or-id>] [--github-dry-run] [--verbose]",
+    helpGroup: "Setup",
+    helpOrder: 1,
+    aliases: [],
+  },
+  {
+    noun: "doctor",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "doctor",
+    handler: runDoctorCommand,
+    tier: "adopter",
+    summary: "check everything is healthy and get exact fixes",
+    usageTail: "[--domain <id>] [--verbose]",
+    helpGroup: "Setup",
+    helpOrder: 2,
+    aliases: [],
+  },
+  {
+    noun: "gateway",
+    verb: "start",
+    acceptNounVerb: true,
+    defaultForBareNoun: true,
+    consumeVerb: true,
+    invokeCommand: "gateway",
+    handler: runGatewayCommand,
+    tier: "adopter",
+    summary: "turn the factory on (watch Linear for Planned projects)",
+    usageTail: "[status] [--domain <id>] [--verbose]",
+    helpGroup: "Run",
+    helpOrder: 1,
+    aliases: [],
+  },
+  {
+    noun: "gateway",
+    verb: "status",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "gateway",
+    handler: runGatewayCommand,
+    tier: "adopter",
+    summary: "check whether the factory is running (read-only)",
+    usageTail: "[--domain <id>] [--verbose]",
+    helpGroup: "Run",
+    helpOrder: 2,
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "open",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "phoenix:open",
+    handler: runPhoenixOpenCommand,
+    tier: "adopter",
+    summary: "open the traces & eval UI",
+    usageTail: "[options]",
+    helpGroup: "Run",
+    helpOrder: 3,
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "status",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "phoenix:status",
+    handler: runPhoenixStatusCommand,
+    tier: "adopter",
+    summary: "check local Phoenix status (read-only)",
+    usageTail: "[options]",
+    helpGroup: "Run",
+    helpOrder: 4,
+    aliases: [],
+  },
+  {
+    noun: "domain",
+    verb: "add",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "domain:add",
+    handler: runLinearSetupCommand,
+    tier: "adopter",
+    summary: "add another Linear workspace/team to this factory",
+    usageTail: "--domain <name> [--workspace <name-or-id>] [--verbose]",
+    helpGroup: "Manage",
+    helpOrder: 1,
+    aliases: [],
+  },
+  {
+    noun: "domain",
+    verb: "show",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "domain:show",
+    handler: runDomainCommand,
+    tier: "adopter",
+    summary: "show which GitHub repos a domain can work in",
+    usageTail: "<id>",
+    helpGroup: "Manage",
+    helpOrder: 2,
+    aliases: [],
+  },
+  {
+    noun: "domain",
+    verb: "grant",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "domain:grant",
+    handler: runDomainCommand,
+    tier: "adopter",
+    summary: "allow a domain to work in a GitHub repo",
+    usageTail: "<id> --repo <owner/name>",
+    helpGroup: "Manage",
+    helpOrder: 3,
+    aliases: [],
+  },
+  {
+    noun: "domain",
+    verb: "revoke",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "domain:revoke",
+    handler: runDomainCommand,
+    tier: "adopter",
+    summary: "remove a GitHub repo from a domain",
+    usageTail: "<id> --repo <owner/name>",
+    helpGroup: "Manage",
+    helpOrder: 4,
+    aliases: [],
+  },
+  {
+    noun: "uninstall",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "uninstall",
+    handler: runLocalSetupCleanupCommand,
+    tier: "adopter",
+    summary: "remove this factory's local setup",
+    usageTail: "--domain <id> [--verbose]",
+    helpGroup: "Manage",
+    helpOrder: 5,
+    aliases: [],
+  },
 ]);
+
+const OPERATOR_COMMANDS = Object.freeze([
+  {
+    noun: "reset",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "reset",
+    handler: runLocalSetupCleanupCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[--domain <id>] [--verbose]",
+    aliases: [],
+  },
+  {
+    noun: "execution",
+    verb: "run",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "execution:run",
+    handler: runExecutionRunCommand,
+    tier: "operator",
+    summary: "run one Ready issue directly through the execution entry",
+    usageTail: "--issue <issue_id> [--domain <id>] [--retry] [--kill-point <name>] [--verbose]",
+    aliases: [],
+  },
+  {
+    noun: "review",
+    verb: "run",
+    acceptNounVerb: true,
+    defaultForBareNoun: false,
+    consumeVerb: true,
+    invokeCommand: "review:run",
+    handler: runReviewRunCommand,
+    tier: "operator",
+    summary: "run one In Review issue directly through the review entry",
+    usageTail: "--issue <issue_id> [--domain <id>] [--verbose]",
+    aliases: [],
+  },
+  {
+    noun: "github",
+    verb: "init",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "github:init",
+    handler: runGithubInitCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[--github-dry-run] [--github-owner <owner>] [--github-repo <repo>]",
+    aliases: [],
+  },
+  {
+    noun: "doctor",
+    verb: "linear",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "doctor:linear",
+    handler: runDoctorLinearCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[--domain <id>] [--verbose]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "start",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:start",
+    handler: runPhoenixStartCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "doctor",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:doctor",
+    handler: runPhoenixDoctorCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "preflight",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:preflight",
+    handler: runPhoenixPreflightCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "annotate-trace",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:annotate-trace",
+    handler: runPhoenixAnnotateTraceCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "promote-run",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:promote-run",
+    handler: runPhoenixPromoteRunCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "promote-decomposition",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:promote-decomposition",
+    handler: runPhoenixPromoteDecompositionCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "experiment-decomposition",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:experiment-decomposition",
+    handler: runPhoenixExperimentDecompositionCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "experiment-amend",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:experiment-amend",
+    handler: runPhoenixExperimentAmendCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "phoenix",
+    verb: "stop",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "phoenix:stop",
+    handler: runPhoenixStopCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "worklist",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "worklist",
+    handler: runWorklistCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "eval",
+    verb: "emit-checks",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "eval:emit-checks",
+    handler: runEvalEmitChecksCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "eval",
+    verb: "judge",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "eval:judge",
+    handler: runEvalJudgeCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "eval",
+    verb: "decomposition",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "eval:decomposition",
+    handler: runEvalDecompositionCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "eval",
+    verb: "disagreements",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "eval:disagreements",
+    handler: runEvalDisagreementsCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "eval",
+    verb: "gate",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "eval:gate",
+    handler: runEvalGateCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "eval",
+    verb: "register-prompt",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "eval:register-prompt",
+    handler: runEvalRegisterPromptCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "eval",
+    verb: "register-judge-prompt",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "eval:register-judge-prompt",
+    handler: runEvalRegisterPromptCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "draft-improvement",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "draft-improvement",
+    handler: runDraftImprovementCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "promote-candidate",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "promote-candidate",
+    handler: runPromoteCandidateCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "promotion",
+    verb: "scan",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "promotion:scan",
+    handler: runPromotionScanCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "supervisor",
+    verb: "register",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "supervisor:register",
+    handler: runSupervisorRegisterCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "supervisor",
+    verb: "run",
+    acceptNounVerb: false,
+    defaultForBareNoun: true,
+    consumeVerb: false,
+    invokeCommand: "supervisor:run",
+    handler: runSupervisorRunCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: ["supervisor"],
+  },
+  {
+    noun: "supervisor",
+    verb: "status",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "supervisor:status",
+    handler: runSupervisorStatusCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "supervisor",
+    verb: "reconcile",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "supervisor:reconcile",
+    handler: runSupervisorReconcileCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "supervisor",
+    verb: "disable",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "supervisor:disable",
+    handler: runSupervisorDisableCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "supervisor",
+    verb: "enable",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "supervisor:enable",
+    handler: runSupervisorEnableCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "supervisor",
+    verb: "unregister",
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    consumeVerb: false,
+    invokeCommand: "supervisor:unregister",
+    handler: runSupervisorUnregisterCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "runner",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: true,
+    invokeCommand: "runner",
+    handler: runRunnerCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+  {
+    noun: "runtime-smoke",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "runtime-smoke",
+    handler: runRuntimeSmokeCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[--domain <id>] [--verbose]",
+    aliases: [],
+  },
+  {
+    noun: "trigger-status",
+    verb: null,
+    acceptNounVerb: false,
+    defaultForBareNoun: false,
+    invokeCommand: "trigger-status",
+    handler: runTriggerStatusCommand,
+    tier: "operator",
+    summary: "",
+    usageTail: "[options]",
+    aliases: [],
+  },
+]);
+
+const COMMAND_REGISTRY = Object.freeze([...ADOPTER_COMMANDS, ...OPERATOR_COMMANDS]);
+COMMAND_REGISTRY.forEach(validateCommandDescriptor);
+const COMMAND_INDEX = buildCommandIndex(COMMAND_REGISTRY);
+
+const HELP_GROUPS = Object.freeze(["Setup", "Run", "Manage"]);
 
 const EVAL_REGISTER_PROMPT_COMMAND_OPTIONS = Object.freeze({
   "eval:register-judge-prompt": {
@@ -232,18 +821,41 @@ export async function runCliCommand({ repoRoot = process.cwd(), command, args = 
     color: outputFlags.noColor ? false : undefined,
     unicode: outputFlags.ascii ? false : undefined,
   });
-  const handler = COMMAND_TABLE.get(command);
+  // Default surface (Phase 1). The home screen and curated help render here, BEFORE any
+  // config/credential/cache setup, reading only the side-effect-free homeStateProbe. No routing
+  // for existing commands changes.
+  if (!command) {
+    renderHomeScreen({ repoRoot, output });
+    process.exitCode = 0;
+    return;
+  }
+  if (command === "--help" || command === "-h" || command === "help") {
+    renderCuratedHelp(output, { all: outputFlags.args.includes("--all") });
+    process.exitCode = 0;
+    return;
+  }
+
+  const descriptor = COMMAND_INDEX.get(command);
   if (isHelpRequest(command, outputFlags.args)) {
     printCliHelp(output, command);
     process.exitCode = 0;
     return;
   }
-  if (!handler) {
-    printCliUsage(output);
+  if (!descriptor) {
+    if (isBareNounNeedingHelp(command, outputFlags.args)) {
+      renderNounHelp(output, command);
+      process.exitCode = 0;
+      return;
+    }
+    output.error({
+      what: `unknown command: ${command}`,
+      fix: `run ${formatCommand("help")} to see the available commands`,
+    });
+    process.exitCode = 2;
     return;
   }
   const context = createCliContext({ repoRoot, output });
-  await handler({ context, command, args: outputFlags.args });
+  await descriptor.handler({ context, command: descriptor.invokeCommand, args: outputFlags.args });
 }
 
 // Global output flags (`--verbose`, `--no-color`, `--ascii`) are recognized only as a
@@ -275,23 +887,110 @@ export function extractCliOutputFlags(args = []) {
   return { args: args.slice(start, end), verbose, noColor, ascii };
 }
 
-function printCliUsage(output = createCliOutput()) {
-  output.error({
-    what: CLI_USAGE,
-  });
-  process.exitCode = 2;
-}
-
 function isHelpRequest(command, args = []) {
   return command === "--help" || command === "-h" || args.includes("--help") || args.includes("-h");
 }
 
+function isBareNounNeedingHelp(command, args = []) {
+  return args.length === 0 && COMMAND_REGISTRY.some((descriptor) =>
+    descriptor.noun === command && descriptor.acceptNounVerb === true
+  );
+}
+
+function renderNounHelp(output, noun) {
+  output.heading(`Teami ${output.symbols.separator} ${noun}`);
+  const verbs = COMMAND_REGISTRY.filter((descriptor) =>
+    descriptor.noun === noun && descriptor.acceptNounVerb === true && descriptor.verb
+  );
+  for (const descriptor of verbs) {
+    output.raw(`    ${output.style.cyan(formatCommand(`${noun} ${descriptor.verb}`))}  ${descriptor.summary}\n`);
+  }
+}
+
 function printCliHelp(output = createCliOutput(), command = null) {
-  if (COMMAND_TABLE.has(command)) {
-    output.raw(`${COMMAND_HELP.get(command) || `Usage: npm run ${command} -- [options]`}\n`);
+  const descriptor = COMMAND_INDEX.get(command);
+  if (descriptor) {
+    const form = descriptor.verb === null || descriptor.invokeCommand === descriptor.noun
+      ? descriptor.noun
+      : (descriptor.acceptNounVerb ? `${descriptor.noun} ${descriptor.verb}` : `${descriptor.noun}:${descriptor.verb}`);
+    output.raw(`${`Usage: ${formatCommand(form)} ${descriptor.usageTail}`.trimEnd()}\n`);
     return;
   }
-  output.raw(`${CLI_USAGE}\n`);
+  renderCuratedHelp(output, { all: false });
+}
+
+// State-aware, side-effect-free home screen for `factory` (no args): one obvious next step for the
+// factory's current state. Reads only the read-only homeStateProbe (no config load, no network, no
+// writes).
+const HOME_SCREEN = {
+  uninitialized: {
+    headline: "not set up yet",
+    steps: () => [{ text: formatCommand("init"), hint: "set up your factory (Linear, first domain, GitHub)" }],
+  },
+  idle: {
+    headline: "ready - not running",
+    steps: () => [{ text: formatCommand("gateway start"), hint: "turn the factory on" }],
+  },
+  listening: {
+    headline: "running",
+    note: 'Move a Linear project to "Planned" to start your first run.',
+    steps: () => [{ text: formatCommand("gateway status"), hint: "check what it's doing (read-only)" }],
+  },
+  degraded: {
+    headline: "needs attention",
+    steps: () => [{ text: formatCommand("doctor"), hint: "diagnose and repair local state" }],
+  },
+};
+
+function renderHomeScreen({ repoRoot, output }) {
+  const probe = homeStateProbe({ repoRoot });
+  const plan = HOME_SCREEN[probe.state] || HOME_SCREEN.uninitialized;
+  output.heading(`Teami ${output.symbols.separator} ${plan.headline}`);
+  if (plan.note) output.info(plan.note);
+  output.nextSteps(plan.steps());
+  output.raw(`\n  ${output.style.dim(`Run ${formatCommand("help")} to see all commands.`)}\n`);
+}
+
+function renderHelpRows(rows, output) {
+  const width = rows.reduce((max, [command]) => Math.max(max, command.length), 0);
+  for (const [command, summary] of rows) {
+    output.raw(`    ${output.style.cyan(command.padEnd(width))}  ${summary}\n`);
+  }
+}
+
+// Curated, grouped adopter help (Setup / Run / Manage). `--all` appends the operator & maintenance
+// commands. Loads no config.
+function renderCuratedHelp(output, { all = false } = {}) {
+  output.heading(`Teami ${output.symbols.separator} commands`);
+  for (const group of HELP_GROUPS) {
+    const items = COMMAND_REGISTRY
+      .filter((descriptor) => descriptor.tier === "adopter" && descriptor.helpGroup === group)
+      .sort((left, right) => left.helpOrder - right.helpOrder);
+    if (items.length === 0) continue;
+    output.section(group);
+    renderHelpRows(
+      items.map((descriptor) => [
+        formatCommand([descriptor.noun, descriptor.verb].filter(Boolean).join(" ")),
+        descriptor.summary,
+      ]),
+      output,
+    );
+  }
+  if (all) {
+    output.section("Operator & maintenance");
+    const operatorTokens = [...new Set(
+      COMMAND_REGISTRY
+        .filter((descriptor) => descriptor.tier === "operator")
+        .flatMap((descriptor) => [descriptor.invokeCommand, ...descriptor.aliases]),
+    )].sort();
+    for (const token of operatorTokens) {
+      output.raw(`    ${output.style.dim(formatCommand(token))}\n`);
+    }
+  }
+  const moreHint = all
+    ? `Run ${formatCommand("<command>")} --help for usage.`
+    : `Run ${formatCommand("<command>")} --help for usage, or ${formatCommand("help")} --all for operator commands.`;
+  output.raw(`\n  ${output.style.dim(moreHint)}\n`);
 }
 
 export async function runGithubInitCommand({ context, command, args }) {
@@ -344,6 +1043,165 @@ export async function runGithubInitCommand({ context, command, args }) {
     output.detail(`connection_mode=${result.connection.connection_mode}`);
     process.exitCode = 0;
 }
+export async function runExecutionRunCommand({ context, command, args }) {
+  const { config, repoRoot, output, runGit } = context;
+    void command;
+    const { flags } = parseCliFlags(args);
+    const issueId = flags.issue;
+    agenticFactoryHeading(output, "execution run");
+    if (!issueId) {
+      output.error({
+        what: `Usage: ${formatCommand("execution run --issue <issue_id> [--domain <id>] [--retry] [--kill-point <name>]")}`,
+      });
+      process.exitCode = 2;
+      return;
+    }
+
+    let result;
+    let traceSink = null;
+    try {
+      const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
+      const foreground = resolveForegroundDomainCache({
+        config,
+        repoRoot,
+        registry,
+        domainId: flags.domain || null,
+      });
+      const credentialStore = createLinearCredentialStore({
+        config,
+        repoRoot,
+        domainContext: foreground.context,
+      });
+      const store = createLocalTriggerStore({ repoRoot });
+      const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(foreground.config, repoRoot));
+      const runtimeExecutor = createProcessRuntimeExecutor({
+        smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
+        repoRoot,
+      });
+      traceSink = createLocalPhoenixTraceSink({ repoRoot });
+      result = await runTriggeredExecution({
+        issueId,
+        retry: flags.retry === true,
+        killPoint: flags["kill-point"] || null,
+        store,
+        runnerId: `local-runner:${foreground.context.domainId}`,
+        workspaceId: foreground.context.linear.workspaceId,
+        linearClientFactory: async () => createLinearSetupGraphqlClient({
+          config: foreground.config,
+          repoRoot,
+          credentialStore,
+          allowBrowserAuth: false,
+          allowRefresh: true,
+        }).client,
+        config: foreground.config,
+        cache: foreground.cache,
+        runtimeExecutor,
+        repoRoot,
+        leaseDurationMs: config?.runner?.lease_duration_ms,
+        runnerVersion: process.version,
+        capabilities: config?.runner?.required_capabilities || EXECUTION_REQUIRED_CAPABILITIES,
+        traceSink,
+        domainContext: foreground.context,
+        registry,
+        runDeps: {
+          materialize: materializeDomainResources,
+          store,
+          runGit,
+        },
+      });
+    } catch (error) {
+      output.error({
+        what: "Execution run could not start",
+        why: redactOAuthSecrets(error.message),
+        fix: "check --issue, --domain, domain resources, and local Linear/GitHub setup, then retry.",
+      });
+      process.exitCode = 1;
+      return;
+    } finally {
+      await traceSink?.shutdown?.();
+    }
+
+    renderExecutionRunReport(result, output);
+    process.exitCode = result.status === "completed" ? 0 : 1;
+}
+
+export async function runReviewRunCommand({ context, command, args }) {
+  const { config, repoRoot, output } = context;
+    void command;
+    const { flags } = parseCliFlags(args);
+    const issueId = flags.issue;
+    agenticFactoryHeading(output, "review run");
+    if (!issueId) {
+      output.error({
+        what: `Usage: ${formatCommand("review run --issue <issue_id> [--domain <id>]")}`,
+      });
+      process.exitCode = 2;
+      return;
+    }
+
+    let result;
+    let traceSink = null;
+    try {
+      const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
+      const foreground = resolveForegroundDomainCache({
+        config,
+        repoRoot,
+        registry,
+        domainId: flags.domain || null,
+      });
+      const credentialStore = createLinearCredentialStore({
+        config,
+        repoRoot,
+        domainContext: foreground.context,
+      });
+      const store = createLocalTriggerStore({ repoRoot });
+      const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(foreground.config, repoRoot));
+      const runtimeExecutor = createProcessRuntimeExecutor({
+        smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
+        repoRoot,
+      });
+      traceSink = createLocalPhoenixTraceSink({ repoRoot });
+      result = await runTriggeredReview({
+        issueId,
+        store,
+        runnerId: `local-runner:${foreground.context.domainId}`,
+        workspaceId: foreground.context.linear.workspaceId,
+        linearClientFactory: async () => createLinearSetupGraphqlClient({
+          config: foreground.config,
+          repoRoot,
+          credentialStore,
+          allowBrowserAuth: false,
+          allowRefresh: true,
+        }).client,
+        config: foreground.config,
+        cache: foreground.cache,
+        runtimeExecutor,
+        repoRoot,
+        leaseDurationMs: config?.runner?.lease_duration_ms,
+        runnerVersion: process.version,
+        capabilities: config?.runner?.required_capabilities || REVIEW_REQUIRED_CAPABILITIES,
+        traceSink,
+        domainContext: foreground.context,
+        registry,
+        runDeps: {
+          store,
+        },
+      });
+    } catch (error) {
+      output.error({
+        what: "Review run could not start",
+        why: redactOAuthSecrets(error.message),
+        fix: "check --issue, --domain, domain resources, and local Linear/GitHub setup, then retry.",
+      });
+      process.exitCode = 1;
+      return;
+    } finally {
+      await traceSink?.shutdown?.();
+    }
+
+    renderReviewRunReport(result, output);
+    process.exitCode = result.status === "completed" ? 0 : 1;
+}
 export async function runPhoenixStartCommand({ context, command, args }) {
   const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix start");
@@ -378,6 +1236,41 @@ export async function runPhoenixStartCommand({ context, command, args }) {
     output.nextSteps([
       { text: "Open Phoenix", hint: phoenix.appUrl },
     ]);
+    printVerboseHint(output);
+    process.exitCode = 0;
+}
+export async function runPhoenixOpenCommand({ context, command, args }) {
+  const { repoRoot, output } = context;
+    phoenixHeading(output, "phoenix open");
+    let phoenix;
+    try {
+      phoenix = await ensurePhoenixReady({
+        repoRoot,
+        onProgress: (line) => output.detail(line),
+      });
+    } catch (error) {
+      output.error({
+        what: "Local Phoenix could not start",
+        why: redactOAuthSecrets(error.message),
+        fix: phoenixRepairHintForError(error) || "check .agent-shell/logs/phoenix-server.err.log and retry.",
+      });
+      process.exitCode = 1;
+      return;
+    }
+    if (!phoenix.ok) {
+      output.error({
+        what: "Local Phoenix could not start",
+        why: phoenix.reason,
+        fix: phoenix.repairHint,
+      });
+      process.exitCode = 1;
+      return;
+    }
+    output.success(`Local Phoenix running: ${phoenix.appUrl}`);
+    output.nextSteps([
+      { text: `Open ${phoenix.appUrl}`, hint: "paste into your browser to view traces & evals" },
+    ]);
+    output.detail(`collector=${phoenix.collectorUrl}`);
     printVerboseHint(output);
     process.exitCode = 0;
 }
@@ -567,7 +1460,7 @@ export async function runWorklistCommand({ context, command, args }) {
 export async function runPhoenixPromoteRunCommand({ context, command, args }) {
   const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     phoenixHeading(output, "phoenix promote run");
-    const [runId, datasetName = "agentic-factory-decomposition-runs"] = args;
+    const [runId, datasetName = "teami-decomposition-runs"] = args;
     if (!runId) {
       output.error({ what: "Usage: npm run phoenix:promote-run -- <run_id> [dataset_name]" });
       process.exitCode = 2;
@@ -729,7 +1622,7 @@ export async function runEvalEmitChecksCommand({ context, command, args }) {
 export async function runEvalJudgeCommand({ context, command, args }) {
   const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "eval judge");
-    // Track D: the decomposition_quality model judge — code-first wrapper
+    // Track D: the quality model judge — code-first wrapper
     // around a Phoenix-managed prompt, strictly outside the live mutation
     // path (the judge never receives a Linear client and never decides live
     // mutation; CONSTRAINTS #27). Executes the repo-ACCEPTED prompt snapshot
@@ -837,7 +1730,7 @@ export async function runPhoenixExperimentDecompositionCommand({ context, comman
     // creates the experiment via REST, runs the non-mutating eval task per
     // example with the requested variant, records task outputs + explicit
     // evaluator results as experiment runs/evaluations, and writes the local
-    // managed-experiment receipt under .agentic-factory/experiments/.
+    // managed-experiment receipt under .teami/experiments/.
     // Intent defaults to exploratory in MVP: no repo-owned automation policy
     // exists yet, so promotion_candidate requires the explicit --intent flag.
     const { positionals, flags } = parseCliFlags(args);
@@ -968,7 +1861,7 @@ export async function runEvalGateCommand({ context, command, args }) {
     // (CONSTRAINTS #34), and reports in product terms. No repo mutation, no
     // PR creation, no Phoenix writes — the step 10 controller consumes this
     // result. The report is stdout + a local record under
-    // .agentic-factory/gate-reports/ only.
+    // .teami/gate-reports/ only.
     const rawArgs = args;
     const acceptCrossVersion = rawArgs.includes("--accept-cross-version");
     const { flags } = parseCliFlags(rawArgs.filter((arg) => arg !== "--accept-cross-version"));
@@ -1047,7 +1940,7 @@ export async function runDraftImprovementCommand({ context, command, args }) {
 export async function runPromoteCandidateCommand({ context, command, args }) {
   const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "promote candidate");
-    // Step 10 (Track G): the agentic_factory.promote_candidate MVP promotion
+    // Step 10 (Track G): the teami.promote_candidate MVP promotion
     // controller. CLI JSON transport (D3): the request envelope comes from
     // --input <request.json>, with inline flags for debugging. The controller
     // owns the outcome (route_to_hitl | blocked); the only caller-requestable
@@ -1125,7 +2018,7 @@ export async function runPromotionScanCommand({ context, command, args }) {
   const { config, repoRoot, cachePath, setupStatePath, credentialStore, output } = context;
     agenticFactoryHeading(output, "promotion scan");
     // Step 12: deterministic candidate-intent scanner. It records local
-    // ledger/health under .agentic-factory/promotion-candidates/, derives
+    // ledger/health under .teami/promotion-candidates/, derives
     // budget/caps from repo-visible PR markers, and calls the committed
     // promotion controller only after explicit intent and deterministic
     // evidence packaging. GitHub marker reads share the same production
@@ -1254,8 +2147,10 @@ function renderPromotionOutcomeResult(result, output) {
     output.error({
       what: `Improvement opportunity found: ${humanName}`,
       why: `Evidence suggests ${humanName} could improve${failureLabels.length > 0 ? ` on ${failureLabels.join(", ")}` : ""}, but no concrete prompt or policy change has been drafted yet.`,
-      fix: result.candidate_target_key
-        ? `run npm run draft-improvement -- --target ${result.candidate_target_key}`
+      fix: result.normalized_envelope_hash
+        ? `run npm run draft-improvement -- --opportunity ${result.normalized_envelope_hash}`
+        : result.candidate_target_key
+          ? `run npm run draft-improvement -- --target ${result.candidate_target_key}`
         : "draft the proposed agent, prompt, or policy change, then rerun promotion.",
     });
   } else if (result.evidence_repair) {
@@ -1393,6 +2288,8 @@ function promotionCandidateHeadline(candidate, result) {
 
 function promotionCandidateNextAction(candidate) {
   if (candidate.status === "improvement_opportunity") {
+    const opportunityHash = candidate.opportunity_hash || candidate.normalized_envelope_hash;
+    if (opportunityHash) return `npm run draft-improvement -- --opportunity ${opportunityHash}`;
     const target = candidate.candidate_target_key || candidate.target_key;
     return target ? `npm run draft-improvement -- --target ${target}` : "draft the proposed change, then rerun promotion";
   }
@@ -1512,7 +2409,7 @@ function phoenixHeading(output, readableCommand) {
 function phoenixRepairHintForError(error) {
   const message = String(error?.message || error || "");
   if (/must bind to loopback/i.test(message)) {
-    return "unset AGENTIC_FACTORY_PHOENIX_URL or point it at a loopback address, then retry.";
+    return "unset TEAMI_PHOENIX_URL or point it at a loopback address, then retry.";
   }
   return null;
 }
@@ -1806,6 +2703,64 @@ function renderJudgeDetails(result, output, { heading = "Judge" } = {}) {
   if (result.judge?.explanation) output.detail(`explanation=${result.judge.explanation}`);
   if (result.annotation_ids?.length > 0) output.detail(`annotation_ids=${result.annotation_ids.join(",")}`);
   if (result.receipt_path) output.detail(`receipt=${result.receipt_path}`);
+}
+
+function renderExecutionRunReport(result, output) {
+  const inner = result?.result || result;
+  const status = inner?.status || result?.status || "unknown";
+  const reason = inner?.reason || result?.reason || inner?.failureReasons?.join(",") || null;
+  if (status === "completed") {
+    output.success("Execution run completed");
+  } else {
+    output.error({
+      what: `Execution run finished as ${status}`,
+      why: reason,
+      fix: "inspect the run artifact and local trigger state before retrying.",
+    });
+  }
+  output.keyValues([
+    ["Status", status],
+    ["Issue", result?.wake?.object_id || inner?.artifact?.linear_issue_id || "unknown"],
+    ["Wake", result?.wake?.id || "none"],
+    ["Run", result?.wake?.run_id || inner?.artifact?.run_id || "unknown"],
+    ["Artifact", inner?.durableRecord?.artifact_path || result?.run?.artifact_pointer?.artifact_path || "none"],
+  ], { heading: "Execution" });
+  if (Array.isArray(inner?.produced_identities) && inner.produced_identities.length > 0) {
+    output.detail(`produced_identities=${inner.produced_identities.length}`);
+  }
+  if (result?.traceDelivery) {
+    output.detail(`trace=${result.traceDelivery.status || "unknown"}${result.traceDelivery.reason ? ` (${result.traceDelivery.reason})` : ""}`);
+  }
+  printVerboseHint(output);
+}
+
+function renderReviewRunReport(result, output) {
+  const inner = result?.result || result;
+  const status = inner?.status || result?.status || "unknown";
+  const reason = inner?.reason || result?.reason || inner?.failureReasons?.join(",") || null;
+  if (status === "completed") {
+    output.success("Review run completed");
+  } else {
+    output.error({
+      what: `Review run finished as ${status}`,
+      why: reason,
+      fix: "inspect the run artifact and local trigger state before retrying.",
+    });
+  }
+  output.keyValues([
+    ["Status", status],
+    ["Issue", result?.wake?.object_id || inner?.artifact?.linear_issue_id || "unknown"],
+    ["Wake", result?.wake?.id || "none"],
+    ["Run", result?.wake?.run_id || inner?.artifact?.run_id || "unknown"],
+    ["Artifact", inner?.durableRecord?.artifact_path || result?.run?.artifact_pointer?.artifact_path || "none"],
+  ], { heading: "Review" });
+  if (Array.isArray(inner?.produced_identities) && inner.produced_identities.length > 0) {
+    output.detail(`produced_identities=${inner.produced_identities.length}`);
+  }
+  if (result?.traceDelivery) {
+    output.detail(`trace=${result.traceDelivery.status || "unknown"}${result.traceDelivery.reason ? ` (${result.traceDelivery.reason})` : ""}`);
+  }
+  printVerboseHint(output);
 }
 
 function judgeFailureWhy(result) {
@@ -2411,9 +3366,10 @@ function renderPhoenixExperimentAmendmentResult(result, output) {
   printVerboseHint(output);
 }
 export {
-  CLI_USAGE,
-  COMMAND_TABLE,
+  COMMAND_INDEX,
+  COMMAND_REGISTRY,
   createCliContext,
-  printCliUsage,
   redactOAuthSecrets,
+  renderCuratedHelp,
+  renderHomeScreen,
 };

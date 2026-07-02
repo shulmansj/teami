@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# Teami repo-local launcher.
+# Run `./teami <command>` from anywhere; the repo dir is resolved from this
+# script's own location, so the working directory does not matter. This is a
+# dumb shim - all command resolution lives in the CLI dispatcher.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$here/execution/integrations/linear/cli.mjs" "$@"

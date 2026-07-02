@@ -2,7 +2,7 @@
 
 Provenance: hand-curated from current output.
 
-This issue bundle is manually curated to match the current Agentic Factory
+This issue bundle is manually curated to match the current Teami
 issue body contract. It represents the shape of a successful decomposition, not
 a live Linear mutation from this demo package.
 
@@ -10,7 +10,7 @@ Source project: [Renewal Risk Triage Workspace](../input/linear-project.md)
 
 ## Native Linear Relations
 
-Agentic Factory would encode these as Linear blocking relations, not only as
+Teami would encode these as Linear blocking relations, not only as
 issue-body prose:
 
 | Relation | Meaning |
@@ -146,7 +146,7 @@ Review workspace UI and state handling for renewal-risk summaries.
 ## Assignment
 
 Instrument the renewal-risk triage workflow so the team can tell whether the
-workspace helped the meeting and whether Agentic Factory produced executable
+workspace helped the meeting and whether Teami produced executable
 issues from the roadmap item.
 
 ## Inputs

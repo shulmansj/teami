@@ -1,6 +1,6 @@
 # Self-Improvement
 
-Self-improvement is core to Agentic Factory, not an optional analytics layer.
+Self-improvement is core to Teami, not an optional analytics layer.
 This document owns the product and trust contract for the learning loop. Current
 implemented commands remain listed in the README and Linear integration docs.
 
@@ -89,10 +89,11 @@ controller structurally cannot merge, the full v2 auto-acceptance invariant
 list, and the Phoenix handoff entry points -- is
 [promotion-acceptance-policy.md](promotion-acceptance-policy.md).
 
-Prompt, rubric, evaluator, calibration, and accepted process behavior are
-workspace-local in MVP. Each adopter should be able to customize the loop to
-reflect how that workspace works. Network effects, shared rubric learning, and
-cross-workspace promotion are future product posture, not MVP scope.
+Adopter-owned work-function prompts, annotations, and accepted process behavior
+are workspace-local in MVP. The shared Judge rubric, evaluator, and calibration
+are maintainer-owned system behavior that ships back through accepted product
+updates. Network effects, shared rubric learning, and cross-workspace promotion
+are future product posture, not MVP scope.
 
 ## Interaction Surface Principle
 
@@ -112,7 +113,7 @@ prompts, experiments, and evaluator results. Phoenix-native agent surfaces such
 as PXI should be used when available for inspecting evidence, iterating prompts,
 running experiments, and recording annotations inside Phoenix. External agent
 sessions remain an operational control surface for asking questions, running
-Agentic Factory workflows, summarizing failures, debugging proposals, and
+Teami workflows, summarizing failures, debugging proposals, and
 drafting process changes.
 
 All agent, judge, and evaluator prompts should be authored and evaluated as
@@ -125,7 +126,7 @@ with explicit materializers. Promotion policy, proposal
 machinery, credentials, write authority, protected maps, and maintainer-owned
 gates are factory behavior, not adopter self-improvement targets.
 
-Agentic Factory should add Phoenix-native wrappers, deep links, schemas, and
+Teami should add Phoenix-native wrappers, deep links, schemas, and
 agent-callable commands rather than a competing dashboard. It should not require
 the user to switch from Phoenix to an external agent session just to trigger the
 obvious promotion path after explicit candidate intent exists. Routine promotion
@@ -139,13 +140,13 @@ before it affects accepted behavior. Linear remains the live work-state surface,
 and the repo remains the reviewable process-change record.
 
 This requires one durable local process boundary. Phoenix can be restarted
-opportunistically because Agentic Factory commands already probe and start the
+opportunistically because Teami commands already probe and start the
 loopback service when needed. The Workflow Runner and self-improvement scanner
-need a local Agentic Factory supervisor so the loop does not depend on a human
+need a local Teami supervisor so the loop does not depend on a human
 remembering to restart foreground runner or scanner commands after a machine
 reboot. The supervisor should be installed or registered only after one
 explicit init-time trust grant. After that grant, the supervisor may run
-Agentic Factory functionality for the workspace within repo-owned policy:
+Teami functionality for the workspace within repo-owned policy:
 runner work, scanner work, evidence resolution, HITL proposal drafting, and
 opening GitHub PRs only after the proposal write and packet gates are
 fail-closed. Until then, unattended supervisor PR work stays report-only or
@@ -208,15 +209,15 @@ improvement, regressions if any, and Phoenix/repo evidence links before merge.
 Do not promise post-merge Linear or status updates until a merge/acceptance
 observer is explicitly scoped.
 
-Promotion readiness is anchored in a dedicated Agentic Factory behavior repo.
+Promotion readiness is anchored in a dedicated Teami behavior repo.
 Behavior-changing proposals should route through owner-reviewed PRs in that
-repo. Product repos are bound separately with `domain:bind-repo` as local
-`git_repo` resources for domain-scoped work; that binding is not behavior-repo
+repo. Product repos are granted separately with `teami domain grant` as local
+`git_repo` resources for domain-scoped work; that grant set is not behavior-repo
 proposal authority and does not give proposal workflows product-repo access. If
 the starter checkout already has an upstream/template remote, setup may preserve
 that remote only as template state.
 
-Target ongoing controller access is selected-repo access to the Agentic Factory
+Target ongoing controller access is selected-repo access to the Teami
 behavior repo, scoped to metadata, proposal branches/commits, PR creation/body
 updates, and open/closed PR metadata for dedupe and rejection memory. If setup
 cannot verify the behavior repo or selected-repo access, behavior-change PR
@@ -233,7 +234,7 @@ all-repositories grant.
 The controller should open regular PRs only after evidence is packaged and the
 proposal is ready for human review. If the proposal is not review-ready, keep it
 in controller/agent status instead of creating a GitHub PR. The no-merge promise
-is enforced by Agentic Factory policy and GitHub client tests, not by GitHub
+is enforced by Teami policy and GitHub client tests, not by GitHub
 permissions alone, because the contents permission needed for proposal commits
 can also be sufficient to merge a PR.
 
@@ -241,19 +242,19 @@ For MVP, the self-improvement loop stops at a reviewable repo proposal. The
 system may detect explicit candidate intent, package evidence, label evidence
 quality, classify risk, draft the repo change, pin Phoenix evidence, and open a
 PR, but it must not merge, apply, or otherwise make the change live. A human owns
-that final step until Agentic Factory has a general code-review and acceptance
+that final step until Teami has a general code-review and acceptance
 system for all agent-authored repo changes. This is still a self-improving loop at MVP
 maturity: it removes the clerical work from evidence-to-proposal. Later
 maturity can close the final proposal-to-merge step for adopter-configured risk
 classes through the shared review system, not a special promotion-only path.
 
 Human-triggered prompt experiments enter the acceptance flow through the tested
-prompt version, not by labeling the experiment itself. A managed Agentic Factory
+prompt version, not by labeling the experiment itself. A managed Teami
 experiment records whether the candidate is `promotion_candidate` or
 `exploratory` and includes the target artifact, baseline, candidate, dataset,
 evaluator, policy, actor, and Phoenix experiment identifiers needed for evidence
 packaging. A Phoenix-native prompt version can be marked with a custom
-Phoenix-valid candidate tag, such as `agentic_factory_promotion_candidate`,
+Phoenix-valid candidate tag, such as `teami_promotion_candidate`,
 when the user wants it considered for repo promotion. Phoenix-native
 experiments without that prompt candidate tag are evidence only. Use one
 promotion-candidate tag per Phoenix prompt; moving the tag supersedes the prior
@@ -300,19 +301,19 @@ annotations so evaluation can connect quality signals back to operational work.
 ### Local Run Store
 
 Accepted turn packets, terminal orchestrator output, and final commit or pause
-artifacts are persisted under `.agentic-factory/runs/<run_id>.json` before
+artifacts are persisted under `.teami/runs/<run_id>.json` before
 Linear mutation. That ignored local store is the retry authority for a commit
 attempt. It is not a durable eval backend and should not be committed.
 
 ### Local Phoenix Trace And Eval Store
 
-Local Phoenix on the adopter machine is the supported Agentic Factory trace and
+Local Phoenix on the adopter machine is the supported Teami trace and
 self-improvement path for this MVP. Local trigger/run state remains the
 mutation-coordination store for Linear polling, wake leases, mutation intent,
 and terminal wake state; it does not receive trace payloads and does not store
 trace status.
 
-The runner exports existing Agentic Factory `trace.mjs` spans to local Phoenix.
+The runner exports existing Teami `trace.mjs` spans to local Phoenix.
 It first tries Phoenix's OTLP HTTP trace endpoint and falls back to Phoenix's
 REST spans endpoint when the local Phoenix version rejects OTLP JSON. `npm run
 init` installs or reuses Phoenix, starts a managed loopback service when needed,
@@ -340,7 +341,7 @@ Phoenix owns high-volume or time-series learning data:
 - Prompt versions, evaluator prompt versions, and prompt-version tags used
   during a run or candidate experiment.
 
-Use native Phoenix learning surfaces before adding Agentic Factory storage.
+Use native Phoenix learning surfaces before adding Teami storage.
 `npm run phoenix:annotate-trace -- <trace_id> <label> [score] [explanation]`
 records a Phoenix trace annotation. `npm run phoenix:promote-run -- <run_id> [dataset_name]`
 promotes a bounded local trace receipt into a Phoenix dataset example for later
@@ -374,7 +375,7 @@ uninstall do not silently delete `.agent-shell/phoenix-data`.
 
 ## GraphQL Linear Integration
 
-The supported Linear integration path is Agentic Factory OAuth plus Linear
+The supported Linear integration path is Teami OAuth plus Linear
 GraphQL. Setup, reads, project updates, issue creation, issue relations, status
 changes, and template updates use the same credential path. Agents can query
 Linear through mediated GraphQL read methods, but Linear writes are committed by
@@ -386,8 +387,8 @@ spread runtime evidence across multiple Linear access mechanisms.
 
 ## Decomposition Trace Shape
 
-Each decomposition run should emit one top-level trace named
-`decomposition_run`.
+Each decomposition run should emit one top-level trace named by the workflow
+definition's `trace_descriptor.trace_name`.
 
 Root trace attributes include `workspace_id`, `event_id`, `wake_id`, `run_id`,
 `attempt`, `trace_id`, source provider/object IDs, runner identity, runtime
@@ -418,7 +419,7 @@ Minimum required fields:
 
 ```yaml
 workflow:
-  name: decomposition_run
+  name: <definition trace_descriptor.trace_name>
   version: <workflow version>
 run:
   id: <run_id>
@@ -435,7 +436,7 @@ runtime:
   sr_eng_runtime: <codex|claude>
   sr_eng_model: <model>
 artifacts:
-  run_store_path: .agentic-factory/runs/<run_id>.json
+  run_store_path: .teami/runs/<run_id>.json
   persisted_before_linear_mutation: true
 actions:
   graphQL_reads: []
@@ -452,7 +453,7 @@ eval:
 
 ## Offline Evaluators
 
-`decomposition_quality` is an offline scorer over trace and resulting Linear
+`quality` is an offline scorer over trace and resulting Linear
 state. It is not a live decomposition span and it is not a mutation gate.
 
 `accepted_packet_sufficiency` is an offline check that accepted turn packets or
@@ -467,7 +468,7 @@ identifier), and emissions record the failure-taxonomy version they were
 checked against. Example deterministic check result:
 
 ```yaml
-name: decomposition_quality
+name: quality
 annotator_kind: CODE
 identifier: decomposition_quality_offline_v1
 label: needs_revision
@@ -579,16 +580,16 @@ change.
 
 ## Onboarding Metrics
 
-Agentic Factory should measure onboarding as product quality once the workflow
+Teami should measure onboarding as product quality once the workflow
 has stable commands.
 
 Initial metrics:
 
-- Time To Workspace: clone to verified `Agentic Factory` Linear team, statuses,
+- Time To Workspace: clone to verified `Teami` Linear team, statuses,
   labels, and project template.
 - Time To First Roadmap Project: verified workspace setup to first disposable
   Linear project with a non-empty body.
-- Time To First GraphQL-Created Issue: Agentic Factory OAuth authorization to
+- Time To First GraphQL-Created Issue: Teami OAuth authorization to
   first issue created from a Linear project with a captured trace summary.
 
 These metrics are not fully instrumented in the current Linear setup slice.

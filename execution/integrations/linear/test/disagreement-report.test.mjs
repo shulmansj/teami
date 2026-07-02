@@ -34,10 +34,10 @@ const TRACE_IDENTITY = Object.freeze({
   teamId: "team-1",
 });
 
-const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "agentic-factory" });
+const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" });
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-disagreement-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-disagreement-"));
 }
 
 function recordTestTraceStatus(options) {
@@ -83,7 +83,7 @@ function fetchRouter(routes, { annotationsByTrace = {} } = {}) {
 function humanAnnotation({ label = "pass", score = 0.9, failureModes = [], identifier = "steve", id = "anno-h1" } = {}) {
   return {
     id,
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "HUMAN",
     identifier,
     result: { label, score, explanation: "human taste judgment" },
@@ -98,7 +98,7 @@ function humanAnnotation({ label = "pass", score = 0.9, failureModes = [], ident
 function llmAnnotation({ label = "pass", score = 0.9, failureModes = [], id = "anno-l1" } = {}) {
   return {
     id,
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "LLM",
     identifier: "decomposition_quality_judge_v1:test-model",
     result: { label, score, explanation: "rubric verdict" },
@@ -113,7 +113,7 @@ function llmAnnotation({ label = "pass", score = 0.9, failureModes = [], id = "a
 function codeAnnotation({ label = "needs_revision", score = 0, failureModes = ["missing_acceptance_criteria"], id = "anno-c1" } = {}) {
   return {
     id,
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "CODE",
     identifier: "decomposition_quality_offline_v1",
     result: { label, score, explanation: "structural gaps" },
@@ -122,7 +122,7 @@ function codeAnnotation({ label = "needs_revision", score = 0, failureModes = ["
 }
 
 function projectsRoute() {
-  return jsonResponse({ data: [{ id: "UHJvamVjdDox", name: "agentic-factory" }] });
+  return jsonResponse({ data: [{ id: "UHJvamVjdDox", name: "teami" }] });
 }
 
 // ---------------------------------------------------------------------------
@@ -131,13 +131,13 @@ function projectsRoute() {
 
 test("worklist and disagreement report share one detection source of truth", () => {
   const humans = [
-    { name: "decomposition_quality", annotator_kind: "HUMAN", identifier: "steve", label: "pass", score: 0.9, explanation: "good", metadata: { failure_modes: [] } },
+    { name: "quality", annotator_kind: "HUMAN", identifier: "steve", label: "pass", score: 0.9, explanation: "good", metadata: { failure_modes: [] } },
   ];
   const llms = [
-    { name: "decomposition_quality", annotator_kind: "LLM", identifier: "judge", label: "needs_revision", score: 0.55, explanation: "gaps", metadata: { failure_modes: ["prose_dependency_instead_of_relation"] } },
+    { name: "quality", annotator_kind: "LLM", identifier: "judge", label: "needs_revision", score: 0.55, explanation: "gaps", metadata: { failure_modes: ["prose_dependency_instead_of_relation"] } },
   ];
   const codes = [
-    { name: "decomposition_quality", annotator_kind: "CODE", identifier: "code", label: "needs_revision", score: 0, explanation: "structural", metadata: { failure_modes: ["missing_acceptance_criteria"] } },
+    { name: "quality", annotator_kind: "CODE", identifier: "code", label: "needs_revision", score: 0, explanation: "structural", metadata: { failure_modes: ["missing_acceptance_criteria"] } },
   ];
   const shared = detectAnnotationDisagreements({ humans, llms, codes });
   const status = deriveRunEvalStatus({ annotations: [...humans, ...llms, ...codes] });
@@ -153,9 +153,9 @@ test("worklist and disagreement report share one detection source of truth", () 
 test("band-mismatch check flags HUMAN/LLM out-of-band scores but never CODE binary scores", () => {
   const flagged = detectBandMismatchedAnnotations([
     // HUMAN pass with a needs_revision-band score: flagged, still valid.
-    { name: "decomposition_quality", annotator_kind: "HUMAN", identifier: "steve", label: "pass", score: 0.5 },
+    { name: "quality", annotator_kind: "HUMAN", identifier: "steve", label: "pass", score: 0.5 },
     // LLM in band: not flagged.
-    { name: "decomposition_quality", annotator_kind: "LLM", identifier: "judge", label: "pass", score: 0.9 },
+    { name: "quality", annotator_kind: "LLM", identifier: "judge", label: "pass", score: 0.9 },
     // CODE binary scores are structural, not taste: never band-checked.
     { name: "accepted_packet_sufficiency", annotator_kind: "CODE", identifier: "code", label: "needs_revision", score: 0 },
     { name: "accepted_packet_sufficiency", annotator_kind: "CODE", identifier: "code", label: "pass", score: 1 },
@@ -260,7 +260,7 @@ test("run mode detects human/LLM label conflict and preserves raw records and Ph
     assert.equal(call.method, null, `non-GET request observed: ${call.pathname}`);
     assert.equal(call.body, null);
   }
-  assert.ok(!fs.existsSync(path.join(repoRoot, ".agentic-factory", "gate-reports")));
+  assert.ok(!fs.existsSync(path.join(repoRoot, ".teami", "gate-reports")));
 
   const lines = formatDisagreementReport(report);
   assert.ok(lines[0].includes("never persisted"));
@@ -312,7 +312,7 @@ test("run mode surfaces judge_invalid and judge_missing receipt attempts as work
       status: "trace_exported",
       observedAt: "2026-06-10T01:00:00.000Z",
     });
-    const runsDir = path.join(repoRoot, ".agentic-factory", "runs");
+    const runsDir = path.join(repoRoot, ".teami", "runs");
     fs.mkdirSync(runsDir, { recursive: true });
     fs.writeFileSync(path.join(runsDir, "run-judge.judge.json"), JSON.stringify({
       schema_version: 1,
@@ -425,7 +425,7 @@ function experimentRow({ exampleId, judge = null, judgeError = null, code = null
   const annotations = [];
   if (judge) {
     annotations.push({
-      name: "decomposition_quality",
+      name: "quality",
       annotator_kind: "LLM",
       label: judge.label,
       score: judge.score,
@@ -440,7 +440,7 @@ function experimentRow({ exampleId, judge = null, judgeError = null, code = null
   }
   if (judgeError) {
     annotations.push({
-      name: "decomposition_quality",
+      name: "quality",
       annotator_kind: "LLM",
       label: null,
       score: null,
@@ -498,7 +498,7 @@ test("experiment mode compares human/LLM/CODE per example through verified GETs 
   const fetchImpl = fetchRouter(
     {
       "GET /v1/experiments/EXP1": jsonResponse({
-        data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "agentic-factory", metadata: {} },
+        data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "teami", metadata: {} },
       }),
       "GET /v1/experiments/EXP1/json": jsonResponse(rows),
       "GET /v1/datasets/DS1/examples": jsonResponse({ data: { examples: records } }),
@@ -573,7 +573,7 @@ test("human-labeled requires an actually-resolved HUMAN annotation; referenced-b
   const fetchImpl = fetchRouter(
     {
       "GET /v1/experiments/EXP1": jsonResponse({
-        data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "agentic-factory", metadata: {} },
+        data: { id: "EXP1", dataset_id: "DS1", dataset_version_id: "DSV9", project_name: "teami", metadata: {} },
       }),
       "GET /v1/experiments/EXP1/json": jsonResponse(rows),
       "GET /v1/datasets/DS1/examples": jsonResponse({ data: { examples: records } }),

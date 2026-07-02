@@ -1,5 +1,6 @@
 import { ensurePhoenixReady, phoenixStatus } from "./local-phoenix-manager.mjs";
 import { createPhoenixTraceAnnotation } from "./phoenix-self-improvement.mjs";
+import { DEFAULT_ANNOTATION_NAME } from "./eval-annotation-contract.mjs";
 import {
   evaluateAcceptedPacketSufficiencyOffline,
   evaluateDecompositionQualityOffline,
@@ -163,13 +164,13 @@ export function runDeterministicChecksForArtifact({ artifact = null, checkInputs
 
   if (!artifact || typeof artifact !== "object") {
     return [
-      skipped("decomposition_quality", "decomposition_quality_offline_v1", "missing_run_artifact", ["run_artifact"]),
+      skipped(DEFAULT_ANNOTATION_NAME, "decomposition_quality_offline_v1", "missing_run_artifact", ["run_artifact"]),
       skipped("accepted_packet_sufficiency", "accepted_packet_sufficiency_offline_v1", "missing_run_artifact", ["run_artifact"]),
       skipped("pause_state_correctness", "pause_state_correctness_offline_v1", "missing_run_artifact", ["run_artifact"]),
     ];
   }
 
-  // decomposition_quality: evaluateDecompositionQualityOffline inspects
+  // quality: evaluateDecompositionQualityOffline inspects
   // structured issue fields (assignment / output / acceptanceCriteria) that
   // run artifacts do NOT record — final_issues carry only the Linear handoff
   // shape (decomposition_key, title, issue_body_markdown, depends_on, ...).
@@ -179,11 +180,12 @@ export function runDeterministicChecksForArtifact({ artifact = null, checkInputs
   // check with a named reason unless the caller (eval-mode / the step-8
   // experiment wrapper, which owns evaluator-input mapping per Track E)
   // supplies structured inputs explicitly.
-  if (checkInputs.decomposition_quality) {
-    checks.push(evaluated(evaluateDecompositionQualityOffline(checkInputs.decomposition_quality)));
+  const qualityCheckInput = checkInputs[DEFAULT_ANNOTATION_NAME];
+  if (qualityCheckInput) {
+    checks.push(evaluated(evaluateDecompositionQualityOffline(qualityCheckInput)));
   } else {
     checks.push(skipped(
-      "decomposition_quality",
+      DEFAULT_ANNOTATION_NAME,
       "decomposition_quality_offline_v1",
       "structured_issue_inputs_not_recorded_in_run_artifact",
       ["issues[].assignment", "issues[].output", "issues[].acceptanceCriteria"],
@@ -283,7 +285,7 @@ export function assertCodeCheckResult(annotation) {
 // Post-run / eval-mode emission of deterministic check results.
 //
 // Accepts EITHER a run id (loads the local run artifact from
-// .agentic-factory/runs/ and the trace receipt from
+// .teami/runs/ and the trace receipt from
 // .agent-shell/telemetry/runs/) OR in-memory artifacts (eval-mode parity: the
 // step-8 experiment wrapper passes `artifact` + `traceId` + `checkInputs`
 // directly). Evaluated results are written as Phoenix trace annotations with

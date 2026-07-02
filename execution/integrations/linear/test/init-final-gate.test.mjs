@@ -50,7 +50,7 @@ test("runFinalGate keeps setup green when smoke fails but doctor is green", asyn
   assert.equal(result.ok, true);
   assert.equal(result.smokeOk, false);
   assertCall(output, "warn", "Runtime check did not pass; setup will still complete.");
-  assertCall(output, "info", "run npm run runtime-smoke");
+  assertCall(output, "info", `You can re-run the check any time with ${factoryLauncherCommand("runtime-smoke")}.`);
   assertCall(output, "success", "Setup verified.");
 });
 
@@ -72,14 +72,35 @@ test("runFinalGate fails when doctor has a red check", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.doctorOk, false);
   assert.ok(
-    output.calls.some((call) => call.method === "error" && call.args[0]?.what === "GitHub connection"),
+    output.calls.some((call) => call.method === "raw" && String(call.args[0]).includes("GitHub connection")),
+    "the failing check renders through the shared doctor renderer",
   );
   assert.ok(
     output.calls.some((call) =>
       call.method === "error" &&
       call.args[0]?.what === "Some setup checks need attention" &&
-      call.args[0]?.fix === "fix the checks above, then re-run npm run init (setup is resumable)."),
+      call.args[0]?.fix === `fix the checks above, then re-run ${factoryLauncherCommand("init")} (setup is resumable).`),
   );
+});
+
+test("runFinalGate stays green when doctor has only a warning (warn never fails onboarding)", async () => {
+  const output = createRecordingOutput();
+  const result = await runFinalGate({
+    config: {},
+    repoRoot: process.cwd(),
+    cachePath: "linear-cache.json",
+    domainId: "domain-one",
+    output,
+    runSmoke: async () => ({ ok: true, results: [] }),
+    runDoctor: async () => [
+      { name: "domain registry", ok: true },
+      { name: "local supervisor OS autostart", state: "warn", message: "DRY-RUN only" },
+    ],
+  });
+
+  assert.equal(result.ok, true, "a warning must not fail onboarding");
+  assert.equal(result.doctorOk, true);
+  assertCall(output, "success", "Setup verified.");
 });
 
 test("finishSetupOutput prints closeout on green gate and resumable warning on red gate", async () => {
@@ -111,7 +132,7 @@ test("finishSetupOutput prints closeout on green gate and resumable warning on r
     });
 
     assert.equal(process.exitCode, 1);
-    assertCall(redOutput, "warn", "Setup is resumable — fix the checks above and re-run npm run init.");
+    assertCall(redOutput, "warn", `Setup is resumable — fix the checks above and re-run ${factoryLauncherCommand("init")}.`);
     assert.equal(redOutput.calls.some((call) => call.method === "done" && call.args[0] === "Setup complete."), false);
   } finally {
     process.exitCode = previousExitCode;
@@ -154,10 +175,10 @@ test("finishSetupOutput fires from both normal finish and GitHub resume paths", 
 
 test("factoryLauncherCommand returns the platform launcher form and appends the subcommand", () => {
   const prefix = factoryLauncherCommand();
-  // Windows (PowerShell/cmd.exe) needs `.\factory.cmd`; POSIX shells use `./factory`.
-  assert.match(prefix, /^(\.\\factory\.cmd|\.\/factory)$/);
+  // Windows (PowerShell/cmd.exe) needs `.\teami.cmd`; POSIX shells use `./teami`.
+  assert.match(prefix, /^(\.\\teami\.cmd|\.\/teami)$/);
   assert.equal(factoryLauncherCommand("gateway start"), `${prefix} gateway start`);
-  assert.equal(prefix, process.platform === "win32" ? ".\\factory.cmd" : "./factory");
+  assert.equal(prefix, process.platform === "win32" ? ".\\teami.cmd" : "./teami");
 });
 
 function createRecordingOutput() {
@@ -167,9 +188,20 @@ function createRecordingOutput() {
     verbose: false,
     style: {
       dim: (text) => String(text),
+      red: (text) => String(text),
+      yellow: (text) => String(text),
+      green: (text) => String(text),
+      cyan: (text) => String(text),
+      bold: (text) => String(text),
     },
     symbols: {
       ellipsis: "...",
+      success: "+",
+      error: "x",
+      warn: "!",
+      step: ">",
+      arrow: "->",
+      separator: "-",
     },
     section: record("section"),
     info: record("info"),
@@ -180,6 +212,11 @@ function createRecordingOutput() {
     done: record("done"),
     nextSteps: record("nextSteps"),
     raw: record("raw"),
+    progress: (label) => {
+      calls.push({ method: "progress", args: [label] });
+      const noop = (text) => calls.push({ method: "progress.terminal", args: [text] });
+      return { update: noop, succeed: noop, fail: noop, stop: () => noop() };
+    },
   };
   return output;
 

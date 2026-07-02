@@ -1,6 +1,6 @@
 # Documentation Hygiene
 
-Documentation quality is part of the product. Agentic Factory asks adopters to
+Documentation quality is part of the product. Teami asks adopters to
 trust an agent workflow, so confusing docs create product risk, not just repo
 mess.
 

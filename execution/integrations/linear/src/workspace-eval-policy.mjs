@@ -21,7 +21,7 @@ export const WORKSPACE_EVAL_POLICY_PATH = resolveDecompositionEvalPath(
   MODULE_REPO_ROOT,
   decompositionEvalNamespacePath("workspace-eval-policy.json"),
 );
-export const WORKSPACE_EVAL_POLICY_SCHEMA_VERSION = "agentic-factory-workspace-eval-policy/v1";
+export const WORKSPACE_EVAL_POLICY_SCHEMA_VERSION = "teami-workspace-eval-policy/v1";
 
 const exampleSchema = JSON.parse(
   fs.readFileSync(

@@ -279,6 +279,7 @@ function renderLocalSupervisorRunResult(result, output) {
       ["Next start", iteration.next_allowed_start_at],
       ["Runner", supervisorStepSummary(iteration.runner)],
       ["Scanner", supervisorStepSummary(iteration.scanner)],
+      ["Export", supervisorStepSummary(iteration.export)],
     ]));
     output.detail(`iteration=${redactOAuthSecrets(JSON.stringify(iteration))}`);
   });

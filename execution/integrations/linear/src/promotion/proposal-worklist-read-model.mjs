@@ -21,7 +21,7 @@ import {
 } from "./registry-store.mjs";
 
 export const PHASE_2_PROPOSAL_WORKLIST_SCHEMA_VERSION =
-  "agentic-factory-phase-2-proposal-worklist/v1";
+  "teami-phase-2-proposal-worklist/v1";
 
 export const PHASE_2_PROPOSAL_STATE_NAMES = Object.freeze({
   CANDIDATE_CREATED: "candidate-created",
@@ -1032,7 +1032,7 @@ function markConnectionRepair({ builder, reason, detail }) {
     kind: "connection",
     copyClass: "blocked_for_repair",
     headline: "Behavior rules connection needs repair.",
-    whyItMatters: "Agentic Factory cannot safely tell whether behavior proposals are waiting until this is repaired.",
+    whyItMatters: "Teami cannot safely tell whether behavior proposals are waiting until this is repaired.",
     blockedBy: "The connection to the behavior rules needs repair before proposals can be checked.",
     whereToDecide: "No owner approve/decline decision yet.",
     optionalTechnical: { reason: reason ?? null, detail: detail ?? null },

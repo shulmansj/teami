@@ -92,7 +92,7 @@ export function evaluateDecompositionQualityOffline({ issues, dependencies, assu
   const score = Math.max(0, 1 - uniqueFailureModes.length * 0.2);
 
   return {
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "CODE",
     identifier: "decomposition_quality_offline_v1",
     label: uniqueFailureModes.length === 0 ? "pass" : "needs_revision",

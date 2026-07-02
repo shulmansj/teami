@@ -1,0 +1,18 @@
+{
+  "schema_version": "teami-failure-taxonomy/v1",
+  "failure_taxonomy_version": "probe-taxonomy-v1",
+  "structural": {
+    "failure_modes": [
+      "probe_missing_trace",
+      "probe_missing_terminal_output"
+    ]
+  },
+  "workflows": {
+    "probe": {
+      "failure_modes": [
+        "probe_missing_artifact",
+        "probe_unsettled_identity"
+      ]
+    }
+  }
+}

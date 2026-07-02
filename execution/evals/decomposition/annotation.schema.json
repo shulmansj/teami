@@ -9,9 +9,9 @@
   ],
   "$defs": {
     "annotation_name": {
-      "description": "Canonical decomposition annotation names. Each dimension is a separate annotation name. decomposition_quality is the roll-up used for default gates and must not drift. accepted_packet_sufficiency and pause_state_correctness are deterministic-check names stored with annotator_kind CODE.",
+      "description": "Canonical decomposition annotation names. Each dimension is a separate annotation name. quality is the roll-up used for default gates and must not drift. accepted_packet_sufficiency and pause_state_correctness are deterministic-check names stored with annotator_kind CODE.",
       "enum": [
-        "decomposition_quality",
+        "quality",
         "project_intent_preservation",
         "issue_executability",
         "dependency_structure",
@@ -56,7 +56,7 @@
       "exclusiveMaximum": 0.4
     },
     "no_workflow_state_keys": {
-      "description": "Denylist for Phoenix-bound metadata: no Agentic Factory workflow/queue state may be stored in Phoenix (wipe test: losing Phoenix must never lose which behavior is accepted or what queue is pending). These known banned keys are schema-level rejections; other extensibility stays open.",
+      "description": "Denylist for Phoenix-bound metadata: no Teami workflow/queue state may be stored in Phoenix (wipe test: losing Phoenix must never lose which behavior is accepted or what queue is pending). These known banned keys are schema-level rejections; other extensibility stays open.",
       "properties": {
         "needs_relabel": false,
         "pending_promotion": false,
@@ -169,7 +169,7 @@
       "additionalProperties": true,
       "required": ["name", "annotator_kind", "result", "metadata", "identifier"],
       "properties": {
-        "name": { "const": "agentic_factory_promotion_outcome" },
+        "name": { "const": "teami_promotion_outcome" },
         "annotator_kind": { "const": "CODE" },
         "trace_id": { "type": "string", "minLength": 1 },
         "span_id": { "type": "string", "minLength": 1 },

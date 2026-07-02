@@ -1,5 +1,5 @@
 {
-  "schema_version": "agentic-factory-workspace-eval-policy/v1",
+  "schema_version": "teami-workspace-eval-policy/v1",
   "_note": "Repo-owned workspace eval policy (plan ~1107-1117). Every value here is HUMAN-SET and has no automatic transition logic in MVP: change it by editing this file in a reviewed commit. Rich dataset promotion reads this artifact at promotion time to stamp workspace_maturity / project_category / project_impact_level metadata and to assign train/test split membership deterministically. JSON, not YAML, per decision D2 (zero-dependency repo).",
   "workspace_maturity": "new",
   "project_category": {

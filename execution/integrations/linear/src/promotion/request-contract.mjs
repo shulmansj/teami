@@ -1,4 +1,4 @@
-// Step 10 (Track G): the `agentic_factory.promote_candidate` MVP promotion
+// Step 10 (Track G): the `teami.promote_candidate` MVP promotion
 // controller. One controller, called from every surface (tonight: the CLI
 // agent-session transport only). It owns the OUTCOME — callers supply context,
 // never authority (CONSTRAINTS #7).
@@ -8,7 +8,7 @@
 //   Caller-supplied authenticity claims are IGNORED (recorded as ignored).
 //   The CLI local-session transport does not authenticate, so MVP items say
 //   `asserted` (D4).
-// - The Phoenix origin comes from local Agentic Factory config ONLY. Deep
+// - The Phoenix origin comes from local Teami config ONLY. Deep
 //   links are optional ID carriers, validated against that origin and a
 //   STRICT path allowlist before any ID is extracted.
 // - All evidence is re-resolved through the one verified local Phoenix REST
@@ -33,12 +33,15 @@
 import {
   classifyAgentBehaviorProposalScope,
 } from "./agent-behavior-scope.mjs";
+import {
+  judgeImprovementEvidenceFromProcessGate,
+} from "./judge-alignment-evidence.mjs";
 
 export const PROMOTE_CANDIDATE_REQUEST_SCHEMA_VERSION =
-  "agentic-factory-promote-candidate-request/v1";
+  "teami-promote-candidate-request/v1";
 
-export const PROMOTION_OUTCOME_ANNOTATION_NAME = "agentic_factory_promotion_outcome";
-export const PROMOTION_OUTCOME_IDENTIFIER = "agentic_factory_promote_candidate_v1";
+export const PROMOTION_OUTCOME_ANNOTATION_NAME = "teami_promotion_outcome";
+export const PROMOTION_OUTCOME_IDENTIFIER = "teami_promote_candidate_v1";
 export const PROMOTION_OUTCOME_LABELS = Object.freeze(["route_to_hitl", "blocked", "superseded"]);
 
 export const CANDIDATE_KINDS = Object.freeze([
@@ -47,12 +50,12 @@ export const CANDIDATE_KINDS = Object.freeze([
 
 // The PRODUCTION behavior-repo identity comes from the local GitHub
 // connection state written by the step 11 `npm run init` GitHub phase
-// (.agentic-factory/github-connection.json, resolveBehaviorRepoIdentity).
+// (.teami/github-connection.json, resolveBehaviorRepoIdentity).
 // When no verified connection exists, this placeholder keeps the request
 // shapes honest without naming a real repo.
 export const DEFAULT_GITHUB_REPO_PLACEHOLDER = Object.freeze({
   owner: "your-github-owner",
-  repo: "agentic-factory",
+  repo: "teami",
 });
 
 const PHOENIX_ID_PATTERN = /^[A-Za-z0-9+/=:_-]+$/;
@@ -556,8 +559,8 @@ export function parseCandidateTargetKey(key) {
   return { ok: true, candidate_kind: candidateKind, scope, artifact_slot: slot.join("/") };
 }
 
-export function validateAgentBehaviorProposalTarget({ candidateTargetKey, target = null } = {}) {
-  return classifyAgentBehaviorProposalScope({ candidateTargetKey, target });
+export function validateAgentBehaviorProposalTarget({ definition = null, candidateTargetKey, target = null } = {}) {
+  return classifyAgentBehaviorProposalScope({ definition, candidateTargetKey, target });
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +588,7 @@ export function deriveEvidenceQualityLabel({ gate } = {}) {
       facts: { facts_missing: true },
     };
   }
+  const judgeImprovementEvidence = judgeImprovementEvidenceFromProcessGate(gate);
   const disagreementCount = Array.isArray(gate.disagreements) ? gate.disagreements.length : 0;
   const judgeAttentionCount = Array.isArray(gate.judge_attention) ? gate.judge_attention.length : 0;
   const humanLabeledTotal =
@@ -601,6 +605,9 @@ export function deriveEvidenceQualityLabel({ gate } = {}) {
     open_disagreements: disagreementCount,
     judge_attention_items: judgeAttentionCount,
     gate_verdict: gate.verdict,
+    ...(judgeImprovementEvidence.applies
+      ? { judge_improvement_alignment: judgeImprovementEvidence }
+      : {}),
   };
   const lowTriggers = [];
   if (ctx.missing_test_split_evidence) lowTriggers.push("no held-out test-split evidence backs the generalization claim");
@@ -610,7 +617,8 @@ export function deriveEvidenceQualityLabel({ gate } = {}) {
   if (lowTriggers.length > 0) {
     return {
       label: "low",
-      explanation: `the evaluation evidence is weak for this decision: ${lowTriggers.join("; ")}.`,
+      explanation:
+        `the evaluation evidence is weak for this decision: ${lowTriggers.join("; ")}.${judgeImprovementEvidence.applies ? ` ${judgeImprovementEvidence.pr_language}` : ""}`,
       facts,
     };
   }
@@ -628,14 +636,15 @@ export function deriveEvidenceQualityLabel({ gate } = {}) {
   if (mediumTriggers.length > 0) {
     return {
       label: "medium",
-      explanation: `the evaluation evidence supports a decision but has disclosed gaps: ${mediumTriggers.join("; ")}.`,
+      explanation:
+        `the evaluation evidence supports a decision but has disclosed gaps: ${mediumTriggers.join("; ")}.${judgeImprovementEvidence.applies ? ` ${judgeImprovementEvidence.pr_language}` : ""}`,
       facts,
     };
   }
   return {
     label: "high",
     explanation:
-      `the evaluation evidence is well grounded: ${counts.test_human_labeled_examples} human-labeled held-out test example(s), ${counts.train_human_labeled_examples} human-labeled training example(s), no open disagreements, no judge-attention items, no band mismatches, and a passing process-change gate all support the same reading.`,
+      `the evaluation evidence is well grounded: ${counts.test_human_labeled_examples} human-labeled held-out test example(s), ${counts.train_human_labeled_examples} human-labeled training example(s), no open disagreements, no judge-attention items, no band mismatches, and a passing process-change gate all support the same reading.${judgeImprovementEvidence.applies ? ` ${judgeImprovementEvidence.pr_language}` : ""}`,
     facts,
   };
 }

@@ -18,7 +18,7 @@ export function formatPromotionOutcomeReport(result) {
         : [];
       lines.push(`Improvement opportunity found: ${humanName}`);
       lines.push(
-        `Evidence suggests ${humanName} could improve${failureLabels.length > 0 ? ` on ${failureLabels.join(", ")}` : ""}, but Agentic Factory has not drafted a concrete prompt/policy change yet.`,
+        `Evidence suggests ${humanName} could improve${failureLabels.length > 0 ? ` on ${failureLabels.join(", ")}` : ""}, but Teami has not drafted a concrete prompt/policy change yet.`,
       );
       lines.push("No GitHub PR was opened.");
       lines.push("Next step: draft the proposed agent/prompt/policy change, then rerun promotion.");

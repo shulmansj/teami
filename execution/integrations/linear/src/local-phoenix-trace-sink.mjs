@@ -7,17 +7,53 @@ import {
 } from "./trace-status-store.mjs";
 import {
   boundedRunReceiptProjection,
+  DEFAULT_LOCAL_TRACE_POLICY,
+  digestTraceField,
   enforceTraceContentPolicy,
+  findSecretContentKeys,
+  LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
   newTraceId,
 } from "../../../engine/trace-contract.mjs";
+import {
+  PRODUCED_IDENTITIES_TRACE_ATTRIBUTE,
+} from "../../../engine/produced-identities.mjs";
 import { behaviorRepoIdForRepoRoot } from "./domain-resolver.mjs";
 
-const SERVICE_NAME = "agentic-factory-local-runner";
+const SERVICE_NAME = "teami-local-runner";
 const PROJECT_ATTRIBUTE = "openinference.project.name";
 const VERIFY_ATTEMPTS = 20;
 const VERIFY_DELAY_MS = 500;
 const TRACE_FETCH_TIMEOUT_MS = 5_000;
 const RUNNER_READY_TIMEOUT_MS = 10_000;
+const EVIDENCE_UNAVAILABLE_ATTRIBUTE = "teami.evidence_unavailable";
+const TRACE_DIGEST_SPAN_NAME = "teami.trace_digest";
+const TRACE_PAYLOAD_SCOPE = "trace.payload";
+const TRACE_SPANS_SCOPE = "trace.spans";
+const ROOT_COMPACT_ATTRIBUTE_KEYS = new Set([
+  "run_id",
+  "workflow.name",
+  "wake_id",
+  "linear_project_id",
+  "workspace_id",
+  "team_id",
+  "domain_id",
+  "behavior_repo_id",
+  "teami.domain_id",
+  "teami.behavior_repo_id",
+  "teami.trace_id",
+  PRODUCED_IDENTITIES_TRACE_ATTRIBUTE,
+  "linear.workspace_id",
+  "linear.team_id",
+  "linear.project_id",
+  "resource.kind",
+  "resource.id",
+  "resource.label",
+  "work_type",
+  "selected_resource_id",
+  "resource_id",
+  "github.behavior_repo_id",
+  "github.behavior_repo_label",
+]);
 
 export function createLocalPhoenixTraceSink({
   repoRoot = process.cwd(),
@@ -69,6 +105,7 @@ export function createLocalPhoenixTraceSink({
           wakeId: wake?.id || null,
           projectId: wake?.object_id || null,
           attempt: wake?.attempt_count || null,
+          workflowType: run.workflow_type,
           traceId,
           phoenixAppUrl: ready.appUrl || null,
           status: "trace_unavailable",
@@ -83,6 +120,110 @@ export function createLocalPhoenixTraceSink({
             run_id: runId,
             domain_id: run.domain_id,
             wake_id: wake?.id || null,
+            trace_id: traceId,
+            reason: ready.reason || "phoenix_unavailable",
+            repair_hint: repairHint,
+          },
+        });
+        return {
+          ok: false,
+          traceId,
+          run,
+          status: "trace_unavailable",
+          reason: ready.reason || "phoenix_unavailable",
+          repairHint,
+          phoenixAppUrl: ready.appUrl || null,
+          traceFailureRecorded: true,
+        };
+      }
+      const exporter = createLocalPhoenixTraceExporter({
+        collectorUrl: ready.collectorUrl,
+        appUrl: ready.appUrl,
+        projectName: ready.projectName,
+        traceId,
+        fetchImpl,
+      });
+      exporters.add(exporter);
+      return {
+        ok: true,
+        traceId,
+        run,
+        exporter,
+        status: "trace_unknown",
+        phoenixAppUrl: ready.appUrl,
+        collectorUrl: ready.collectorUrl,
+        projectName: ready.projectName,
+        managed: ready.managed,
+        started: ready.started === true,
+        reused: ready.reused === true,
+        adoptedAfterReadinessFailure: ready.adoptedAfterReadinessFailure === true,
+        traceFailureRecorded: false,
+      };
+    },
+
+    async startAgentRun({
+      runId,
+      domainId,
+      workflowType,
+      agentRole,
+      resource,
+      githubBehaviorRepoId = null,
+      githubBehaviorRepoLabel = null,
+    } = {}) {
+      const traceId = idFactory();
+      const run = runRecordFromAgent({
+        runId,
+        domainId,
+        workflowType,
+        agentRole,
+        resource,
+        githubBehaviorRepoId,
+        githubBehaviorRepoLabel,
+        repoRoot,
+      });
+      let ready;
+      try {
+        ready = await withTimeout(
+          ensureReady({ repoRoot, fetchImpl, now, onProgress, startTimeoutMs: runnerReadyTimeoutMs }),
+          runnerReadyTimeoutMs,
+          "phoenix_readiness_timeout",
+        );
+      } catch (error) {
+        ready = await adoptHealthyPhoenixAfterReadinessFailure({
+          repoRoot,
+          fetchImpl,
+          statusProbe,
+        }).catch(() => null);
+        ready ||= { ok: false, reason: "phoenix_start_failed", repairHint: error.message };
+      }
+      if (!ready.ok) {
+        const repairHint = ready.repairHint || "Run npm run phoenix:doctor for local Phoenix repair guidance.";
+        recordTraceStatus({
+          repoRoot,
+          runId,
+          domainId: run.domain_id,
+          workspaceId: run.workspace_id,
+          teamId: run.team_id,
+          workflowType: run.workflow_type,
+          resource: run.resource,
+          githubBehaviorRepoId: run.github_behavior_repo_id,
+          githubBehaviorRepoLabel: run.github_behavior_repo_label,
+          traceId,
+          phoenixAppUrl: ready.appUrl || null,
+          status: "trace_unavailable",
+          reason: ready.reason || "phoenix_unavailable",
+          repairHint,
+          observedAt: now().toISOString(),
+        });
+        appendAuditOnlyTraceOutbox({
+          repoRoot,
+          observedAt: now().toISOString(),
+          record: {
+            run_id: runId,
+            domain_id: run.domain_id,
+            resource: run.resource,
+            github_behavior_repo_id: run.github_behavior_repo_id,
+            github_behavior_repo_label: run.github_behavior_repo_label,
             trace_id: traceId,
             reason: ready.reason || "phoenix_unavailable",
             repair_hint: repairHint,
@@ -158,7 +299,9 @@ export function createLocalPhoenixTraceSink({
       }
       const flushed = await this.forceFlush({ session, trace, result, stage: "final" });
       if (!flushed.ok) return flushed;
-      const requiredSpanNames = trace.spans?.map((span) => span.name).filter(Boolean) || [];
+      const requiredSpanNames = Array.isArray(flushed.exportedSpanNames)
+        ? flushed.exportedSpanNames
+        : trace.spans?.map((span) => span.name).filter(Boolean) || [];
       const verified = await verifyTraceDelivery({
         appUrl: session.phoenixAppUrl,
         projectName: session.projectName,
@@ -200,6 +343,10 @@ export function createLocalPhoenixTraceSink({
         wakeId: run.wake_id,
         projectId: run.object_id,
         attempt: run.current_attempt,
+        workflowType: run.workflow_type,
+        resource: run.resource,
+        githubBehaviorRepoId: run.github_behavior_repo_id,
+        githubBehaviorRepoLabel: run.github_behavior_repo_label,
         traceId: session.traceId,
         phoenixAppUrl: session.phoenixAppUrl,
         status: "trace_exported",
@@ -247,6 +394,7 @@ export function createLocalPhoenixTraceExporter({
   fetchTimeoutMs = TRACE_FETCH_TIMEOUT_MS,
 } = {}) {
   const sentSpanIds = new Set();
+  const exportedSpanNames = new Set();
   let shutdownCalled = false;
   let rootSent = false;
   let transport = "otlp_json";
@@ -257,20 +405,38 @@ export function createLocalPhoenixTraceExporter({
     },
     async forceFlush({ trace, run = {}, observedAt = new Date().toISOString(), stage = "checkpoint" } = {}) {
       if (shutdownCalled) throw new Error("local Phoenix exporter is shut down");
-      const policy = enforceTraceContentPolicy(trace);
+      const requestedIncludeRoot = stage === "final" || !rootSent;
+      const accountedSpanIds = unsentTraceSpanIds({ trace, traceId, sentSpanIds });
+      const preparedTrace = prepareTraceForExport(trace, {
+        policy: LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
+        sentSpanIds,
+        includeRoot: requestedIncludeRoot,
+        traceId,
+      });
+      const includeRoot = requestedIncludeRoot || evidenceUnavailableMarkerCreated(trace, preparedTrace);
+      const policy = enforceTraceContentPolicy(preparedTrace, LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS);
       if (!policy.ok) throw new Error(policy.reason);
       const exportPayload = buildPhoenixOtlpTraceExport({
         projectName,
         run,
-        trace,
+        trace: preparedTrace,
         traceId,
         observedAt,
-        includeRoot: stage === "final" || !rootSent,
+        includeRoot,
         sentSpanIds,
         stage,
       });
       const spans = exportPayload.resourceSpans[0].scopeSpans[0].spans;
-      if (spans.length === 0) return { ok: true, skipped: true };
+      if (spans.length === 0) return { ok: true, skipped: true, exportedSpanNames: [...exportedSpanNames] };
+      const markExported = () => {
+        rootSent ||= spans.some((span) => span.name === "teami.workflow_run");
+        return markExportedSpans({
+          spans,
+          accountedSpanIds,
+          sentSpanIds,
+          exportedSpanNames,
+        });
+      };
       if (transport === "phoenix_rest_spans") {
         return await exportRestSpans({
           appUrl,
@@ -284,10 +450,7 @@ export function createLocalPhoenixTraceExporter({
             await ensurePhoenixProjectExists({ appUrl, projectName, fetchImpl, fetchTimeoutMs });
             projectEnsured = true;
           },
-          markExported: () => {
-            rootSent ||= spans.some((span) => span.name === "agentic_factory.workflow_run");
-            for (const span of spans) sentSpanIds.add(span.spanId);
-          },
+          markExported,
           traceId,
         });
       }
@@ -315,23 +478,101 @@ export function createLocalPhoenixTraceExporter({
             await ensurePhoenixProjectExists({ appUrl, projectName, fetchImpl, fetchTimeoutMs });
             projectEnsured = true;
           },
-          markExported: () => {
-            rootSent ||= spans.some((span) => span.name === "agentic_factory.workflow_run");
-            for (const span of spans) sentSpanIds.add(span.spanId);
-          },
+          markExported,
           traceId,
         });
       }
       if (!response.ok) throw new Error(`phoenix_otlp_http_${response.status}`);
-      rootSent ||= spans.some((span) => span.name === "agentic_factory.workflow_run");
-      for (const span of spans) sentSpanIds.add(span.spanId);
-      return { ok: true, exportedSpanCount: spans.length, appUrl, traceId };
+      rootSent ||= spans.some((span) => span.name === "teami.workflow_run");
+      const cumulativeExportedSpanNames = markExported();
+      return { ok: true, exportedSpanCount: spans.length, appUrl, traceId, exportedSpanNames: cumulativeExportedSpanNames };
     },
     async shutdown() {
       shutdownCalled = true;
       return { ok: true };
     },
   };
+}
+
+export function prepareTraceForExport(trace, {
+  policy = DEFAULT_LOCAL_TRACE_POLICY,
+  sentSpanIds = new Set(),
+  includeRoot = true,
+  traceId = "",
+} = {}) {
+  if (!isRecord(trace)) return { attributes: {}, annotations: [], spans: [] };
+  if (findSecretContentKeys(trace).length > 0) return trace;
+
+  const normalizedPolicy = normalizeTracePolicy(policy);
+  const pending = pendingTraceSpanEntries({ trace, traceId, sentSpanIds });
+  const baseTrace = buildPreparedTrace({
+    trace,
+    entries: pending,
+    includeRoot,
+  });
+  if (traceFitsExportPolicy(baseTrace, normalizedPolicy)) return baseTrace;
+
+  const reasons = evidenceUnavailableReasonsForTrace(baseTrace, pending, normalizedPolicy);
+  const digestSlots = Math.max(normalizedPolicy.max_spans_per_export - 1, 0);
+  let kept = pending.slice(0, digestSlots);
+  let folded = pending.slice(digestSlots);
+  let rootCompacted = false;
+  if (folded.length > 0) {
+    addEvidenceUnavailableReason(reasons, TRACE_SPANS_SCOPE, "too_many_trace_spans");
+  }
+
+  let candidate = buildReducedTrace({
+    trace,
+    kept,
+    folded,
+    reasons,
+    traceId,
+    sentSpanIds,
+    rootCompacted,
+  });
+  while (!traceFitsExportPolicy(candidate, normalizedPolicy) && kept.length > 0) {
+    folded = [kept.at(-1), ...folded];
+    kept = kept.slice(0, -1);
+    addEvidenceUnavailableReason(reasons, TRACE_PAYLOAD_SCOPE, "trace_payload_too_large");
+    candidate = buildReducedTrace({
+      trace,
+      kept,
+      folded,
+      reasons,
+      traceId,
+      sentSpanIds,
+      rootCompacted,
+    });
+  }
+
+  if (!traceFitsExportPolicy(candidate, normalizedPolicy)) {
+    rootCompacted = true;
+    addEvidenceUnavailableReason(reasons, TRACE_PAYLOAD_SCOPE, "trace_payload_too_large");
+    candidate = buildReducedTrace({
+      trace,
+      kept,
+      folded,
+      reasons,
+      traceId,
+      sentSpanIds,
+      rootCompacted,
+    });
+  }
+  while (!traceFitsExportPolicy(candidate, normalizedPolicy) && kept.length > 0) {
+    folded = [kept.at(-1), ...folded];
+    kept = kept.slice(0, -1);
+    candidate = buildReducedTrace({
+      trace,
+      kept,
+      folded,
+      reasons,
+      traceId,
+      sentSpanIds,
+      rootCompacted,
+    });
+  }
+
+  return candidate;
 }
 
 export async function runLocalPhoenixTracePreflight({
@@ -376,7 +617,7 @@ export async function runLocalPhoenixTracePreflight({
         name: "phoenix_preflight",
         createdAt: observedAt,
         attributes: {
-          "agentic_factory.preflight": true,
+          "teami.preflight": true,
         },
       }],
       spans: [{
@@ -386,8 +627,8 @@ export async function runLocalPhoenixTracePreflight({
         startedAt: observedAt,
         endedAt: now().toISOString(),
         attributes: {
-          "agentic_factory.preflight": true,
-          "agentic_factory.trace_id": session.traceId,
+          "teami.preflight": true,
+          "teami.trace_id": session.traceId,
         },
       }],
     };
@@ -434,27 +675,64 @@ export function buildPhoenixOtlpTraceExport({
     ? [{
         traceId,
         spanId: rootSpanId,
-        name: "agentic_factory.workflow_run",
+        name: "teami.workflow_run",
         kind: 1,
         startTimeUnixNano: timeUnixNano(startedAt),
         endTimeUnixNano: timeUnixNano(endedAt),
         attributes: otlpAttributes({
           "openinference.span.kind": "CHAIN",
-          "agentic_factory.run_id": run?.run_id || trace?.attributes?.run_id,
-          "agentic_factory.domain_id":
+          "teami.run_id": run?.run_id || trace?.attributes?.run_id,
+          "teami.domain_id":
             run?.domain_id ||
-            trace?.attributes?.["agentic_factory.domain_id"] ||
+            trace?.attributes?.["teami.domain_id"] ||
             trace?.attributes?.domain_id,
-          "agentic_factory.behavior_repo_id":
+          "teami.behavior_repo_id":
             run?.behavior_repo_id ||
-            trace?.attributes?.["agentic_factory.behavior_repo_id"] ||
+            trace?.attributes?.["teami.behavior_repo_id"] ||
             trace?.attributes?.behavior_repo_id,
-          "agentic_factory.wake_id": run?.wake_id || trace?.attributes?.wake_id,
-          "agentic_factory.workflow_type": run?.workflow_type || trace?.attributes?.["workflow.name"],
-          "agentic_factory.object_id": run?.object_id || trace?.attributes?.linear_project_id,
-          "agentic_factory.trace_id": traceId,
-          "agentic_factory.flush_stage": stage,
-          "agentic_factory.unpinned_runtime": trace?.attributes?.["agentic_factory.unpinned_runtime"],
+          "teami.wake_id": run?.wake_id || trace?.attributes?.wake_id,
+          "teami.workflow_type": run?.workflow_type || trace?.attributes?.["workflow.name"],
+          "teami.object_id": run?.object_id || trace?.attributes?.linear_project_id,
+          "teami.trace_id": traceId,
+          "teami.flush_stage": stage,
+          "teami.unpinned_runtime": trace?.attributes?.["teami.unpinned_runtime"],
+          "teami.work_type": trace?.attributes?.work_type,
+          "teami.selected_resource_id":
+            trace?.attributes?.selected_resource_id ||
+            trace?.attributes?.resource_id ||
+            trace?.attributes?.["resource.id"],
+          [PRODUCED_IDENTITIES_TRACE_ATTRIBUTE]: producedIdentitiesTraceCarrier(
+            trace?.attributes?.[PRODUCED_IDENTITIES_TRACE_ATTRIBUTE],
+          ),
+          [EVIDENCE_UNAVAILABLE_ATTRIBUTE]: trace?.attributes?.[EVIDENCE_UNAVAILABLE_ATTRIBUTE],
+          "resource.kind":
+            run?.resource?.kind ||
+            trace?.attributes?.["resource.kind"] ||
+            trace?.attributes?.resource_kind,
+          "resource.id":
+            run?.resource?.id ||
+            trace?.attributes?.["resource.id"] ||
+            trace?.attributes?.resource_id,
+          "resource.label":
+            run?.resource?.label ||
+            trace?.attributes?.["resource.label"] ||
+            trace?.attributes?.resource_label,
+          work_type: trace?.attributes?.work_type,
+          selected_resource_id:
+            trace?.attributes?.selected_resource_id ||
+            trace?.attributes?.resource_id ||
+            trace?.attributes?.["resource.id"],
+          resource_id:
+            trace?.attributes?.resource_id ||
+            trace?.attributes?.["resource.id"],
+          "github.behavior_repo_id":
+            run?.github_behavior_repo_id ||
+            trace?.attributes?.["github.behavior_repo_id"] ||
+            trace?.attributes?.github_behavior_repo_id,
+          "github.behavior_repo_label":
+            run?.github_behavior_repo_label ||
+            trace?.attributes?.["github.behavior_repo_label"] ||
+            trace?.attributes?.github_behavior_repo_label,
           "linear.workspace_id":
             run?.workspace_id ||
             trace?.attributes?.["linear.workspace_id"] ||
@@ -485,7 +763,7 @@ export function buildPhoenixOtlpTraceExport({
       traceId,
       spanId,
       parentSpanId: rootSpanId,
-      name: safeName(span?.name || `agentic_factory.span.${index + 1}`),
+      name: safeName(span?.name || `teami.span.${index + 1}`),
       kind: 1,
       startTimeUnixNano: timeUnixNano(span?.startedAt || startedAt),
       endTimeUnixNano: timeUnixNano(span?.endedAt || endedAt),
@@ -514,7 +792,7 @@ export function buildPhoenixOtlpTraceExport({
       },
       scopeSpans: [{
         scope: {
-          name: "agentic-factory.local-phoenix",
+          name: "teami.local-phoenix",
           version: "1",
         },
         spans: [...root, ...childSpans],
@@ -527,15 +805,15 @@ function evidenceSpanAttributes(attributes = {}) {
   const mirrored = {};
   if (
     Object.hasOwn(attributes, "outcome") &&
-    !Object.hasOwn(attributes, "agentic_factory.outcome")
+    !Object.hasOwn(attributes, "teami.outcome")
   ) {
-    mirrored["agentic_factory.outcome"] = attributes.outcome;
+    mirrored["teami.outcome"] = attributes.outcome;
   }
   if (
     Object.hasOwn(attributes, "perspectives_run") &&
-    !Object.hasOwn(attributes, "agentic_factory.perspectives_run")
+    !Object.hasOwn(attributes, "teami.perspectives_run")
   ) {
-    mirrored["agentic_factory.perspectives_run"] = attributes.perspectives_run;
+    mirrored["teami.perspectives_run"] = attributes.perspectives_run;
   }
   return mirrored;
 }
@@ -590,6 +868,261 @@ function buildPhoenixRestSpanUploadFromOtlp(otlp) {
   };
 }
 
+function normalizeTracePolicy(policy) {
+  const explicitPolicy = isRecord(policy?.policy) ? policy.policy : policy;
+  return { ...DEFAULT_LOCAL_TRACE_POLICY, ...(isRecord(explicitPolicy) ? explicitPolicy : {}) };
+}
+
+function traceFitsExportPolicy(trace, policy) {
+  const spans = Array.isArray(trace?.spans) ? trace.spans : [];
+  return spans.length <= policy.max_spans_per_export
+    && tracePayloadBytes(trace) <= policy.max_trace_payload_bytes;
+}
+
+function tracePayloadBytes(trace) {
+  try {
+    const serialized = JSON.stringify(trace);
+    return Buffer.byteLength(serialized || "null", "utf8");
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function evidenceUnavailableReasonsForTrace(trace, pending, policy) {
+  const reasons = [];
+  if (pending.length > policy.max_spans_per_export) {
+    addEvidenceUnavailableReason(reasons, TRACE_SPANS_SCOPE, "too_many_trace_spans");
+  }
+  if (tracePayloadBytes(trace) > policy.max_trace_payload_bytes) {
+    addEvidenceUnavailableReason(reasons, TRACE_PAYLOAD_SCOPE, "trace_payload_too_large");
+  }
+  if (reasons.length === 0) {
+    addEvidenceUnavailableReason(reasons, TRACE_PAYLOAD_SCOPE, "trace_payload_too_large");
+  }
+  return reasons;
+}
+
+function addEvidenceUnavailableReason(reasons, scope, reason) {
+  if (!reasons.some((entry) => entry.scope === scope && entry.reason === reason)) {
+    reasons.push({ scope, reason });
+  }
+}
+
+function buildPreparedTrace({ trace, entries, includeRoot }) {
+  return {
+    attributes: includeRoot ? rootAttributesForPreparedTrace(trace) : {},
+    annotations: includeRoot && Array.isArray(trace?.annotations) ? trace.annotations : [],
+    spans: entries.map(cloneTraceSpanEntry),
+  };
+}
+
+function buildReducedTrace({
+  trace,
+  kept,
+  folded,
+  reasons,
+  traceId,
+  sentSpanIds,
+  rootCompacted,
+}) {
+  const spans = kept.map(cloneTraceSpanEntry);
+  if (reasons.length > 0 || folded.length > 0 || rootCompacted) {
+    spans.push(buildTraceDigestSpan({
+      trace,
+      kept,
+      folded,
+      reasons,
+      traceId,
+      sentSpanIds,
+      rootCompacted,
+    }));
+  }
+  return {
+    attributes: rootAttributesForPreparedTrace(trace, { markers: reasons, compact: rootCompacted }),
+    annotations: !rootCompacted && Array.isArray(trace?.annotations) ? trace.annotations : [],
+    spans,
+  };
+}
+
+function rootAttributesForPreparedTrace(trace, { markers = [], compact = false } = {}) {
+  const source = isRecord(trace?.attributes) ? trace.attributes : {};
+  const attributes = compact ? compactRootAttributes(source) : { ...source };
+  if (markers.length > 0) {
+    attributes[EVIDENCE_UNAVAILABLE_ATTRIBUTE] = mergeEvidenceUnavailableMarkers(
+      source[EVIDENCE_UNAVAILABLE_ATTRIBUTE],
+      markers,
+    );
+  }
+  return attributes;
+}
+
+function compactRootAttributes(attributes) {
+  const compacted = {};
+  for (const key of ROOT_COMPACT_ATTRIBUTE_KEYS) {
+    if (
+      Object.hasOwn(attributes, key) &&
+      (isJsonSafeScalar(attributes[key]) ||
+        (key === PRODUCED_IDENTITIES_TRACE_ATTRIBUTE && producedIdentitiesTraceCarrier(attributes[key])))
+    ) {
+      compacted[key] = attributes[key];
+    }
+  }
+  return compacted;
+}
+
+function buildTraceDigestSpan({
+  trace,
+  kept,
+  folded,
+  reasons,
+  traceId,
+  sentSpanIds,
+  rootCompacted,
+}) {
+  const foldedSpanRefs = folded.map((entry) => ({
+    index: entry.index,
+    span_id: entry.spanId,
+    name: spanName(entry.span, entry.index),
+  }));
+  const digestPayload = {
+    reasons,
+    folded_spans: folded.map((entry) => ({
+      index: entry.index,
+      span_id: entry.spanId,
+      name: spanName(entry.span, entry.index),
+      span: entry.span,
+    })),
+    ...(rootCompacted
+      ? {
+          trace_attributes: isRecord(trace?.attributes) ? trace.attributes : {},
+          trace_annotations: Array.isArray(trace?.annotations) ? trace.annotations : [],
+        }
+      : {}),
+  };
+  const digest = digestTraceField(digestPayload);
+  const spanId = digestSpanId({
+    traceId,
+    digest,
+    kept,
+    folded,
+    sentSpanIds,
+    rootCompacted,
+  });
+  const firstFolded = folded[0]?.span;
+  const lastFolded = folded.at(-1)?.span;
+  return {
+    name: TRACE_DIGEST_SPAN_NAME,
+    spanId,
+    kind: "INTERNAL",
+    status: "completed",
+    ...(firstFolded?.startedAt ? { startedAt: firstFolded.startedAt } : {}),
+    ...(lastFolded?.endedAt ? { endedAt: lastFolded.endedAt } : {}),
+    attributes: {
+      "teami.digest": digest,
+      "teami.digest_scope": [...new Set(reasons.map((entry) => entry.scope))],
+      "teami.folded_span_count": folded.length,
+      "teami.folded_span_first_index": folded[0]?.index ?? null,
+      "teami.folded_span_last_index": folded.at(-1)?.index ?? null,
+      "teami.folded_span_first_name": foldedSpanRefs[0]?.name ?? null,
+      "teami.folded_span_last_name": foldedSpanRefs.at(-1)?.name ?? null,
+      "teami.root_compacted": rootCompacted,
+      [EVIDENCE_UNAVAILABLE_ATTRIBUTE]: reasons,
+    },
+  };
+}
+
+function digestSpanId({ traceId, digest, kept, folded, sentSpanIds, rootCompacted }) {
+  const reservedSpanIds = new Set([
+    stableSpanId(`${traceId}:root`),
+    ...[...sentSpanIds].map((spanId) => String(spanId).toLowerCase()),
+    ...kept.map((entry) => entry.spanId),
+    ...folded.map((entry) => entry.spanId),
+  ]);
+  const foldedRange = `${folded[0]?.index ?? "none"}:${folded.at(-1)?.index ?? "none"}:${folded.length}`;
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const suffix = attempt === 0 ? "" : `:${attempt}`;
+    const spanId = stableSpanId(`${traceId}:span:digest:${foldedRange}:${rootCompacted}:${digest}${suffix}`);
+    if (!reservedSpanIds.has(spanId)) return spanId;
+  }
+  return stableSpanId(`${traceId}:span:digest:fallback:${digest}`);
+}
+
+function evidenceUnavailableMarkerCreated(originalTrace, preparedTrace) {
+  const before = evidenceUnavailableMarkerKeys(originalTrace?.attributes?.[EVIDENCE_UNAVAILABLE_ATTRIBUTE]);
+  const after = evidenceUnavailableMarkerKeys(preparedTrace?.attributes?.[EVIDENCE_UNAVAILABLE_ATTRIBUTE]);
+  return [...after].some((key) => !before.has(key));
+}
+
+function evidenceUnavailableMarkerKeys(value) {
+  return new Set(normalizeEvidenceUnavailableMarkers(value).map((entry) => `${entry.scope}\u0000${entry.reason}`));
+}
+
+function mergeEvidenceUnavailableMarkers(existing, additions) {
+  const merged = normalizeEvidenceUnavailableMarkers(existing);
+  for (const marker of normalizeEvidenceUnavailableMarkers(additions)) {
+    if (!merged.some((entry) => entry.scope === marker.scope && entry.reason === marker.reason)) {
+      merged.push(marker);
+    }
+  }
+  return merged;
+}
+
+function normalizeEvidenceUnavailableMarkers(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry) => typeof entry?.scope === "string" && typeof entry?.reason === "string")
+    .map((entry) => ({ scope: entry.scope, reason: entry.reason }));
+}
+
+function unsentTraceSpanIds({ trace, traceId, sentSpanIds }) {
+  return pendingTraceSpanEntries({ trace, traceId, sentSpanIds }).map((entry) => entry.spanId);
+}
+
+function pendingTraceSpanEntries({ trace, traceId, sentSpanIds }) {
+  const spans = Array.isArray(trace?.spans) ? trace.spans : [];
+  return spans
+    .map((span, index) => ({
+      span,
+      index,
+      spanId: spanIdForTraceSpan({ traceId, span, index }),
+    }))
+    .filter((entry) => !sentSpanIds.has(entry.spanId));
+}
+
+function spanIdForTraceSpan({ traceId, span, index }) {
+  return validSpanId(span?.spanId)
+    ? span.spanId.toLowerCase()
+    : stableSpanId(`${traceId}:span:${index}:${span?.name || ""}`);
+}
+
+function cloneTraceSpanEntry(entry) {
+  const source = isRecord(entry.span) ? entry.span : {};
+  return { ...source, name: spanName(entry.span, entry.index), spanId: entry.spanId };
+}
+
+function spanName(span, index) {
+  return span?.name || `teami.span.${index + 1}`;
+}
+
+function markExportedSpans({ spans, accountedSpanIds, sentSpanIds, exportedSpanNames }) {
+  for (const spanId of accountedSpanIds) sentSpanIds.add(String(spanId).toLowerCase());
+  for (const span of spans) {
+    if (span?.spanId) sentSpanIds.add(String(span.spanId).toLowerCase());
+    if (span?.name) exportedSpanNames.add(span.name);
+  }
+  return [...exportedSpanNames];
+}
+
+function isJsonSafeScalar(value) {
+  return typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export async function verifyTraceDelivery({
   appUrl,
   projectName,
@@ -638,6 +1171,10 @@ function recordTraceFailure({ repoRoot, session, status, reason, now, wake = nul
     wakeId: session.run?.wake_id || wake?.id || null,
     projectId: session.run?.object_id || wake?.object_id || null,
     attempt: session.run?.current_attempt || wake?.attempt_count || null,
+    workflowType: session.run?.workflow_type || null,
+    resource: session.run?.resource || null,
+    githubBehaviorRepoId: session.run?.github_behavior_repo_id || null,
+    githubBehaviorRepoLabel: session.run?.github_behavior_repo_label || null,
     traceId: session.traceId,
     phoenixAppUrl: session.phoenixAppUrl || null,
     status,
@@ -652,6 +1189,9 @@ function recordTraceFailure({ repoRoot, session, status, reason, now, wake = nul
       run_id: session.run?.run_id,
       domain_id: session.run?.domain_id,
       wake_id: session.run?.wake_id || wake?.id || null,
+      resource: session.run?.resource || null,
+      github_behavior_repo_id: session.run?.github_behavior_repo_id || null,
+      github_behavior_repo_label: session.run?.github_behavior_repo_label || null,
       trace_id: session.traceId,
       reason,
       repair_hint: repairHint,
@@ -679,7 +1219,7 @@ async function ensurePhoenixProjectExists({ appUrl, projectName, fetchImpl, fetc
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       name: projectName,
-      description: "Agentic Factory local traces",
+      description: "Teami local traces",
     }),
   });
   if (response.ok || response.status === 409 || response.status === 422) return;
@@ -707,8 +1247,15 @@ async function exportRestSpans({
     body: JSON.stringify(buildPhoenixRestSpanUploadFromOtlp(exportPayload)),
   });
   if (!restResponse.ok) throw new Error(`phoenix_rest_spans_http_${restResponse.status}`);
-  markExported();
-  return { ok: true, exportedSpanCount: spans.length, appUrl, traceId, transport: "phoenix_rest_spans" };
+  const exportedSpanNames = markExported();
+  return {
+    ok: true,
+    exportedSpanCount: spans.length,
+    appUrl,
+    traceId,
+    transport: "phoenix_rest_spans",
+    exportedSpanNames,
+  };
 }
 
 async function fetchWithTimeout(url, { fetchImpl, timeoutMs, ...init }) {
@@ -753,8 +1300,111 @@ function runRecordFromWake({ wake, sourceEvent, runId, workspaceId, domainContex
   };
 }
 
+function runRecordFromAgent({
+  runId,
+  domainId,
+  workflowType,
+  agentRole,
+  resource,
+  githubBehaviorRepoId = null,
+  githubBehaviorRepoLabel = null,
+  repoRoot = process.cwd(),
+}) {
+  const normalizedResource = normalizeRunResource(resource);
+  const githubIdentity = githubIdentityForResource({
+    resource: normalizedResource,
+    githubBehaviorRepoId,
+    githubBehaviorRepoLabel,
+  });
+  return {
+    run_id: runId,
+    domain_id: domainId || null,
+    workspace_id: null,
+    team_id: null,
+    behavior_repo_id: behaviorRepoIdForRepoRoot(repoRoot),
+    github_behavior_repo_id: githubIdentity.id,
+    github_behavior_repo_label: githubIdentity.label,
+    workflow_type: workflowType || null,
+    agent_role: agentRole || null,
+    resource: normalizedResource,
+    wake_id: null,
+    object_id: null,
+    source_event_id: null,
+    current_attempt: null,
+    status: "running",
+    started_at: new Date().toISOString(),
+  };
+}
+
 function providerUpdateIdsForResult(result) {
-  return [result?.projectUpdate?.id, ...(result?.created || []).map((issue) => issue.id)].filter(Boolean);
+  const projectedIds = providerUpdateIdsFromProducedIdentities(result?.produced_identities);
+  if (projectedIds.length > 0) return projectedIds;
+  return uniqueStrings([
+    result?.projectUpdate?.id,
+    ...(result?.created || []).map(providerObjectId),
+    ...(result?.reused || []).map(providerObjectId),
+  ]);
+}
+
+function providerUpdateIdsFromProducedIdentities(producedIdentities) {
+  if (!Array.isArray(producedIdentities)) return [];
+  const ids = [];
+  for (const entry of producedIdentities) {
+    if (entry?.provider !== "linear" || entry?.resource_kind !== "linear_issue") continue;
+    ids.push(entry.identity?.project_update_id);
+    ids.push(...(Array.isArray(entry.target_ids) ? entry.target_ids : []));
+  }
+  return uniqueStrings(ids);
+}
+
+function providerObjectId(value) {
+  if (typeof value === "string") return value;
+  return value?.id || null;
+}
+
+function uniqueStrings(values) {
+  return [...new Set((values || []).map((value) => String(value || "")).filter(Boolean))];
+}
+
+function producedIdentitiesTraceCarrier(value) {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeRunResource(resource) {
+  const kind = firstPresent(resource?.kind);
+  const id = firstPresent(resource?.id);
+  const label = firstPresent(resource?.label);
+  if (!kind && !id && !label) return null;
+  return {
+    kind: kind || null,
+    id: id || null,
+    label: label || null,
+  };
+}
+
+function githubIdentityForResource({
+  resource,
+  githubBehaviorRepoId = null,
+  githubBehaviorRepoLabel = null,
+} = {}) {
+  const isGithubBehaviorRepo = String(resource?.kind || "").toLowerCase() === "github_behavior_repo";
+  return {
+    id: firstPresent(githubBehaviorRepoId, isGithubBehaviorRepo ? resource?.id : null),
+    label: firstPresent(githubBehaviorRepoLabel, isGithubBehaviorRepo ? resource?.label : null),
+  };
+}
+
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "") return value;
+  }
+  return null;
 }
 
 function assertOtlpTraceId(value) {
@@ -836,5 +1486,5 @@ function stableSpanId(input) {
 
 function safeName(value) {
   const name = String(value || "").trim();
-  return name || "agentic_factory.span";
+  return name || "teami.span";
 }

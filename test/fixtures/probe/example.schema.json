@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "probe-eval-example/v1",
+  "title": "Probe eval dataset example",
+  "description": "Frozen synthetic grade-time input contract for the probe namespace.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["input", "output", "reference", "metadata"],
+  "properties": {
+    "schema_version": { "const": "probe-eval-example/v1" },
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source_type", "run"],
+      "properties": {
+        "source_type": { "const": "probe_run_snapshot" },
+        "run": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["run_id", "resource"],
+          "properties": {
+            "run_id": { "type": "string", "minLength": 1 },
+            "resource": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["kind", "id"],
+              "properties": {
+                "kind": { "type": "string", "minLength": 1 },
+                "id": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["terminal_status", "produced_identities"],
+      "properties": {
+        "terminal_status": { "enum": ["completed", "failed_closed"] },
+        "produced_identities": { "type": "array" }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "human_annotations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["name", "label", "score", "failure_modes", "explanation"],
+            "properties": {
+              "name": { "$ref": "#/$defs/annotation_name" },
+              "label": { "$ref": "#/$defs/quality_label" },
+              "score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "failure_modes": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "explanation": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+      "required": [
+        "workspace_maturity",
+        "dataset_split",
+        "rubric_version",
+        "failure_taxonomy_version",
+        "source_trace_id",
+        "content_retention"
+      ],
+      "properties": {
+        "workspace_maturity": { "enum": ["new", "calibrating", "stable"] },
+        "dataset_split": { "enum": ["train", "test", "calibration", "regression"] },
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "source_trace_id": { "type": ["string", "null"] },
+        "content_retention": { "enum": ["sanitized_fixture"] }
+      }
+    }
+  },
+  "$defs": {
+    "no_workflow_state_keys": {
+      "properties": {
+        "needs_relabel": false,
+        "pending_promotion": false,
+        "accepted_by_factory": false,
+        "propose_repo_change": false,
+        "proposal_state": false,
+        "queue_state": false,
+        "workflow_status": false,
+        "assigned": false,
+        "resolved": false
+      }
+    },
+    "quality_label": {
+      "enum": ["pass", "needs_revision", "blocking_failure"]
+    },
+    "annotation_name": {
+      "enum": [
+        "quality",
+        "probe_artifact_quality",
+        "accepted_packet_sufficiency",
+        "pause_state_correctness"
+      ]
+    }
+  }
+}

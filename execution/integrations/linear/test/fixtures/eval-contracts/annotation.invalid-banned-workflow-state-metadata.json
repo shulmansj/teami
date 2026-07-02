@@ -1,6 +1,6 @@
 {
-  "_invalid_because": "Phoenix-bound annotation metadata must never carry Agentic Factory workflow/queue state (wipe test). needs_relabel is on the schema-level denylist, so this annotation is rejected even though everything else is valid.",
-  "name": "decomposition_quality",
+  "_invalid_because": "Phoenix-bound annotation metadata must never carry Teami workflow/queue state (wipe test). needs_relabel is on the schema-level denylist, so this annotation is rejected even though everything else is valid.",
+  "name": "quality",
   "annotator_kind": "HUMAN",
   "label": "needs_revision",
   "score": 0.55,

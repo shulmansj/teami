@@ -87,9 +87,9 @@ machine-readable promotion marker. Old-style branches with committed proposal
 files remain readable only as migration artifacts.
 
 New-style promotion commits also carry the immutable envelope anchors as
-commit trailers: `Agentic-Factory-Promotion-Envelope`,
-`Agentic-Factory-Promotion-Instance`, and
-`Agentic-Factory-Promotion-Target`. Resume and orphan-branch recovery verify
+commit trailers: `Teami-Promotion-Envelope`,
+`Teami-Promotion-Instance`, and
+`Teami-Promotion-Target`. Resume and orphan-branch recovery verify
 those trailers against the current controller envelope before trusting an
 existing branch.
 

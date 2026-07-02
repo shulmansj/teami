@@ -162,6 +162,8 @@ export function buildDomainContext({
   const context = {
     domainId: domain.id,
     status: domain.status,
+    resources: structuredClone(domain.resources || []),
+    allowedRepoPacket: allowedRepoPacketFromDomainResources(domain.resources || []),
     linear: {
       workspaceId: domain.linear.workspace_id,
       teamId: domain.linear.team_id,
@@ -190,6 +192,24 @@ export function buildDomainContext({
     },
   };
   return deepFreeze(context);
+}
+
+export function allowedRepoPacketFromDomainResources(resources = []) {
+  return (Array.isArray(resources) ? resources : [])
+    .filter((resource) => resource?.kind === "git_repo" && resource.binding)
+    .map((resource) => {
+      const binding = resource.binding;
+      const entry = {
+        resource_id: resource.id,
+        owner: binding.owner,
+        repo: binding.repo,
+        default_branch: binding.default_branch,
+      };
+      if (typeof binding.repo_scope === "string" && binding.repo_scope.trim() !== "") {
+        entry.repo_scope = binding.repo_scope;
+      }
+      return entry;
+    });
 }
 
 export function behaviorRepoIdForRepoRoot(repoRoot = process.cwd()) {

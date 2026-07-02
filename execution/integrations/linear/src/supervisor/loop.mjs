@@ -1,6 +1,8 @@
 import { scanPromotionCandidates } from "../promotion-candidate-scanner.mjs";
 
 import {
+  runSupervisorAutonomousDiagnosisScanStep,
+  runSupervisorExportStep,
   runSupervisorRunnerStep,
   runSupervisorScannerStep,
 } from "./jobs.mjs";
@@ -147,8 +149,22 @@ export async function runLocalSupervisorIteration({
       disable,
       onProgress,
     });
+    const exportJob = await runSupervisorExportStep({
+      repoRoot,
+      disable,
+      onProgress,
+    });
+    const autonomousDiagnosisScan = await runSupervisorAutonomousDiagnosisScanStep({
+      repoRoot,
+      disable,
+      onProgress,
+    });
     const finishedAt = now().toISOString();
-    const degraded = scanner.ok === false || runner.ok === false;
+    const degraded =
+      scanner.ok === false ||
+      runner.ok === false ||
+      exportJob.ok === false ||
+      autonomousDiagnosisScan.ok === false;
     const iteration = {
       ok: !degraded,
       status: degraded ? "degraded" : "ok",
@@ -156,6 +172,8 @@ export async function runLocalSupervisorIteration({
       finished_at: finishedAt,
       runner,
       scanner,
+      export: exportJob,
+      autonomous_diagnosis_scan: autonomousDiagnosisScan,
       checks: preflight.checks,
     };
     writeSupervisorState({
@@ -195,11 +213,11 @@ function resolveLocalSupervisorSettings({
       nonNegativeInteger(configured.interval_ms, DEFAULT_LOOP_INTERVAL_MS),
     ),
     crash_backoff_base_ms: positiveInteger(
-      env.AGENTIC_FACTORY_SUPERVISOR_CRASH_BACKOFF_BASE_MS,
+      env.TEAMI_SUPERVISOR_CRASH_BACKOFF_BASE_MS,
       positiveInteger(configured.crash_backoff_base_ms, DEFAULT_CRASH_BACKOFF_BASE_MS),
     ),
     crash_backoff_max_ms: positiveInteger(
-      env.AGENTIC_FACTORY_SUPERVISOR_CRASH_BACKOFF_MAX_MS,
+      env.TEAMI_SUPERVISOR_CRASH_BACKOFF_MAX_MS,
       positiveInteger(configured.crash_backoff_max_ms, DEFAULT_CRASH_BACKOFF_MAX_MS),
     ),
   };

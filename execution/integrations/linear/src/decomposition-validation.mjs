@@ -33,7 +33,7 @@ export const VALIDATION_SCOPE_CAVEAT =
 
 export function defaultValidationOperatorDir() {
   const base = process.platform === "win32" ? "C:\\tmp" : os.tmpdir();
-  return path.resolve(base, "agentic-factory-decomposition-validation");
+  return path.resolve(base, "teami-decomposition-validation");
 }
 
 export function defaultValidationRunId(date = new Date()) {
@@ -338,10 +338,11 @@ export async function main({
 function normalizeFixtureStatus(status, { config = null } = {}) {
   if (typeof status !== "string") return status;
   const normalized = status.trim().toLowerCase().replace(/\s+/g, "_");
-  const statusTypes = config?.linear?.project?.status_types || {};
-  if (Object.hasOwn(statusTypes, normalized)) return normalized;
-  for (const [semantic, nativeType] of Object.entries(statusTypes)) {
-    if (String(nativeType).toLowerCase() === normalized) return semantic;
+  const statuses = config?.linear?.project?.statuses || {};
+  if (Object.hasOwn(statuses, normalized)) return normalized;
+  for (const [semantic, configuredStatus] of Object.entries(statuses)) {
+    if (String(configuredStatus?.type).toLowerCase() === normalized) return semantic;
+    if (String(configuredStatus?.name).trim().toLowerCase().replace(/\s+/g, "_") === normalized) return semantic;
   }
   return status;
 }

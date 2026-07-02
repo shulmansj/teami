@@ -1,11 +1,15 @@
 import { createTrace, recordSpan } from "../../trace.mjs";
-import { enforceTraceContentPolicy } from "../../../../../engine/trace-contract.mjs";
+import {
+  enforceTraceContentPolicy,
+  LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
+} from "../../../../../engine/trace-contract.mjs";
 import {
   RUN_ARTIFACT_SCHEMA_VERSION,
 } from "../../../../../engine/engine-contract-constants.mjs";
 import { readRunArtifact, runArtifactPath } from "../../../../../engine/run-store.mjs";
 import { validateOrchestratorOutput } from "../../../../../engine/orchestrator-output.mjs";
 import { commitPayload as decompositionCommitPayload } from "./commit-payload.mjs";
+import { decompositionDefinition } from "./definition.mjs";
 import {
   acceptedRefFromLoadedSnapshot,
   unjoinableCoverageMarker,
@@ -58,11 +62,11 @@ export async function runDecomposition({
   loadJudgeContractFn = null,
 } = {}) {
   const domainTrace = resolveDomainTrace({ domainContext, traceContext, cache, repoRoot });
-  const trace = createTrace("decomposition_run", knownTraceAttributes({
+  const trace = createTrace(decompositionDefinition.trace_descriptor.trace_name, knownTraceAttributes({
     "workflow.name": "project_decomposition",
     "workflow.version": DECOMPOSITION_FUNCTION_VERSION,
-    "agentic_factory.domain_id": domainTrace.domain_id,
-    "agentic_factory.behavior_repo_id": domainTrace.behavior_repo_id,
+    "teami.domain_id": domainTrace.domain_id,
+    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
     "linear.workspace_id": domainTrace.workspace_id,
     "linear.team_id": domainTrace.team_id,
     "linear.project_id": projectId,
@@ -84,7 +88,7 @@ export async function runDecomposition({
     ...unpinnedRuntimeTraceAttributes(config),
   }));
 
-  const runtimeAssignments = resolveRoleRuntimeAssignments(config);
+  const runtimeAssignments = resolveRoleRuntimeAssignments(config, "decomposition");
   if (retryCommit) {
     const persisted = readRunArtifact({ runId, repoRoot, runStoreDir });
     if (!persisted) throw new Error(`No persisted run artifact found for ${runId}.`);
@@ -303,7 +307,8 @@ async function appendQualityCheckAdvisory({
     runResult.terminal_output.project_update_markdown,
     advisory.result,
   );
-  recordSpan(trace, "quality_check_advisory", {
+  recordQualityJudgeRunSpan(trace, advisory.result);
+  safelyRecordSpan(trace, "quality_check_advisory", {
     judge_state: advisory.result?.judge_state || "judge_unavailable",
     judge_label: advisory.result?.judge?.label || null,
     reason: advisory.result?.reason || null,
@@ -365,6 +370,78 @@ function appendJudgeAcceptedRef({ artifact, loadPromptRegistrationContract, targ
     return artifact;
   }
   return { ...artifact, accepted_refs: [...existing, judgeRef] };
+}
+
+function recordQualityJudgeRunSpan(trace, result) {
+  try {
+    const judge = isRecord(result?.judge) ? result.judge : null;
+    const judgeState = typeof result?.judge_state === "string" && result.judge_state.trim()
+      ? result.judge_state
+      : "judge_unavailable";
+    safelyRecordSpan(trace, "quality_judge_run", knownTraceAttributes({
+      role: "judge",
+      agent_role: "decomposition_quality_judge",
+      judge_state: judgeState,
+      judge_label: judge?.label || null,
+      judge_score: typeof judge?.score === "number" ? judge.score : null,
+      reason: result?.reason || null,
+      run_id: result?.run_id || null,
+      trace_id: result?.trace_id || null,
+      asked: knownTraceAttributes({
+        prompt: typeof result?.judge_prompt === "string" ? result.judge_prompt : null,
+        inputs: isRecord(result?.judge_inputs) ? result.judge_inputs : null,
+      }),
+      did: knownTraceAttributes({
+        raw_output: typeof result?.raw_output === "string" ? result.raw_output : null,
+        raw_output_excerpt: typeof result?.raw_output_excerpt === "string" ? result.raw_output_excerpt : null,
+        parsed_judge: judge,
+        parse_failures: arrayAttribute(result?.parse_failures),
+      }),
+      outcome: knownTraceAttributes({
+        judge_state: judgeState,
+        label: judge?.label || null,
+        score: typeof judge?.score === "number" ? judge.score : null,
+        explanation: judge?.explanation || null,
+        failure_modes: arrayAttribute(judge?.failure_modes),
+        failure_mode_details: arrayAttribute(judge?.failure_mode_details),
+        low_confidence_reasons: arrayAttribute(result?.low_confidence_reasons),
+        storage: result?.storage || null,
+        annotation_ids: arrayAttribute(result?.annotation_ids),
+        reason: result?.reason || null,
+      }),
+      settings: knownTraceAttributes({
+        evaluator_id: result?.evaluator_id || null,
+        identifier: result?.identifier || null,
+        model: result?.model || null,
+        runtime: result?.runtime || null,
+        prompt_source: result?.prompt_source || null,
+        prompt_version: result?.prompt_version || null,
+        rubric_version: result?.rubric_version || null,
+        failure_taxonomy_version: result?.failure_taxonomy_version || null,
+        trace_status: result?.trace_status || null,
+      }),
+      "teami.outcome": judgeState,
+    }));
+  } catch {
+    // Observability cannot change the advisory or terminal run outcome.
+  }
+}
+
+function safelyRecordSpan(trace, name, attributes = {}) {
+  try {
+    if (!trace) return null;
+    return recordSpan(trace, name, attributes);
+  } catch {
+    return null;
+  }
+}
+
+function arrayAttribute(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function withProjectUpdateMarkdown(runResult, projectUpdateMarkdown) {
@@ -497,8 +574,8 @@ function recordRuntimeEvidenceSpans(trace, { runtimeEvidence = {}, orchestratorO
       outcome: turn.outcome,
       evidence_ref: turn.evidence_ref || null,
       perspectives_run: perspectivesRun,
-      "agentic_factory.outcome": turn.outcome,
-      "agentic_factory.perspectives_run": perspectivesRun,
+      "teami.outcome": turn.outcome,
+      "teami.perspectives_run": perspectivesRun,
     });
     if (Array.isArray(turn.tool_events) && turn.tool_events.length > 0) {
       recordPolicyCheckedEvidenceSpan(trace, "runtime_tool_events", {
@@ -516,7 +593,10 @@ function recordRuntimeEvidenceSpans(trace, { runtimeEvidence = {}, orchestratorO
 }
 
 function recordPolicyCheckedEvidenceSpan(trace, name, attributes) {
-  const policy = enforceTraceContentPolicy({ spans: [{ name, attributes }] });
+  const policy = enforceTraceContentPolicy(
+    { spans: [{ name, attributes }] },
+    LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
+  );
   if (policy.ok) {
     recordSpan(trace, name, attributes);
     return;
@@ -528,8 +608,8 @@ function recordPolicyCheckedEvidenceSpan(trace, name, attributes) {
     scope: `${attributes.role || "runtime"}.${attributes.phase || "unknown"}.tool_events`,
     reason: policy.reason,
     perspectives_run: attributes.perspectives_run || [],
-    "agentic_factory.outcome": attributes.outcome || null,
-    "agentic_factory.perspectives_run": attributes.perspectives_run || [],
+    "teami.outcome": attributes.outcome || null,
+    "teami.perspectives_run": attributes.perspectives_run || [],
   }));
 }
 
@@ -566,11 +646,11 @@ export async function resumeProjectAfterQuestions({
   onBeforeLinearMutation = null,
 } = {}) {
   const domainTrace = resolveDomainTrace({ domainContext, traceContext, cache, repoRoot });
-  const trace = createTrace("decomposition_run", knownTraceAttributes({
+  const trace = createTrace(decompositionDefinition.trace_descriptor.trace_name, knownTraceAttributes({
     "workflow.name": "project_decomposition_resume",
     "workflow.version": DECOMPOSITION_FUNCTION_VERSION,
-    "agentic_factory.domain_id": domainTrace.domain_id,
-    "agentic_factory.behavior_repo_id": domainTrace.behavior_repo_id,
+    "teami.domain_id": domainTrace.domain_id,
+    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
     "linear.workspace_id": domainTrace.workspace_id,
     "linear.team_id": domainTrace.team_id,
     "linear.project_id": projectId,
@@ -591,7 +671,7 @@ export async function resumeProjectAfterQuestions({
     runner_version: traceContext.runner_version || null,
     ...unpinnedRuntimeTraceAttributes(config),
   }));
-  const runtimeAssignments = resolveRoleRuntimeAssignments(config);
+  const runtimeAssignments = resolveRoleRuntimeAssignments(config, "decomposition");
   const shape = await resolveLinearShape({ client, config, cache });
   const project = await client.getProjectContext(projectId);
   recordSpan(trace, "load_project_context", {

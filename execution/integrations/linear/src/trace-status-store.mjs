@@ -40,6 +40,11 @@ export function recordTraceStatus({
   wakeId = null,
   projectId = null,
   attempt = null,
+  workflowType = null,
+  resource = null,
+  resourceKind = null,
+  githubBehaviorRepoId = null,
+  githubBehaviorRepoLabel = null,
   traceId = null,
   phoenixAppUrl = null,
   status = "trace_unknown",
@@ -49,12 +54,14 @@ export function recordTraceStatus({
 } = {}) {
   if (!runId) throw new Error("runId is required for local trace status.");
   if (!domainId) throw new Error("domainId is required for local trace status.");
-  if (!workspaceId) throw new Error("workspaceId is required for local trace status.");
-  if (!teamId) throw new Error("teamId is required for local trace status.");
+  const receiptResource = normalizeReceiptResource(resource, resourceKind);
+  const requiresLinearIdentity = requiresLinearReceiptIdentity(receiptResource?.kind);
+  if (requiresLinearIdentity && !workspaceId) throw new Error("workspaceId is required for local trace status.");
+  if (requiresLinearIdentity && !teamId) throw new Error("teamId is required for local trace status.");
   if (!LOCAL_TRACE_STATUSES.includes(status)) throw new Error(`Invalid local trace status: ${status}`);
   const paths = traceTelemetryPaths(repoRoot);
   fs.mkdirSync(paths.runsDir, { recursive: true });
-  const receipt = redactSecretFields({
+  const receiptPayload = {
     schema_version: TRACE_RECEIPT_SCHEMA_VERSION,
     run_id: runId,
     domain_id: domainId,
@@ -63,13 +70,18 @@ export function recordTraceStatus({
     wake_id: wakeId,
     project_id: projectId,
     attempt,
+    workflow_type: workflowType,
     trace_id: traceId,
     phoenix_app_url: phoenixAppUrl,
     trace_status: status,
     reason,
     repair_hint: repairHint,
     observed_at: observedAt,
-  });
+  };
+  if (receiptResource) receiptPayload.resource = receiptResource;
+  if (githubBehaviorRepoId) receiptPayload.github_behavior_repo_id = githubBehaviorRepoId;
+  if (githubBehaviorRepoLabel) receiptPayload.github_behavior_repo_label = githubBehaviorRepoLabel;
+  const receipt = redactSecretFields(receiptPayload);
   writeJsonAtomic(path.join(paths.runsDir, `${safeFileName(runId)}.json`), receipt);
   const health = updateTraceHealth({ repoRoot, status, reason, observedAt });
   return { receipt, health };
@@ -129,17 +141,20 @@ function traceReceiptValidationFailures(receipt) {
   if (receipt?.schema_version !== TRACE_RECEIPT_SCHEMA_VERSION) failures.push("unsupported_trace_receipt_schema_version");
   if (!receipt?.run_id) failures.push("missing_run_id");
   if (!receipt?.domain_id) failures.push("missing_domain_id");
-  if (!receipt?.workspace_id) failures.push("missing_workspace_id");
-  if (!receipt?.team_id) failures.push("missing_team_id");
+  if (requiresLinearReceiptIdentity(receipt?.resource?.kind)) {
+    if (!receipt?.workspace_id) failures.push("missing_workspace_id");
+    if (!receipt?.team_id) failures.push("missing_team_id");
+  }
   if (!LOCAL_TRACE_STATUSES.includes(receipt?.trace_status)) failures.push("invalid_trace_status");
   return [...new Set(failures)];
 }
 
 function legacyTraceReceiptFailures(receipt, failures) {
+  const requiresLinearIdentity = requiresLinearReceiptIdentity(receipt?.resource?.kind);
   return receipt?.schema_version === 1
     || failures.includes("missing_domain_id")
-    || failures.includes("missing_workspace_id")
-    || failures.includes("missing_team_id");
+    || (requiresLinearIdentity && failures.includes("missing_workspace_id"))
+    || (requiresLinearIdentity && failures.includes("missing_team_id"));
 }
 
 export function updateTraceHealth({
@@ -222,4 +237,27 @@ function setPath(target, parts, value) {
 
 function safeFileName(value) {
   return String(value || "unknown").replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+function normalizeReceiptResource(resource, resourceKind = null) {
+  const kind = firstPresent(resource?.kind, resourceKind);
+  const id = firstPresent(resource?.id);
+  const label = firstPresent(resource?.label);
+  if (!kind && !id && !label) return null;
+  return {
+    kind: kind || null,
+    id: id || null,
+    label: label || null,
+  };
+}
+
+function requiresLinearReceiptIdentity(resourceKind) {
+  return !resourceKind || String(resourceKind).toLowerCase() === "linear";
+}
+
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "") return value;
+  }
+  return null;
 }

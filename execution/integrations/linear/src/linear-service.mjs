@@ -25,6 +25,9 @@ export {
   evaluateEligibilityFromContext,
 } from "./workflows/decomposition/eligibility.mjs";
 export {
+  isReadyIssueEligible,
+} from "./workflows/execution/eligibility.mjs";
+export {
   encodeDiscoveryFindingsAndResume,
   replayPersistedDecompositionRun,
   resumeProjectAfterQuestions,

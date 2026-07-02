@@ -6,14 +6,45 @@ import { findTokenShapedContent } from "./eval-content-gate.mjs";
 import {
   parseAcceptedPromptSnapshotSections,
 } from "../../../engine/accepted-prompt-snapshot.mjs";
+import { evalNamespacePaths } from "../../../engine/eval-namespace.mjs";
 import { getWorkflowDefinition } from "../../../engine/workflow-registry.mjs";
+import "./trigger-registry.mjs";
 import { adopterSelfImprovementPersonaBinding } from "./promotion/agent-behavior-scope.mjs";
-import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.mjs";
 
-const DECOMPOSITION_WORKFLOW_TYPE = "decomposition";
 const RUNTIME_ROLE_FIELDS = Object.freeze(["runtime", "model"]);
 const RUNTIME_ROLE_DEFAULTS_DISCLOSURE =
   "Adopters without explicit role overrides change behavior when this merges.";
+
+function workflowTypeFromTargetKey(targetKey) {
+  const segments = String(targetKey ?? "").split("/");
+  return segments.length >= 3 && segments[1] ? segments[1] : "decomposition";
+}
+
+function workflowDefinitionForTarget(target = {}) {
+  const workflowType = workflowTypeFromTargetKey(target?.target_key);
+  try {
+    return getWorkflowDefinition(workflowType);
+  } catch {
+    return {
+      workflow_type: workflowType,
+      roles: [],
+      eval_namespace: `execution/evals/${workflowType}`,
+      engine_owned_evaluator_roles: [],
+    };
+  }
+}
+
+function evalPathsForTarget(target = {}) {
+  return evalNamespacePaths(workflowDefinitionForTarget(target));
+}
+
+function manifestPathForTarget(target = {}) {
+  return target.manifest_path || evalPathsForTarget(target).manifest;
+}
+
+function proposalsPathForTarget(target = {}) {
+  return evalPathsForTarget(target).proposals;
+}
 
 const MATERIALIZER_REGISTRY = new Map([
   [
@@ -148,7 +179,7 @@ async function materializeEvalVariantToRuntimeRoleDefaults({
     };
   }
 
-  const current = parseAcceptedRuntimeRoleDefaults(currentAcceptedSnapshotContent);
+  const current = parseAcceptedRuntimeRoleDefaults(currentAcceptedSnapshotContent, target);
   if (!current.ok) {
     return {
       kind: "blocked",
@@ -195,13 +226,13 @@ async function materializeEvalVariantToRuntimeRoleDefaults({
     };
   }
 
-  const newDefaultsBytes = serializeAcceptedRuntimeRoleDefaults(next);
+  const newDefaultsBytes = serializeAcceptedRuntimeRoleDefaults(next, target);
   const newDefaultsSha256 = sha256Hex(newDefaultsBytes);
 
   // Atomically update the manifest's runtime-defaults rule pin so the accepted
   // artifact and its phoenix-assets.json `snapshot_sha256` never drift. Mirrors
   // the accepted-prompt materializer's two-file write (snapshot + manifest pin).
-  const manifestPath = target?.manifest_path || DECOMPOSITION_EVAL_PATHS.manifest;
+  const manifestPath = manifestPathForTarget(target);
   const oldManifestBytes = resolveCurrentManifestContent({
     manifestPath,
     resolvedBaseline,
@@ -261,7 +292,7 @@ function extractRuntimeRoleOverrides(resolvedReceipt, target = null) {
   if (!isPlainObject(overrides) || Object.keys(overrides).length === 0) {
     return { ok: false, reason: "candidate_role_overrides_unavailable" };
   }
-  const runtimeRoleNames = runtimeRoleNamesForWorkflow();
+  const runtimeRoleNames = runtimeRoleNamesForWorkflow(target);
 
   for (const role of Object.keys(overrides)) {
     if (!runtimeRoleNames.includes(role)) {
@@ -309,7 +340,7 @@ function extractRuntimeRoleOverrides(resolvedReceipt, target = null) {
   return { ok: true, overrides: normalized };
 }
 
-function parseAcceptedRuntimeRoleDefaults(content) {
+function parseAcceptedRuntimeRoleDefaults(content, target = {}) {
   let parsed;
   try {
     parsed = JSON.parse(content);
@@ -321,7 +352,8 @@ function parseAcceptedRuntimeRoleDefaults(content) {
     };
   }
   try {
-    validateAcceptedRuntimeRoleDefaults(parsed);
+    const workflowType = workflowTypeFromTargetKey(target?.target_key);
+    validateAcceptedRuntimeRoleDefaults(parsed, target?.artifact_path, { workflowType });
   } catch (error) {
     return {
       ok: false,
@@ -332,24 +364,36 @@ function parseAcceptedRuntimeRoleDefaults(content) {
   return { ok: true, defaults: parsed };
 }
 
-function serializeAcceptedRuntimeRoleDefaults(defaults) {
+function serializeAcceptedRuntimeRoleDefaults(defaults, target = {}) {
   const normalized = {
     schema_version: defaults.schema_version,
     _note: defaults._note,
     roles: {},
   };
-  for (const role of runtimeRoleNamesForWorkflow()) {
+  for (const role of runtimeRoleNamesForWorkflow(target)) {
     normalized.roles[role] = {};
     for (const field of RUNTIME_ROLE_FIELDS) {
       normalized.roles[role][field] = defaults.roles[role][field];
     }
   }
-  validateAcceptedRuntimeRoleDefaults(normalized);
+  const workflowType = workflowTypeFromTargetKey(target?.target_key);
+  validateAcceptedRuntimeRoleDefaults(normalized, target?.artifact_path, { workflowType });
   return `${JSON.stringify(normalized, null, 2)}\n`;
 }
 
-function runtimeRoleNamesForWorkflow() {
-  return getWorkflowDefinition(DECOMPOSITION_WORKFLOW_TYPE).roles;
+function runtimeRoleNamesForWorkflow(target = {}) {
+  const definition = workflowDefinitionForTarget(target);
+  const workflowRoles = Array.isArray(definition.roles) ? definition.roles : [];
+  const evaluatorRoles = Array.isArray(definition.engine_owned_evaluator_roles)
+    ? definition.engine_owned_evaluator_roles
+    : [];
+  const hasEvaluatorRuntimeRole = evaluatorRoles.some((role) => workflowRoles.includes(role));
+  return [
+    ...new Set([
+      ...workflowRoles,
+      ...(!hasEvaluatorRuntimeRole && evaluatorRoles[0] ? [evaluatorRoles[0]] : []),
+    ]),
+  ];
 }
 
 async function materializePhoenixPromptVersionToAcceptedPromptSnapshot({
@@ -404,7 +448,7 @@ async function materializePhoenixPromptVersionToAcceptedPromptSnapshot({
 
   const snapshotSha256 = sha256Hex(newSnapshotBytes);
   const oldSnapshotSha256 = sha256Hex(oldSnapshotBytes);
-  const manifestPath = target?.manifest_path || DECOMPOSITION_EVAL_PATHS.manifest;
+  const manifestPath = manifestPathForTarget(target);
   const oldManifestBytes = resolveCurrentManifestContent({
     manifestPath,
     resolvedBaseline,
@@ -1038,7 +1082,7 @@ export function validateBehaviorDiff({ files, target } = {}) {
 
   for (const [filePath, content] of entries) {
     const normalizedPath = normalizePathForCompare(filePath);
-    if (isBannedProposalPath(normalizedPath)) {
+    if (isBannedProposalPath(normalizedPath, target)) {
       return { ok: false, reason: "proposals_path_banned" };
     }
     if (mappedArtifactPaths.has(normalizedPath)) {
@@ -1062,7 +1106,7 @@ export function validateBehaviorDiff({ files, target } = {}) {
   // changed the artifact without re-pinning, which would otherwise leave the pin stale.
   if (target?.materializer === "eval_variant_to_runtime_role_defaults") {
     const artifactPath = normalizePathForCompare(target.artifact_path);
-    const manifestPath = normalizePathForCompare(target.manifest_path || DECOMPOSITION_EVAL_PATHS.manifest);
+    const manifestPath = normalizePathForCompare(manifestPathForTarget(target));
     const byPath = new Map(entries.map(([p, c]) => [normalizePathForCompare(p), c]));
     const newArtifactBytes = byPath.get(artifactPath);
     const newManifestBytes = byPath.get(manifestPath);
@@ -1117,7 +1161,7 @@ function manifestTargets(manifest) {
 function enrichTarget(target) {
   const enriched = {
     ...target,
-    manifest_path: target.manifest_path || DECOMPOSITION_EVAL_PATHS.manifest,
+    manifest_path: manifestPathForTarget(target),
   };
   return {
     ...enriched,
@@ -1131,8 +1175,7 @@ function mappedArtifactPathSet(target = {}) {
       target.snapshot_path,
       target.artifact_path,
       ...(Array.isArray(target.mapped_artifact_paths) ? target.mapped_artifact_paths : []),
-      target.manifest_path || DECOMPOSITION_EVAL_PATHS.manifest,
-      DECOMPOSITION_EVAL_PATHS.manifest,
+      manifestPathForTarget(target),
     ]
       .filter((entry) => typeof entry === "string" && entry.length > 0)
       .map(normalizePathForCompare),
@@ -1152,8 +1195,7 @@ export function allowedPromotionArtifactPaths(target = {}) {
         target.snapshot_path,
         target.artifact_path,
         ...(Array.isArray(target.mapped_artifact_paths) ? target.mapped_artifact_paths : []),
-        target.manifest_path || DECOMPOSITION_EVAL_PATHS.manifest,
-        DECOMPOSITION_EVAL_PATHS.manifest,
+        manifestPathForTarget(target),
       ].filter((entry) => typeof entry === "string" && entry.length > 0),
     ),
   ];
@@ -1177,8 +1219,8 @@ function normalizePathForCompare(filePath) {
   return withoutLeadingSlash === "." ? "" : withoutLeadingSlash.toLowerCase();
 }
 
-function isBannedProposalPath(normalizedPath) {
-  const banned = normalizePathForCompare(DECOMPOSITION_EVAL_PATHS.proposals);
+function isBannedProposalPath(normalizedPath, target = {}) {
+  const banned = normalizePathForCompare(proposalsPathForTarget(target));
   return normalizedPath === banned
     || normalizedPath.startsWith(`${banned}/`)
     || normalizedPath.endsWith(`/${banned}`)

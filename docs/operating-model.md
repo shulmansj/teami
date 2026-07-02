@@ -1,6 +1,6 @@
 # Operating Model
 
-Agentic Factory is a source-visible control plane for turning product intent
+Teami is a source-visible control plane for turning product intent
 into reviewed, shipped work without making the human become the technical
 coordinator.
 
@@ -10,7 +10,7 @@ defaults, and visible review points.
 
 ## Core Job
 
-When a team has product direction, Agentic Factory helps turn that direction
+When a team has product direction, Teami helps turn that direction
 into shipped, reviewed code while keeping humans focused on product decisions:
 scope, user experience, trust, priority, release timing, and business risk.
 
@@ -18,7 +18,7 @@ scope, user experience, trust, priority, release timing, and business risk.
 
 | Domain | Source of truth |
 | --- | --- |
-| Roadmap item content | Linear projects inside the `Agentic Factory` team |
+| Roadmap item content | Linear projects inside the `Teami` team |
 | Execution work | Linear issues inside the source roadmap project |
 | Code state | GitHub branches, commits, pull requests, checks, and merge state |
 | Process definitions | This repo: docs, templates, schemas, prompts, workflows, and eval contracts |
@@ -30,7 +30,7 @@ instances.
 
 ## Public Trust Boundaries
 
-Agentic Factory keeps live authority local.
+Teami keeps live authority local.
 
 The local gateway polls Linear's current state with the adopter's OAuth grant
 for projects in the trigger state. Linear is the queue: moving a project to
@@ -48,12 +48,13 @@ reviewable proposal branches and pull requests for process changes. Agentic
 Factory stores no GitHub secret. PR provenance is visible in local run evidence
 and the PR body.
 
-Product-repo binding is local and explicit. `domain:bind-repo` binds one
-existing local checkout per domain as that domain's `git_repo` resource. The
-binding records the local checkout path, `owner/repo`, and default branch. The
-landed resource seam supports repo-selection scoping and local worktree/cwd
-selection for domain-scoped work. It is not OS isolation, container isolation,
-all-repositories GitHub access, or a substitute for local permission checks.
+Product-repo grants are local and explicit. `teami domain grant` records
+selected GitHub repo coordinates as a domain `git_repo` resource. The grant
+records `owner/repo` and default branch only. Execution materializes a fresh
+per-run clone through the adopter's ambient local GitHub authority, then strips
+remotes and credential config before handing the cwd to the worker. It is not OS
+isolation, container isolation, all-repositories GitHub access, or a substitute
+for local permission checks.
 
 ## Roles
 
@@ -146,7 +147,7 @@ Input:
 
 Output:
 
-- Linear project in the `Agentic Factory` team.
+- Linear project in the `Teami` team.
 - Non-empty roadmap project body. The repo template is an optional drafting
   aid, not the automation gate.
 
@@ -300,7 +301,7 @@ Human judgment required when:
 
 ## Execution Interface Strategy
 
-Agentic Factory has one Workflow Runner that owns Linear reads and mutations
+Teami has one Workflow Runner that owns Linear reads and mutations
 through the GraphQL-backed Linear service.
 
 The Workflow Runner owns the product contract: how Linear projects are selected,
@@ -346,11 +347,11 @@ Roadmap project statuses:
 | --- | --- |
 | `Backlog` | Stub roadmap item that still needs product shaping and taste before decomposition. |
 | `Planned` | Accountable human approval that the item is roadmap truth and ready for non-interactive decomposition. |
-| `In Progress` | Agentic Factory has decomposed the roadmap item into execution issues. |
+| `In Progress` | Teami has decomposed the roadmap item into execution issues. |
 | `Completed` | The underlying execution work has landed. |
 | `Canceled` | Accountable human closure without deployment. |
 
-Use Linear's native project status categories instead of Agentic Factory-specific
+Use Linear's native project status categories instead of Teami-specific
 `AF` status names. The statuses are the human-visible lifecycle state:
 `Planned` is the approval boundary for decomposition, and `In Progress` is the
 visible signal that decomposition has completed. Before decomposition has
@@ -360,7 +361,7 @@ markers are the retry authority; another runner must not silently continue a
 partial post-mutation run from a different machine.
 
 Execution issue states should follow the adopter's normal Linear workflow until
-Agentic Factory has enough real decomposition runs to justify its own issue
+Teami has enough real decomposition runs to justify its own issue
 workflow.
 
 For decomposition-created execution issues, Ready means the work is structured

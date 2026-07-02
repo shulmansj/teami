@@ -16,7 +16,7 @@ import { CANDIDATE_KINDS } from "./request-contract.mjs";
 // ---------------------------------------------------------------------------
 
 export const MARKER_UNDO_BOUNDS_SCHEMA_VERSION =
-  "agentic-factory-marker-undo-bounds/v1";
+  "teami-marker-undo-bounds/v1";
 
 // The candidate kinds the engine knows how to undo today: every CANDIDATE_KIND
 // is a git-revertible committed-file edit, and the engine's only mutation is the

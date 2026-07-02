@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import { readLinearCache } from "../cache.mjs";
 import { formatRuntimeRoleAssignmentsSection } from "../config.mjs";
+import { doctorCheck, normalizeDoctorChecks } from "../doctor-check.mjs";
 import { resolveForegroundDomainCache } from "../domain-command-context.mjs";
 import { readDomainRegistry } from "../domain-registry.mjs";
 import { githubConnectionDoctorChecks } from "../github-setup.mjs";
@@ -23,6 +24,7 @@ import {
   runtimeSmokeDoctorChecks,
 } from "../runtime-smoke.mjs";
 import { createCliOutput } from "./cli-output.mjs";
+import { doctorExitCode, renderDoctorReport } from "./doctor-report.mjs";
 import { flagValue } from "./flags.mjs";
 import { githubDoctorTransportFromConnection } from "./github-command-options.mjs";
 export async function runDoctorCommand({ context, command, args }) {
@@ -33,10 +35,10 @@ export async function runDoctorCommand({ context, command, args }) {
     cachePath,
     domainId: flagValue(args, "--domain"),
   });
-  output.heading(`Agentic Factory ${output.symbols.separator} doctor`);
-  printDoctorChecks(checks, output);
+  output.heading(`Teami ${output.symbols.separator} doctor`);
+  renderDoctorReport(checks, output);
   for (const line of formatRuntimeRoleAssignmentsSection(config)) output.detail(line);
-  process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
+  process.exitCode = doctorExitCode(checks);
 }
 export async function runDoctorLinearCommand({ context, command, args }) {
   const { config, repoRoot, cachePath, output = createCliOutput() } = context;
@@ -50,10 +52,10 @@ export async function runDoctorLinearCommand({ context, command, args }) {
     includeGitHub: false,
     includeLocalSupervisor: false,
   });
-  output.heading(`Agentic Factory ${output.symbols.separator} Linear doctor`);
-  printDoctorChecks(checks, output);
+  output.heading(`Teami ${output.symbols.separator} Linear doctor`);
+  renderDoctorReport(checks, output);
   for (const line of formatRuntimeRoleAssignmentsSection(config)) output.detail(line);
-  process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
+  process.exitCode = doctorExitCode(checks);
 }
 async function doctorGraphqlLinear({
   config,
@@ -69,7 +71,7 @@ async function doctorGraphqlLinear({
     repoRoot,
     orphanHints: likelyDomainOrphans({ cachePath }),
   });
-  if (!domainDoctor.registryAvailable) return domainDoctor.checks;
+  if (!domainDoctor.registryAvailable) return normalizeDoctorChecks(domainDoctor.checks);
 
   const registry = readDomainRegistry({ repoRoot });
   const selectedDomains = domainId
@@ -89,7 +91,7 @@ async function doctorGraphqlLinear({
       ok: false,
       message: `domain_not_found: ${domainId}`,
     });
-    return checks;
+    return normalizeDoctorChecks(checks);
   }
 
   const foregrounds = [];
@@ -188,29 +190,33 @@ async function doctorGraphqlLinear({
       cachePath: supervisorForeground?.context?.linear?.cachePath || cachePath,
     })));
   }
-  return checks;
+  return normalizeDoctorChecks(checks);
 }
 
 function doctorProductRepoBindingChecksForDomains(domains = []) {
-  return domains.map((domain) => ({
-    name: `domain ${domain.id} product repo binding`,
-    ok: true,
-    message: formatProductRepoBindingReadout(domain),
-    showMessage: true,
-  }));
+  return domains.map((domain) => {
+    const posture = productRepoBindingPosture(domain);
+    return doctorCheck({
+      name: `domain ${domain.id} product repo binding`,
+      state: posture.state,
+      message: [formatProductRepoBindingReadout(domain), posture.message].filter(Boolean).join("; "),
+      fix: posture.fix,
+      showMessage: true,
+    });
+  });
 }
 
 function formatProductRepoBindingReadout(domain) {
   const prefix = `domain=${formatDomainReadoutName(domain)}; linear_team=${formatLinearTeam(domain.linear)}`;
   const gitRepo = domain.resources.find((resource) => resource.kind === "git_repo");
   if (!gitRepo) {
-    return `${prefix}; no product repo bound (domain:bind-repo binds product repos; behavior repo GitHub setup remains separate config.github)`;
+    return `${prefix}; no product repo granted (domain grant authorizes product repos; behavior repo GitHub setup remains separate config.github)`;
   }
   const binding = gitRepo.binding;
   return (
-    `${prefix}; product repo local_checkout_path=${binding.local_checkout_path}; ` +
-    `remote=${binding.owner}/${binding.repo}; default_branch=${binding.default_branch}; ` +
-    "bound_by=domain:bind-repo; behavior repo GitHub setup remains separate config.github"
+    `${prefix}; product repo remote=${binding.owner}/${binding.repo}; default_branch=${binding.default_branch}; ` +
+    "materialization=fresh_remote_clone; " +
+    "granted_by=domain:grant; behavior repo GitHub setup remains separate config.github"
   );
 }
 
@@ -224,6 +230,23 @@ export function doctorProductRepoBindingChecks({
     ? registry.domains.filter((domain) => domain.id === domainId)
     : registry.domains;
   return doctorProductRepoBindingChecksForDomains(domains);
+}
+
+function productRepoBindingPosture(domain) {
+  const gitRepo = domain.resources.find((resource) => resource.kind === "git_repo");
+  if (!gitRepo) return { state: "ok", message: null, fix: null };
+  const binding = gitRepo.binding || {};
+  const missing = ["owner", "repo", "default_branch"].filter((field) =>
+    typeof binding[field] !== "string" || binding[field].trim() === ""
+  );
+  if (missing.length > 0) {
+    return {
+      state: "fail",
+      message: `product repo binding is missing ${missing.join(", ")} for remote materialization`,
+      fix: "Re-grant the domain repo with domain grant so execution can derive the GitHub remote.",
+    };
+  }
+  return { state: "ok", message: "fresh remote clone ready for execution", fix: null };
 }
 
 function formatDomainReadoutName(domain) {
@@ -287,34 +310,6 @@ function likelyDomainOrphans({ cachePath } = {}) {
     }
   }
   return hints;
-}
-
-function printDoctorChecks(checks, output) {
-  for (const check of checks) {
-    const message = defaultDoctorMessage(check);
-    const line = message ? `${check.name}: ${message}` : check.name;
-    if (check.ok) {
-      output.success(line);
-    } else {
-      output.error({ what: line });
-    }
-    if (check.message && !check.showMessage) output.detail(`${check.name}: ${check.message}`);
-  }
-}
-
-function defaultDoctorMessage(check) {
-  if (check.showMessage) return String(check.message || "");
-  if (check.ok) return "";
-  return compactDoctorDetail(check.message);
-}
-
-function compactDoctorDetail(message) {
-  return String(message || "")
-    .replace(/[A-Za-z]:\\[^\s;,)]+/g, "[path]")
-    .replace(/(?:^|\s)\/[^\s;,)]+/g, " [path]")
-    .replace(/https?:\/\/[^\s;,)]+/g, "[url]")
-    .replace(/\b[0-9a-f]{12,}\b/gi, "[id]")
-    .trim();
 }
 
 export {

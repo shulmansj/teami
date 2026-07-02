@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { COMMAND_INDEX } from "../src/cli/dispatch.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import { runDecompositionEvalTask } from "../src/decomposition-eval-cli.mjs";
 import {
@@ -61,7 +62,7 @@ const POLICY_SHA256 = createHash("sha256")
 // ---------------------------------------------------------------------------
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-experiment-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-experiment-"));
 }
 
 function resolvedEvalDomainContext(root) {
@@ -119,7 +120,7 @@ function fetchRouter(routes) {
   return impl;
 }
 
-const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "agentic-factory" });
+const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" });
 
 function projectUpdateMarkdownForRun(runId, summary = "Decomposition completed.") {
   return `run_id: ${runId}\n\n## What I did with each part of your project\n\n${summary}`;
@@ -161,19 +162,37 @@ function exampleRecord({
   humanAnnotationIds = [],
   projectId = "project-exp-1",
 }) {
+  const project = {
+    id: projectId,
+    name: "Customer onboarding pilot",
+    description: null,
+    content: "## Goal\n\nDecompose the onboarding pilot.\n\n## Open Questions\n",
+    status: "planned",
+    labels: [],
+    existing_issues: [],
+  };
   return {
     id,
     input: {
-      source_type: "linear_project_snapshot",
-      project: {
-        id: projectId,
-        name: "Customer onboarding pilot",
-        description: null,
-        content: "## Goal\n\nDecompose the onboarding pilot.\n\n## Open Questions\n",
-        status: "planned",
-        labels: [],
-        existing_issues: [],
+      gradeability: "full_input",
+      judge_fixture_input: {
+        project_intent: project,
+        terminal_status: "completed",
+        terminal_reason: "no_blockers",
+        final_issues: [],
+        discovery_issues: [],
+        dependency_relations: [],
+        project_update_markdown: projectUpdateMarkdownForRun("source_run"),
+        open_questions_markdown: null,
+        phase_packet_summaries: [],
       },
+      maintainer_supplied_context: {
+        rubric_version: "1.0.0",
+        failure_taxonomy_version: "1.0.0",
+        allowed_failure_modes: [],
+      },
+      source_type: "linear_project_snapshot",
+      project,
       run_envelope: {
         workflow_version: DECOMPOSITION_FUNCTION_VERSION,
         allowed_source_boundaries: [],
@@ -258,7 +277,7 @@ function fakeTaskResult({
         },
         {
           status: "skipped",
-          name: "decomposition_quality",
+          name: "quality",
           identifier: "decomposition_quality_offline_v1",
           skip_reason: "structured_issue_inputs_not_recorded_in_run_artifact",
         },
@@ -323,7 +342,7 @@ function baseRoutes({
           dataset_version_id: "DSV9",
           repetitions: 1,
           metadata: call.body.metadata || {},
-          project_name: "agentic-factory",
+          project_name: "teami",
         },
       });
     },
@@ -397,12 +416,12 @@ test("experiment wrapper stores through the Phoenix experiment REST API and writ
   assert.equal(evaluationCalls.length, 4);
 
   // Create-time metadata stamp (best-effort provenance; receipt is primary).
-  assert.equal(createCalls[0].body.metadata.agentic_factory_receipt_id, result.receipt_id);
+  assert.equal(createCalls[0].body.metadata.teami_receipt_id, result.receipt_id);
   assert.equal(
-    createCalls[0].body.metadata.agentic_factory_run_id,
-    result.agentic_factory_run_id,
+    createCalls[0].body.metadata.teami_run_id,
+    result.teami_run_id,
   );
-  assert.equal(createCalls[0].body.metadata.agentic_factory_source, "managed_manual");
+  assert.equal(createCalls[0].body.metadata.teami_source, "managed_manual");
 
   // Managed receipt: every plan-required field, baseline from the manifest.
   const stored = readExperimentReceipt({ receiptId: result.receipt_id, repoRoot: root });
@@ -446,9 +465,9 @@ test("experiment wrapper stores through the Phoenix experiment REST API and writ
   assert.ok(receipt.launch.launched_at);
   assert.deepEqual(receipt.launch.phoenix_scope, {
     origin: "http://127.0.0.1:6006",
-    project_name: "agentic-factory",
+    project_name: "teami",
   });
-  assert.ok(receipt.launch.agentic_factory_run_id.startsWith("afexp-"));
+  assert.ok(receipt.launch.teami_run_id.startsWith("afexp-"));
 
   // The Phoenix experiment ID was written back as the primary join.
   assert.equal(receipt.phoenix_experiment_id, "EXP1");
@@ -613,7 +632,7 @@ test("evaluators are run and passed explicitly: the wrapper chains checks+judge 
   assert.equal(code.body.metadata.identifier, "accepted_packet_sufficiency_offline_v1");
   assert.equal(code.body.experiment_run_id, "EXPRUN-1");
   const llm = evaluations.find((call) => call.body.annotator_kind === "LLM");
-  assert.equal(llm.body.name, "decomposition_quality");
+  assert.equal(llm.body.name, "quality");
   assert.equal(llm.body.result.score, 0.85);
   assert.equal(llm.body.metadata.judge_prompt_source, "repo_accepted_snapshot");
 });
@@ -713,7 +732,7 @@ test("failed experiment creation leaves a registerable receipt; register amendme
   // Retroactive registration through the verified resolver.
   const amendFetch = fetchRouter({
     "GET /v1/experiments/EXP9": jsonResponse({
-      data: { id: "EXP9", dataset_id: "DS1", dataset_version_id: "DSV10", project_name: "agentic-factory" },
+      data: { id: "EXP9", dataset_id: "DS1", dataset_version_id: "DSV10", project_name: "teami" },
     }),
   });
   const registered = await amendExperimentReceipt({
@@ -998,7 +1017,7 @@ test("derivedVariant bypasses committed variants.json and records per-target bas
     config,
     datasetName: "eval-ds",
     derivedVariant,
-    draftedBy: "agentic_factory_drafter_v1:test-model",
+    draftedBy: "teami_drafter_v1:test-model",
     intentFlag: "promotion_candidate",
     variantsPath: committedVariantsPath,
     ensureReady: readyUp,
@@ -1018,7 +1037,7 @@ test("derivedVariant bypasses committed variants.json and records per-target bas
   assert.equal(fs.readFileSync(committedVariantsPath, "utf8"), committedBefore);
   const receipt = readExperimentReceipt({ receiptId: result.receipt_id, repoRoot: root }).receipt;
   assert.equal(receipt.launch.intent, "promotion_candidate");
-  assert.equal(receipt.launch.drafted_by, "agentic_factory_drafter_v1:test-model");
+  assert.equal(receipt.launch.drafted_by, "teami_drafter_v1:test-model");
   assert.equal(receipt.launch.candidate_target_key, targetKey);
   assert.equal(receipt.launch.launch_baseline.accepted_baseline_id, EXPECTED_SR_ENG_BASELINE_ID);
   assert.equal(receipt.launch.launch_baseline.prompt_role, SR_ENG_MANIFEST_ENTRY.role);
@@ -1030,7 +1049,7 @@ test("derivedVariant bypasses committed variants.json and records per-target bas
   assert.deepEqual(receipt.launch.candidate.prompt_overrides, derivedVariant.prompt_overrides);
   const createCall = fetchImpl.calls.find((call) =>
     call.method === "POST" && call.pathname === "/v1/datasets/DS1/experiments");
-  assert.equal(createCall.body.metadata.agentic_factory_candidate_version_id, "PV-DRAFT");
+  assert.equal(createCall.body.metadata.teami_candidate_version_id, "PV-DRAFT");
 });
 
 test("judge-target launches keep the existing judge baseline identity", async () => {
@@ -1167,11 +1186,11 @@ test("summary reports human/LLM/CODE disagreements and judge-vs-human regression
     exampleRecord({ id: "EX1", split: "test", sourceTraceId, humanAnnotationIds: ["ann-h1"] }),
   ];
   const routes = baseRoutes({ records });
-  routes["GET /v1/projects/agentic-factory/trace_annotations"] = jsonResponse({
+  routes["GET /v1/projects/teami/trace_annotations"] = jsonResponse({
     data: [
       {
         id: "ann-h1",
-        name: "decomposition_quality",
+        name: "quality",
         annotator_kind: "HUMAN",
         identifier: "steve",
         result: { label: "pass", score: 0.95, explanation: "good decomposition" },
@@ -1212,8 +1231,8 @@ test("score changes vs an accepted baseline experiment are computed when the man
   const records = [exampleRecord({ id: "EX1" })];
   const routes = baseRoutes({ records });
   routes["GET /v1/experiments/BASE1/json"] = jsonResponse([
-    { example_id: "EX1", annotations: [{ name: "decomposition_quality", score: 0.95, label: "pass" }] },
-    { example_id: "EX2", annotations: [{ name: "decomposition_quality", score: 0.85, label: "pass" }] },
+    { example_id: "EX1", annotations: [{ name: "quality", score: 0.95, label: "pass" }] },
+    { example_id: "EX2", annotations: [{ name: "quality", score: 0.85, label: "pass" }] },
   ]);
   const fetchImpl = fetchRouter(routes);
 
@@ -1230,8 +1249,8 @@ test("score changes vs an accepted baseline experiment are computed when the man
   const comparison = result.summary.baseline_comparison;
   assert.equal(comparison.computable, true);
   assert.equal(comparison.baseline_experiment_id, "BASE1");
-  assert.ok(Math.abs(comparison.deltas.decomposition_quality.delta - (0.8 - 0.9)) < 1e-9);
-  assert.deepEqual(comparison.regressions, ["decomposition_quality"]);
+  assert.ok(Math.abs(comparison.deltas.quality.delta - (0.8 - 0.9)) < 1e-9);
+  assert.deepEqual(comparison.regressions, ["quality"]);
   assert.ok(
     formatExperimentReport(result).some((line) => line.includes("REGRESSIONS vs baseline")),
   );
@@ -1399,7 +1418,7 @@ test("end-to-end with the real eval task: dataset example runs the real phase lo
     runEvalTaskFn: (args) => runDecompositionEvalTask({
       ...args,
       repoRoot,
-      evalRunStoreDir: path.join(root, ".agentic-factory", "eval-runs"),
+      evalRunStoreDir: path.join(root, ".teami", "eval-runs"),
       domainContext,
       orchestratorTurnExecutor,
     }),
@@ -1451,7 +1470,7 @@ test("end-to-end with the real eval task: dataset example runs the real phase lo
   assert.equal(runCall.body.output.accepted_packet_count, 4);
   assert.equal(runCall.body.trace_id, "e".repeat(32));
   // The real eval task wrote its local eval-run record under this repoRoot.
-  const evalRunDir = path.join(root, ".agentic-factory", "eval-runs");
+  const evalRunDir = path.join(root, ".teami", "eval-runs");
   assert.ok(fs.existsSync(evalRunDir));
   // Judge failure became an experiment evaluation ERROR row (explainable),
   // and the CODE check landed as a CODE evaluation.
@@ -1540,12 +1559,8 @@ test("phoenix:experiment-decomposition and phoenix:experiment-amend are wired as
     packageJson.scripts["phoenix:experiment-amend"],
     "node execution/integrations/linear/cli.mjs phoenix:experiment-amend",
   );
-  const cliSource = fs.readFileSync(
-    path.resolve(import.meta.dirname, "..", "cli.mjs"),
-    "utf8",
-  );
-  assert.ok(cliSource.includes('command === "phoenix:experiment-decomposition"'));
-  assert.ok(cliSource.includes('command === "phoenix:experiment-amend"'));
+  assert.ok(COMMAND_INDEX.has("phoenix:experiment-decomposition"));
+  assert.ok(COMMAND_INDEX.has("phoenix:experiment-amend"));
   // Post-split, command bodies live in src/cli/dispatch.mjs; the wiring pin
   // follows the wiring.
   const dispatchSource = fs.readFileSync(
@@ -1566,5 +1581,5 @@ test("phoenix:experiment-decomposition and phoenix:experiment-amend are wired as
   assert.ok(moduleSource.includes("/v1/experiment_evaluations"));
 
   const receiptPath = experimentReceiptPath({ receiptId: "expr-test", repoRoot: "/tmp/x" });
-  assert.ok(receiptPath.replaceAll("\\", "/").includes(".agentic-factory/experiments/expr-test.json"));
+  assert.ok(receiptPath.replaceAll("\\", "/").includes(".teami/experiments/expr-test.json"));
 });

@@ -1,5 +1,5 @@
 export const PROMOTION_ACCEPTANCE_POLICY_DECISION_SCHEMA_VERSION =
-  "agentic-factory-promotion-acceptance-policy-decision/v1";
+  "teami-promotion-acceptance-policy-decision/v1";
 
 export const PROMOTION_ACCEPTANCE_DECISIONS = Object.freeze([
   "route_to_hitl",

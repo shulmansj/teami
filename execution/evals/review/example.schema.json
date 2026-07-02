@@ -1,0 +1,292 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-eval-example/v1",
+  "title": "Reviewer eval dataset example",
+  "description": "Canonical contract for one Reviewer eval dataset example. The input owns the verdict-shaped grade-time Judge input: reviewed PR diff, Reviewer verdict and reasoning, and the review-correctness signal.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["input", "output", "reference", "metadata"],
+  "properties": {
+    "schema_version": {
+      "description": "Optional example contract version stamp. When present it must match this schema's $id.",
+      "const": "review-eval-example/v1"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "gradeability",
+        "judge_fixture_input",
+        "maintainer_supplied_context",
+        "source_type",
+        "run_envelope",
+        "source_refs"
+      ],
+      "properties": {
+        "gradeability": {
+          "description": "Only full_input rows may be regraded or used to tune the Judge.",
+          "enum": ["full_input", "detection_only"]
+        },
+        "judge_fixture_input": { "$ref": "#/$defs/judge_fixture_input" },
+        "maintainer_supplied_context": { "$ref": "#/$defs/maintainer_supplied_context" },
+        "source_type": { "const": "github_pull_request_review_snapshot" },
+        "run_envelope": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["workflow_version", "allowed_source_boundaries", "runtime_assignments"],
+          "properties": {
+            "workflow_version": { "type": "string", "minLength": 1 },
+            "allowed_source_boundaries": { "type": "array" },
+            "runtime_assignments": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["reviewer", "orchestrator"],
+              "properties": {
+                "reviewer": { "type": "string", "minLength": 1 },
+                "orchestrator": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "source_refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["disposition", "body", "reviewed_head_sha"],
+      "properties": {
+        "disposition": { "$ref": "#/$defs/review_verdict" },
+        "body": { "type": "string", "minLength": 1 },
+        "reviewed_head_sha": { "type": "string", "minLength": 1 },
+        "comments": { "type": "array" }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "human_annotations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["name", "label", "score", "failure_modes", "explanation"],
+            "properties": {
+              "name": { "$ref": "#/$defs/annotation_name" },
+              "label": { "$ref": "#/$defs/quality_label" },
+              "score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "failure_modes": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "explanation": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "human_annotation_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_label": { "$ref": "#/$defs/quality_label" },
+        "expected_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label_source", "label_status", "labeled_at"],
+          "properties": {
+            "label_source": { "enum": ["explicit_human", "ambiguous"] },
+            "label_status": { "enum": ["GOLD", "excluded"] },
+            "labeled_at": { "type": "string", "minLength": 1 },
+            "annotator_id": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "description": "Example metadata is Phoenix-bound; workflow and queue state keys are banned.",
+      "type": "object",
+      "additionalProperties": true,
+      "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+      "required": [
+        "eval_namespace",
+        "workflow_type",
+        "workspace_maturity",
+        "project_category",
+        "project_impact_level",
+        "lifecycle_state",
+        "dataset_split",
+        "process_version",
+        "rubric_version",
+        "failure_taxonomy_version",
+        "source_trace_id",
+        "source_run_id",
+        "content_retention"
+      ],
+      "properties": {
+        "eval_namespace": { "const": "execution/evals/review" },
+        "workflow_type": { "const": "review" },
+        "workspace_maturity": { "enum": ["new", "calibrating", "stable"] },
+        "project_category": { "enum": ["code", "docs", "marketing", "ops", "mixed"] },
+        "project_impact_level": { "enum": ["low", "medium", "high"] },
+        "lifecycle_state": { "enum": ["active", "deprecated"] },
+        "dataset_split": { "enum": ["train", "test", "calibration", "regression"] },
+        "process_version": { "type": "string", "minLength": 1 },
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "source_trace_id": { "type": ["string", "null"] },
+        "source_run_id": { "type": ["string", "null"] },
+        "source_target_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "produced_identity_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/produced_identity_ref" }
+        },
+        "content_retention": { "enum": ["bounded", "rich_local", "sanitized_fixture"] }
+      }
+    }
+  },
+  "$defs": {
+    "no_workflow_state_keys": {
+      "description": "Denylist for Phoenix-bound metadata.",
+      "properties": {
+        "needs_relabel": false,
+        "pending_promotion": false,
+        "accepted_by_factory": false,
+        "propose_repo_change": false,
+        "proposal_state": false,
+        "queue_state": false,
+        "workflow_status": false,
+        "assigned": false,
+        "resolved": false
+      }
+    },
+    "judge_fixture_input": {
+      "description": "Captured evidence fields consumed by the Judge for Reviewer quality grading.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "reviewed_pr",
+        "reviewer_review",
+        "review_correctness_signal"
+      ],
+      "properties": {
+        "reviewed_pr": { "$ref": "#/$defs/reviewed_pr" },
+        "reviewer_review": { "$ref": "#/$defs/reviewer_review" },
+        "review_correctness_signal": { "$ref": "#/$defs/review_correctness_signal" }
+      }
+    },
+    "maintainer_supplied_context": {
+      "description": "Maintainer-owned Judge context supplied at grading time.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "rubric_version",
+        "failure_taxonomy_version",
+        "allowed_failure_modes"
+      ],
+      "properties": {
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "allowed_failure_modes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "reviewed_pr": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["provider", "owner", "repo", "pull_request_number", "head_sha", "base_ref", "diff"],
+      "properties": {
+        "provider": { "const": "github" },
+        "owner": { "type": "string", "minLength": 1 },
+        "repo": { "type": "string", "minLength": 1 },
+        "pull_request_number": { "type": "integer", "minimum": 1 },
+        "head_sha": { "type": "string", "minLength": 1 },
+        "base_ref": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "body": { "type": ["string", "null"] },
+        "issue_context": { "type": "object", "additionalProperties": true },
+        "diff": {
+          "description": "Captured PR diff or sanitized diff summary available to the Reviewer.",
+          "type": "string",
+          "minLength": 1
+        },
+        "test_evidence": { "type": "array" }
+      }
+    },
+    "reviewer_review": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["verdict", "reasoning", "reviewed_head_sha"],
+      "properties": {
+        "verdict": { "$ref": "#/$defs/review_verdict" },
+        "reasoning": { "type": "string", "minLength": 1 },
+        "body": { "type": "string" },
+        "reviewed_head_sha": { "type": "string", "minLength": 1 },
+        "comments": { "type": "array" },
+        "source_refs": { "type": "array" },
+        "assumptions": { "type": "array" },
+        "constraints": { "type": "array" },
+        "risks": { "type": "array" }
+      }
+    },
+    "review_correctness_signal": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source", "verdict_correct", "summary"],
+      "properties": {
+        "source": {
+          "description": "Where the correctness signal came from. Human GOLD labels are the now-build source; outcome observations can be added by the deferred arm.",
+          "enum": ["human_gold_label", "outcome_observation", "synthetic_probe", "unavailable"]
+        },
+        "verdict_correct": { "type": ["boolean", "null"] },
+        "summary": { "type": "string", "minLength": 1 },
+        "known_limitations": { "type": "array" }
+      }
+    },
+    "review_verdict": {
+      "enum": ["approve", "request-changes", "escalate"]
+    },
+    "quality_label": {
+      "description": "Default Judge label set.",
+      "enum": ["pass", "needs_revision", "blocking_failure"]
+    },
+    "annotation_name": {
+      "description": "Reviewer quality annotation names.",
+      "enum": [
+        "quality",
+        "verdict_correctness",
+        "real_issue_detection",
+        "false_positive_avoidance",
+        "reasoning_soundness",
+        "actionability",
+        "severity_calibration",
+        "scope_discipline",
+        "user_risk_explanation",
+        "accepted_packet_sufficiency",
+        "pause_state_correctness"
+      ]
+    },
+    "produced_identity_ref": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["effect_id", "provider", "resource_kind", "target_ids"],
+      "properties": {
+        "effect_id": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "resource_kind": { "type": "string", "minLength": 1 },
+        "target_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

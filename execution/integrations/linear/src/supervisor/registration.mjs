@@ -13,15 +13,17 @@ import {
 } from "./state-store.mjs";
 
 export const LOCAL_SUPERVISOR_REGISTRATION_SCHEMA_VERSION =
-  "agentic-factory-local-supervisor-registration/v1";
+  "teami-local-supervisor-registration/v1";
 export const LOCAL_SUPERVISOR_DISABLE_SCHEMA_VERSION =
-  "agentic-factory-local-supervisor-disable/v1";
+  "teami-local-supervisor-disable/v1";
 
 export const LOCAL_SUPERVISOR_CONSENT_FLAG = "consent-local-supervisor";
 
 const AUTHORIZED_AFTER_GRANT = Object.freeze([
   "runner_work",
   "scanner_work",
+  "export",
+  "autonomous_diagnosis_scan",
   "evidence_resolution",
   "hitl_proposal_drafting",
   "github_pr_opening",
@@ -127,6 +129,8 @@ export function setLocalSupervisorDisabled({
   reason = "operator_disabled",
   runnerDisabled = null,
   scannerDisabled = null,
+  exportDisabled = null,
+  autonomousDiagnosisScanDisabled = null,
   now = () => new Date(),
 } = {}) {
   const disablePath = localSupervisorDisablePath(repoRoot);
@@ -145,6 +149,9 @@ export function setLocalSupervisorDisabled({
     reason,
     runner_disabled: runnerDisabled === null ? true : Boolean(runnerDisabled),
     scanner_disabled: scannerDisabled === null ? true : Boolean(scannerDisabled),
+    export_disabled: exportDisabled === null ? true : Boolean(exportDisabled),
+    autonomous_diagnosis_scan_disabled:
+      autonomousDiagnosisScanDisabled === null ? true : Boolean(autonomousDiagnosisScanDisabled),
     disabled_at: now().toISOString(),
   };
   writeJsonAtomic(disablePath, record);
@@ -200,19 +207,29 @@ function readLocalSupervisorRegistration({ repoRoot = process.cwd() } = {}) {
 
 function readLocalSupervisorDisable({ repoRoot = process.cwd(), env = process.env } = {}) {
   const fileRecord = readJsonIfExists(localSupervisorDisablePath(repoRoot));
-  const envAll = envFlag(env.AGENTIC_FACTORY_SUPERVISOR_DISABLED);
-  const envRunner = envFlag(env.AGENTIC_FACTORY_SUPERVISOR_DISABLE_RUNNER);
-  const envScanner = envFlag(env.AGENTIC_FACTORY_SUPERVISOR_DISABLE_SCANNER);
+  const envAll = envFlag(env.TEAMI_SUPERVISOR_DISABLED);
+  const envRunner = envFlag(env.TEAMI_SUPERVISOR_DISABLE_RUNNER);
+  const envScanner = envFlag(env.TEAMI_SUPERVISOR_DISABLE_SCANNER);
+  const envExport = envFlag(env.TEAMI_SUPERVISOR_DISABLE_EXPORT);
+  const envAutonomousDiagnosisScan =
+    envFlag(env.TEAMI_SUPERVISOR_DISABLE_AUTONOMOUS_DIAGNOSIS_SCAN);
   const disabled = envAll || fileRecord?.disabled === true;
   const runnerDisabled = disabled || envRunner || fileRecord?.runner_disabled === true;
   const scannerDisabled = disabled || envScanner || fileRecord?.scanner_disabled === true;
+  const exportDisabled = disabled || envExport || fileRecord?.export_disabled === true;
+  const autonomousDiagnosisScanDisabled =
+    disabled || envAutonomousDiagnosisScan || fileRecord?.autonomous_diagnosis_scan_disabled === true;
+  const capabilityDisabled =
+    runnerDisabled || scannerDisabled || exportDisabled || autonomousDiagnosisScanDisabled;
   return {
     disabled,
     runner_disabled: runnerDisabled,
     scanner_disabled: scannerDisabled,
+    export_disabled: exportDisabled,
+    autonomous_diagnosis_scan_disabled: autonomousDiagnosisScanDisabled,
     reason: envAll
-      ? "env:AGENTIC_FACTORY_SUPERVISOR_DISABLED"
-      : fileRecord?.reason || (runnerDisabled || scannerDisabled ? "capability_disabled" : null),
+      ? "env:TEAMI_SUPERVISOR_DISABLED"
+      : fileRecord?.reason || (capabilityDisabled ? "capability_disabled" : null),
     file: fileRecord || null,
   };
 }

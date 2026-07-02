@@ -38,7 +38,7 @@ export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_POLL_GRACE_MS = 5_000;
 export const DEFAULT_CHILD_CRASH_TIMEOUT_MS = 5 * 60 * 1000;
 
-const CHILD_EVENT_TYPE = "agentic_factory_gateway_uat";
+const CHILD_EVENT_TYPE = "teami_gateway_uat";
 const TERMINAL_PROJECT_STATUSES = new Set(["started", "backlog", "completed", "canceled", "cancelled"]);
 const CRASH_SCENARIOS = Object.freeze({
   commit_before_started: Object.freeze({
@@ -68,14 +68,14 @@ class UatUserError extends Error {
 
 export function parseGatewayUatArgs(argv = process.argv.slice(2), env = process.env) {
   const options = {
-    repoRoot: path.resolve(env.AGENTIC_FACTORY_UAT_REPO_ROOT || REPO_ROOT),
-    domainId: env.AGENTIC_FACTORY_UAT_DOMAIN || null,
-    prefix: env.AGENTIC_FACTORY_UAT_PREFIX || DEFAULT_UAT_PREFIX,
-    consecutive: parsePositiveInteger(env.AGENTIC_FACTORY_UAT_CONSECUTIVE, DEFAULT_CONSECUTIVE_COMMITS),
-    pollIntervalMs: parsePositiveInteger(env.AGENTIC_FACTORY_UAT_POLL_INTERVAL_MS, null),
-    pollGraceMs: parsePositiveInteger(env.AGENTIC_FACTORY_UAT_POLL_GRACE_MS, DEFAULT_POLL_GRACE_MS),
-    timeoutMs: parsePositiveInteger(env.AGENTIC_FACTORY_UAT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
-    keepArtifacts: truthy(env.AGENTIC_FACTORY_UAT_KEEP_ARTIFACTS),
+    repoRoot: path.resolve(env.TEAMI_UAT_REPO_ROOT || REPO_ROOT),
+    domainId: env.TEAMI_UAT_DOMAIN || null,
+    prefix: env.TEAMI_UAT_PREFIX || DEFAULT_UAT_PREFIX,
+    consecutive: parsePositiveInteger(env.TEAMI_UAT_CONSECUTIVE, DEFAULT_CONSECUTIVE_COMMITS),
+    pollIntervalMs: parsePositiveInteger(env.TEAMI_UAT_POLL_INTERVAL_MS, null),
+    pollGraceMs: parsePositiveInteger(env.TEAMI_UAT_POLL_GRACE_MS, DEFAULT_POLL_GRACE_MS),
+    timeoutMs: parsePositiveInteger(env.TEAMI_UAT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    keepArtifacts: truthy(env.TEAMI_UAT_KEEP_ARTIFACTS),
     childCrash: null,
     childProjectId: null,
     help: false,
@@ -158,10 +158,10 @@ export function buildGatewayUatUsage() {
     "Usage: npm run uat:gateway -- [--domain <id>] [--prefix AF-UAT] [--consecutive 2]",
     "",
     "Environment equivalents:",
-    "- AGENTIC_FACTORY_UAT_DOMAIN selects the disposable Linear domain/team.",
-    "- AGENTIC_FACTORY_UAT_PREFIX controls test-created Linear project name prefixes.",
-    "- AGENTIC_FACTORY_UAT_POLL_INTERVAL_MS overrides poll.interval_ms for the harness run.",
-    "- AGENTIC_FACTORY_UAT_KEEP_ARTIFACTS=1 keeps test artifacts where the scenarios leave them.",
+    "- TEAMI_UAT_DOMAIN selects the disposable Linear domain/team.",
+    "- TEAMI_UAT_PREFIX controls test-created Linear project name prefixes.",
+    "- TEAMI_UAT_POLL_INTERVAL_MS overrides poll.interval_ms for the harness run.",
+    "- TEAMI_UAT_KEEP_ARTIFACTS=1 keeps test artifacts where the scenarios leave them.",
   ].join("\n");
 }
 

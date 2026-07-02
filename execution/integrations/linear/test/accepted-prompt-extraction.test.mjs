@@ -92,7 +92,7 @@ test("accepted prompt loader rejects promotion sentinels and template placeholde
   const originalText = fs.readFileSync(path.join(repoRoot, entry.snapshot_path), "utf8");
 
   for (const [suffix, expectedReason] of [
-    ["\n<!-- agentic_factory_promotion:begin -->\n", "accepted_prompt_snapshot_forbidden_sentinel"],
+    ["\n<!-- teami_promotion:begin -->\n", "accepted_prompt_snapshot_forbidden_sentinel"],
     ["\n{{candidate_prompt_body}}\n", "accepted_prompt_snapshot_template_placeholder"],
   ]) {
     const unsafeBytes = Buffer.from(`${originalText}${suffix}`, "utf8");

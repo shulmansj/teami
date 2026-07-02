@@ -1,5 +1,5 @@
 {
-  "schema_version": "agentic-factory-run-artifact/v1",
+  "schema_version": "teami-run-artifact/v1",
   "engine_version": "0.2.0",
   "function_version": "0.0.1",
   "workflow_version": "0.0.1",

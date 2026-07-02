@@ -10,9 +10,9 @@ labels, not private repo names, local paths, credentials, or source contents.
 
 ## Proof Summary
 
-Agentic Factory now has landed, tested behavior for binding one domain to one
+Teami now has landed, tested behavior for binding one domain to one
 existing local product checkout through a `git_repo` resource. The binding is
-separate from the Agentic Factory behavior-repo GitHub path used for process
+separate from the Teami behavior-repo GitHub path used for process
 change proposals.
 
 The proof is source-and-test based. It does not require exposing a real checkout
@@ -28,7 +28,7 @@ path or running against a private product repository.
 | Resource id | `git_repo` |
 | Resource role | `primary` |
 | Example bound repo label | `example-org/renewal-risk-product` |
-| Behavior-repo label | `example-org/agentic-factory-behavior` |
+| Behavior-repo label | `example-org/teami-behavior` |
 | Local checkout disclosure | Redacted; public artifacts contain no local path value. |
 
 ## Evidence From Landed Source And Tests

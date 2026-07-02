@@ -118,7 +118,7 @@ export function advisorySchemaFor(classification = {}) {
 }
 
 export const FACTORY_CHANGE_ADVISORY_SCHEMA_VERSION =
-  "agentic-factory-factory-change-advisory/v1";
+  "teami-factory-change-advisory/v1";
 
 // The marker-facing advisory: the demoted-view schema when at least one factory
 // class was demoted to advisory, else null (a purely ordinary change records no

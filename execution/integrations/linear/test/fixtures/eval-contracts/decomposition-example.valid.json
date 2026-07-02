@@ -1,6 +1,83 @@
 {
   "schema_version": "decomposition-eval-example/v1",
   "input": {
+    "gradeability": "full_input",
+    "judge_fixture_input": {
+      "project_intent": {
+        "id": "fixture-project-onboarding-email-refresh",
+        "name": "Onboarding email sequence refresh",
+        "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking domains.",
+        "status": "Planned",
+        "labels": [],
+        "existing_issues": []
+      },
+      "terminal_status": "completed",
+      "terminal_reason": "synthesis_complete",
+      "final_issues": [
+        {
+          "title": "Draft refreshed copy for onboarding emails 1-3",
+          "assignment": "Write replacement copy for the three onboarding emails.",
+          "output": "Three approved email drafts checked into the content folder.",
+          "acceptanceCriteria": [
+            "Each email names the single next action the user should take",
+            "Copy fits the existing template slots without layout changes"
+          ],
+          "decompositionKey": "onboarding-email-refresh/copy"
+        },
+        {
+          "title": "Wire refreshed copy into the email provider templates",
+          "assignment": "Update the provider templates with the approved drafts.",
+          "output": "Updated templates live behind the existing send schedule.",
+          "acceptanceCriteria": [
+            "Test sends render correctly in the provider preview",
+            "No new tracking domains are introduced"
+          ],
+          "decompositionKey": "onboarding-email-refresh/templates",
+          "dependsOn": ["onboarding-email-refresh/copy"]
+        }
+      ],
+      "discovery_issues": [],
+      "dependency_relations": [
+        {
+          "blocking": "onboarding-email-refresh/copy",
+          "blocked": "onboarding-email-refresh/templates"
+        }
+      ],
+      "project_update_markdown": "run_id: fixture-run-0001\nDecomposed the onboarding email refresh into two sequenced issues: copy first, template wiring second.",
+      "open_questions_markdown": null,
+      "phase_packet_summaries": []
+    },
+    "maintainer_supplied_context": {
+      "rubric_version": "1.0.0",
+      "failure_taxonomy_version": "1.0.0",
+      "allowed_failure_modes": [
+        "missing_agent_ready_issues",
+        "issue_not_independently_executable",
+        "missing_acceptance_criteria",
+        "missing_decomposition_key",
+        "prose_dependency_instead_of_relation",
+        "product_question_not_escalated",
+        "missing_terminal_output",
+        "missing_context_digest",
+        "missing_source_refs",
+        "missing_assumptions",
+        "missing_constraints",
+        "missing_risks",
+        "missing_pause_open_questions",
+        "missing_project_update",
+        "missing_discovery_issue_body",
+        "missing_has_open_questions_label",
+        "pause_project_not_backlog",
+        "missing_open_questions_section",
+        "incomplete_pause_artifact",
+        "duplicated_project_truth",
+        "wrong_agent_routing",
+        "architecture_constraint_missed",
+        "missing_exact_project_update_markdown",
+        "missing_exact_open_questions_markdown",
+        "warm_continuation_missing"
+      ]
+    },
     "source_type": "linear_project_snapshot",
     "project": {
       "id": "fixture-project-onboarding-email-refresh",
@@ -59,7 +136,7 @@
   "reference": {
     "human_annotations": [
       {
-        "name": "decomposition_quality",
+        "name": "quality",
         "label": "pass",
         "score": 0.9,
         "failure_modes": [],

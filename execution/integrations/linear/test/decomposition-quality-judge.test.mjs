@@ -7,10 +7,13 @@ import test from "node:test";
 
 import {
   appendAdvisoryQualityLine,
+  buildJudgeFixtureInput,
   buildJudgeInputs,
+  buildStoredFixtureJudgeInputs,
   formatAdvisoryQualityLine,
   formatJudgePromptRegistrationReport,
   formatJudgeReport,
+  buildMaintainerSuppliedContext,
   judgeAllowedFailureModes,
   judgeAnnotationIdentifier,
   loadJudgePromptContract,
@@ -21,6 +24,7 @@ import {
   registrationReceiptPath,
   runAdvisoryDecompositionQualityCheck,
   runDecompositionQualityJudge,
+  runStoredDecompositionFixtureJudge,
 } from "../src/decomposition-quality-judge.mjs";
 import { emitDeterministicCheckResults } from "../src/deterministic-check-emission.mjs";
 import {
@@ -59,7 +63,7 @@ const ARTIFACT_IDENTITY = Object.freeze({
 });
 
 function tempRepoRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `agentic-factory-judge-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-judge-${label}-`));
 }
 
 function sha256(text) {
@@ -275,7 +279,8 @@ test("judge wrapper records rubric version, prompt version, model, and taxonomy 
   seedRun(repoRoot, runId);
 
   const posts = [];
-  const { runCommand, invocations } = fakeRuntime(validJudgeJson());
+  const rawJudgeOutput = validJudgeJson();
+  const { runCommand, invocations } = fakeRuntime(rawJudgeOutput);
   const result = await runDecompositionQualityJudge({
     repoRoot,
     runId,
@@ -291,6 +296,9 @@ test("judge wrapper records rubric version, prompt version, model, and taxonomy 
   assert.deepEqual(result.annotation_ids, ["anno-1"]);
   assert.equal(result.run_id, runId);
   assert.equal(result.trace_id, TRACE_ID);
+  assert.ok(result.judge_prompt.includes(`run_id: ${runId}`));
+  assert.equal(result.judge_inputs.project_update_markdown, `run_id: ${runId}`);
+  assert.equal(result.raw_output, rawJudgeOutput);
 
   // Test item: wrapper records rubric version, prompt version, model, and
   // failure taxonomy version.
@@ -305,12 +313,12 @@ test("judge wrapper records rubric version, prompt version, model, and taxonomy 
   // the stable judge identifier including the model identity.
   assert.equal(posts.length, 1);
   const wire = posts[0].data[0];
-  assert.equal(wire.name, "decomposition_quality");
+  assert.equal(wire.name, "quality");
   assert.equal(wire.annotator_kind, "LLM");
   assert.equal(wire.identifier, `decomposition_quality_judge_v1:${JUDGE_MODEL}`);
   assert.equal(wire.trace_id, TRACE_ID);
   assert.equal(wire.result.label, "pass");
-  assert.equal(wire.result.score, 0.92);
+  assert.equal(wire.result.score, 0.9);
   assert.ok(wire.result.explanation.length > 0);
   assert.equal(wire.metadata.rubric_version, RUBRIC_VERSION);
   assert.equal(wire.metadata.failure_taxonomy_version, FAILURE_TAXONOMY_VERSION);
@@ -320,6 +328,8 @@ test("judge wrapper records rubric version, prompt version, model, and taxonomy 
   assert.equal(wire.metadata.judge_prompt_source, "repo_accepted_snapshot");
   assert.equal(wire.metadata.judge_prompt_version, `sha256:${contract.entry.snapshot_sha256}`);
   assert.equal(wire.metadata.workspace_maturity, "new");
+  assert.equal(wire.metadata.workflow_type, "decomposition");
+  assert.equal(wire.metadata.eval_namespace, "execution/evals/decomposition");
   assert.equal(wire.metadata.source_run_id, runId);
   assert.deepEqual(wire.metadata.failure_modes, []);
 
@@ -443,7 +453,7 @@ test("malformed judge output records judge_invalid and surfaces a derived workli
   const worklistFetch = async (url) => {
     const parsed = new URL(String(url));
     if (parsed.pathname === "/v1/projects") {
-      return new Response(JSON.stringify({ data: [{ id: "UHJvamVjdDox", name: "agentic-factory" }] }), { status: 200 });
+      return new Response(JSON.stringify({ data: [{ id: "UHJvamVjdDox", name: "teami" }] }), { status: 200 });
     }
     if (/trace_annotations$/.test(parsed.pathname)) {
       return new Response(JSON.stringify({ data: [], next_cursor: null }), { status: 200 });
@@ -552,8 +562,18 @@ test("canonical label, score, explanation, and taxonomy failure modes are enforc
     { allowedFailureModes: allowed },
   );
   assert.equal(parameterized.ok, true);
+  assert.equal(parameterized.judge.score, 0.6);
   assert.deepEqual(parameterized.judge.failure_modes, ["missing_context_digest"]);
   assert.deepEqual(parameterized.judge.failure_mode_details, ["missing_context_digest:pm_synthesis"]);
+
+  // Raw model scores are accepted only as schema-shaped output; the stored
+  // score is derived from the namespace's label band.
+  const offBandRawScore = parseJudgeOutput(
+    validJudgeJson({ label: "pass", score: 0.55 }),
+    { allowedFailureModes: allowed },
+  );
+  assert.equal(offBandRawScore.ok, true);
+  assert.equal(offBandRawScore.judge.score, 0.9);
 
   // Claude-style result envelopes (fenced JSON inside a result string) parse.
   const envelope = parseJudgeOutput(
@@ -572,14 +592,16 @@ test("canonical label, score, explanation, and taxonomy failure modes are enforc
   assert.deepEqual(ambiguous.failures, ["ambiguous_judge_output"]);
 });
 
-test("low-confidence heuristics fire on band mismatch and boundary scores and stay out of Phoenix metadata", async () => {
+test("judge stores band-derived scores and keeps raw-score artifacts out of Phoenix metadata", async () => {
   const repoRoot = tempRepoRoot("low-conf");
   const runId = "run-judge-low-conf";
   seedRun(repoRoot, runId);
 
-  // Band mismatch: pass with a needs_revision-band score.
+  // Raw band mismatch: pass with a needs_revision-band model score. The
+  // stored score is derived from the pass band, so fresh Judge output cannot
+  // carry a label/score mismatch.
   const posts = [];
-  const mismatch = await runDecompositionQualityJudge({
+  const normalized = await runDecompositionQualityJudge({
     repoRoot,
     runId,
     config: judgeConfig(),
@@ -587,15 +609,17 @@ test("low-confidence heuristics fire on band mismatch and boundary scores and st
     ensureReady: readyStub,
     fetchImpl: annotationFetchStub({ posts }),
   });
-  assert.equal(mismatch.ok, true, "low confidence is a flag, not a rejection");
-  assert.ok(mismatch.low_confidence_reasons.includes("label_score_band_mismatch"));
-  // The FLAG is derived: it lives in the report and local receipt, never in
-  // the stored annotation (CONSTRAINTS #3/#33).
+  assert.equal(normalized.ok, true);
+  assert.equal(normalized.judge.score, 0.9);
+  assert.deepEqual(normalized.low_confidence_reasons, []);
+  const stored = posts[0].data[0];
+  assert.equal(stored.result.score, 0.9);
   assert.equal(posts[0].data[0].metadata.low_confidence_reasons, undefined);
   const receipt = readJudgeReceipt({ runId, repoRoot });
-  assert.ok(receipt.receipt.attempts[0].low_confidence_reasons.includes("label_score_band_mismatch"));
+  assert.equal(receipt.receipt.attempts[0].score, 0.9);
+  assert.deepEqual(receipt.receipt.attempts[0].low_confidence_reasons, []);
 
-  // Boundary proximity: needs_revision at 0.79 (within 0.05 of the 0.80 edge).
+  // Raw boundary proximity is normalized away before low-confidence checks.
   const boundary = await runDecompositionQualityJudge({
     repoRoot,
     runId,
@@ -608,11 +632,11 @@ test("low-confidence heuristics fire on band mismatch and boundary scores and st
     ensureReady: readyStub,
     fetchImpl: annotationFetchStub({ posts: [] }),
   });
-  assert.ok(boundary.low_confidence_reasons.includes("score_at_band_boundary"));
-  assert.ok(!boundary.low_confidence_reasons.includes("label_score_band_mismatch"));
+  assert.equal(boundary.judge.score, 0.6);
+  assert.deepEqual(boundary.low_confidence_reasons, []);
 
   const reportLines = formatJudgeReport(boundary);
-  assert.ok(reportLines.some((line) => line.includes("score_at_band_boundary")));
+  assert.ok(!reportLines.some((line) => line.includes("score_at_band_boundary")));
 });
 
 test("--candidate-prompt-version executes the Phoenix candidate and labels all metadata with the candidate id", async () => {
@@ -818,6 +842,116 @@ test("eval-mode parity: in-memory artifact, snapshot, and explicit trace id run 
   assert.equal(reportOnly.storage, "report_only");
   assert.equal(reportOnly.reason, "missing_trace_target");
   assert.equal(reportOnly.judge.label, "pass");
+});
+
+test("stored full-input fixtures regrade through the Judge without rerunning decomposition", async () => {
+  const repoRoot = tempRepoRoot("stored-regrade");
+  const runId = "run-judge-stored-fixture";
+  const artifact = commitArtifact(runId);
+  const snapshot = {
+    schema_version: "linear-decomposition-project-snapshot/v1",
+    run_id: runId,
+    capture_source: "eval_mode_memory_snapshot",
+    project: {
+      id: "proj-stored",
+      name: "Stored Fixture Project",
+      content: "## Goal\nRegrade stored evidence.",
+      status: "planned",
+      labels: [],
+      existing_issues: [],
+    },
+  };
+  const built = buildJudgeInputs({
+    artifact,
+    snapshot,
+    allowedFailureModes: judgeAllowedFailureModes(),
+  });
+  assert.equal(built.ok, true);
+  const projected = buildJudgeFixtureInput({ judgeInputs: built.inputs });
+  assert.equal(projected.ok, true);
+
+  const fixture = {
+    schema_version: "decomposition-eval-example/v1",
+    input: projected,
+    metadata: {
+      source_run_id: runId,
+      source_trace_id: TRACE_ID,
+    },
+  };
+
+  const posts = [];
+  const { runCommand, invocations } = fakeRuntime(validJudgeJson());
+  const result = await runStoredDecompositionFixtureJudge({
+    repoRoot,
+    fixture,
+    config: judgeConfig(),
+    runCommand,
+    ensureReady: readyStub,
+    fetchImpl: annotationFetchStub({ posts }),
+    recordReceipt: false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.run_id, runId);
+  assert.equal(result.trace_id, TRACE_ID);
+  assert.deepEqual(result.judge_inputs, built.inputs);
+  assert.equal(invocations.length, 1);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].data[0].metadata.source_run_id, runId);
+});
+
+test("stored fixtures missing contract-required Judge input are rejected before model invocation", async () => {
+  const artifact = commitArtifact("run-judge-short-fixture");
+  const snapshot = {
+    project: {
+      id: "proj-short",
+      name: "Short Fixture Project",
+      content: "## Goal\nCatch short captures.",
+      status: "planned",
+    },
+  };
+  const built = buildJudgeInputs({
+    artifact,
+    snapshot,
+    allowedFailureModes: judgeAllowedFailureModes(),
+  });
+  const projected = buildJudgeFixtureInput({ judgeInputs: built.inputs });
+  assert.equal(projected.ok, true);
+  const shortInput = structuredClone(projected);
+  delete shortInput.judge_fixture_input.terminal_reason;
+
+  const stored = buildStoredFixtureJudgeInputs({
+    fixture: { input: shortInput },
+    refreshMaintainerContext: false,
+  });
+  assert.equal(stored.ok, false);
+  assert.equal(stored.reason, "stored_judge_input_incomplete");
+  assert.ok(stored.failures.includes("missing:terminal_reason"));
+
+  const detectionOnly = await runStoredDecompositionFixtureJudge({
+    fixture: { input: { ...projected, gradeability: "detection_only" } },
+    config: judgeConfig(),
+    runCommand: async () => {
+      throw new Error("the model must not run for detection-only fixtures");
+    },
+    fetchImpl: noFetch,
+  });
+  assert.equal(detectionOnly.judge_state, "not_run");
+  assert.equal(detectionOnly.reason, "stored_fixture_not_full_input");
+  assert.equal(detectionOnly.gradeability, "detection_only");
+
+  assert.deepEqual(
+    buildStoredFixtureJudgeInputs({
+      fixture: { input: projected },
+      refreshMaintainerContext: false,
+    }).inputs,
+    built.inputs,
+    "stored fixture projection must stay equal to buildJudgeInputs output; adding a Judge input requires capturing it",
+  );
+  assert.deepEqual(
+    buildMaintainerSuppliedContext(),
+    projected.maintainer_supplied_context,
+  );
 });
 
 test("judge prompt registration stages the pin without mutating phoenix-assets.json", async () => {

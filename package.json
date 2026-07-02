@@ -1,5 +1,5 @@
 {
-  "name": "agentic-factory",
+  "name": "teami",
   "version": "0.3.20",
   "description": "Control plane for orchestrating, evaluating, and improving agent work across a company",
   "keywords": [
@@ -11,13 +11,13 @@
     "agent-orchestration",
     "phoenix"
   ],
-  "homepage": "https://github.com/shulmansj/agentic-factory#readme",
+  "homepage": "https://github.com/shulmansj/teami#readme",
   "bugs": {
-    "url": "https://github.com/shulmansj/agentic-factory/issues"
+    "url": "https://github.com/shulmansj/teami/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/shulmansj/agentic-factory.git"
+    "url": "git+https://github.com/shulmansj/teami.git"
   },
   "license": "UNLICENSED",
   "private": true,
@@ -25,7 +25,6 @@
   "scripts": {
     "init": "node execution/integrations/linear/cli.mjs init",
     "domain:add": "node execution/integrations/linear/cli.mjs domain:add",
-    "domain:bind-repo": "node execution/integrations/linear/cli.mjs domain:bind-repo",
     "doctor": "node execution/integrations/linear/cli.mjs doctor",
     "phoenix:doctor": "node execution/integrations/linear/cli.mjs phoenix:doctor",
     "phoenix:start": "node execution/integrations/linear/cli.mjs phoenix:start",
@@ -63,10 +62,13 @@
     "supervisor:enable": "node execution/integrations/linear/cli.mjs supervisor:enable",
     "supervisor:unregister": "node execution/integrations/linear/cli.mjs supervisor:unregister",
     "runtime-smoke": "node execution/integrations/linear/cli.mjs runtime-smoke",
+    "uat:execution": "node execution/integrations/linear/uat/execution-uat.mjs",
     "uat:gateway": "node execution/integrations/linear/uat/gateway-uat.mjs",
     "uat:github-local": "node execution/integrations/linear/uat/github-local-uat.mjs",
     "uat:no-hosted": "node execution/integrations/linear/uat/no-hosted-uat.mjs",
-    "trigger-status": "node execution/integrations/linear/cli.mjs gateway status",
+    "uat:review": "node execution/integrations/linear/uat/review-uat.mjs",
+    "uat:e2e-sandbox": "node execution/integrations/linear/uat/e2e-sandbox.mjs",
+    "trigger-status": "node execution/integrations/linear/cli.mjs trigger-status",
     "worklist": "node execution/integrations/linear/cli.mjs worklist",
     "reset": "node execution/integrations/linear/cli.mjs reset",
     "init:linear": "node execution/integrations/linear/cli.mjs init",

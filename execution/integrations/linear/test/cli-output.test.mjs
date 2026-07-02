@@ -124,7 +124,7 @@ test("keyValues renders an aligned two-column block without color", () => {
   const output = createCliOutput({ stream, color: false, unicode: true });
 
   output.keyValues([
-    ["Dataset", "agentic-factory-decomposition-examples"],
+    ["Dataset", "teami-decomposition-examples"],
     ["Version", "v1"],
     ["Split", "calibration"],
   ], { heading: "Promotion" });
@@ -134,7 +134,7 @@ test("keyValues renders an aligned two-column block without color", () => {
     [
       "",
       "  Promotion",
-      "  Dataset:  agentic-factory-decomposition-examples",
+      "  Dataset:  teami-decomposition-examples",
       "  Version:  v1",
       "  Split:    calibration",
       "",

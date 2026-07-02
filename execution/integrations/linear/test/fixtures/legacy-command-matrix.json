@@ -1,0 +1,66 @@
+{
+  "capturedFrom": "post-Phase-1 main (PR #80, 6fde18e): dispatch.mjs COMMAND_TABLE + NOUN_VERB_COMMANDS; updated for Issue 5b domain grant/show/revoke",
+  "note": "FROZEN pre-cutover snapshot with retired commands removed. Do not regenerate. Issue L2 asserts the registry resolves each entry to the same handler name + normalized args (and same invokeCommand token for the S-INVOKE handlers).",
+  "commandTable": [
+    { "token": "uninstall", "handler": "runLocalSetupCleanupCommand" },
+    { "token": "reset", "handler": "runLocalSetupCleanupCommand" },
+    { "token": "init", "handler": "runLinearSetupCommand" },
+    { "token": "domain:add", "handler": "runLinearSetupCommand" },
+    { "token": "domain:show", "handler": "runDomainCommand" },
+    { "token": "domain:grant", "handler": "runDomainCommand" },
+    { "token": "domain:revoke", "handler": "runDomainCommand" },
+    { "token": "github:init", "handler": "runGithubInitCommand" },
+    { "token": "doctor", "handler": "runDoctorCommand" },
+    { "token": "doctor:linear", "handler": "runDoctorLinearCommand" },
+    { "token": "phoenix:start", "handler": "runPhoenixStartCommand" },
+    { "token": "phoenix:doctor", "handler": "runPhoenixDoctorCommand" },
+    { "token": "phoenix:status", "handler": "runPhoenixStatusCommand" },
+    { "token": "phoenix:preflight", "handler": "runPhoenixPreflightCommand" },
+    { "token": "phoenix:annotate-trace", "handler": "runPhoenixAnnotateTraceCommand" },
+    { "token": "worklist", "handler": "runWorklistCommand" },
+    { "token": "phoenix:promote-run", "handler": "runPhoenixPromoteRunCommand" },
+    { "token": "phoenix:promote-decomposition", "handler": "runPhoenixPromoteDecompositionCommand" },
+    { "token": "eval:emit-checks", "handler": "runEvalEmitChecksCommand" },
+    { "token": "eval:judge", "handler": "runEvalJudgeCommand" },
+    { "token": "eval:decomposition", "handler": "runEvalDecompositionCommand" },
+    { "token": "phoenix:experiment-decomposition", "handler": "runPhoenixExperimentDecompositionCommand" },
+    { "token": "phoenix:experiment-amend", "handler": "runPhoenixExperimentAmendCommand" },
+    { "token": "eval:disagreements", "handler": "runEvalDisagreementsCommand" },
+    { "token": "eval:gate", "handler": "runEvalGateCommand" },
+    { "token": "draft-improvement", "handler": "runDraftImprovementCommand" },
+    { "token": "promote-candidate", "handler": "runPromoteCandidateCommand" },
+    { "token": "promotion:scan", "handler": "runPromotionScanCommand" },
+    { "token": "supervisor:register", "handler": "runSupervisorRegisterCommand" },
+    { "token": "supervisor:run", "handler": "runSupervisorRunCommand" },
+    { "token": "supervisor", "handler": "runSupervisorRunCommand" },
+    { "token": "supervisor:status", "handler": "runSupervisorStatusCommand" },
+    { "token": "supervisor:reconcile", "handler": "runSupervisorReconcileCommand" },
+    { "token": "supervisor:disable", "handler": "runSupervisorDisableCommand" },
+    { "token": "supervisor:enable", "handler": "runSupervisorEnableCommand" },
+    { "token": "supervisor:unregister", "handler": "runSupervisorUnregisterCommand" },
+    { "token": "eval:register-prompt", "handler": "runEvalRegisterPromptCommand" },
+    { "token": "eval:register-judge-prompt", "handler": "runEvalRegisterPromptCommand" },
+    { "token": "phoenix:stop", "handler": "runPhoenixStopCommand" },
+    { "token": "gateway", "handler": "runGatewayCommand" },
+    { "token": "runner", "handler": "runRunnerCommand" },
+    { "token": "runtime-smoke", "handler": "runRuntimeSmokeCommand" },
+    { "token": "trigger-status", "handler": "runTriggerStatusCommand" }
+  ],
+  "nounVerb": {
+    "gateway": {
+      "start": { "invokeCommand": "gateway", "consumeVerb": true, "handler": "runGatewayCommand" },
+      "status": { "invokeCommand": "gateway", "consumeVerb": false, "handler": "runGatewayCommand" }
+    },
+    "domain": {
+      "add": { "invokeCommand": "domain:add", "consumeVerb": true, "handler": "runLinearSetupCommand" },
+      "show": { "invokeCommand": "domain:show", "consumeVerb": true, "handler": "runDomainCommand" },
+      "grant": { "invokeCommand": "domain:grant", "consumeVerb": true, "handler": "runDomainCommand" },
+      "revoke": { "invokeCommand": "domain:revoke", "consumeVerb": true, "handler": "runDomainCommand" }
+    }
+  },
+  "bareNounActions": {
+    "gateway": "runGatewayCommand",
+    "runner": "runRunnerCommand",
+    "supervisor": "runSupervisorRunCommand"
+  }
+}

@@ -5,18 +5,28 @@ import path from "node:path";
 import { loadLinearConfig } from "./config.mjs";
 import { registerPromptInPhoenix } from "./decomposition-quality-judge.mjs";
 import { findTokenShapedContent } from "./eval-content-gate.mjs";
-import { FAILURE_TAXONOMY_PATH } from "./eval-annotation-contract.mjs";
+import { resolveEvalContract } from "./eval-annotation-contract.mjs";
 import { createProductionGitHubPromotionTransport } from "./github-production-transport.mjs";
 import { resolveBehaviorRepoIdentity } from "./github-setup.mjs";
+import { startAgentTrace } from "./agent-trace.mjs";
+import {
+  behaviorRepoIdForRepoRoot,
+  resolveForegroundDomainContext,
+} from "./domain-resolver.mjs";
 import { ensurePhoenixReady, resolvePhoenixConfig } from "./local-phoenix-manager.mjs";
-import { runDecompositionExperiment } from "./phoenix-experiment.mjs";
+import { runWorkflowExperiment } from "./phoenix-experiment.mjs";
 import { resolveMaterializerTarget } from "./promotion-materializer.mjs";
 import { isAdopterSelfImprovementTarget } from "./promotion/agent-behavior-scope.mjs";
 import {
-  PROMOTION_POLICY_PATH,
   SCANNER_PROMPT_CANDIDATE_TAG,
+  resolvePromotionPolicyPath,
   resolveTrustedPolicyRead,
 } from "./promotion-policy.mjs";
+import {
+  collectAutonomousLoopSignalSurfaces,
+  computeAutonomousLoopSignals,
+} from "./promotion/autonomous-loop-state.mjs";
+import { appendAutonomousDiagnosisEvent } from "./promotion/autonomous-diagnosis-store.mjs";
 import {
   defaultPromotionRegistryDir,
   parseCandidateTargetKey,
@@ -33,13 +43,18 @@ import {
   extractRuntimeJsonCandidates,
 } from "./runtime-adapters.mjs";
 import { resolveWorkflowRuntime } from "./workflow-runtime-config.mjs";
-import { decompositionDefinition } from "./workflows/decomposition/definition.mjs";
 import {
   parseAcceptedPromptSnapshotSections,
   loadAcceptedPromptSnapshot,
 } from "../../../engine/accepted-prompt-snapshot.mjs";
+import { evalNamespacePaths } from "../../../engine/eval-namespace.mjs";
+import { getWorkflowDefinition } from "../../../engine/workflow-registry.mjs";
 import { runRuntimeCommand } from "./trigger-runner.mjs";
-import { controllerNamespacePr } from "./promotion-workspace.mjs";
+import "./trigger-registry.mjs";
+import {
+  controllerNamespacePr,
+  ensurePromotionWorkspace,
+} from "./promotion-workspace.mjs";
 
 const MODULE_REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
 
@@ -51,9 +66,9 @@ export const IMPROVEMENT_DRAFT_OUTPUT_SCHEMA_PATH = path.resolve(
 );
 export const IMPROVEMENT_DRAFT_OUTPUT_SCHEMA_VERSION = "improvement-draft-output/v1";
 export const IMPROVEMENT_DRAFT_RECEIPT_SCHEMA_VERSION =
-  "agentic-factory-improvement-draft/v1";
+  "teami-improvement-draft/v1";
 export const IMPROVEMENT_DRAFT_LOCK_SCHEMA_VERSION =
-  "agentic-factory-improvement-draft-lock/v1";
+  "teami-improvement-draft-lock/v1";
 export const DEFAULT_DRAFT_LOCK_STALE_MS = 15 * 60 * 1000;
 
 const DEFAULT_DRAFTER_TIMEOUT_MS = 10 * 60 * 1000;
@@ -66,6 +81,11 @@ const RUNTIME_ROLE_FIELDS = Object.freeze(["runtime", "model"]);
 const DRAFT_CONTENT_PLACEHOLDER = "@@DRAFT_CONTENT@@";
 const DRAFT_CONTENT_BEGIN_DELIMITER = "-----BEGIN DRAFT CONTENT-----";
 const DRAFT_CONTENT_END_DELIMITER = "-----END DRAFT CONTENT-----";
+const SELF_IMPROVEMENT_DRAFTER_AGENT_ROLE = "self_improvement_drafter";
+const SELF_IMPROVEMENT_DRAFT_WORKFLOW_TYPE = "self_improvement_draft";
+const MAX_TRACE_OUTPUT_BYTES = 256 * 1024;
+const DRAFTER_TRACE_START_TIMEOUT_MS = 5_000;
+const DRAFTER_TRACE_FINISH_TIMEOUT_MS = 5_000;
 
 export const UNTRUSTED_DRAFTER_OVERRIDE_KEYS = Object.freeze([
   "config",
@@ -73,6 +93,7 @@ export const UNTRUSTED_DRAFTER_OVERRIDE_KEYS = Object.freeze([
   "runCommand",
   "githubTransport",
   "policyPath",
+  "policyRelativePath",
   "registryDir",
   "draftDir",
   "env",
@@ -82,15 +103,27 @@ export const UNTRUSTED_DRAFTER_OVERRIDE_KEYS = Object.freeze([
   "createGitHubTransport",
   "lockStaleAfterMs",
   "policyReadMode",
+  "policyInternalCloneDir",
+  "resolveTrustedPolicyReadImpl",
+  "ensurePromotionWorkspaceImpl",
+  "appendAutonomousDiagnosisEventImpl",
   "registerPromptInPhoenixImpl",
+  "runWorkflowExperimentImpl",
   "runDecompositionExperimentImpl",
+  "startAgentTrace",
+  "startAgentTraceImpl",
+  "sinkFactory",
+  "statusProbe",
+  "idFactory",
+  "runnerReadyTimeoutMs",
   "ensureReady",
   "fetchImpl",
   "experimentReceiptDir",
+  "collectAutonomousLoopSignalSurfacesImpl",
 ]);
 
 export function defaultImprovementDraftDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "drafts");
+  return path.resolve(repoRoot, ".teami", "drafts");
 }
 
 export function improvementDraftReceiptPath({ draftDir, draftId } = {}) {
@@ -134,6 +167,188 @@ export function createImprovementDrafterTestHarness(overrides = {}) {
   };
 }
 
+export async function runAutonomousImprovementDrafter(options = {}) {
+  for (const key of UNTRUSTED_DRAFTER_OVERRIDE_KEYS) {
+    if (key in options) {
+      throw new Error(
+        `untrusted_autonomous_drafter_override_rejected:${key} - autonomous drafting uses the repo-owned unattended policy path and production drafter chain; injection exists only behind createAutonomousImprovementDrafterTestHarness.`,
+      );
+    }
+  }
+  return runAutonomousImprovementDrafterWithOverrides(options);
+}
+
+export function createAutonomousImprovementDrafterTestHarness(overrides = {}) {
+  return {
+    kind: "autonomous_improvement_drafter_test_harness",
+    runAutonomousImprovementDrafter: (options = {}) =>
+      runAutonomousImprovementDrafterWithOverrides({ ...overrides, ...options }),
+  };
+}
+
+async function runAutonomousImprovementDrafterWithOverrides({
+  repoRoot = process.cwd(),
+  opportunityHash = null,
+  registryDir = null,
+  policyPath = undefined,
+  policyRelativePath = undefined,
+  policyInternalCloneDir = null,
+  ensurePromotionWorkspaceImpl = ensurePromotionWorkspace,
+  resolveTrustedPolicyReadImpl = resolveTrustedPolicyRead,
+  appendAutonomousDiagnosisEventImpl = appendAutonomousDiagnosisEvent,
+  collectAutonomousLoopSignalSurfacesImpl = collectAutonomousLoopSignalSurfaces,
+  now = () => new Date(),
+  onProgress = () => {},
+  ...drafterOverrides
+} = {}) {
+  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(repoRoot);
+  const input = resolveDraftInput({
+    opportunityHash,
+    registryDir: resolvedRegistryDir,
+  });
+  if (!input.ok) {
+    return {
+      ok: false,
+      status: "blocked",
+      outcome: "blocked",
+      terminal: true,
+      reason: input.reason,
+      detail: input.detail ?? null,
+      opportunity_hash: opportunityHash ?? null,
+    };
+  }
+  const targetParse = parseCandidateTargetKey(input.target_key);
+  if (!targetParse.ok) {
+    return {
+      ok: false,
+      status: "blocked",
+      outcome: "blocked",
+      terminal: true,
+      reason: targetParse.reason,
+      detail: targetParse.detail ?? null,
+      opportunity_hash: input.opportunity_hash,
+      target_key: input.target_key,
+    };
+  }
+  const definitionResolution = resolveWorkflowDefinitionForTargetParse(targetParse);
+  if (!definitionResolution.ok) {
+    return {
+      ok: false,
+      status: "blocked",
+      outcome: "blocked",
+      terminal: true,
+      reason: definitionResolution.reason,
+      detail: definitionResolution.detail ?? null,
+      opportunity_hash: input.opportunity_hash,
+      target_key: input.target_key,
+    };
+  }
+  const policyPaths = resolvePromotionPolicyPath(definitionResolution.definition, repoRoot);
+  const resolvedPolicyPath = policyPath || policyPaths.path;
+  const resolvedPolicyRelativePath = policyRelativePath || policyPaths.relativePath;
+  let cloneDir = policyInternalCloneDir;
+  if (!cloneDir) {
+    const workspace = ensurePromotionWorkspaceImpl({ repoRoot });
+    if (!workspace.ok) {
+      return {
+        ok: false,
+        status: "blocked",
+        outcome: "blocked",
+        terminal: false,
+        reason: workspace.reason,
+        detail: workspace.detail ?? null,
+        opportunity_hash: input.opportunity_hash,
+        target_key: input.target_key,
+      };
+    }
+    cloneDir = workspace.cloneDir;
+  }
+  const policyRead = resolveTrustedPolicyReadImpl({
+    mode: "unattended",
+    policyPath: resolvedPolicyPath,
+    policyRelativePath: resolvedPolicyRelativePath,
+    internalCloneDir: cloneDir,
+  });
+  if (!policyRead.ok) {
+    return {
+      ok: false,
+      status: "blocked",
+      outcome: "blocked",
+      terminal: false,
+      reason: policyRead.reason,
+      detail: policyRead.detail ?? null,
+      opportunity_hash: input.opportunity_hash,
+      target_key: input.target_key,
+    };
+  }
+  if (policyRead.policy.disabled) {
+    appendAutonomousDiagnosisEventImpl({
+      repoRoot,
+      registryDir: resolvedRegistryDir,
+      opportunityHash: input.opportunity_hash,
+      now,
+      event: {
+        action: "autonomous_drafter_skipped",
+        status: "skipped",
+        reason: "promotion_disabled_by_policy",
+        policy: {
+          policy_version: policyRead.policy.policy_version,
+          policy_hash: policyRead.policy_hash,
+          read_path: policyRead.read_path,
+        },
+      },
+    });
+    return {
+      ok: true,
+      status: "skipped",
+      outcome: "blocked",
+      terminal: true,
+      reason: "promotion_disabled_by_policy",
+      detail:
+        "promotion-policy.json sets disabled: true; autonomous drafting skipped before runtime invocation or tag application.",
+      opportunity_hash: input.opportunity_hash,
+      target_key: input.target_key,
+      policy: {
+        policy_version: policyRead.policy.policy_version,
+        policy_hash: policyRead.policy_hash,
+        read_path: policyRead.read_path,
+      },
+    };
+  }
+  const surfaces = typeof collectAutonomousLoopSignalSurfacesImpl === "function"
+    ? collectAutonomousLoopSignalSurfacesImpl({
+      repoRoot,
+      registryDir: resolvedRegistryDir,
+    })
+    : collectAutonomousLoopSignalSurfaces({
+      repoRoot,
+      registryDir: resolvedRegistryDir,
+    });
+  const signals = computeAutonomousLoopSignals({
+    registryRecords: surfaces.registry_records,
+    gateReports: surfaces.gate_reports,
+    repoMarkerState: surfaces.repo_marker_state,
+  });
+  onProgress(`autonomous drafter: using unattended policy ${policyRead.read_path}`);
+  const result = await runImprovementDrafterWithOverrides({
+    ...drafterOverrides,
+    repoRoot,
+    opportunityHash: input.opportunity_hash,
+    registryDir: resolvedRegistryDir,
+    policyPath: resolvedPolicyPath,
+    policyRelativePath: resolvedPolicyRelativePath,
+    policyReadMode: "unattended",
+    policyInternalCloneDir: cloneDir,
+    resolveTrustedPolicyReadImpl,
+    onProgress,
+    now,
+  });
+  return {
+    ...result,
+    signals,
+  };
+}
+
 async function runImprovementDrafterWithOverrides({
   repoRoot = process.cwd(),
   opportunityHash = null,
@@ -146,7 +361,8 @@ async function runImprovementDrafterWithOverrides({
   loadConfig = loadLinearConfig,
   runCommand = runRuntimeCommand,
   githubTransport = null,
-  policyPath = PROMOTION_POLICY_PATH,
+  policyPath = undefined,
+  policyRelativePath = undefined,
   registryDir = null,
   draftDir = null,
   env = process.env,
@@ -156,8 +372,17 @@ async function runImprovementDrafterWithOverrides({
   createGitHubTransport = createProductionGitHubPromotionTransport,
   lockStaleAfterMs = DEFAULT_DRAFT_LOCK_STALE_MS,
   policyReadMode = "user_invoked",
+  policyInternalCloneDir = null,
+  resolveTrustedPolicyReadImpl = resolveTrustedPolicyRead,
   registerPromptInPhoenixImpl = registerPromptInPhoenix,
-  runDecompositionExperimentImpl = runDecompositionExperiment,
+  runWorkflowExperimentImpl = null,
+  runDecompositionExperimentImpl = null,
+  startAgentTrace: startAgentTraceOverride = null,
+  startAgentTraceImpl = startAgentTraceOverride || startAgentTrace,
+  sinkFactory,
+  statusProbe,
+  idFactory,
+  runnerReadyTimeoutMs,
   ensureReady = ensurePhoenixReady,
   fetchImpl = globalThis.fetch,
   experimentReceiptDir = null,
@@ -177,7 +402,16 @@ async function runImprovementDrafterWithOverrides({
   const targetParse = parseCandidateTargetKey(input.target_key);
   if (!targetParse.ok) return refuse(targetParse.reason, targetParse.detail, { target_key: input.target_key });
 
-  const taxonomy = loadFailureTaxonomy();
+  const definitionResolution = resolveWorkflowDefinitionForTargetParse(targetParse);
+  if (!definitionResolution.ok) {
+    return refuse(definitionResolution.reason, definitionResolution.detail, { target_key: input.target_key });
+  }
+  const definition = definitionResolution.definition;
+  const policyPaths = resolvePromotionPolicyPath(definition, repoRoot);
+  const resolvedPolicyPath = policyPath || policyPaths.path;
+  const resolvedPolicyRelativePath = policyRelativePath || policyPaths.relativePath;
+
+  const taxonomy = loadFailureTaxonomy({ definition, repoRoot });
   const failureValidation = validateFailureModeIds({
     failureModeIds: input.failure_mode_ids,
     taxonomy,
@@ -186,12 +420,14 @@ async function runImprovementDrafterWithOverrides({
     onProgress(`Dropped unknown failure-mode id before drafting: ${id}`);
   }
 
-  const target = resolveDraftTarget({ repoRoot, targetKey: input.target_key });
+  const target = resolveDraftTarget({ repoRoot, targetKey: input.target_key, definition });
   if (!target.ok) return refuse(target.reason, target.detail, { target_key: input.target_key });
 
-  const policyRead = resolveTrustedPolicyRead({
+  const policyRead = resolveTrustedPolicyReadImpl({
     mode: policyReadMode,
-    policyPath,
+    policyPath: resolvedPolicyPath,
+    policyRelativePath: resolvedPolicyRelativePath,
+    internalCloneDir: policyInternalCloneDir,
   });
   if (!policyRead.ok) return refuse(policyRead.reason, policyRead.detail, { target_key: input.target_key });
   const policy = policyRead.policy;
@@ -209,8 +445,12 @@ async function runImprovementDrafterWithOverrides({
       draftId: resumable.receipt.id,
       datasetName,
       config: loadedConfig,
+      definition,
       policy,
+      policyPath: resolvedPolicyPath,
+      policyRelativePath: resolvedPolicyRelativePath,
       registerPromptInPhoenixImpl,
+      runWorkflowExperimentImpl,
       runDecompositionExperimentImpl,
       ensureReady,
       fetchImpl,
@@ -237,11 +477,47 @@ async function runImprovementDrafterWithOverrides({
       repo_marker_state: markerState,
     });
   }
+
+  const drafterTrace = await startImprovementDrafterTraceBestEffort({
+    repoRoot,
+    config: loadedConfig,
+    markerState,
+    targetKey: input.target_key,
+    startedAt,
+    startAgentTraceImpl,
+    sinkFactory,
+    ensureReady,
+    statusProbe,
+    fetchImpl,
+    now,
+    idFactory,
+    onProgress,
+    runnerReadyTimeoutMs,
+  });
+  const finishTracedResult = async (resultOrPromise) => {
+    try {
+      const result = await resultOrPromise;
+      return await finishImprovementDrafterTraceResultBestEffort({ drafterTrace, result });
+    } catch (error) {
+      recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.outcome", {
+        ok: false,
+        outcome: "exception",
+        reason: error.message,
+      });
+      await finishImprovementDrafterTraceBestEffort(drafterTrace, {
+        status: "failed",
+        reason: error.message,
+      });
+      throw error;
+    }
+  };
+
+  try {
   if (markerState.suppressed) {
-    return refuse("suppressed_by_human_rejection", markerState.detail, {
+    return finishTracedResult(refuse("suppressed_by_human_rejection", markerState.detail, {
       target_key: input.target_key,
       repo_marker_state: markerState,
-    });
+    }));
   }
 
   const quota = checkDraftQuota({
@@ -250,7 +526,7 @@ async function runImprovementDrafterWithOverrides({
     policy,
     now: () => startedAt,
   });
-  if (!quota.ok) return refuse(quota.reason, quota.detail, { target_key: input.target_key, quota });
+  if (!quota.ok) return finishTracedResult(refuse(quota.reason, quota.detail, { target_key: input.target_key, quota }));
 
   const phoenixConfig = resolvePhoenixConfig({ env });
   const deepLinks = validateOpportunityDeepLinks({
@@ -269,11 +545,28 @@ async function runImprovementDrafterWithOverrides({
     suggestedDraftPrompt: input.suggested_draft_prompt,
     phoenixDeepLinks: deepLinks.validated,
   });
+  recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.asked", {
+    target_key: input.target_key,
+    human_name: target.human_name,
+    prompt,
+    prompt_byte_size: Buffer.byteLength(prompt, "utf8"),
+  });
   const assignment = resolveDrafterRuntimeAssignment(loadedConfig);
+  recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.settings", {
+    target_key: input.target_key,
+    role: assignment.role,
+    runtime: assignment.runtime,
+    model: assignment.model,
+    command: assignment.command,
+    cli_args_prefix: assignment.cli_args_prefix,
+    schema_path: assignment.schema_path,
+    generation_schema_path: assignment.generation_schema_path,
+    tool_policy: assignment.tool_policy,
+  });
   if (!assignment.model) {
-    return refuse("drafter_model_not_configured", "configure workflows.decomposition.roles.drafter.model before drafting.", {
+    return finishTracedResult(refuse("drafter_model_not_configured", "configure workflows.decomposition.roles.drafter.model before drafting.", {
       target_key: input.target_key,
-    });
+    }));
   }
   const command = buildSessionStartRuntimeCommand({
     assignment,
@@ -288,7 +581,13 @@ async function runImprovementDrafterWithOverrides({
       maxOutputBytes: DEFAULT_MAX_RUNTIME_OUTPUT_BYTES,
     });
   } catch (error) {
-    return writeRejectedDraft({
+    recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.did", {
+      target_key: input.target_key,
+      ok: false,
+      reason: "runtime_failed",
+      detail: error.message,
+    });
+    return finishTracedResult(writeRejectedDraft({
       repoRoot,
       draftDir: resolvedDraftDir,
       lockStaleAfterMs,
@@ -303,13 +602,19 @@ async function runImprovementDrafterWithOverrides({
       reason: "runtime_failed",
       detail: error.message,
       rawOutput: null,
-    });
+    }));
   }
+  recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.did", {
+    target_key: input.target_key,
+    ok: true,
+    runtime_output: traceString(output),
+    runtime_output_byte_size: traceByteSize(output),
+  });
 
   const parsed = parseImprovementDraftOutput(output);
   if (!parsed.ok) {
     const rejectionReason = parsed.reason || "schema_invalid";
-    return writeRejectedDraft({
+    return finishTracedResult(writeRejectedDraft({
       repoRoot,
       draftDir: resolvedDraftDir,
       lockStaleAfterMs,
@@ -324,11 +629,18 @@ async function runImprovementDrafterWithOverrides({
       reason: rejectionReason,
       detail: parsed.failures.join(","),
       rawOutput: String(output ?? "").slice(0, 2_000),
-    });
+    }));
   }
   const draft = parsed.draft;
+  recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.did.parsed", {
+    target_key: input.target_key,
+    draft_target_key: draft.target_key,
+    draft_content: traceString(draft.draft_content),
+    draft_content_byte_size: Buffer.byteLength(draft.draft_content, "utf8"),
+    change_summary: draft.change_summary ?? null,
+  });
   if (draft.target_key !== input.target_key) {
-    return writeRejectedDraft({
+    return finishTracedResult(writeRejectedDraft({
       repoRoot,
       draftDir: resolvedDraftDir,
       lockStaleAfterMs,
@@ -343,11 +655,11 @@ async function runImprovementDrafterWithOverrides({
       reason: "target_key_mismatch",
       detail: `drafter returned ${draft.target_key}, expected ${input.target_key}`,
       draftContent: draft.draft_content,
-    });
+    }));
   }
   const contentCheck = validateDraftContent(draft.draft_content);
   if (!contentCheck.ok) {
-    return writeRejectedDraft({
+    return finishTracedResult(writeRejectedDraft({
       repoRoot,
       draftDir: resolvedDraftDir,
       lockStaleAfterMs,
@@ -362,14 +674,14 @@ async function runImprovementDrafterWithOverrides({
       reason: contentCheck.reason,
       detail: contentCheck.detail,
       draftContent: draft.draft_content,
-    });
+    }));
   }
   const composabilityCheck = validateRuntimePhasePromptComposability({
     target: target.target,
     content: draft.draft_content,
   });
   if (!composabilityCheck.ok) {
-    return writeRejectedDraft({
+    return finishTracedResult(writeRejectedDraft({
       repoRoot,
       draftDir: resolvedDraftDir,
       lockStaleAfterMs,
@@ -384,7 +696,7 @@ async function runImprovementDrafterWithOverrides({
       reason: "draft_not_composable",
       detail: composabilityCheck.detail,
       draftContent: draft.draft_content,
-    });
+    }));
   }
 
   const contentSha256 = sha256Text(draft.draft_content);
@@ -393,16 +705,20 @@ async function runImprovementDrafterWithOverrides({
     targetKey: input.target_key,
     contentSha256,
   });
-  if (!duplicateBeforeLock.ok) return refuse(duplicateBeforeLock.reason, duplicateBeforeLock.detail, { target_key: input.target_key });
+  if (!duplicateBeforeLock.ok) return finishTracedResult(refuse(duplicateBeforeLock.reason, duplicateBeforeLock.detail, { target_key: input.target_key }));
   if (duplicateBeforeLock.duplicate) {
-    return continueImprovementDraftChain({
+    return finishTracedResult(continueImprovementDraftChain({
       repoRoot,
       draftDir: resolvedDraftDir,
       draftId: duplicateBeforeLock.duplicate.id,
       datasetName,
       config: loadedConfig,
+      definition,
       policy,
+      policyPath: resolvedPolicyPath,
+      policyRelativePath: resolvedPolicyRelativePath,
       registerPromptInPhoenixImpl,
+      runWorkflowExperimentImpl,
       runDecompositionExperimentImpl,
       ensureReady,
       fetchImpl,
@@ -410,7 +726,7 @@ async function runImprovementDrafterWithOverrides({
       lockStaleAfterMs,
       onProgress,
       now,
-    });
+    }));
   }
 
   const lock = acquireImprovementDraftLock({
@@ -418,7 +734,7 @@ async function runImprovementDrafterWithOverrides({
     now,
     staleAfterMs: lockStaleAfterMs,
   });
-  if (!lock.ok) return refuse(lock.reason, lock.detail, { target_key: input.target_key, lock_path: lock.lock_path });
+  if (!lock.ok) return finishTracedResult(refuse(lock.reason, lock.detail, { target_key: input.target_key, lock_path: lock.lock_path }));
   let draftedResult = null;
   try {
     const duplicate = findDuplicateDraftReceipt({
@@ -426,17 +742,21 @@ async function runImprovementDrafterWithOverrides({
       targetKey: input.target_key,
       contentSha256,
     });
-    if (!duplicate.ok) return refuse(duplicate.reason, duplicate.detail, { target_key: input.target_key });
+    if (!duplicate.ok) return finishTracedResult(refuse(duplicate.reason, duplicate.detail, { target_key: input.target_key }));
     if (duplicate.duplicate) {
       lock.release();
-      return continueImprovementDraftChain({
+      return finishTracedResult(continueImprovementDraftChain({
         repoRoot,
         draftDir: resolvedDraftDir,
         draftId: duplicate.duplicate.id,
         datasetName,
         config: loadedConfig,
+        definition,
         policy,
+        policyPath: resolvedPolicyPath,
+        policyRelativePath: resolvedPolicyRelativePath,
         registerPromptInPhoenixImpl,
+        runWorkflowExperimentImpl,
         runDecompositionExperimentImpl,
         ensureReady,
         fetchImpl,
@@ -444,7 +764,7 @@ async function runImprovementDrafterWithOverrides({
         lockStaleAfterMs,
         onProgress,
         now,
-      });
+      }));
     }
     const draftId = makeDraftId({ now, randomHex });
     const contentPath = writeDraftContentFile({
@@ -494,14 +814,18 @@ async function runImprovementDrafterWithOverrides({
   } finally {
     lock.release();
   }
-  return continueImprovementDraftChain({
+  return finishTracedResult(continueImprovementDraftChain({
     repoRoot,
     draftDir: resolvedDraftDir,
     draftId: draftedResult.draft_id,
     datasetName,
     config: loadedConfig,
+    definition,
     policy,
+    policyPath: resolvedPolicyPath,
+    policyRelativePath: resolvedPolicyRelativePath,
     registerPromptInPhoenixImpl,
+    runWorkflowExperimentImpl,
     runDecompositionExperimentImpl,
     ensureReady,
     fetchImpl,
@@ -509,7 +833,191 @@ async function runImprovementDrafterWithOverrides({
     lockStaleAfterMs,
     onProgress,
     now,
+  }));
+  } catch (error) {
+    recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.outcome", {
+      ok: false,
+      outcome: "exception",
+      reason: error.message,
+    });
+    await finishImprovementDrafterTraceBestEffort(drafterTrace, {
+      status: "failed",
+      reason: error.message,
+    });
+    throw error;
+  }
+}
+
+async function startImprovementDrafterTraceBestEffort({
+  repoRoot,
+  config,
+  markerState,
+  targetKey,
+  startedAt,
+  startAgentTraceImpl,
+  sinkFactory,
+  ensureReady,
+  statusProbe,
+  fetchImpl,
+  now,
+  idFactory,
+  onProgress,
+  runnerReadyTimeoutMs,
+} = {}) {
+  try {
+    const behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot);
+    const resource = githubBehaviorRepoResourceForTrace({ markerState, behaviorRepoId });
+    if (!resource) {
+      reportDrafterTraceUnavailable(onProgress, "missing_github_behavior_repo_identity");
+      return null;
+    }
+    const domain = resolveForegroundDomainContext({
+      repoRoot,
+      config,
+      behaviorRepoId,
+    });
+    if (!domain.ok || !domain.context?.domainId) {
+      reportDrafterTraceUnavailable(onProgress, domain.reason || "missing_domain_id");
+      return null;
+    }
+    const options = {
+      agent_role: SELF_IMPROVEMENT_DRAFTER_AGENT_ROLE,
+      run_id: makeDrafterTraceRunId({ startedAt, targetKey }),
+      resource,
+      domain_id: domain.context.domainId,
+      workflow_type: SELF_IMPROVEMENT_DRAFT_WORKFLOW_TYPE,
+      repoRoot,
+      ensureReady,
+      fetchImpl,
+      now,
+      onProgress,
+    };
+    if (sinkFactory !== undefined) options.sinkFactory = sinkFactory;
+    if (statusProbe !== undefined) options.statusProbe = statusProbe;
+    if (idFactory !== undefined) options.idFactory = idFactory;
+    if (runnerReadyTimeoutMs !== undefined) options.runnerReadyTimeoutMs = runnerReadyTimeoutMs;
+    return await settleTracePromiseWithin(
+      startAgentTraceImpl(options),
+      DRAFTER_TRACE_START_TIMEOUT_MS,
+      null,
+    );
+  } catch (error) {
+    reportDrafterTraceUnavailable(onProgress, error.message || "trace_start_failed");
+    return null;
+  }
+}
+
+function githubBehaviorRepoResourceForTrace({ markerState, behaviorRepoId } = {}) {
+  const repo = markerState?.repo || {};
+  const repoName = nonEmptyTraceString(repo.repo || repo.name);
+  const owner = nonEmptyTraceString(repo.owner);
+  const label = owner && repoName ? `${owner}/${repoName}` : repoName || owner;
+  const id = nonEmptyTraceString(markerState?.repo_id) || nonEmptyTraceString(behaviorRepoId);
+  if (!id || !label) return null;
+  return {
+    kind: "github_behavior_repo",
+    id,
+    label,
+  };
+}
+
+function makeDrafterTraceRunId({ startedAt, targetKey } = {}) {
+  const date = startedAt instanceof Date ? startedAt : new Date();
+  const stamp = date.toISOString().replace(/[-:.]/g, "");
+  const digest = createHash("sha256").update(String(targetKey || "unknown")).digest("hex").slice(0, 6);
+  return `drafter-${stamp}-${digest}`;
+}
+
+async function finishImprovementDrafterTraceResultBestEffort({ drafterTrace, result } = {}) {
+  recordImprovementDrafterSpanBestEffort(drafterTrace, "self_improvement_drafter.outcome", {
+    ok: result?.ok === true,
+    outcome: result?.outcome || null,
+    reason: result?.reason || null,
+    detail: result?.detail || null,
+    chain_state: result?.chain_state || null,
+    target_key: result?.target_key || result?.receipt?.target_key || null,
+    draft_id: result?.draft_id || result?.receipt?.id || null,
+    receipt_path: result?.receipt_path || null,
+    content_path: result?.content_path || null,
+    content_sha256: result?.content_sha256 || result?.receipt?.content_sha256 || null,
+    content_byte_size: result?.content_byte_size || result?.receipt?.content_byte_size || null,
+    rejection: result?.receipt?.rejection || null,
   });
+  await finishImprovementDrafterTraceBestEffort(drafterTrace, {
+    status: result?.ok ? "completed" : "failed",
+    reason: result?.reason || result?.chain_state || result?.outcome || null,
+  });
+  return result;
+}
+
+async function finishImprovementDrafterTraceBestEffort(drafterTrace, finishPayload = {}) {
+  try {
+    const finish = drafterTrace?.finish;
+    if (typeof finish !== "function") return;
+    await settleTracePromiseWithin(finish.call(drafterTrace, finishPayload), DRAFTER_TRACE_FINISH_TIMEOUT_MS);
+  } catch {
+    // Observability must never change the drafter outcome or receipt.
+  }
+}
+
+function settleTracePromiseWithin(promise, timeoutMs, fallbackValue = undefined) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallbackValue), timeoutMs);
+    Promise.resolve(promise)
+      .then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(fallbackValue);
+        },
+      );
+  });
+}
+
+function recordImprovementDrafterSpanBestEffort(drafterTrace, name, attributes = {}) {
+  try {
+    drafterTrace?.spanSink?.recordSpan?.(name, attributes);
+  } catch {
+    // Observability must never change the drafter outcome or receipt.
+  }
+}
+
+function reportDrafterTraceUnavailable(onProgress, reason) {
+  try {
+    onProgress?.(`Self-improvement drafter trace unavailable: ${reason}.`);
+  } catch {
+    // Progress reporting for trace setup is best-effort.
+  }
+}
+
+function traceString(value, maxBytes = MAX_TRACE_OUTPUT_BYTES) {
+  const text = serializeTraceValue(value);
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  return `${bytes.subarray(0, maxBytes).toString("utf8")}\n[trace_content_truncated_bytes=${bytes.length - maxBytes}]`;
+}
+
+function traceByteSize(value) {
+  return Buffer.byteLength(serializeTraceValue(value), "utf8");
+}
+
+function serializeTraceValue(value) {
+  if (typeof value === "string") return value;
+  try {
+    const json = JSON.stringify(value);
+    return json === undefined ? String(value) : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function nonEmptyTraceString(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 function refuse(reason, detail = null, extra = {}) {
@@ -617,8 +1125,31 @@ function arrayStrings(value) {
   return value.filter((entry) => typeof entry === "string" && entry.trim()).map((entry) => entry.trim());
 }
 
-function loadFailureTaxonomy() {
-  return JSON.parse(fs.readFileSync(FAILURE_TAXONOMY_PATH, "utf8"));
+function resolveWorkflowDefinitionForTargetParse(targetParse) {
+  try {
+    return { ok: true, definition: getWorkflowDefinition(targetParse.scope) };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "workflow_definition_unavailable",
+      detail: error.message,
+    };
+  }
+}
+
+function loadFailureTaxonomy({ definition, repoRoot = MODULE_REPO_ROOT } = {}) {
+  const contract = resolveEvalContract(definition, repoRoot);
+  if (contract.failure_taxonomy) return contract.failure_taxonomy;
+  const taxonomyPath = contract.absolute_paths?.taxonomy
+    || path.resolve(repoRoot, evalNamespacePaths(definition).taxonomy);
+  if (!fs.existsSync(taxonomyPath)) {
+    if (definition?.workflow_type === "decomposition") {
+      const fallback = resolveEvalContract(definition, MODULE_REPO_ROOT);
+      return fallback.failure_taxonomy;
+    }
+    return null;
+  }
+  return JSON.parse(fs.readFileSync(taxonomyPath, "utf8"));
 }
 
 function validateFailureModeIds({ failureModeIds, taxonomy }) {
@@ -737,6 +1268,7 @@ async function readRepoVisibleMarkerState({
       open_prs_seen: openPrs.length,
       closed_prs_seen: closedPrs.length,
       repo: identity.repo,
+      repo_id: identity.repo_id ?? null,
       connection_mode: identity.connection_mode,
     };
   }
@@ -752,6 +1284,7 @@ async function readRepoVisibleMarkerState({
       overridden_by_materially_new_evidence: true,
       latest_rejection_at: latestRejection,
       repo: identity.repo,
+      repo_id: identity.repo_id ?? null,
       connection_mode: identity.connection_mode,
     };
   }
@@ -762,6 +1295,7 @@ async function readRepoVisibleMarkerState({
     detail:
       `a human closed PR #${rejectionMemory[0].pr.number} for candidate target ${targetKey} without merging; drafting is suppressed inside the ${policy.lookback_days}-day lookback unless a receipt amendment (reclassify/register) supplies materially new evidence.`,
     repo: identity.repo,
+    repo_id: identity.repo_id ?? null,
     connection_mode: identity.connection_mode,
   };
 }
@@ -809,19 +1343,19 @@ function checkDraftQuota({ draftDir, targetKey, policy, now }) {
   return { ok: true, count: inWindow.length, max, period_days: policy.drafting.period_days };
 }
 
-function resolveDraftTarget({ repoRoot, targetKey }) {
+function resolveDraftTarget({ repoRoot, targetKey, definition }) {
+  const namespacePaths = evalNamespacePaths(definition);
+  const manifestPath = path.resolve(repoRoot, namespacePaths.manifest);
   let manifest;
   try {
-    manifest = JSON.parse(
-      fs.readFileSync(path.join(repoRoot, "execution", "evals", "decomposition", "phoenix-assets.json"), "utf8"),
-    );
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   } catch (error) {
     return { ok: false, reason: "phoenix_assets_manifest_unreadable", detail: error.message };
   }
   const resolved = resolveMaterializerTarget({ manifest, candidateTargetKey: targetKey });
   if (!resolved.ok) return { ok: false, reason: resolved.reason, detail: `no draftable target metadata for ${targetKey}` };
   const target = resolved.target;
-  if (!isAdopterSelfImprovementTarget(target)) {
+  if (!isAdopterSelfImprovementTarget(target, { definition })) {
     return {
       ok: false,
       reason: "drafting_target_not_adopter_self_improvement",
@@ -843,7 +1377,7 @@ function resolveDraftTarget({ repoRoot, targetKey }) {
     // models kept producing uncomposable drafts.
     snapshot = loadAcceptedPromptSnapshot({
       repoRoot,
-      definition: decompositionDefinition,
+      definition,
       targetKey,
       includeHeaderInContent: true,
       parseContentSections: false,
@@ -891,7 +1425,7 @@ export function buildImprovementDraftPrompt({
   phoenixDeepLinks,
 } = {}) {
   return [
-    "Agentic Factory improvement drafter.",
+    "Teami improvement drafter.",
     "",
     "Authority boundaries:",
     "- Draft only a candidate replacement for the accepted artifact content.",
@@ -1440,7 +1974,7 @@ function buildDraftReceipt({
   evidenceRefs = {},
   validatedPhoenixDeepLinks = [],
 } = {}) {
-  const draftedBy = `agentic_factory_drafter_v1:${assignment.model}`;
+  const draftedBy = `teami_drafter_v1:${assignment.model}`;
   return {
     schema_version: IMPROVEMENT_DRAFT_RECEIPT_SCHEMA_VERSION,
     id: draftId,
@@ -1700,6 +2234,8 @@ function draftChainResult({ ok, receipt, receiptPath, reason = null, detail = nu
     phoenix_prompt_version_id: receipt.phoenix_prompt_version_id ?? null,
     experiment_receipt_id: receipt.experiment_receipt_id ?? null,
     phoenix_experiment_id: receipt.phoenix_experiment_id ?? null,
+    candidate_tag_mode: receipt.candidate_tag_mode ?? "apply",
+    candidate_tag: receipt.candidate_tag ?? null,
     idempotent,
   };
 }
@@ -1726,8 +2262,18 @@ function readDraftContentForRegistration({ draftDir, receipt }) {
   return { ok: true, content, contentPath };
 }
 
-function validateResumeDraftComposability({ repoRoot, draftDir, receipt } = {}) {
-  const target = resolveDraftTarget({ repoRoot, targetKey: receipt.target_key });
+function validateResumeDraftComposability({ repoRoot, draftDir, receipt, definition = null } = {}) {
+  let resolvedDefinition = definition;
+  if (!resolvedDefinition) {
+    const targetParse = parseCandidateTargetKey(receipt.target_key);
+    if (!targetParse.ok) return { ok: false, reason: targetParse.reason, detail: targetParse.detail };
+    const definitionResolution = resolveWorkflowDefinitionForTargetParse(targetParse);
+    if (!definitionResolution.ok) {
+      return { ok: false, reason: definitionResolution.reason, detail: definitionResolution.detail };
+    }
+    resolvedDefinition = definitionResolution.definition;
+  }
+  const target = resolveDraftTarget({ repoRoot, targetKey: receipt.target_key, definition: resolvedDefinition });
   if (!target.ok) return { ok: false, reason: target.reason, detail: target.detail };
   if (!isRuntimePhasePromptTarget(target.target)) return { ok: true };
   const contentRead = readDraftContentForRegistration({ draftDir, receipt });
@@ -1817,7 +2363,7 @@ async function applyCandidateTag({ appUrl, promptVersionId, tagName, fetchImpl }
     method: "POST",
     payload: {
       name: tagName,
-      description: "Agentic Factory promotion candidate intent; managed experiment receipt recorded before tag.",
+      description: "Teami promotion candidate intent; managed experiment receipt recorded before tag.",
     },
     fetchImpl,
   });
@@ -1965,6 +2511,21 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+async function runExperimentForDefinition({
+  definition,
+  runWorkflowExperimentImpl = null,
+  runDecompositionExperimentImpl = null,
+  options,
+} = {}) {
+  if (typeof runWorkflowExperimentImpl === "function") {
+    return runWorkflowExperimentImpl(definition, options);
+  }
+  if (typeof runDecompositionExperimentImpl === "function") {
+    return runDecompositionExperimentImpl(options);
+  }
+  return runWorkflowExperiment(definition, options);
+}
+
 export function assertAppendOnlyDraftReceiptUpdate(before, after) {
   for (const key of [
     "schema_version",
@@ -2001,10 +2562,13 @@ export async function continueImprovementDraftChain({
   draftId = null,
   datasetName = null,
   config = null,
+  definition = null,
   policy = null,
-  policyPath = PROMOTION_POLICY_PATH,
+  policyPath = undefined,
+  policyRelativePath = undefined,
   registerPromptInPhoenixImpl = registerPromptInPhoenix,
-  runDecompositionExperimentImpl = runDecompositionExperiment,
+  runWorkflowExperimentImpl = null,
+  runDecompositionExperimentImpl = null,
   ensureReady = ensurePhoenixReady,
   fetchImpl = globalThis.fetch,
   experimentReceiptDir = null,
@@ -2038,7 +2602,7 @@ export async function continueImprovementDraftChain({
       "registration_failed",
       "registered",
       "experiment_failed_no_tag_applied",
-      "experiment_recorded_no_tag_applied",
+      "experiment_recorded",
       "tag_occupied_no_tag_applied",
       "tag_apply_failed",
     ].includes(receipt.chain_state)) {
@@ -2093,9 +2657,40 @@ export async function continueImprovementDraftChain({
       });
     }
 
+    const receiptTargetParse = parseCandidateTargetKey(receipt.target_key);
+    if (!receiptTargetParse.ok) {
+      return draftChainResult({
+        ok: false,
+        receipt,
+        receiptPath,
+        reason: receiptTargetParse.reason,
+        detail: receiptTargetParse.detail,
+      });
+    }
+    const definitionResolution = definition
+      ? { ok: true, definition }
+      : resolveWorkflowDefinitionForTargetParse(receiptTargetParse);
+    if (!definitionResolution.ok) {
+      return draftChainResult({
+        ok: false,
+        receipt,
+        receiptPath,
+        reason: definitionResolution.reason,
+        detail: definitionResolution.detail,
+      });
+    }
+    const chainDefinition = definitionResolution.definition;
+    const policyPaths = resolvePromotionPolicyPath(chainDefinition, repoRoot);
+    const resolvedPolicyPath = policyPath || policyPaths.path;
+    const resolvedPolicyRelativePath = policyRelativePath || policyPaths.relativePath;
+
     const loadedConfig = config || loadLinearConfig({ repoRoot });
     const loadedPolicy = policy || (() => {
-      const policyRead = resolveTrustedPolicyRead({ mode: "user_invoked", policyPath });
+      const policyRead = resolveTrustedPolicyRead({
+        mode: "user_invoked",
+        policyPath: resolvedPolicyPath,
+        policyRelativePath: resolvedPolicyRelativePath,
+      });
       if (!policyRead.ok) throw new Error(`${policyRead.reason}:${policyRead.detail || ""}`);
       return policyRead.policy;
     })();
@@ -2135,6 +2730,7 @@ export async function continueImprovementDraftChain({
       try {
         registration = await registerPromptInPhoenixImpl({
           repoRoot,
+          definition: chainDefinition,
           targetKey: receipt.target_key,
           config: loadedConfig,
           contentText: contentRead.content,
@@ -2192,18 +2788,23 @@ export async function continueImprovementDraftChain({
       };
       let experiment;
       try {
-        experiment = await runDecompositionExperimentImpl({
-          repoRoot,
-          config: loadedConfig,
-          datasetName: datasetResolution.datasetName,
-          derivedVariant,
-          intentFlag: "promotion_candidate",
-          draftedBy: receipt.drafted_by,
-          receiptDir: experimentReceiptDir,
-          ensureReady,
-          fetchImpl,
-          onProgress,
-          now,
+        experiment = await runExperimentForDefinition({
+          definition: chainDefinition,
+          runWorkflowExperimentImpl,
+          runDecompositionExperimentImpl,
+          options: {
+            repoRoot,
+            config: loadedConfig,
+            datasetName: datasetResolution.datasetName,
+            derivedVariant,
+            intentFlag: "promotion_candidate",
+            draftedBy: receipt.drafted_by,
+            receiptDir: experimentReceiptDir,
+            ensureReady,
+            fetchImpl,
+            onProgress,
+            now,
+          },
         });
       } catch (error) {
         experiment = { ok: false, reason: "experiment_failed", detail: error.message };
@@ -2226,7 +2827,7 @@ export async function continueImprovementDraftChain({
         });
       }
       receipt = appendDraftReceiptUpdate({ draftDir, draftId, now }, (current) => {
-        current.chain_state = "experiment_recorded_no_tag_applied";
+        current.chain_state = "experiment_recorded";
         current.experiment_receipt_id = experiment.receipt_id;
         current.experiment_receipt_path = experiment.receipt_path ?? null;
         current.phoenix_experiment_id = experiment.phoenix_experiment_id;
@@ -2235,7 +2836,7 @@ export async function continueImprovementDraftChain({
         current.events.push({
           at: now().toISOString(),
           action: "managed_experiment_recorded",
-          chain_state: "experiment_recorded_no_tag_applied",
+          chain_state: "experiment_recorded",
           experiment_receipt_id: experiment.receipt_id,
           phoenix_experiment_id: experiment.phoenix_experiment_id,
         });

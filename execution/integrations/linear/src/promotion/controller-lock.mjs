@@ -4,7 +4,7 @@ import path from "node:path";
 import { canonicalJson, readJsonTolerant } from "./registry-store.mjs";
 
 export const PROMOTION_CONTROLLER_LOCK_SCHEMA_VERSION =
-  "agentic-factory-promotion-controller-lock/v1";
+  "teami-promotion-controller-lock/v1";
 export const DEFAULT_PROMOTION_CONTROLLER_LOCK_STALE_MS = 15 * 60 * 1000;
 
 export function promotionControllerStateDirForRegistryDir(registryDir) {

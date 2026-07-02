@@ -4,6 +4,7 @@ export const GENERIC_CORE_OUTCOME_REASONS = Object.freeze({
   failed_closed: Object.freeze([
     "bounds_breach",
     "environment_breach",
+    "warm_continuation_unavailable",
     "subagent_turn_validation_failed",
     "orchestrator_turn_validation_failed",
   ]),

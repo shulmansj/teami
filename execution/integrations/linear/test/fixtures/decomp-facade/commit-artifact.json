@@ -1,0 +1,374 @@
+{
+  "schema_version": "teami-run-artifact/v1",
+  "engine_version": "0.2.0",
+  "function_version": "0.2.0",
+  "workflow_version": "0.2.0",
+  "kind": "commit",
+  "run_id": "run_decomp_facade_commit",
+  "domain_id": "support-ops",
+  "workspace_id": "workspace-1",
+  "team_id": "team-1",
+  "linear_project_id": "project-webhook-inbox",
+  "terminal_output": {
+    "schema_version": "teami-orchestrator-turn-output/v1",
+    "run_id": "run_decomp_facade_commit",
+    "workflow_version": "0.2.0",
+    "outcome": "commit",
+    "reason": "synthesis_complete",
+    "context_digest": "Synthesized the webhook-inbox project into an agent-ready issue set.",
+    "source_refs": [
+      {
+        "kind": "linear_project",
+        "id": "project-webhook-inbox"
+      }
+    ],
+    "assumptions": [],
+    "constraints": [],
+    "risks": []
+  },
+  "evidence": {
+    "perspectives_run": [
+      {
+        "role": "sr_eng",
+        "outcome": "technical_context_grounded",
+        "instance_id": "sr_eng#default"
+      },
+      {
+        "role": "pm",
+        "outcome": "product_context_sufficient",
+        "instance_id": "pm#default"
+      }
+    ],
+    "evidence_unavailable": [
+      {
+        "scope": "sr_eng.turn.tool_events",
+        "reason": "runtime_tool_event_channel_unavailable"
+      },
+      {
+        "scope": "pm.turn.tool_events",
+        "reason": "runtime_tool_event_channel_unavailable"
+      }
+    ]
+  },
+  "bounds": {
+    "rounds_used": 3,
+    "max_rounds": 1000,
+    "wall_ms": 0,
+    "invocations": 2
+  },
+  "environment": {
+    "agent_write_credentials_present": false
+  },
+  "runtime_assignments": {
+    "pm": {
+      "role": "pm",
+      "runtime": "claude",
+      "model": "claude-opus-4-8",
+      "command": "claude",
+      "cli_args_prefix": [],
+      "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "local_schema_version": "linear-decomposition-orchestrator-subagent-turn/v2",
+      "warm_continuation": {
+        "enabled": false,
+        "required": false
+      },
+      "capabilities": {
+        "persisted_session_handles": false
+      },
+      "version": null,
+      "tool_policy": {
+        "linear_write": false,
+        "project_mutation": "runner_only",
+        "issue_mutation": "runner_only"
+      }
+    },
+    "sr_eng": {
+      "role": "sr_eng",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "command": "codex",
+      "cli_args_prefix": [
+        "-c",
+        "service_tier=\"fast\""
+      ],
+      "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.strict-generation.schema.json",
+      "local_schema_version": "linear-decomposition-orchestrator-subagent-turn/v2",
+      "warm_continuation": {
+        "enabled": false,
+        "required": false
+      },
+      "capabilities": {
+        "persisted_session_handles": false
+      },
+      "version": null,
+      "tool_policy": {
+        "linear_write": false,
+        "project_mutation": "runner_only",
+        "issue_mutation": "runner_only"
+      }
+    },
+    "judge": {
+      "role": "judge",
+      "runtime": "claude",
+      "model": "claude-opus-4-8",
+      "command": "claude",
+      "cli_args_prefix": [],
+      "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "local_schema_version": "linear-decomposition-orchestrator-subagent-turn/v2",
+      "warm_continuation": {
+        "enabled": false,
+        "required": false
+      },
+      "capabilities": {
+        "persisted_session_handles": false
+      },
+      "version": null,
+      "tool_policy": {
+        "linear_write": false,
+        "project_mutation": "runner_only",
+        "issue_mutation": "runner_only"
+      }
+    },
+    "drafter": {
+      "role": "drafter",
+      "runtime": "claude",
+      "model": "claude-opus-4-8",
+      "command": "claude",
+      "cli_args_prefix": [],
+      "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "local_schema_version": "linear-decomposition-orchestrator-subagent-turn/v2",
+      "warm_continuation": {
+        "enabled": false,
+        "required": false
+      },
+      "capabilities": {
+        "persisted_session_handles": false
+      },
+      "version": null,
+      "tool_policy": {
+        "linear_write": false,
+        "project_mutation": "runner_only",
+        "issue_mutation": "runner_only"
+      }
+    },
+    "orchestrator": {
+      "role": "orchestrator",
+      "runtime": "claude",
+      "model": "claude-opus-4-8",
+      "command": "claude",
+      "cli_args_prefix": [],
+      "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+      "local_schema_version": "linear-decomposition-orchestrator-subagent-turn/v2",
+      "warm_continuation": {
+        "enabled": false,
+        "required": false
+      },
+      "capabilities": {
+        "persisted_session_handles": false
+      },
+      "version": null,
+      "tool_policy": {
+        "linear_write": false,
+        "project_mutation": "runner_only",
+        "issue_mutation": "runner_only"
+      }
+    }
+  },
+  "runtime_metadata": {
+    "sr_eng": {
+      "role": "sr_eng",
+      "runtime_name": "codex",
+      "model": "gpt-5.5",
+      "continuation_requirement": "independent_session_start",
+      "continuation_capability_flags": {
+        "warm_continuation_required": false,
+        "warm_continuation_ready": false,
+        "persisted_session_handles": false,
+        "structured_output_mode": true,
+        "tool_policy_controls": true
+      },
+      "session_handle": null,
+      "last_accepted_role": "sr_eng",
+      "structured_output_validation": "local_canonical",
+      "schema_version": "linear-decomposition-orchestrator-subagent-turn/v2",
+      "handle_acquisition_mode": null,
+      "invocation_mode": "session_start",
+      "observed_warm_continuation": false,
+      "tool_policy": {
+        "linear_write": false,
+        "project_mutation": "runner_only",
+        "issue_mutation": "runner_only"
+      }
+    },
+    "pm": {
+      "role": "pm",
+      "runtime_name": "claude",
+      "model": "claude-opus-4-8",
+      "continuation_requirement": "independent_session_start",
+      "continuation_capability_flags": {
+        "warm_continuation_required": false,
+        "warm_continuation_ready": false,
+        "persisted_session_handles": false,
+        "structured_output_mode": true,
+        "tool_policy_controls": true
+      },
+      "session_handle": null,
+      "last_accepted_role": "pm",
+      "structured_output_validation": "local_canonical",
+      "schema_version": "linear-decomposition-orchestrator-subagent-turn/v2",
+      "handle_acquisition_mode": null,
+      "invocation_mode": "session_start",
+      "observed_warm_continuation": false,
+      "tool_policy": {
+        "linear_write": false,
+        "project_mutation": "runner_only",
+        "issue_mutation": "runner_only"
+      }
+    }
+  },
+  "payload_schema_id": "linear-decomposition-run-payload/v1",
+  "payload": {
+    "terminal_output": {
+      "schema_version": "teami-orchestrator-turn-output/v1",
+      "run_id": "run_decomp_facade_commit",
+      "workflow_version": "0.2.0",
+      "outcome": "commit",
+      "reason": "synthesis_complete",
+      "context_digest": "Synthesized the webhook-inbox project into an agent-ready issue set.",
+      "source_refs": [
+        {
+          "kind": "linear_project",
+          "id": "project-webhook-inbox"
+        }
+      ],
+      "assumptions": [],
+      "constraints": [],
+      "risks": []
+    },
+    "final_issues": [
+      {
+        "decomposition_key": "webhook-inbox-core",
+        "title": "Build the hosted webhook inbox (authenticate, dedupe, normalize)",
+        "issue_body_markdown": "## Assignment\n\nBuild the hosted inbox.\n\n## Acceptance Criteria\n\n- Authenticates Linear + GitHub events.\n- Dedupes redelivery.\n- Normalizes to the internal wake envelope.",
+        "depends_on": [],
+        "assignment": "Build the hosted inbox: authenticate, dedupe, normalize events to the wake envelope.",
+        "output": "A hosted inbox that emits normalized wake envelopes.",
+        "acceptance_criteria": [
+          "Authenticates events",
+          "Dedupes redelivery",
+          "Normalizes to the wake envelope"
+        ]
+      },
+      {
+        "decomposition_key": "webhook-inbox-queue",
+        "title": "Add the durable wake queue the Workflow Runner drains",
+        "issue_body_markdown": "## Assignment\n\nAdd a durable queue.\n\n## Acceptance Criteria\n\n- Persists wake envelopes durably.\n- Drains in order.",
+        "depends_on": [],
+        "assignment": "Add a durable queue that persists wake envelopes for the Workflow Runner.",
+        "output": "A durable wake queue.",
+        "acceptance_criteria": [
+          "Persists wake envelopes durably",
+          "Drains in order"
+        ]
+      },
+      {
+        "decomposition_key": "webhook-inbox-status",
+        "title": "Expose operator-visible status for every event",
+        "issue_body_markdown": "## Assignment\n\nExpose per-event status.\n\n## Acceptance Criteria\n\n- Every event shows accepted / deduped / refused / enqueued.",
+        "depends_on": [
+          "webhook-inbox-core"
+        ],
+        "assignment": "Expose operator-visible per-event status across surfaces.",
+        "output": "Operator-visible event status.",
+        "acceptance_criteria": [
+          "Every event shows its disposition"
+        ]
+      }
+    ],
+    "project_update_markdown": "run_id: run_decomp_facade_commit\n\nDecomposed the Event Trigger Webhook Inbox project into an agent-ready issue set.\n\n## What I did with each part of your project\n- Objective + scope became the inbox build and the durable queue.\n- Operator-visible status became its own issue, blocked on the inbox build."
+  },
+  "accepted_refs": [
+    {
+      "target_key": "prompt/decomposition/orchestrator_governing",
+      "accepted_baseline_id": "sha256:9230bafbaf10b5d6bd9511898b7f65ce3d3cf3ea507d127d5a866e3fffce3ace",
+      "snapshot_sha256": "9230bafbaf10b5d6bd9511898b7f65ce3d3cf3ea507d127d5a866e3fffce3ace"
+    },
+    {
+      "target_key": "prompt/decomposition/sr_eng_grounding_pass",
+      "accepted_baseline_id": "sha256:d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843",
+      "snapshot_sha256": "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843"
+    },
+    {
+      "target_key": "prompt/decomposition/pm_product_sufficiency_pass",
+      "accepted_baseline_id": "sha256:41fceb1ee15b9aa2c6905fe06e7acfa08eb0c4401e8431a26d7e0e980666bca1",
+      "snapshot_sha256": "41fceb1ee15b9aa2c6905fe06e7acfa08eb0c4401e8431a26d7e0e980666bca1"
+    },
+    {
+      "target_key": "rule/decomposition/runtime_role_assignments",
+      "accepted_baseline_id": "sha256:98b1f2498affda7bcf945fa49e20d68143970ff4105c59e50c9d67a0e265252c",
+      "snapshot_sha256": "98b1f2498affda7bcf945fa49e20d68143970ff4105c59e50c9d67a0e265252c"
+    }
+  ],
+  "artifact_set_lineage": {
+    "lineage_scope": "artifact_set",
+    "produced_by_turn_id": 3,
+    "commit_decision_turn_id": 3,
+    "informed_by_turn_ids": [
+      "2.1"
+    ],
+    "source_refs": [
+      {
+        "kind": "linear_project",
+        "id": "project-webhook-inbox"
+      }
+    ]
+  },
+  "completed_at": "2026-06-26T12:00:00.000Z",
+  "execution_mode": "live",
+  "final_issues": [
+    {
+      "decomposition_key": "webhook-inbox-core",
+      "title": "Build the hosted webhook inbox (authenticate, dedupe, normalize)",
+      "issue_body_markdown": "## Assignment\n\nBuild the hosted inbox.\n\n## Acceptance Criteria\n\n- Authenticates Linear + GitHub events.\n- Dedupes redelivery.\n- Normalizes to the internal wake envelope.",
+      "depends_on": [],
+      "assignment": "Build the hosted inbox: authenticate, dedupe, normalize events to the wake envelope.",
+      "output": "A hosted inbox that emits normalized wake envelopes.",
+      "acceptance_criteria": [
+        "Authenticates events",
+        "Dedupes redelivery",
+        "Normalizes to the wake envelope"
+      ]
+    },
+    {
+      "decomposition_key": "webhook-inbox-queue",
+      "title": "Add the durable wake queue the Workflow Runner drains",
+      "issue_body_markdown": "## Assignment\n\nAdd a durable queue.\n\n## Acceptance Criteria\n\n- Persists wake envelopes durably.\n- Drains in order.",
+      "depends_on": [],
+      "assignment": "Add a durable queue that persists wake envelopes for the Workflow Runner.",
+      "output": "A durable wake queue.",
+      "acceptance_criteria": [
+        "Persists wake envelopes durably",
+        "Drains in order"
+      ]
+    },
+    {
+      "decomposition_key": "webhook-inbox-status",
+      "title": "Expose operator-visible status for every event",
+      "issue_body_markdown": "## Assignment\n\nExpose per-event status.\n\n## Acceptance Criteria\n\n- Every event shows accepted / deduped / refused / enqueued.",
+      "depends_on": [
+        "webhook-inbox-core"
+      ],
+      "assignment": "Expose operator-visible per-event status across surfaces.",
+      "output": "Operator-visible event status.",
+      "acceptance_criteria": [
+        "Every event shows its disposition"
+      ]
+    }
+  ],
+  "project_update_markdown": "run_id: run_decomp_facade_commit\n\nDecomposed the Event Trigger Webhook Inbox project into an agent-ready issue set.\n\n## What I did with each part of your project\n- Objective + scope became the inbox build and the durable queue.\n- Operator-visible status became its own issue, blocked on the inbox build."
+}

@@ -5,7 +5,7 @@ import { STABLE_KEY_PATTERN } from "../../../../engine/stable-key-pattern.mjs";
 
 export { STABLE_KEY_PATTERN } from "../../../../engine/stable-key-pattern.mjs";
 
-export const CLOSED_ISSUE_TYPES = new Set(["completed", "canceled"]);
+export const CLOSED_ISSUE_TYPES = new Set(["completed", "canceled", "cancelled"]);
 
 export function knownRegistryWorkspaces(registry = emptyDomainRegistry()) {
   const workspaces = new Map();
@@ -84,13 +84,17 @@ export function projectBelongsToTeam(project, teamId) {
   return teams.some((team) => team?.id === teamId);
 }
 
+export function isIssueClosed(issue) {
+  return CLOSED_ISSUE_TYPES.has(String(issue?.state?.type || "").toLowerCase());
+}
+
 export function isIssueOpen(issue) {
-  return !CLOSED_ISSUE_TYPES.has(issue.state?.type);
+  return !isIssueClosed(issue);
 }
 
 export function matchesStatus(actual, expected) {
   if (!actual || !expected) return false;
-  if (actual.id && expected.id && actual.id === expected.id) return true;
+  if (expected.id) return actual.id === expected.id;
   return actual.type && expected.type && actual.type === expected.type;
 }
 
@@ -99,7 +103,12 @@ export function projectLabelNames(config) {
 }
 
 export function issueLabelNames(config) {
-  return [config.linear.issue.labels.discovery];
+  return [
+    config.linear.issue.labels.discovery,
+    config.linear.issue.labels.needs_principal,
+    config.linear.issue.labels.work_type_code,
+    config.linear.issue.labels.work_type_non_code,
+  ].filter(Boolean);
 }
 
 export function configWithLinearTeam(config, team) {
@@ -250,7 +259,7 @@ export function uniqueOrThrow(matches, label) {
 }
 
 export async function resolveLabelByNameOrId({ list, id, label }) {
-  const matches = id ? list.filter((candidate) => candidate.id === id || candidate.name === label) : list;
+  const matches = id ? list.filter((candidate) => candidate.id === id) : list;
   return uniqueOrThrow(matches, label);
 }
 

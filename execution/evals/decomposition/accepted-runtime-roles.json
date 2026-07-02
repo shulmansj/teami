@@ -1,5 +1,5 @@
 {
-  "schema_version": "agentic-factory-accepted-runtime-roles/v1",
+  "schema_version": "teami-accepted-runtime-roles/v1",
   "_note": "Repo-owned accepted defaults for decomposition runtime role assignments. Stampable runs use these runtime/model fields; tunable adopter overrides require the unpinned-runtime dev flag and are recorded as unpinned_runtime.",
   "roles": {
     "pm": {

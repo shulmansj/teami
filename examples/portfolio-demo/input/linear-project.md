@@ -4,7 +4,7 @@ Provenance: illustrative future artifact.
 
 Synthetic Linear fields:
 
-- Team: Agentic Factory
+- Team: Teami
 - Status: Planned
 - Labels: none
 - Lead: Maya Patel, Product Operations
@@ -27,7 +27,7 @@ high-risk accounts had product commitments with no clear owner or next action.
 
 Renewal risk is where product-ops work becomes visible to revenue and customer
 trust. A focused triage workspace would help the team decide which product
-commitments matter now, without turning Agentic Factory into a CRM, support
+commitments matter now, without turning Teami into a CRM, support
 tool, or revenue dashboard.
 
 # Desired Outcome

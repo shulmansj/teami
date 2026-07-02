@@ -104,6 +104,9 @@ export async function deriveScannerRepoMarkerState({
   const openMarkers = withMarkers(openStates);
   const closedMarkers = withMarkers(closedStates);
   const activeOpen = openMarkers.filter((entry) => entry.marker.proposal_state !== "superseded");
+  const closedUnmerged = closedMarkers.filter((entry) =>
+    !entry.pr.merged_at
+    && !["superseded", "blocked"].includes(entry.marker.proposal_state));
   const nowMs = now().getTime();
   const periodMs = policy.proposal_budget.period_days * 24 * 60 * 60 * 1000;
   const recentProposals = [...openMarkers, ...closedMarkers].filter(
@@ -114,6 +117,7 @@ export async function deriveScannerRepoMarkerState({
     closed_prs_seen: closedPrs.length,
     readable_open_markers: openMarkers.length,
     readable_closed_markers: closedMarkers.length,
+    closed_unmerged_proposals: closedUnmerged.length,
     active_open_proposals: activeOpen.length,
     recent_proposals_in_budget_window: recentProposals.length,
     max_open_proposals: policy.max_open_proposals,

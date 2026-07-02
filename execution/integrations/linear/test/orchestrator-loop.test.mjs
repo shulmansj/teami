@@ -11,6 +11,12 @@ import {
   validateOrchestratorOutput,
 } from "../../../engine/orchestrator-output.mjs";
 import { SUBAGENT_TURN_OUTCOMES } from "../../../engine/orchestrator-turn-contract.mjs";
+import { LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS } from "../../../engine/trace-contract.mjs";
+import {
+  rememberSubagentSessionHandle,
+  resolveSubagentInstanceId,
+  subagentSessionHandleForInstance,
+} from "../../../engine/orchestrator-loop.mjs";
 import {
   defaultOrchestratorRuntime,
   executeOrchestratorTurn,
@@ -19,6 +25,7 @@ import { REPAIR_RETRY_TIMEOUT_MS } from "../src/runtime-command.mjs";
 import { resolveRoleRuntimeAssignments } from "../src/runtime-adapters.mjs";
 import { terminalArtifact } from "../src/workflows/decomposition/artifacts.mjs";
 import {
+  createProcessRuntimeExecutor,
   createEvalModeReadOnlyLinearClient,
   runDecompositionEvalMode,
   runDecompositionOrchestrator,
@@ -67,7 +74,10 @@ function fakeRoster() {
         ok: true,
         runtime_role: role,
         loadSnapshot: () => ({
-          entry: { target_key: targetKey },
+          entry: {
+            target_key: targetKey,
+            human_name: role === "sr_eng" ? "Senior engineering grounding pass" : "PM product sufficiency pass",
+          },
           contentBytes: `BODY for ${targetKey}`,
           snapshotSha256: `sha-${targetKey}`,
         }),
@@ -93,15 +103,18 @@ function fakeSubagentExecutor() {
       const reason =
         runtime_role === "sr_eng" ? "technical_context_grounded" : "product_context_sufficient";
       const packet = subagentTurn(runId, { status: "continue", reason });
+      const rawOutput = JSON.stringify(packet);
       return {
         ok: true,
         packet,
-        output: JSON.stringify(packet),
+        output: rawOutput,
         role: runtime_role,
         runtime: "codex",
         parse_status: "valid",
         clean_parse: true,
-        raw_output_excerpt: JSON.stringify(packet),
+        prompt: `fake envelope for ${runtime_role}`,
+        raw_output: rawOutput,
+        raw_output_excerpt: rawOutput,
         envelope: `fake envelope for ${runtime_role}`,
         sessionHandle: null,
         evidence: {
@@ -139,15 +152,18 @@ function validSpawn(runId, {
   evidenceRef = null,
 } = {}) {
   const packet = subagentTurn(runId, { status, reason });
+  const rawOutput = JSON.stringify(packet);
   return {
     ok: true,
     packet,
-    output: JSON.stringify(packet),
+    output: rawOutput,
     role,
     runtime: "codex",
     parse_status: "valid",
     clean_parse: true,
-    raw_output_excerpt: JSON.stringify(packet),
+    prompt: envelope,
+    raw_output: rawOutput,
+    raw_output_excerpt: rawOutput,
     envelope,
     sessionHandle: null,
     evidence: {
@@ -174,6 +190,13 @@ function captureSpanSink() {
   };
 }
 
+function captureLocalSpanSink() {
+  return {
+    traceContentPolicy: LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
+    ...captureSpanSink(),
+  };
+}
+
 function parseFailureSpawn({
   role = "pm",
   envelope = `preserved envelope for ${role}`,
@@ -185,6 +208,8 @@ function parseFailureSpawn({
     runtime: "codex",
     parse_status: "invalid",
     clean_parse,
+    prompt: envelope,
+    raw_output: raw_output_excerpt,
     raw_output_excerpt,
     failure_kind: "parse",
     failure_code: "invalid_packet",
@@ -203,6 +228,8 @@ function processFailureSpawn({
     runtime: "codex",
     parse_status: "invalid",
     clean_parse: false,
+    prompt: envelope,
+    raw_output: "partial stdout",
     raw_output_excerpt: "partial stdout",
     failure_kind: "process",
     failure_code,
@@ -241,6 +268,52 @@ function commitProducedContent(runId) {
   };
 }
 
+function codeFinalIssue({
+  key = "project-plan",
+  title = "Prepare execution setup",
+  resourceId,
+  repoScope = undefined,
+} = {}) {
+  return {
+    decomposition_key: key,
+    title,
+    issue_body_markdown: "## Assignment\n\nBuild the code change.\n\n## Acceptance Criteria\n\n- Code change is verified.",
+    depends_on: [],
+    assignment: "Build the code change.",
+    output: "A verified code change.",
+    acceptance_criteria: ["Code change is verified."],
+    work_type: "code",
+    resource_target: {
+      kind: "git_repo",
+      id: resourceId,
+      ...(repoScope ? { repo_scope: repoScope } : {}),
+    },
+  };
+}
+
+function nonCodeFinalIssue({
+  key = "project-docs",
+  title = "Write launch notes",
+} = {}) {
+  return {
+    decomposition_key: key,
+    title,
+    issue_body_markdown: "## Assignment\n\nWrite launch notes.\n\n## Acceptance Criteria\n\n- Notes are complete.",
+    depends_on: [],
+    assignment: "Write launch notes.",
+    output: "Published launch notes.",
+    acceptance_criteria: ["Notes are complete."],
+    work_type: "non_code",
+  };
+}
+
+function commitProducedContentWithIssues(runId, finalIssues) {
+  return {
+    ...commitProducedContent(runId),
+    final_issues: finalIssues,
+  };
+}
+
 function pauseProducedContent(runId) {
   return {
     context_digest: "The run paused after observing a failed subagent turn.",
@@ -263,11 +336,400 @@ function pauseProducedContent(runId) {
 // (1) NON-DEFAULT library order (sr_eng grounding BEFORE pm sufficiency — the
 // reverse of the retired fixed phase order) then terminate(commit) carrying valid
 // producedContent -> a validated commit.
+function promptFromCommand(command, marker) {
+  return command?.args?.find((arg) => typeof arg === "string" && arg.includes(marker)) || "";
+}
+
+function promptSection(prompt, startMarker, endMarker) {
+  const startIndex = prompt.indexOf(startMarker);
+  assert.notEqual(startIndex, -1, `missing prompt section ${startMarker}`);
+  const contentStart = startIndex + startMarker.length;
+  const endIndex = endMarker ? prompt.indexOf(endMarker, contentStart) : -1;
+  return prompt.slice(contentStart, endIndex === -1 ? undefined : endIndex).trim();
+}
+
+test("subagent session handles are keyed by instance id", () => {
+  const sessionHandles = {};
+  const role = "sr_eng";
+  const defaultInstanceId = resolveSubagentInstanceId({ role });
+  const instanceA = resolveSubagentInstanceId({ role, instanceKey: "a" });
+  const instanceB = resolveSubagentInstanceId({ role, instanceKey: "b" });
+  const defaultHandle = { id: "session-default", role, run_id: "run-1", runtime: "codex" };
+  const handleA = { id: "session-a", role, run_id: "run-1", runtime: "codex" };
+  const handleB = { id: "session-b", role, run_id: "run-1", runtime: "codex" };
+
+  assert.equal(defaultInstanceId, "sr_eng#default");
+  assert.equal(resolveSubagentInstanceId({ role, instanceId: "a" }), instanceA);
+  assert.equal(resolveSubagentInstanceId({ role, instanceId: instanceA }), instanceA);
+  assert.notEqual(instanceA, instanceB);
+
+  rememberSubagentSessionHandle(sessionHandles, { role, sessionHandle: defaultHandle });
+  rememberSubagentSessionHandle(sessionHandles, {
+    role,
+    instanceId: instanceA,
+    sessionHandle: handleA,
+  });
+  rememberSubagentSessionHandle(sessionHandles, {
+    role,
+    instanceId: instanceB,
+    sessionHandle: handleB,
+  });
+
+  assert.deepEqual(Object.keys(sessionHandles).sort(), [
+    "sr_eng#a",
+    "sr_eng#b",
+    "sr_eng#default",
+  ]);
+  assert.deepEqual(sessionHandles[instanceA], {
+    role,
+    instanceId: instanceA,
+    sessionHandle: handleA,
+  });
+  assert.deepEqual(sessionHandles[instanceB], {
+    role,
+    instanceId: instanceB,
+    sessionHandle: handleB,
+  });
+  assert.equal(subagentSessionHandleForInstance(sessionHandles, defaultInstanceId), defaultHandle);
+  assert.equal(subagentSessionHandleForInstance(sessionHandles, instanceA), handleA);
+  assert.equal(subagentSessionHandleForInstance(sessionHandles, instanceB), handleB);
+});
+
+test("orchestrator loop: role-only repeated subagent invocation reuses the default instance handle", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_default_instance_handle";
+  const calls = [];
+  const defaultHandle = { id: "session-pm-default", role: "pm", run_id: runId, runtime: "codex" };
+  const runtimeExecutor = {
+    async executeSubagent(input) {
+      calls.push({ ...input });
+      return {
+        ...validSpawn(runId, { role: input.runtime_role }),
+        sessionHandle: input.sessionHandle || defaultHandle,
+      };
+    },
+  };
+  let turn = 0;
+  const orchestratorTurnExecutor = async () => {
+    turn += 1;
+    if (turn <= 2) {
+      return {
+        controlAction: {
+          action: "invoke_library",
+          target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+        },
+        evidence: null,
+      };
+    }
+    return {
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      producedContent: commitProducedContent(runId),
+      evidence: null,
+    };
+  };
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "commit");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].sessionHandle, null);
+  assert.deepEqual(calls[1].sessionHandle, defaultHandle);
+  assert.deepEqual(result.sessionHandles, {
+    "pm#default": {
+      role: "pm",
+      instanceId: "pm#default",
+      sessionHandle: defaultHandle,
+    },
+  });
+});
+
+test("orchestrator loop: explicit instance_id spawns and continues distinct same-role instances", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_explicit_instance_handles";
+  const calls = [];
+  const defaultHandle = { id: "session-pm-default", role: "pm", run_id: runId, runtime: "codex" };
+  const sideAHandle = { id: "session-pm-side-a", role: "pm", run_id: runId, runtime: "codex" };
+  const sideBHandle = { id: "session-pm-side-b", role: "pm", run_id: runId, runtime: "codex" };
+  const handleByTask = new Map([
+    ["default first", defaultHandle],
+    ["side A first", sideAHandle],
+    ["side B first", sideBHandle],
+    ["side A continue", sideAHandle],
+    ["default continue", defaultHandle],
+  ]);
+  const runtimeExecutor = {
+    async executeSubagent(input) {
+      calls.push({ ...input });
+      return {
+        ...validSpawn(runId, { role: input.runtime_role }),
+        sessionHandle: input.sessionHandle || handleByTask.get(input.task),
+      };
+    },
+  };
+  const actions = [
+    {
+      action: "invoke_one_off",
+      role_label: "default",
+      task: "default first",
+      prompt: "Start the default PM instance.",
+      runtime_role: "pm",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "side-a",
+      task: "side A first",
+      prompt: "Start side A.",
+      runtime_role: "pm",
+      instance_id: "side_a",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "side-b",
+      task: "side B first",
+      prompt: "Start side B.",
+      runtime_role: "pm",
+      instance_id: "side_b",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "side-a",
+      task: "side A continue",
+      prompt: "Continue side A.",
+      runtime_role: "pm",
+      instance_id: "pm#side_a",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "default",
+      task: "default continue",
+      prompt: "Continue the default PM instance.",
+      runtime_role: "pm",
+    },
+  ];
+  let turn = 0;
+  const priorTurnSnapshots = [];
+  const orchestratorTurnExecutor = async ({ priorTurns }) => {
+    priorTurnSnapshots.push(priorTurns.map((prior) => ({ ...prior })));
+    if (turn < actions.length) {
+      const controlAction = actions[turn];
+      turn += 1;
+      return { controlAction, evidence: null };
+    }
+    return {
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      producedContent: commitProducedContent(runId),
+      evidence: null,
+    };
+  };
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "commit");
+  assert.equal(calls.length, 5);
+  assert.equal(calls[0].sessionHandle, null);
+  assert.equal(calls[1].sessionHandle, null);
+  assert.equal(calls[2].sessionHandle, null);
+  assert.deepEqual(calls[3].sessionHandle, sideAHandle);
+  assert.deepEqual(calls[4].sessionHandle, defaultHandle);
+  assert.deepEqual(Object.keys(result.sessionHandles).sort(), [
+    "pm#default",
+    "pm#side_a",
+    "pm#side_b",
+  ]);
+  assert.deepEqual(result.sessionHandles["pm#default"].sessionHandle, defaultHandle);
+  assert.deepEqual(result.sessionHandles["pm#side_a"].sessionHandle, sideAHandle);
+  assert.deepEqual(result.sessionHandles["pm#side_b"].sessionHandle, sideBHandle);
+  assert.deepEqual(
+    result.output.evidence.perspectives_run.map((entry) => entry.instance_id),
+    ["pm#default", "pm#side_a", "pm#side_b", "pm#side_a", "pm#default"],
+  );
+  assert.deepEqual(
+    priorTurnSnapshots.at(-1).map((prior) => prior.instance_id),
+    ["pm#default", "pm#side_a", "pm#side_b", "pm#side_a", "pm#default"],
+  );
+});
+
+test("orchestrator loop: same-role fan-out keeps explicit sr_eng instances independently warm-resumable", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_same_role_fan_out_instances";
+  const calls = [];
+  const defaultHandle = { id: "session-sr-eng-default", role: "sr_eng", run_id: runId, runtime: "codex" };
+  const handleA = { id: "session-sr-eng-a", role: "sr_eng", run_id: runId, runtime: "codex" };
+  const handleB = { id: "session-sr-eng-b", role: "sr_eng", run_id: runId, runtime: "codex" };
+  const handleByTask = new Map([
+    ["spawn A", handleA],
+    ["spawn B", handleB],
+    ["resume A", handleA],
+    ["resume B", handleB],
+    ["default first", defaultHandle],
+    ["default resume", defaultHandle],
+  ]);
+  const runtimeExecutor = {
+    async executeSubagent(input) {
+      calls.push({ ...input });
+      return {
+        ...validSpawn(runId, {
+          role: input.runtime_role,
+          reason: "technical_context_grounded",
+        }),
+        sessionHandle: input.sessionHandle || handleByTask.get(input.task),
+      };
+    },
+  };
+  const actions = [
+    {
+      action: "invoke_one_off",
+      role_label: "sr-eng-a",
+      task: "spawn A",
+      prompt: "Inspect the API boundary for instance A.",
+      runtime_role: "sr_eng",
+      instance_id: "sr_eng#a",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "sr-eng-b",
+      task: "spawn B",
+      prompt: "Inspect the persistence boundary for instance B.",
+      runtime_role: "sr_eng",
+      instance_id: "sr_eng#b",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "sr-eng-a",
+      task: "resume A",
+      prompt: "Continue instance A on the API boundary.",
+      runtime_role: "sr_eng",
+      instance_id: "sr_eng#a",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "sr-eng-b",
+      task: "resume B",
+      prompt: "Continue instance B on the persistence boundary.",
+      runtime_role: "sr_eng",
+      instance_id: "sr_eng#b",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "sr-eng-default",
+      task: "default first",
+      prompt: "Start the role-only default sr_eng thread.",
+      runtime_role: "sr_eng",
+    },
+    {
+      action: "invoke_one_off",
+      role_label: "sr-eng-default",
+      task: "default resume",
+      prompt: "Continue the role-only default sr_eng thread.",
+      runtime_role: "sr_eng",
+    },
+  ];
+  let turn = 0;
+  const priorTurnSnapshots = [];
+  const orchestratorTurnExecutor = async ({ priorTurns }) => {
+    priorTurnSnapshots.push(priorTurns.map((prior) => ({ ...prior })));
+    if (turn < actions.length) {
+      const controlAction = actions[turn];
+      turn += 1;
+      return { controlAction, evidence: null };
+    }
+    return {
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      producedContent: commitProducedContent(runId),
+      evidence: null,
+    };
+  };
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "commit");
+  assert.equal(calls.length, 6);
+  assert.deepEqual(
+    calls.map((call) => call.prompt),
+    actions.map((action) => action.prompt),
+  );
+  assert.deepEqual(
+    calls.map((call) => call.task),
+    ["spawn A", "spawn B", "resume A", "resume B", "default first", "default resume"],
+  );
+  assert.equal(calls[0].sessionHandle, null);
+  assert.equal(calls[1].sessionHandle, null);
+  assert.deepEqual(calls[2].sessionHandle, handleA);
+  assert.deepEqual(calls[3].sessionHandle, handleB);
+  assert.equal(calls[4].sessionHandle, null);
+  assert.deepEqual(calls[5].sessionHandle, defaultHandle);
+
+  assert.deepEqual(Object.keys(result.sessionHandles).sort(), [
+    "sr_eng#a",
+    "sr_eng#b",
+    "sr_eng#default",
+  ]);
+  assert.deepEqual(result.sessionHandles["sr_eng#a"], {
+    role: "sr_eng",
+    instanceId: "sr_eng#a",
+    sessionHandle: handleA,
+  });
+  assert.deepEqual(result.sessionHandles["sr_eng#b"], {
+    role: "sr_eng",
+    instanceId: "sr_eng#b",
+    sessionHandle: handleB,
+  });
+  assert.deepEqual(result.sessionHandles["sr_eng#default"], {
+    role: "sr_eng",
+    instanceId: "sr_eng#default",
+    sessionHandle: defaultHandle,
+  });
+  assert.notEqual(
+    result.sessionHandles["sr_eng#a"].sessionHandle.id,
+    result.sessionHandles["sr_eng#b"].sessionHandle.id,
+  );
+  assert.deepEqual(
+    result.output.evidence.perspectives_run.map((entry) => entry.instance_id),
+    ["sr_eng#a", "sr_eng#b", "sr_eng#a", "sr_eng#b", "sr_eng#default", "sr_eng#default"],
+  );
+  assert.deepEqual(
+    result.runtimeEvidence.sr_eng.turns.map((turnEvidence) => turnEvidence.instance_id),
+    ["sr_eng#a", "sr_eng#b", "sr_eng#a", "sr_eng#b", "sr_eng#default", "sr_eng#default"],
+  );
+  assert.deepEqual(
+    priorTurnSnapshots.at(-1).map((prior) => prior.instance_id),
+    ["sr_eng#a", "sr_eng#b", "sr_eng#a", "sr_eng#b", "sr_eng#default", "sr_eng#default"],
+  );
+});
+
 test("orchestrator loop: non-default library order then terminate(commit) yields a validated commit", async () => {
   const config = loadLinearConfig({ repoRoot: REPO_ROOT });
   const runId = "run_loop_commit";
   const roster = fakeRoster();
   const runtimeExecutor = fakeSubagentExecutor();
+  const spanSink = captureSpanSink();
 
   const libraryOrder = [
     "prompt/decomposition/sr_eng_grounding_pass",
@@ -300,6 +762,7 @@ test("orchestrator loop: non-default library order then terminate(commit) yields
     runtimeExecutor,
     orchestratorTurnExecutor,
     roster,
+    spanSink,
   });
 
   assert.equal(result.output.terminal_output.outcome, "commit");
@@ -323,11 +786,260 @@ test("orchestrator loop: non-default library order then terminate(commit) yields
   // rounds_used counts DECISION turns (3); invocations counts SPAWNS (2).
   assert.equal(result.output.bounds.rounds_used, 3);
   assert.equal(result.output.bounds.invocations, 2);
+  assert.deepEqual(
+    spanSink.orchestratorTurns.map((span) => span.consumed_input_refs),
+    [
+      [],
+      ["1.1"],
+      ["2.1", "linear_project:project-1"],
+    ],
+  );
+  assert.deepEqual(
+    spanSink.subagentTurns.map((span) => span.consumed_input_refs),
+    [
+      [1, "linear_project:project-1"],
+      [2, "linear_project:project-1"],
+    ],
+  );
   // The run consumed the governing prompt + both library refs (the #50 re-key).
   const refTargets = result.acceptedRefs.map((r) => r.target_key);
   assert.ok(refTargets.includes("prompt/decomposition/orchestrator_governing"));
   assert.ok(refTargets.includes("prompt/decomposition/sr_eng_grounding_pass"));
   assert.ok(refTargets.includes("prompt/decomposition/pm_product_sufficiency_pass"));
+  assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
+});
+
+test("orchestrator loop: allowed repo packet reaches orchestrator and subagent prompts and authored code routing commits", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_allowed_repo_packet_single";
+  const allowedRepoPacket = [{
+    resource_id: "repo-main",
+    owner: "acme",
+    repo: "product-app",
+    default_branch: "main",
+    repo_scope: "product",
+  }];
+  const project = {
+    id: "project-1",
+    name: "Project",
+    description: "Decompose the product app work.",
+    content: "## Goal\n\nShip the product app change.",
+  };
+  const originalProject = structuredClone(project);
+  const assignment = resolveRoleRuntimeAssignments(config, "decomposition").orchestrator;
+  const orchestratorCommands = [];
+  let orchestratorRuntimeCall = 0;
+  const orchestratorRunCommand = async (command) => {
+    orchestratorCommands.push(command);
+    orchestratorRuntimeCall += 1;
+    if (orchestratorRuntimeCall === 1) {
+      return JSON.stringify({
+        control_action: {
+          action: "invoke_library",
+          target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+        },
+      });
+    }
+    return JSON.stringify({
+      control_action: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      produced_content: commitProducedContentWithIssues(runId, [
+        codeFinalIssue({ resourceId: "repo-main", repoScope: "product" }),
+      ]),
+    });
+  };
+  const orchestratorTurnExecutor = (input) =>
+    executeOrchestratorTurn({
+      ...input,
+      orchestratorRuntime: (runtimeInput) =>
+        defaultOrchestratorRuntime({
+          ...runtimeInput,
+          assignment,
+          runCommand: orchestratorRunCommand,
+          repoRoot: REPO_ROOT,
+        }),
+    });
+
+  const subagentCommands = [];
+  const runtimeExecutor = createProcessRuntimeExecutor({
+    repoRoot: REPO_ROOT,
+    runCommand: async (command) => {
+      subagentCommands.push(command);
+      return JSON.stringify(subagentTurn(runId, { reason: "product_context_sufficient" }));
+    },
+  });
+  const spanSink = captureLocalSpanSink();
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project,
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+    repoRoot: REPO_ROOT,
+    allowedRepoPacket,
+    spanSink,
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "commit");
+  assert.deepEqual(result.output.terminal_output.final_issues.map((issue) => ({
+    work_type: issue.work_type,
+    resource_target: issue.resource_target,
+  })), [{
+    work_type: "code",
+    resource_target: { kind: "git_repo", id: "repo-main", repo_scope: "product" },
+  }]);
+
+  const firstOrchestratorPrompt = promptFromCommand(orchestratorCommands[0], "Project context JSON:");
+  assert.ok(firstOrchestratorPrompt.includes("Allowed repo packet (JSON):"));
+  assert.match(promptSection(
+    firstOrchestratorPrompt,
+    "Allowed repo packet (JSON):",
+    "\n\nDecisions so far this run:",
+  ), /"resource_id": "repo-main"/);
+  assert.doesNotMatch(promptSection(
+    firstOrchestratorPrompt,
+    "Project context JSON:",
+    "\n\nAllowed repo packet (JSON):",
+  ), /repo-main/);
+
+  const subagentEnvelope = promptFromCommand(subagentCommands[0], "Project context JSON (length-capped):");
+  assert.ok(subagentEnvelope.includes("Allowed repo packet (JSON):"));
+  assert.match(promptSection(
+    subagentEnvelope,
+    "Allowed repo packet (JSON):",
+    "\n\nAllowed (status, reason) outcomes:",
+  ), /"resource_id": "repo-main"/);
+  assert.doesNotMatch(promptSection(
+    subagentEnvelope,
+    "Project context JSON (length-capped):",
+    "\n\nAllowed repo packet (JSON):",
+  ), /repo-main/);
+
+  assert.deepEqual(project, originalProject, "allowed repo packet must not mutate Linear project content");
+  const terminateSpan = spanSink.orchestratorTurns.at(-1);
+  assert.deepEqual(terminateSpan.resource_routing.allowed_resource_ids, ["repo-main"]);
+  assert.deepEqual(terminateSpan.resource_routing.selected_resource_ids, ["repo-main"]);
+  assert.equal(terminateSpan.resource_routing.selection_outcome, "selected");
+  assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
+});
+
+test("orchestrator loop: multi-repo authored selections are accepted and observable", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_allowed_repo_packet_multi";
+  const allowedRepoPacket = [
+    { resource_id: "repo-web", owner: "acme", repo: "web", default_branch: "main", repo_scope: "frontend" },
+    { resource_id: "repo-api", owner: "acme", repo: "api", default_branch: "trunk", repo_scope: "backend" },
+  ];
+  const finalIssues = [
+    codeFinalIssue({ key: "web-change", title: "Build web change", resourceId: "repo-web", repoScope: "frontend" }),
+    codeFinalIssue({ key: "api-change", title: "Build API change", resourceId: "repo-api", repoScope: "backend" }),
+    nonCodeFinalIssue(),
+  ];
+  const spanSink = captureSpanSink();
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor: fakeSubagentExecutor(),
+    orchestratorTurnExecutor: async () => ({
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      producedContent: commitProducedContentWithIssues(runId, finalIssues),
+    }),
+    roster: fakeRoster(),
+    allowedRepoPacket,
+    spanSink,
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "commit");
+  assert.deepEqual(
+    result.output.terminal_output.final_issues.map((issue) => ({
+      key: issue.decomposition_key,
+      work_type: issue.work_type,
+      resource_target: issue.resource_target ?? null,
+    })),
+    [
+      {
+        key: "web-change",
+        work_type: "code",
+        resource_target: { kind: "git_repo", id: "repo-web", repo_scope: "frontend" },
+      },
+      {
+        key: "api-change",
+        work_type: "code",
+        resource_target: { kind: "git_repo", id: "repo-api", repo_scope: "backend" },
+      },
+      {
+        key: "project-docs",
+        work_type: "non_code",
+        resource_target: null,
+      },
+    ],
+  );
+  const [span] = spanSink.orchestratorTurns;
+  assert.deepEqual(span.resource_routing.allowed_resource_ids, ["repo-web", "repo-api"]);
+  assert.deepEqual(span.resource_routing.selected_resource_ids, ["repo-web", "repo-api"]);
+  assert.equal(span.resource_routing.selection_outcome, "selected");
+  assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
+});
+
+test("orchestrator loop: multi-repo ambiguity pauses for product_questions and emits no final issues", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_allowed_repo_packet_ambiguous";
+  const allowedRepoPacket = [
+    { resource_id: "repo-web", owner: "acme", repo: "web", default_branch: "main" },
+    { resource_id: "repo-api", owner: "acme", repo: "api", default_branch: "trunk" },
+  ];
+  const spanSink = captureSpanSink();
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor: fakeSubagentExecutor(),
+    orchestratorTurnExecutor: async () => ({
+      controlAction: { action: "terminate", outcome: "pause", reason: "product_questions" },
+      producedContent: {
+        context_digest: "The code work could belong to more than one allowed repo.",
+        source_refs: [{ kind: "linear_project", id: "project-1" }],
+        assumptions: [],
+        constraints: [],
+        risks: ["Repo ownership is ambiguous between the allowed resources."],
+        project_update_markdown: [
+          `run_id: ${runId}`,
+          "",
+          "Paused because code repo ownership is ambiguous.",
+          "",
+          "## What I did with each part of your project",
+          "- Identified the work, but did not emit final issues until repo ownership is selected.",
+        ].join("\n"),
+        open_questions_markdown: "- Which allowed `resource_id` should own the code issue: `repo-web` or `repo-api`?",
+      },
+    }),
+    roster: fakeRoster(),
+    allowedRepoPacket,
+    spanSink,
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "pause");
+  assert.equal(result.output.terminal_output.reason, "product_questions");
+  assert.equal(Object.hasOwn(result.output.terminal_output, "final_issues"), false);
+  assert.match(result.output.terminal_output.open_questions_markdown, /resource_id/);
+  assert.match(result.output.terminal_output.open_questions_markdown, /repo-web/);
+  assert.match(result.output.terminal_output.open_questions_markdown, /repo-api/);
+  const [span] = spanSink.orchestratorTurns;
+  assert.deepEqual(span.resource_routing.allowed_resource_ids, ["repo-web", "repo-api"]);
+  assert.deepEqual(span.resource_routing.selected_resource_ids, []);
+  assert.equal(span.resource_routing.terminal_outcome, "pause");
+  assert.equal(span.resource_routing.terminal_reason, "product_questions");
+  assert.equal(span.resource_routing.selection_outcome, "pause_product_questions");
   assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
 });
 
@@ -377,15 +1089,133 @@ test("orchestrator loop: spanSink records subagent spans without changing the co
   });
 
   assert.equal(result.output.terminal_output.outcome, "commit");
-  assert.deepEqual(spans, [
-    {
-      role: "pm",
-      outcome: "product_context_sufficient",
-      parse_status: "valid",
-      clean_parse: true,
-      evidence_ref: evidenceRef,
-    },
+  assert.equal(spans.length, 1);
+  const [span] = spans;
+  assert.equal(span.role, "pm");
+  assert.equal(span.outcome, "product_context_sufficient");
+  assert.equal(span.parse_status, "valid");
+  assert.equal(span.clean_parse, true);
+  assert.equal(span.evidence_ref, evidenceRef);
+  assert.equal(span.agent_turn_id, "1.1");
+  assert.equal(span.parent_turn_id, 1);
+  assert.deepEqual(span.control_action, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+  });
+  assert.deepEqual(span.spawn_reason, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+    target_label: "PM product sufficiency pass",
+  });
+  assert.equal(span.produced_content.reason, "product_context_sufficient");
+  assert.deepEqual(span.evidence_unavailable, [
+    { scope: "pm.turn.tool_events", reason: "runtime_tool_event_channel_unavailable" },
   ]);
+  assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
+});
+
+test("orchestrator loop: over-cap consumed_input_refs drops the list and merges a lineage marker", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_consumed_refs_over_cap";
+  const overflowSpawn = validSpawn(runId, { role: "pm" });
+  overflowSpawn.packet.source_refs = Array.from({ length: 300 }, (_, index) => ({
+    kind: "linear_project",
+    id: `project-${index}`,
+  }));
+  overflowSpawn.raw_output = JSON.stringify(overflowSpawn.packet);
+  overflowSpawn.raw_output_excerpt = overflowSpawn.raw_output;
+  overflowSpawn.output = overflowSpawn.raw_output;
+  const runtimeExecutor = scriptedSubagentExecutor([overflowSpawn]);
+  const spanSink = captureSpanSink();
+  let turn = 0;
+  const orchestratorTurnExecutor = async () => {
+    turn += 1;
+    if (turn === 1) {
+      return {
+        controlAction: { action: "invoke_library", target_key: "prompt/decomposition/pm_product_sufficiency_pass" },
+        evidence: null,
+      };
+    }
+    return {
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      producedContent: commitProducedContent(runId),
+      evidence: null,
+    };
+  };
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+    spanSink,
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "commit");
+  assert.equal(spanSink.subagentTurns.length, 1);
+  const [subagentSpan] = spanSink.subagentTurns;
+  assert.equal(Object.hasOwn(subagentSpan, "consumed_input_refs"), false);
+  assert.deepEqual(subagentSpan.evidence_unavailable, [
+    { scope: "pm.turn.tool_events", reason: "runtime_tool_event_channel_unavailable" },
+    { scope: "lineage.consumed_refs", reason: "too_many_lineage_consumed_refs" },
+  ]);
+  assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
+});
+
+test("orchestrator loop: throwing rich span construction and sink methods do not change the terminal outcome", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_span_thunk_non_interference";
+  const spawn = validSpawn(runId, { role: "pm" });
+  Object.defineProperty(spawn, "prompt", {
+    get() {
+      throw new Error("span prompt getter failed");
+    },
+  });
+  const runtimeExecutor = scriptedSubagentExecutor([spawn]);
+  const spanSink = {
+    recordSubagentTurn() {
+      throw new Error("sink write failed");
+    },
+    recordOrchestratorTurn() {
+      throw new Error("sink write failed");
+    },
+  };
+  let turn = 0;
+  const orchestratorTurnExecutor = async () => {
+    turn += 1;
+    if (turn === 1) {
+      return {
+        controlAction: { action: "invoke_library", target_key: "prompt/decomposition/pm_product_sufficiency_pass" },
+        get prompt() {
+          throw new Error("orchestrator prompt getter failed");
+        },
+        evidence: null,
+      };
+    }
+    return {
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      producedContent: commitProducedContent(runId),
+      evidence: null,
+    };
+  };
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+    spanSink,
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "commit");
   assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
 });
 
@@ -436,6 +1266,118 @@ test("orchestrator loop: span scrub digest-substitutes a secret-bearing field an
   assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
 });
 
+test("orchestrator loop: local trace scrubber preserves rich prompt output and tool diffs while scrubbing secrets", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_local_full_content_trace";
+  const promptBody = [
+    "Review the local project context and explain whether decomposition can proceed.",
+    "diff --git a/app.txt b/app.txt",
+    "+ship the full local diff content",
+  ].join("\n");
+  const rawOutput = [
+    "The role inspected the prompt and returned a grounded answer.",
+    "diff --git a/app.txt b/app.txt",
+    "+preserve this output diff",
+  ].join("\n");
+  const toolDiff = [
+    "diff --git a/package.json b/package.json",
+    "+\"test\": \"node --test\"",
+  ].join("\n");
+  const tokenValue = ["Bearer ", "abcdefghijklmnop"].join("");
+  const secretParseStatus = `${"LINEAR_ACCESS_TOKEN"}=${"linear-secret-value"}`;
+  const spawn = validSpawn(runId, { role: "pm" });
+  spawn.prompt = promptBody;
+  spawn.raw_output = rawOutput;
+  spawn.parse_status = secretParseStatus;
+  spawn.evidence.tool_events = [{
+    type: "tool_result",
+    name: "shell",
+    input: {
+      prompt: "Inspect the local diff and report exact findings.",
+    },
+    output: {
+      shell_output: toolDiff,
+      note: `runtime returned ${tokenValue}`,
+      api_key: "secret-key-value",
+    },
+  }];
+  const runtimeExecutor = scriptedSubagentExecutor([spawn]);
+  const spanSink = captureLocalSpanSink();
+  let turn = 0;
+  const orchestratorTurnExecutor = async () => {
+    turn += 1;
+    if (turn === 1) {
+      return {
+        controlAction: { action: "invoke_library", target_key: "prompt/decomposition/pm_product_sufficiency_pass" },
+        prompt: "Orchestrator local prompt should survive in the local trace.",
+        raw_output: "Orchestrator raw output should survive in the local trace.",
+        evidence: null,
+      };
+    }
+    return {
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      prompt: "Termination prompt should also be observable locally.",
+      raw_output: "Termination raw output selected the commit path.",
+      producedContent: commitProducedContent(runId),
+      evidence: null,
+    };
+  };
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+    spanSink,
+  });
+
+  const expectedDigest =
+    "sha256:" + createHash("sha256").update(secretParseStatus, "utf8").digest("hex");
+  assert.equal(result.output.terminal_output.outcome, "commit");
+  // B1 owns the content posture; F3/G1 owns putting the rich transcript and
+  // lineage fields on these in-loop spans.
+  const [orchestratorInvokeSpan, orchestratorTerminateSpan] = spanSink.orchestratorTurns;
+  assert.equal(orchestratorInvokeSpan.prompt, "Orchestrator local prompt should survive in the local trace.");
+  assert.equal(orchestratorInvokeSpan.raw_output, "Orchestrator raw output should survive in the local trace.");
+  assert.deepEqual(orchestratorInvokeSpan.control_action, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+  });
+  assert.equal(orchestratorInvokeSpan.produced_content, null);
+  assert.deepEqual(orchestratorInvokeSpan.evidence_unavailable, [
+    { scope: "orchestrator.turn.tool_events", reason: "runtime_tool_event_channel_unavailable" },
+  ]);
+  assert.equal(orchestratorTerminateSpan.prompt, "Termination prompt should also be observable locally.");
+  assert.equal(orchestratorTerminateSpan.raw_output, "Termination raw output selected the commit path.");
+  assert.equal(
+    orchestratorTerminateSpan.produced_content.context_digest,
+    "Reviewed project intent and grounded constraints for decomposition.",
+  );
+
+  const subagentSpan = spanSink.subagentTurns[0];
+  assert.equal(subagentSpan.parse_status, expectedDigest);
+  assert.equal(subagentSpan.prompt, promptBody);
+  assert.equal(subagentSpan.raw_output, rawOutput);
+  assert.equal(subagentSpan.tool_events[0].input.prompt, "Inspect the local diff and report exact findings.");
+  assert.equal(subagentSpan.tool_events[0].output.shell_output, toolDiff);
+  assert.equal(subagentSpan.tool_events[0].output.note, "[redacted token material]");
+  assert.deepEqual(subagentSpan.tool_events[0].output.redacted_fields, ["api_key"]);
+
+  const toolEvent = result.runtimeEvidence.pm.turns[0].tool_events[0];
+  assert.equal(toolEvent.input.prompt, "Inspect the local diff and report exact findings.");
+  assert.equal(toolEvent.output.shell_output, toolDiff);
+  assert.equal(toolEvent.output.note, "[redacted token material]");
+  assert.deepEqual(toolEvent.output.redacted_fields, ["api_key"]);
+  assert.equal(JSON.stringify(spanSink).includes("linear-secret-value"), false);
+  assert.equal(JSON.stringify(result.runtimeEvidence).includes(tokenValue), false);
+  assert.equal(JSON.stringify(result.runtimeEvidence).includes("secret-key-value"), false);
+  assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
+});
+
 test("orchestrator loop: spanSink records orchestrator turns and the single subagent span on the commit path", async () => {
   const config = loadLinearConfig({ repoRoot: REPO_ROOT });
   const runId = "run_loop_orchestrator_span_sink";
@@ -443,19 +1385,26 @@ test("orchestrator loop: spanSink records orchestrator turns and the single suba
   const runtimeExecutor = scriptedSubagentExecutor([
     validSpawn(runId, { role: "pm", evidenceRef }),
   ]);
-  const spanSink = captureSpanSink();
+  const spanSink = captureLocalSpanSink();
   let turn = 0;
-  const orchestratorTurnExecutor = async () => {
+  let priorTurnsJsonSeenByTerminal = null;
+  const terminalProducedContent = commitProducedContent(runId);
+  const orchestratorTurnExecutor = async ({ priorTurns }) => {
     turn += 1;
     if (turn === 1) {
       return {
         controlAction: { action: "invoke_library", target_key: "prompt/decomposition/pm_product_sufficiency_pass" },
+        prompt: "orchestrator prompt: invoke the PM library target",
+        raw_output: "{\"control_action\":{\"action\":\"invoke_library\"}}",
         evidence: null,
       };
     }
+    priorTurnsJsonSeenByTerminal = JSON.stringify(priorTurns);
     return {
       controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
-      producedContent: commitProducedContent(runId),
+      prompt: "orchestrator prompt: terminate with commit",
+      raw_output: "{\"control_action\":{\"action\":\"terminate\",\"outcome\":\"commit\"}}",
+      producedContent: terminalProducedContent,
       evidence: null,
     };
   };
@@ -483,6 +1432,20 @@ test("orchestrator loop: spanSink records orchestrator turns and the single suba
   assert.equal(invokeSpan.target_key, "prompt/decomposition/pm_product_sufficiency_pass");
   assert.equal(invokeSpan.bounds.rounds_used, 1);
   assert.equal(invokeSpan.bounds.invocations, 0);
+  assert.equal(invokeSpan.prompt, "orchestrator prompt: invoke the PM library target");
+  assert.equal(invokeSpan.raw_output, "{\"control_action\":{\"action\":\"invoke_library\"}}");
+  assert.deepEqual(invokeSpan.control_action, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+  });
+  assert.equal(invokeSpan.produced_content, null);
+  assert.equal(invokeSpan.agent_turn_id, 1);
+  assert.equal(invokeSpan.parent_turn_id, null);
+  assert.deepEqual(invokeSpan.spawn_reason, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+  });
+  assert.equal(Object.hasOwn(invokeSpan.spawn_reason, "target_label"), false);
 
   assert.equal(terminateSpan.round_index, 2);
   assert.equal(terminateSpan.action, "terminate");
@@ -490,8 +1453,30 @@ test("orchestrator loop: spanSink records orchestrator turns and the single suba
   assert.equal(terminateSpan.reason, "synthesis_complete");
   assert.equal(terminateSpan.bounds.rounds_used, 2);
   assert.equal(terminateSpan.bounds.invocations, 1);
+  assert.equal(terminateSpan.prompt, "orchestrator prompt: terminate with commit");
+  assert.equal(terminateSpan.raw_output, "{\"control_action\":{\"action\":\"terminate\",\"outcome\":\"commit\"}}");
+  assert.deepEqual(terminateSpan.control_action, {
+    action: "terminate",
+    outcome: "commit",
+    reason: "synthesis_complete",
+  });
+  assert.deepEqual(terminateSpan.produced_content, terminalProducedContent);
+  assert.equal(terminateSpan.agent_turn_id, 2);
+  assert.equal(terminateSpan.parent_turn_id, null);
+  assert.deepEqual(terminateSpan.spawn_reason, {
+    action: "terminate",
+    outcome: "commit",
+    reason: "synthesis_complete",
+  });
 
-  assert.deepEqual(spanSink.subagentTurns, [
+  assert.deepEqual(
+    {
+      role: spanSink.subagentTurns[0].role,
+      outcome: spanSink.subagentTurns[0].outcome,
+      parse_status: spanSink.subagentTurns[0].parse_status,
+      clean_parse: spanSink.subagentTurns[0].clean_parse,
+      evidence_ref: spanSink.subagentTurns[0].evidence_ref,
+    },
     {
       role: "pm",
       outcome: "product_context_sufficient",
@@ -499,7 +1484,41 @@ test("orchestrator loop: spanSink records orchestrator turns and the single suba
       clean_parse: true,
       evidence_ref: evidenceRef,
     },
+  );
+  assert.equal(spanSink.subagentTurns[0].prompt, "repair envelope for pm");
+  assert.match(spanSink.subagentTurns[0].raw_output, /product_context_sufficient/);
+  assert.deepEqual(spanSink.subagentTurns[0].control_action, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+  });
+  assert.equal(spanSink.subagentTurns[0].produced_content.reason, "product_context_sufficient");
+  assert.equal(spanSink.subagentTurns[0].agent_turn_id, "1.1");
+  assert.equal(spanSink.subagentTurns[0].parent_turn_id, 1);
+  assert.deepEqual(spanSink.subagentTurns[0].spawn_reason, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+    target_label: "PM product sufficiency pass",
+  });
+  assert.deepEqual(spanSink.subagentTurns[0].evidence_unavailable, [
+    { scope: "pm.turn.tool_events", reason: "runtime_tool_event_channel_unavailable" },
   ]);
+  assert.equal(
+    priorTurnsJsonSeenByTerminal,
+    JSON.stringify([{
+      controlAction: { action: "invoke_library", target_key: "prompt/decomposition/pm_product_sufficiency_pass" },
+      outcome: "product_context_sufficient",
+      role: "pm",
+      instance_id: "pm#default",
+      status: "continue",
+      reason: "product_context_sufficient",
+      failure_kind: null,
+      failure_code: null,
+      context_digest: "product_context_sufficient digest",
+      source_refs: [{ kind: "linear_project", id: "project-1" }],
+    }]),
+  );
+  assert.equal(priorTurnsJsonSeenByTerminal.includes("agent_turn_id"), false);
+  assert.equal(priorTurnsJsonSeenByTerminal.includes("parent_turn_id"), false);
   assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
 });
 
@@ -732,6 +1751,7 @@ test("orchestrator loop: prose-wrapped subagent output gets one repair retry and
   ]);
   let turn = 0;
   let priorTurnsSeenByTerminal = null;
+  const spanSink = captureSpanSink();
   const orchestratorTurnExecutor = async ({ priorTurns }) => {
     turn += 1;
     if (turn === 1) {
@@ -759,6 +1779,7 @@ test("orchestrator loop: prose-wrapped subagent output gets one repair retry and
     orchestratorTurnExecutor,
     roster: fakeRoster(),
     renew: async () => { renewCalls += 1; },
+    spanSink,
   });
 
   assert.equal(result.output.terminal_output.outcome, "commit");
@@ -790,6 +1811,14 @@ test("orchestrator loop: prose-wrapped subagent output gets one repair retry and
   assert.deepEqual(
     priorTurnsSeenByTerminal.map((priorTurn) => priorTurn.outcome),
     ["subagent_turn_invalid", "product_context_sufficient"],
+  );
+  assert.deepEqual(
+    spanSink.subagentTurns.map((span) => span.agent_turn_id),
+    ["1.1", "1.2"],
+  );
+  assert.deepEqual(
+    spanSink.subagentTurns.map((span) => span.parent_turn_id),
+    [1, 1],
   );
   assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
 });
@@ -1054,10 +2083,17 @@ test("orchestrator loop: eval-mode is read-only over the orchestrator loop", asy
   const orchestratorTurnExecutor = async () => {
     turn += 1;
     if (turn <= libraryOrder.length) {
-      return { controlAction: { action: "invoke_library", target_key: libraryOrder[turn - 1] }, evidence: null };
+      return {
+        controlAction: { action: "invoke_library", target_key: libraryOrder[turn - 1] },
+        prompt: `eval orchestrator prompt ${turn}`,
+        raw_output: `eval orchestrator raw output ${turn}`,
+        evidence: null,
+      };
     }
     return {
       controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      prompt: "eval orchestrator prompt terminate",
+      raw_output: "eval orchestrator raw output terminate",
       producedContent: commitProducedContent(runId),
       evidence: null,
     };
@@ -1086,7 +2122,7 @@ test("orchestrator loop: eval-mode is read-only over the orchestrator loop", asy
     repoRoot: REPO_ROOT,
     runStoreDir: path.join(
       os.tmpdir(),
-      "agentic-factory-eval-runs-test-readonly",
+      "teami-eval-runs-test-readonly",
       `${runId}-${process.pid}-${Date.now()}`,
     ),
     domainContext,
@@ -1101,6 +2137,31 @@ test("orchestrator loop: eval-mode is read-only over the orchestrator loop", asy
   assert.equal(result.subagent_evidence[0].parse_status, "valid");
   assert.equal(result.subagent_evidence[0].clean_parse, true);
   assert.equal(result.runtimeEvidence.pm.turns[0].subagent_evidence.role, "pm");
+  const exportedOrchestratorSpan = result.trace.spans
+    .find((span) => span.name === "orchestrator_turn.1")?.attributes;
+  assert.equal(exportedOrchestratorSpan.prompt, "eval orchestrator prompt 1");
+  assert.equal(exportedOrchestratorSpan.raw_output, "eval orchestrator raw output 1");
+  assert.equal(exportedOrchestratorSpan.agent_turn_id, 1);
+  assert.deepEqual(exportedOrchestratorSpan.spawn_reason, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+  });
+
+  const exportedPmSpan = result.trace.spans
+    .find((span) => span.name === "subagent_turn.pm")?.attributes;
+  assert.equal(exportedPmSpan.prompt, "fake envelope for pm");
+  assert.match(exportedPmSpan.raw_output, /product_context_sufficient/);
+  assert.equal(exportedPmSpan.agent_turn_id, "1.1");
+  assert.equal(exportedPmSpan.parent_turn_id, 1);
+  assert.deepEqual(exportedPmSpan.spawn_reason, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_product_sufficiency_pass",
+    target_label: "PM product sufficiency pass",
+  });
+  assert.equal(exportedPmSpan.produced_content.reason, "product_context_sufficient");
+  assert.deepEqual(exportedPmSpan.evidence_unavailable, [
+    { scope: "pm.turn.tool_events", reason: "runtime_tool_event_channel_unavailable" },
+  ]);
 });
 
 // (4) PRODUCTION-PARSER path (BUG 1 regression): drive the loop through the REAL
@@ -1115,7 +2176,7 @@ test("orchestrator loop: the REAL runtime parses the { control_action, produced_
   const runId = "run_loop_real_parse";
   const roster = fakeRoster();
   const runtimeExecutor = fakeSubagentExecutor();
-  const assignment = resolveRoleRuntimeAssignments(config).orchestrator;
+  const assignment = resolveRoleRuntimeAssignments(config, "decomposition").orchestrator;
 
   // The fake runCommand stands in for the spawned CLI: it returns a realistic
   // turn-output ENVELOPE string per orchestrator turn (no real CLI is spawned).
@@ -1332,7 +2393,7 @@ test("orchestrator loop: invoking the same role (pm) twice assembles a terminal 
   const runId = "run_loop_same_role_twice";
   const roster = fakeRoster();
   const runtimeExecutor = fakeSubagentExecutor();
-  const runtimeAssignments = resolveRoleRuntimeAssignments(config);
+  const runtimeAssignments = resolveRoleRuntimeAssignments(config, "decomposition");
 
   // Invoke pm TWICE (the same library target both times), then terminate commit.
   let turn = 0;
@@ -1445,6 +2506,7 @@ test("orchestrator loop: a CLEAN one-off body is persisted verbatim on its persp
   const runId = "run_loop_one_off_clean";
   const cleanPrompt = "Scan the project description for deploy-time risks and report any that block decomposition.";
   const runtimeExecutor = fakeSubagentExecutor();
+  const spanSink = captureSpanSink();
 
   const result = await runDecompositionOrchestrator({
     runId,
@@ -1455,6 +2517,7 @@ test("orchestrator loop: a CLEAN one-off body is persisted verbatim on its persp
     runtimeExecutor,
     orchestratorTurnExecutor: oneOffThenCommit(runId, cleanPrompt),
     roster: fakeRoster(),
+    spanSink,
   });
 
   assert.equal(result.output.terminal_output.outcome, "commit");
@@ -1483,6 +2546,26 @@ test("orchestrator loop: a CLEAN one-off body is persisted verbatim on its persp
   // A clean body is NOT redacted and carries no digest fallback.
   assert.equal(oneOffEntry.one_off.prompt_body_redacted, undefined);
   assert.equal(oneOffEntry.one_off.prompt_body_digest, undefined);
+  assert.deepEqual(spanSink.orchestratorTurns[1].spawn_reason, {
+    action: "invoke_one_off",
+    runtime_role: "pm",
+    role_label: "risk_scanner",
+    task: "Scan the project for risky deploy steps before decomposition.",
+  });
+  assert.equal(spanSink.subagentTurns[1].agent_turn_id, "2.1");
+  assert.equal(spanSink.subagentTurns[1].parent_turn_id, 2);
+  assert.deepEqual(spanSink.subagentTurns[1].control_action, {
+    action: "invoke_one_off",
+    runtime_role: "pm",
+    role_label: "risk_scanner",
+    task: "Scan the project for risky deploy steps before decomposition.",
+  });
+  assert.deepEqual(spanSink.subagentTurns[1].spawn_reason, {
+    action: "invoke_one_off",
+    runtime_role: "pm",
+    role_label: "risk_scanner",
+    task: "Scan the project for risky deploy steps before decomposition.",
+  });
 
   // The enrichment does NOT break the single commit floor.
   assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });

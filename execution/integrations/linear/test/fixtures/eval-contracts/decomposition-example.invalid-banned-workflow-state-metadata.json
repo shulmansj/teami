@@ -1,5 +1,5 @@
 {
-  "_invalid_because": "Example metadata is Phoenix-bound, and Agentic Factory workflow/queue state keys are banned there (wipe test). pending_promotion is on the schema-level denylist, so this otherwise-valid example is rejected.",
+  "_invalid_because": "Example metadata is Phoenix-bound, and Teami workflow/queue state keys are banned there (wipe test). pending_promotion is on the schema-level denylist, so this otherwise-valid example is rejected.",
   "schema_version": "decomposition-eval-example/v1",
   "input": {
     "source_type": "linear_project_snapshot",

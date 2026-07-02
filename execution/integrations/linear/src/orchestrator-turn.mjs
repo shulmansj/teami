@@ -30,6 +30,7 @@ export {
   handleInvokeLibrary,
 } from "../../../engine/engine-orchestrator-contract.mjs";
 import {
+  buildWarmRuntimeCommand,
   buildSessionStartRuntimeCommand,
   extractRuntimeJsonCandidates,
   extractRuntimeSessionHandle,
@@ -41,7 +42,6 @@ import {
   DEFAULT_MAX_RUNTIME_OUTPUT_BYTES,
   DEFAULT_RUNTIME_TIMEOUT_MS,
   runRuntimeCommand,
-  scrubChildEnv,
 } from "./runtime-command.mjs";
 import { buildSubagentInvocationEnvelope } from "../../../engine/subagent-invocation-envelope.mjs";
 
@@ -63,9 +63,43 @@ const TURN_OUTPUT_SCHEMA_PATH = path.resolve(
 );
 const RAW_OUTPUT_EXCERPT_MAX_CHARS = 4096;
 const PROCESS_FAILURE_CODES = new Set(["process_failed", "timed_out", "could_not_start", "envelope_too_large"]);
+const PROMPT_UNAVAILABLE_ENVELOPE_BUILD_FAILED_REASON = "prompt_unavailable_envelope_build_failed";
 const DEFAULT_ONE_OFF_RUNTIME_ROLE_PROSE = ONE_OFF_RUNTIME_ROLES.join("|");
 const DEFAULT_ORCHESTRATOR_GOVERNING_BODY =
-  "You are the Agentic Factory decomposition orchestrator. Decide which subagents to run and when to terminate.";
+  "You are the Teami decomposition orchestrator. Decide which subagents to run and when to terminate.";
+export const WARM_CONTINUATION_UNAVAILABLE_CODE = "warm_continuation_unavailable";
+
+function normalizeFirstTurnWarmStart(firstTurnWarmStart) {
+  if (!firstTurnWarmStart || typeof firstTurnWarmStart !== "object" || Array.isArray(firstTurnWarmStart)) {
+    return null;
+  }
+  const priorRunId = stringOrNull(firstTurnWarmStart.priorRunId);
+  const sessionHandle =
+    firstTurnWarmStart.sessionHandle &&
+    typeof firstTurnWarmStart.sessionHandle === "object" &&
+    !Array.isArray(firstTurnWarmStart.sessionHandle)
+      ? { ...firstTurnWarmStart.sessionHandle }
+      : null;
+  return {
+    sessionHandle,
+    priorRunId,
+    smokeTests:
+      firstTurnWarmStart.smokeTests &&
+      typeof firstTurnWarmStart.smokeTests === "object" &&
+      !Array.isArray(firstTurnWarmStart.smokeTests)
+        ? firstTurnWarmStart.smokeTests
+        : {},
+    runtimeVersion: stringOrNull(firstTurnWarmStart.runtimeVersion),
+  };
+}
+
+function warmContinuationUnavailableError(message, { prompt = null, raw_output = null } = {}) {
+  const error = new Error(`${WARM_CONTINUATION_UNAVAILABLE_CODE}: ${message}`);
+  error.code = WARM_CONTINUATION_UNAVAILABLE_CODE;
+  error.prompt = transcriptTextOrNull(prompt);
+  error.raw_output = transcriptTextOrNull(raw_output);
+  return error;
+}
 
 // Resolve the orchestrator's runtime assignment via the SAME mechanism as the
 // other personas. In I-2a the "orchestrator" key is not yet in the assignments
@@ -73,26 +107,34 @@ const DEFAULT_ORCHESTRATOR_GOVERNING_BODY =
 // scaffolding error if a caller reaches here without injecting a runtime. The
 // unit test always injects `orchestratorRuntime`, so this path is exercised by
 // I-2b's wiring, not by the I-2a tests.
-function resolveOrchestratorRuntimeAssignment(config) {
-  const assignment = resolveRoleRuntimeAssignments(config)?.[ORCHESTRATOR_RUNTIME_ROLE];
+function resolveOrchestratorRuntimeAssignment(config, definition = null) {
+  const assignment = resolveRoleRuntimeAssignments(config, workflowTypeForDefinition(definition))?.[ORCHESTRATOR_RUNTIME_ROLE];
   return assignment ?? null;
+}
+
+function workflowTypeForDefinition(definition = null) {
+  const workflowType = typeof definition?.workflow_type === "string" ? definition.workflow_type.trim() : "";
+  return workflowType || "decomposition";
 }
 
 // Execute one orchestrator decision turn.
 //
 //   executeOrchestratorTurn({
 //     runId, project, roster, priorTurns, bounds, sessionHandle, config, repoRoot,
+//     cwd?, envAugment?,
 //     orchestratorRuntime?,   // TEST/loop injection: the thing that calls the LLM
 //   }) -> {
 //     controlAction,          // a VALIDATED, normalized control action (Seam 1)
 //     evidence,               // the thin per-turn evidence envelope
+//     prompt,                 // prompt sent to the runtime, when surfaced
+//     raw_output,             // raw runtime output, when surfaced
 //     producedContent?,       // SIBLING of evidence: the turn's authored output
 //     sessionHandle,          // warm-continuation handle for the next turn
 //   }
 //
 // `orchestratorRuntime` is an async function
 //   ({ runId, project, selectableTargets, priorTurns, bounds, sessionHandle,
-//      config, repoRoot, assignment, invocableRuntimeRoles }) ->
+//      config, repoRoot, assignment, invocableRuntimeRoles, allowedRepoPacket, cwd, envAugment }) ->
 //   { controlAction (raw), evidence?, producedContent?, sessionHandle? }
 // When omitted, the real runtime is resolved via the normal role mechanism
 // (scaffolded; wired in I-2b). The roster's `selectableTargets` is passed in so
@@ -107,14 +149,18 @@ export async function executeOrchestratorTurn({
   config = null,
   repoRoot = undefined,
   definition = null,
+  cwd = undefined,
+  envAugment = {},
   // The orchestrator governing-prompt BODY, loaded through the run recorder at
   // run-start and threaded in so the real runtime can use it as the system
   // persona (the loop owns the single recorder-routed load — Seam 3).
   governingBody = null,
+  allowedRepoPacket = [],
   // No-abort recovery (parallel to subagent recovery): when the loop retries a
   // malformed/failed orchestrator turn, it passes a repair hint that is surfaced
   // in the prompt so the model re-emits a clean control action.
   repairHint = null,
+  firstTurnWarmStart = null,
   orchestratorRuntime = null,
 } = {}) {
   const selectableTargets = Array.isArray(roster?.selectableTargets)
@@ -122,7 +168,7 @@ export async function executeOrchestratorTurn({
     : [];
 
   const runtime = orchestratorRuntime ?? defaultOrchestratorRuntime;
-  const assignment = orchestratorRuntime ? null : resolveOrchestratorRuntimeAssignment(config);
+  const assignment = orchestratorRuntime ? null : resolveOrchestratorRuntimeAssignment(config, definition);
   const invocableRuntimeRoles = Array.isArray(definition?.invocable_runtime_roles)
     ? definition.invocable_runtime_roles
     : undefined;
@@ -139,7 +185,11 @@ export async function executeOrchestratorTurn({
     assignment,
     invocableRuntimeRoles,
     governingBody,
+    allowedRepoPacket,
     repairHint,
+    firstTurnWarmStart,
+    cwd,
+    envAugment,
   });
 
   if (!turn || typeof turn !== "object") {
@@ -150,14 +200,16 @@ export async function executeOrchestratorTurn({
     invocableRoles: invocableRuntimeRoles,
   });
   if (!parsed.ok) {
-    throw new Error(
+    throw enrichErrorWithTranscript(new Error(
       `orchestrator_turn_invalid_control_action: ${parsed.reasons.join(", ")}`,
-    );
+    ), turn);
   }
 
   return {
     controlAction: parsed.action,
     evidence: turn.evidence ?? null,
+    prompt: transcriptTextOrNull(turn.prompt),
+    raw_output: transcriptTextOrNull(turn.raw_output),
     // producedContent rides on the turn RESULT as a sibling of evidence. It is
     // omitted (undefined) when the turn authored nothing this turn.
     ...(turn.producedContent === undefined
@@ -187,7 +239,11 @@ export async function defaultOrchestratorRuntime({
   assignment,
   invocableRuntimeRoles = null,
   governingBody = null,
+  allowedRepoPacket = [],
   repairHint = null,
+  firstTurnWarmStart = null,
+  cwd = undefined,
+  envAugment = {},
   runCommand = runRuntimeCommand,
   timeoutMs = DEFAULT_RUNTIME_TIMEOUT_MS,
   maxOutputBytes = DEFAULT_MAX_RUNTIME_OUTPUT_BYTES,
@@ -205,33 +261,73 @@ export async function defaultOrchestratorRuntime({
     bounds,
     invocableRuntimeRoles,
     governingBody,
+    allowedRepoPacket,
     repairHint,
   });
-  const command = buildSessionStartRuntimeCommand({
-    assignment,
-    prompt,
-    schemaPath: TURN_OUTPUT_SCHEMA_PATH,
-    repoRoot,
-  });
-  const output = await runCommand(command, {
-    timeoutMs,
-    maxOutputBytes,
-    env: scrubChildEnv(),
-  });
+  const warmStart = normalizeFirstTurnWarmStart(firstTurnWarmStart);
+  const usingWarmStart = warmStart !== null;
+  let command;
+  try {
+    command = usingWarmStart
+      ? buildWarmRuntimeCommand({
+          assignment,
+          role: ORCHESTRATOR_RUNTIME_ROLE,
+          runId: warmStart.priorRunId,
+          sessionHandle: warmStart.sessionHandle,
+          prompt,
+          schemaPath: TURN_OUTPUT_SCHEMA_PATH,
+          smokeTests: warmStart.smokeTests,
+          runtimeVersion: warmStart.runtimeVersion,
+          repoRoot,
+        })
+      : buildSessionStartRuntimeCommand({
+          assignment,
+          prompt,
+          schemaPath: TURN_OUTPUT_SCHEMA_PATH,
+          repoRoot,
+        });
+  } catch (error) {
+    if (usingWarmStart) throw warmContinuationUnavailableError(error.message, { prompt });
+    throw error;
+  }
+  let output;
+  try {
+    output = await runCommand(command, {
+      timeoutMs,
+      maxOutputBytes,
+      cwd,
+      envAugment,
+    });
+  } catch (error) {
+    if (usingWarmStart) {
+      throw warmContinuationUnavailableError(error.message, {
+        prompt,
+        raw_output: error?.stdout || error?.stderr || error?.message || "",
+      });
+    }
+    throw enrichErrorWithTranscript(error, {
+      prompt,
+      raw_output: error?.stdout || error?.stderr || error?.message || "",
+    });
+  }
   // The runtime emits the turn-output ENVELOPE { control_action, produced_content? }.
   // Pull the control action out of the envelope (tolerating a bare control-action
   // object too); produced_content rides back as the turn's authored draft so a
   // later terminate(commit) assembles the commit from it.
   const { controlAction, producedContent } = firstTurnOutputCandidate(output);
+  const handleRunId = usingWarmStart ? warmStart.priorRunId : runId;
+  const fallbackHandle = usingWarmStart ? warmStart.sessionHandle : sessionHandle;
   const nextHandle =
     extractRuntimeSessionHandle(output, {
-      role: "orchestrator",
-      runId,
+      role: ORCHESTRATOR_RUNTIME_ROLE,
+      runId: handleRunId,
       runtime: assignment.runtime,
-    }) || sessionHandle || null;
+    }) || fallbackHandle || null;
   return {
     controlAction,
     evidence: { evidence_unavailable: [{ scope: "orchestrator.turn.tool_events", reason: RUNTIME_TOOL_EVENTS_UNAVAILABLE_REASON }] },
+    prompt,
+    raw_output: transcriptTextOrNull(output),
     ...(producedContent === undefined ? {} : { producedContent }),
     sessionHandle: nextHandle,
   };
@@ -253,20 +349,25 @@ export function buildOrchestratorPrompt({
   bounds,
   invocableRuntimeRoles,
   governingBody,
+  allowedRepoPacket = [],
   repairHint = null,
 }) {
   const projectSummary = orchestratorProjectSummary(project);
+  const allowedRepoPacketBlock = allowedRepoPacketText(allowedRepoPacket);
   const oneOffRuntimeRoleProse = formatOneOffRuntimeRoleProse(invocableRuntimeRoles);
   const factoryContract = buildOrchestratorFactoryContract({ oneOffRuntimeRoleProse });
+  const warmResumeReviewerNotes = warmResumeReviewerNotesFromPriorTurns(priorTurns);
   const priorTurnDigest = (priorTurns || []).map((turn) => ({
     action: turn?.controlAction?.action ?? turn?.action ?? null,
     target_key: turn?.controlAction?.target_key ?? null,
     runtime_role: turn?.controlAction?.runtime_role ?? turn?.runtime_role ?? turn?.role ?? null,
     role_label: turn?.controlAction?.role_label ?? turn?.role_label ?? null,
+    instance_id: turn?.instance_id ?? turn?.controlAction?.instance_id ?? null,
     outcome: turn?.outcome ?? turn?.evidence?.outcome ?? null,
     status: turn?.status ?? null,
     reason: turn?.reason ?? null,
     context_digest: turn?.context_digest ?? null,
+    ...(typeof turn?.reviewer_notes === "string" ? { reviewer_notes: turn.reviewer_notes } : {}),
     source_refs: Array.isArray(turn?.source_refs) ? turn.source_refs : [],
   }));
   return [
@@ -288,10 +389,29 @@ export function buildOrchestratorPrompt({
     "",
     "Project context JSON:",
     JSON.stringify(projectSummary, null, 2),
+    ...(allowedRepoPacketBlock
+      ? [
+          "",
+          "Allowed repo packet (JSON):",
+          allowedRepoPacketBlock,
+        ]
+      : []),
+    ...(warmResumeReviewerNotes
+      ? ["", "Reviewer notes for this warm resume:", warmResumeReviewerNotes]
+      : []),
     "",
     "Decisions so far this run:",
     JSON.stringify(priorTurnDigest, null, 2),
   ].join("\n");
+}
+
+function warmResumeReviewerNotesFromPriorTurns(priorTurns) {
+  const notes = (priorTurns || [])
+    .filter((turn) => turn?.action === "review_notes" && typeof turn.reviewer_notes === "string")
+    .map((turn) => turn.reviewer_notes)
+    .filter((text) => text !== "");
+  if (notes.length === 0) return null;
+  return notes.join("\n\n---\n\n");
 }
 
 function buildOrchestratorFactoryContract({ oneOffRuntimeRoleProse }) {
@@ -299,13 +419,15 @@ function buildOrchestratorFactoryContract({ oneOffRuntimeRoleProse }) {
     "Reply with EXACTLY ONE JSON object that satisfies the provided schema. It has two top-level keys:",
     "  { \"control_action\": { ... }, \"produced_content\": { ... } }",
     "control_action is REQUIRED and is exactly ONE of:",
-    "- invoke_library({ action: \"invoke_library\", target_key }) to run a named library subagent;",
-    `- invoke_one_off({ action: "invoke_one_off", role_label, task, prompt, runtime_role }) to run an improvised subagent (runtime_role is one of ${oneOffRuntimeRoleProse});`,
+    "- invoke_library({ action: \"invoke_library\", target_key, instance_id? }) to run a named library subagent;",
+    `- invoke_one_off({ action: "invoke_one_off", role_label, task, prompt, runtime_role, instance_id? }) to run an improvised subagent (runtime_role is one of ${oneOffRuntimeRoleProse});`,
     "- terminate({ action: \"terminate\", outcome, reason }) to end the run (outcome commit -> reason synthesis_complete; outcome pause -> reason product_questions|discovery_needed|needs_pm_review).",
+    "Optional instance_id: omit it for the role's default instance; supply a fresh safe id to spawn a same-role non-default instance; reuse the resolved instance_id from a prior turn to continue it.",
     "produced_content is a SIBLING of control_action (NOT a field inside it). Keep the terminate control_action exactly { action, outcome, reason } with no extra keys.",
     "On a non-terminating turn you may omit produced_content or include partial drafting context.",
     "When you terminate with outcome commit, produced_content MUST include:",
     "- final_issues: an array of agent-ready issues, each { decomposition_key, title, issue_body_markdown, depends_on, assignment, output, acceptance_criteria };",
+    "  Optional per final issue: work_type is code|non_code; resource_target is { kind, id, repo_scope? } and currently selects a git_repo resource when authored.",
     "- project_update_markdown: a project update that includes the line `run_id: <run_id>` and a `## What I did with each part of your project` section.",
     "Author every issue field yourself; the harness rejects the commit if a required field is missing or empty (it never fills them in for you).",
   ].join("\n");
@@ -332,6 +454,12 @@ function orchestratorProjectSummary(project) {
       state: issue?.state ?? null,
     })),
   };
+}
+
+function allowedRepoPacketText(allowedRepoPacket) {
+  const packet = Array.isArray(allowedRepoPacket) ? allowedRepoPacket : [];
+  if (packet.length === 0) return "";
+  return JSON.stringify(packet, null, 2);
 }
 
 // Pull the turn-output ENVELOPE out of the runtime output (raw JSON,
@@ -373,13 +501,14 @@ function firstTurnOutputCandidate(output) {
 // subagent-turn contract (Seam 2).
 //
 //   executeSubagent({ runtime_role, prompt, envelopeOverride?, runId, task,
-//                     project, priorDigest, sessionHandle, config, repoRoot,
-//                     runCommand? })
+//                     project, allowedRepoPacket, priorDigest, sessionHandle,
+//                     config, repoRoot, runCommand? })
 //   -> { ok:true, packet, output, command, sessionHandle, evidence,
 //        role: runtime_role, runtime, parse_status, clean_parse,
-//        raw_output_excerpt, envelope }
+//        prompt, raw_output, raw_output_excerpt, envelope }
 //      OR { ok:false, runtime, parse_status, clean_parse, raw_output_excerpt,
-//           failure_kind, failure_code, envelope, role, process? }
+//           prompt, raw_output, failure_kind, failure_code, envelope, role,
+//           process?, prompt_unavailable? }
 export async function executeSubagent({
   runtime_role,
   prompt,
@@ -387,15 +516,19 @@ export async function executeSubagent({
   runId,
   task = null,
   project,
+  allowedRepoPacket = [],
   priorDigest = null,
   sessionHandle = null,
   config,
+  definition = null,
   repoRoot = MODULE_REPO_ROOT,
+  cwd = undefined,
+  envAugment = {},
   runCommand = runRuntimeCommand,
   timeoutMs = DEFAULT_RUNTIME_TIMEOUT_MS,
   maxOutputBytes = DEFAULT_MAX_RUNTIME_OUTPUT_BYTES,
 } = {}) {
-  const assignment = resolveRoleRuntimeAssignments(config)?.[runtime_role];
+  const assignment = resolveRoleRuntimeAssignments(config, workflowTypeForDefinition(definition))?.[runtime_role];
   if (!assignment) {
     throw new Error(`No runtime assignment is configured for ${runtime_role}.`);
   }
@@ -414,16 +547,19 @@ export async function executeSubagent({
           role: runtime_role,
           task,
           project,
+          allowedRepoPacket,
           priorDigest,
           allowedOutcomes: SUBAGENT_TURN_OUTCOMES,
         });
   } catch (error) {
+    const rawOutput = rawOutputExcerpt(error?.message || "subagent invocation envelope could not be built");
     return {
       ok: false,
       runtime: assignment.runtime,
       parse_status: "invalid",
       clean_parse: false,
-      raw_output_excerpt: rawOutputExcerpt(error?.message || "subagent invocation envelope could not be built"),
+      raw_output: rawOutput,
+      raw_output_excerpt: rawOutput,
       failure_kind: "process",
       failure_code: "envelope_too_large",
       process: {
@@ -432,6 +568,11 @@ export async function executeSubagent({
         timed_out: false,
       },
       envelope: null,
+      prompt: null,
+      prompt_unavailable: {
+        reason: PROMPT_UNAVAILABLE_ENVELOPE_BUILD_FAILED_REASON,
+        attempted_prompt: rawOutputExcerpt(prompt),
+      },
       role: runtime_role,
     };
   }
@@ -445,18 +586,22 @@ export async function executeSubagent({
     commandResult = await runCommand(command, {
       timeoutMs,
       maxOutputBytes,
-      env: scrubChildEnv(),
+      cwd,
+      envAugment,
     });
   } catch (error) {
     const failureCode = PROCESS_FAILURE_CODES.has(error?.failure_code)
       ? error.failure_code
       : "process_failed";
+    const rawOutput = rawOutputExcerpt(error?.stdout || error?.stderr || error?.message || "");
     return {
       ok: false,
       runtime: assignment.runtime,
       parse_status: "invalid",
       clean_parse: false,
-      raw_output_excerpt: rawOutputExcerpt(error?.stdout || error?.stderr || error?.message || ""),
+      prompt: envelope,
+      raw_output: rawOutput,
+      raw_output_excerpt: rawOutput,
       failure_kind: "process",
       failure_code: failureCode,
       process: {
@@ -471,12 +616,15 @@ export async function executeSubagent({
   const output = runtimeCommandOutput(commandResult);
   const parsed = strictParseSubagentTurn(output, { runId });
   if (!parsed.ok) {
+    const rawOutput = rawOutputExcerpt(output);
     return {
       ok: false,
       runtime: assignment.runtime,
       parse_status: "invalid",
       clean_parse: parsed.clean_parse,
-      raw_output_excerpt: rawOutputExcerpt(output),
+      prompt: envelope,
+      raw_output: rawOutput,
+      raw_output_excerpt: rawOutput,
       failure_kind: "parse",
       failure_code: "invalid_packet",
       envelope,
@@ -499,6 +647,8 @@ export async function executeSubagent({
     runtime: assignment.runtime,
     parse_status: "valid",
     clean_parse: true,
+    prompt: envelope,
+    raw_output: output,
     raw_output_excerpt: rawOutputExcerpt(output),
     envelope,
     sessionHandle: nextHandle,
@@ -518,6 +668,38 @@ function runtimeCommandOutput(commandResult) {
   }
   if (commandResult === undefined || commandResult === null) return "";
   return String(commandResult);
+}
+
+function enrichErrorWithTranscript(error, { prompt, raw_output: rawOutput } = {}) {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return error;
+  try {
+    error.prompt = boundedTranscriptTextOrNull(prompt);
+    error.raw_output = boundedTranscriptTextOrNull(rawOutput);
+  } catch {
+    // Best-effort transcript fields must never change the thrown outcome.
+  }
+  return error;
+}
+
+function boundedTranscriptTextOrNull(value) {
+  const text = transcriptTextOrNull(value);
+  return text === null ? null : rawOutputExcerpt(text);
+}
+
+function transcriptTextOrNull(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string") return value;
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized === "string") return serialized;
+  } catch {
+    // Fall through to the primitive string representation.
+  }
+  return String(value);
+}
+
+function stringOrNull(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
 function rawOutputExcerpt(value) {

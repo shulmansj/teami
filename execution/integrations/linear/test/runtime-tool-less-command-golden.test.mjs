@@ -25,7 +25,7 @@ function assertNoShellGrantTokens(command) {
 
 test("tool-less command contract golden keeps pm Claude and sr_eng Codex session_start commands locked down", () => {
   const config = loadLinearConfig({ repoRoot });
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
   const pmCommand = buildSessionStartRuntimeCommand({
     assignment: assignments.pm,
     prompt: "Return a PM subagent turn.",

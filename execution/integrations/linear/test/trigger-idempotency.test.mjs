@@ -250,5 +250,5 @@ function runArtifact({ runId, kind, domainId, projectId }) {
 }
 
 function tempRunStore() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-trigger-idem-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-trigger-idem-"));
 }

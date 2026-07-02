@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { COMMAND_REGISTRY } from "../src/cli/dispatch.mjs";
+
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const cliPath = path.join(repoRoot, "execution", "integrations", "linear", "cli.mjs");
 const exampleConfigPath = path.join(repoRoot, "execution", "integrations", "linear", "config.example.json");
@@ -15,65 +17,81 @@ const DISPATCH_CASES = Object.freeze([
   { command: "doctor", args: [], expected: /[✗×x] domain registry:/ },
   { command: "doctor:linear", args: [], expected: /[✗×x] domain registry:/ },
   { command: "domain:add", args: ["--workspace"], expected: /Usage: --workspace requires a workspace name or id\./ },
-  { command: "domain:bind-repo", args: [], expected: /Agentic Factory [·-] domain bind repo[\s\S]*[✗×x] Usage: npm run domain:bind-repo/ },
-  { command: "draft-improvement", args: [], expected: /Agentic Factory [·-] draft improvement[\s\S]*[✗×x] Usage: npm run draft-improvement/ },
-  { command: "eval:decomposition", args: [], expected: /Agentic Factory [·-] eval decomposition[\s\S]*[✗×x] Eval decomposition could not run[\s\S]*no_active_domains:/ },
-  { command: "eval:disagreements", args: [], expected: /Agentic Factory [·-] eval disagreements[\s\S]*[✗×x] Usage: npm run eval:disagreements/ },
-  { command: "eval:emit-checks", args: [], expected: /Agentic Factory [·-] eval emit-checks[\s\S]*[✗×x] Usage: npm run eval:emit-checks/ },
-  { command: "eval:gate", args: [], expected: /Agentic Factory [·-] eval gate[\s\S]*[✗×x] Usage: npm run eval:gate/ },
-  { command: "eval:judge", args: [], expected: /Agentic Factory [·-] eval judge[\s\S]*[✗×x] Usage: npm run eval:judge/ },
-  { command: "eval:register-judge-prompt", args: [], expected: /Agentic Factory [·-] eval register judge prompt[\s\S]*[✗×x] Prompt registration failed/ },
-  { command: "eval:register-prompt", args: [], expected: /Agentic Factory [·-] eval register prompt[\s\S]*[✗×x] Usage: npm run eval:register-prompt/ },
+  { command: "domain:grant", args: [], expected: /Teami [·-] domain grant[\s\S]*[✗×x] Usage: .*domain grant <id> --repo <owner\/name>/ },
+  { command: "domain:revoke", args: [], expected: /Teami [·-] domain revoke[\s\S]*[✗×x] Usage: .*domain revoke <id> --repo <owner\/name>/ },
+  { command: "domain:show", args: [], expected: /Teami [·-] domain show[\s\S]*[✗×x] Usage: .*domain show <id>/ },
+  { command: "draft-improvement", args: [], expected: /Teami [·-] draft improvement[\s\S]*[✗×x] Usage: npm run draft-improvement/ },
+  { command: "eval:decomposition", args: [], expected: /Teami [·-] eval decomposition[\s\S]*[✗×x] Eval decomposition could not run[\s\S]*no_active_domains:/ },
+  { command: "eval:disagreements", args: [], expected: /Teami [·-] eval disagreements[\s\S]*[✗×x] Usage: npm run eval:disagreements/ },
+  { command: "eval:emit-checks", args: [], expected: /Teami [·-] eval emit-checks[\s\S]*[✗×x] Usage: npm run eval:emit-checks/ },
+  { command: "eval:gate", args: [], expected: /Teami [·-] eval gate[\s\S]*[✗×x] Usage: npm run eval:gate/ },
+  { command: "eval:judge", args: [], expected: /Teami [·-] eval judge[\s\S]*[✗×x] Usage: npm run eval:judge/ },
+  { command: "execution:run", args: [], expected: /Teami [·-] execution run[\s\S]*[✗×x] Usage: .*teami(?:\.cmd)? execution run --issue/ },
+  { command: "review:run", args: [], expected: /Teami [·-] review run[\s\S]*[✗×x] Usage: .*teami(?:\.cmd)? review run --issue/ },
+  { command: "eval:register-judge-prompt", args: [], expected: /Teami [·-] eval register judge prompt[\s\S]*[✗×x] Prompt registration failed/ },
+  { command: "eval:register-prompt", args: [], expected: /Teami [·-] eval register prompt[\s\S]*[✗×x] Usage: npm run eval:register-prompt/ },
   { command: "github:init", args: ["--github-dry-run"], expected: /GitHub connection failed|Repo connected:/ },
-  { command: "gateway", args: [], expected: /Agentic Factory [·-] gateway[\s\S]*[✗×x] Gateway could not start[\s\S]*no_active_domains:/ },
+  { command: "gateway", args: [], expected: /Teami [·-] gateway[\s\S]*[✗×x] Gateway could not start[\s\S]*no_active_domains:/ },
   { command: "init", args: ["--workspace"], expected: /Usage: --workspace requires a workspace name or id\./ },
-  { command: "phoenix:annotate-trace", args: [], expected: /Agentic Factory [·-] phoenix annotate trace[\s\S]*[✗×x] Usage: npm run phoenix:annotate-trace/ },
-  { command: "phoenix:doctor", args: [], expected: /Agentic Factory [·-] phoenix doctor[\s\S]*[✗×x] Local Phoenix doctor could not run[\s\S]*Local Phoenix must bind to loopback/ },
-  { command: "phoenix:experiment-amend", args: [], expected: /Agentic Factory [·-] phoenix experiment amend[\s\S]*[✗×x] Usage: npm run phoenix:experiment-amend/ },
-  { command: "phoenix:experiment-decomposition", args: [], expected: /Agentic Factory [·-] phoenix experiment decomposition[\s\S]*[✗×x] Usage: npm run phoenix:experiment-decomposition/ },
-  { command: "phoenix:preflight", args: [], expected: /Agentic Factory [·-] phoenix preflight[\s\S]*[✗×x] Local Phoenix preflight could not run[\s\S]*no_active_domains:/ },
-  { command: "phoenix:promote-decomposition", args: [], expected: /Agentic Factory [·-] phoenix promote decomposition[\s\S]*[✗×x] Usage: npm run phoenix:promote-decomposition/ },
-  { command: "phoenix:promote-run", args: [], expected: /Agentic Factory [·-] phoenix promote run[\s\S]*[✗×x] Usage: npm run phoenix:promote-run/ },
-  { command: "phoenix:start", args: [], expected: /Agentic Factory [·-] phoenix start[\s\S]*[✗×x] Local Phoenix could not start[\s\S]*Local Phoenix must bind to loopback/ },
-  { command: "phoenix:status", args: [], expected: /Agentic Factory [·-] phoenix status[\s\S]*[✗×x] Local Phoenix status could not be read[\s\S]*Local Phoenix must bind to loopback/ },
-  { command: "phoenix:stop", args: [], expected: /Agentic Factory [·-] phoenix stop[\s\S]*[✗×x] Local Phoenix stop failed[\s\S]*Local Phoenix must bind to loopback/ },
-  { command: "promote-candidate", args: [], expected: /Agentic Factory [·-] promote candidate[\s\S]*[✗×x] Usage: npm run promote-candidate/ },
-  { command: "promotion:scan", args: [], expected: /Agentic Factory [·-] promotion scan[\s\S]*(?:[✗×x] Promotion scan could not complete|[✓+] Promotion scan completed)/ },
+  { command: "phoenix:annotate-trace", args: [], expected: /Teami [·-] phoenix annotate trace[\s\S]*[✗×x] Usage: npm run phoenix:annotate-trace/ },
+  { command: "phoenix:doctor", args: [], expected: /Teami [·-] phoenix doctor[\s\S]*[✗×x] Local Phoenix doctor could not run[\s\S]*Local Phoenix must bind to loopback/ },
+  { command: "phoenix:experiment-amend", args: [], expected: /Teami [·-] phoenix experiment amend[\s\S]*[✗×x] Usage: npm run phoenix:experiment-amend/ },
+  { command: "phoenix:experiment-decomposition", args: [], expected: /Teami [·-] phoenix experiment decomposition[\s\S]*[✗×x] Usage: npm run phoenix:experiment-decomposition/ },
+  { command: "phoenix:open", args: [], expected: /phoenix open[\s\S]*Local Phoenix could not start[\s\S]*Local Phoenix must bind to loopback/ },
+  { command: "phoenix:preflight", args: [], expected: /Teami [·-] phoenix preflight[\s\S]*[✗×x] Local Phoenix preflight could not run[\s\S]*no_active_domains:/ },
+  { command: "phoenix:promote-decomposition", args: [], expected: /Teami [·-] phoenix promote decomposition[\s\S]*[✗×x] Usage: npm run phoenix:promote-decomposition/ },
+  { command: "phoenix:promote-run", args: [], expected: /Teami [·-] phoenix promote run[\s\S]*[✗×x] Usage: npm run phoenix:promote-run/ },
+  { command: "phoenix:start", args: [], expected: /Teami [·-] phoenix start[\s\S]*[✗×x] Local Phoenix could not start[\s\S]*Local Phoenix must bind to loopback/ },
+  { command: "phoenix:status", args: [], expected: /Teami [·-] phoenix status[\s\S]*[✗×x] Local Phoenix status could not be read[\s\S]*Local Phoenix must bind to loopback/ },
+  { command: "phoenix:stop", args: [], expected: /Teami [·-] phoenix stop[\s\S]*[✗×x] Local Phoenix stop failed[\s\S]*Local Phoenix must bind to loopback/ },
+  { command: "promote-candidate", args: [], expected: /Teami [·-] promote candidate[\s\S]*[✗×x] Usage: npm run promote-candidate/ },
+  { command: "promotion:scan", args: [], expected: /Teami [·-] promotion scan[\s\S]*(?:[✗×x] Promotion scan could not complete|[✓+] Promotion scan completed)/ },
   { command: "reset", args: [], expected: /[✓√+] Reset complete\./ },
-  { command: "runner", args: [], expected: /Agentic Factory [·-] gateway[\s\S]*[✗×x] Gateway could not start[\s\S]*no_active_domains:/ },
-  { command: "runtime-smoke", args: [], expected: /Agentic Factory [·-] runtime smoke[\s\S]*[✗×x] Runtime smoke (?:could not run|found runtime checks that need repair)/ },
-  { command: "supervisor", args: ["--max-iterations", "0"], expected: /Agentic Factory [·-] supervisor run[\s\S]*[✗×x] Supervisor run needs attention[\s\S]*preflight checks need attention/ },
-  { command: "supervisor:disable", args: [], expected: /Agentic Factory [·-] supervisor disable[\s\S]*[✓+] Supervisor disabled\./ },
-  { command: "supervisor:enable", args: [], expected: /Agentic Factory [·-] supervisor enable[\s\S]*[✓+] Supervisor enabled\./ },
-  { command: "supervisor:reconcile", args: [], expected: /Agentic Factory [·-] supervisor reconcile[\s\S]*Next resume[\s\S]*[✓+] No stalled resume work needs intervention\./ },
-  { command: "supervisor:register", args: [], expected: /Agentic Factory [·-] supervisor register[\s\S]*[✗×x] Supervisor registration requires explicit consent/ },
-  { command: "supervisor:run", args: ["--max-iterations", "0"], expected: /Agentic Factory [·-] supervisor run[\s\S]*[✗×x] Supervisor run needs attention[\s\S]*preflight checks need attention/ },
-  { command: "supervisor:status", args: [], expected: /Agentic Factory [·-] supervisor status[\s\S]*[✗×x] Supervisor status needs attention[\s\S]*missing_local_supervisor_registration/ },
-  { command: "supervisor:unregister", args: [], expected: /Agentic Factory [·-] supervisor unregister[\s\S]*[✓+] Supervisor local state cleaned up\.[\s\S]*(?:Already clean: local supervisor|Real OS login\/autostart deregistration)/ },
-  { command: "trigger-status", args: [], expected: /Agentic Factory [·-] gateway status[\s\S]*[✗×x] Gateway status could not be read[\s\S]*no_active_domains:/ },
+  { command: "runner", args: [], expected: /Teami [·-] gateway[\s\S]*[✗×x] Gateway could not start[\s\S]*no_active_domains:/ },
+  { command: "runtime-smoke", args: [], expected: /Teami [·-] runtime smoke[\s\S]*[✗×x] Runtime smoke (?:could not run|found runtime checks that need repair)/ },
+  { command: "supervisor", args: ["--max-iterations", "0"], expected: /Teami [·-] supervisor run[\s\S]*[✗×x] Supervisor run needs attention[\s\S]*preflight checks need attention/ },
+  { command: "supervisor:disable", args: [], expected: /Teami [·-] supervisor disable[\s\S]*[✓+] Supervisor disabled\./ },
+  { command: "supervisor:enable", args: [], expected: /Teami [·-] supervisor enable[\s\S]*[✓+] Supervisor enabled\./ },
+  { command: "supervisor:reconcile", args: [], expected: /Teami [·-] supervisor reconcile[\s\S]*Next resume[\s\S]*[✓+] No stalled resume work needs intervention\./ },
+  { command: "supervisor:register", args: [], expected: /Teami [·-] supervisor register[\s\S]*[✗×x] Supervisor registration requires explicit consent/ },
+  { command: "supervisor:run", args: ["--max-iterations", "0"], expected: /Teami [·-] supervisor run[\s\S]*[✗×x] Supervisor run needs attention[\s\S]*preflight checks need attention/ },
+  { command: "supervisor:status", args: [], expected: /Teami [·-] supervisor status[\s\S]*[✗×x] Supervisor status needs attention[\s\S]*missing_local_supervisor_registration/ },
+  { command: "supervisor:unregister", args: [], expected: /Teami [·-] supervisor unregister[\s\S]*[✓+] Supervisor local state cleaned up\.[\s\S]*(?:Already clean: local supervisor|Real OS login\/autostart deregistration)/ },
+  { command: "trigger-status", args: [], expected: /Teami [·-] gateway status[\s\S]*[✗×x] Gateway status could not be read[\s\S]*no_active_domains:/ },
   { command: "uninstall", args: [], expected: /[✓√+] Uninstall complete\./ },
-  { command: "worklist", args: [], expected: /Agentic Factory [·-] worklist[\s\S]*Behavior proposal decisions[\s\S]*Repair and setup blockers[\s\S]*Local evidence[\s\S]*Local evidence status could not be read/ },
+  { command: "worklist", args: [], expected: /Teami [·-] worklist[\s\S]*Behavior proposal decisions[\s\S]*Repair and setup blockers[\s\S]*Local evidence[\s\S]*Local evidence status could not be read/ },
 ]);
 
 const HELP_CASES = Object.freeze([
-  { command: "init", args: ["--help"], expected: /Usage: npm run init -- --domain <name>/ },
-  { command: "doctor", args: ["--help"], expected: /Usage: npm run doctor --/ },
-  { command: "domain:bind-repo", args: ["--help"], expected: /Usage: npm run domain:bind-repo -- --domain <id> --path <existing checkout>/ },
-  { command: "--help", args: [], expected: /Usage: node execution\/integrations\/linear\/cli\.mjs/ },
+  // <command> --help renders in the platform launcher form, not "npm run ...".
+  { command: "init", args: ["--help"], expected: /teami(?:\.cmd)? init --domain <name>/ },
+  { command: "doctor", args: ["--help"], expected: /teami(?:\.cmd)? doctor/ },
+  { command: "domain:grant", args: ["--help"], expected: /teami(?:\.cmd)? domain grant <id> --repo <owner\/name>/ },
+  { command: "domain:revoke", args: ["--help"], expected: /teami(?:\.cmd)? domain revoke <id> --repo <owner\/name>/ },
+  { command: "domain:show", args: ["--help"], expected: /teami(?:\.cmd)? domain show <id>/ },
+  // gateway --help renders the bare-noun form (not "gateway start"); gateway status --help too.
+  { command: "gateway", args: ["--help"], expected: /teami(?:\.cmd)? gateway \[status\]/ },
+  { command: "gateway", args: ["status", "--help"], expected: /teami(?:\.cmd)? gateway \[status\]/ },
+  // phoenix:status is now an adopter noun-verb: its --help shows the space form (colon still resolves).
+  { command: "phoenix:status", args: ["--help"], expected: /teami(?:\.cmd)? phoenix status/ },
+  // operator colon commands keep their colon form in --help.
+  { command: "supervisor:run", args: ["--help"], expected: /teami(?:\.cmd)? supervisor:run/ },
+  // The default surface is curated grouped help, not the old command wall.
+  { command: "--help", args: [], expected: /Setup[\s\S]*Run[\s\S]*Manage/ },
+  { command: "help", args: [], expected: /Setup[\s\S]*Run[\s\S]*Manage/ },
+  { command: "help", args: ["--all"], expected: /Operator & maintenance[\s\S]*eval:/ },
 ]);
 
 const JAVASCRIPT_CRASH_PATTERN =
   /\b(?:ReferenceError|TypeError|SyntaxError)\b|Cannot access .* before initialization|Cannot read properties of| is not defined|\n\s+at .*cli\.mjs:/i;
 
-test("CLI dispatch fixture covers every command branch in cli.mjs", () => {
-  const source = fs.readFileSync(cliPath, "utf8");
-  const dispatchCommands = [...source.matchAll(/command === "([^"]+)"/g)]
-    .map((match) => match[1])
-    .filter((value, index, values) => values.indexOf(value) === index)
-    .sort();
+test("CLI dispatch fixture covers every routable registry command", () => {
+  const routableTokens = [...new Set(
+    COMMAND_REGISTRY.flatMap((descriptor) => [descriptor.invokeCommand, ...descriptor.aliases]),
+  )].sort();
   const coveredCommands = DISPATCH_CASES.map((entry) => entry.command).sort();
 
-  assert.deepEqual(coveredCommands, dispatchCommands);
+  assert.deepEqual(coveredCommands, routableTokens);
 });
 
 test("CLI dispatch commands fail closed or print help without JavaScript initialization crashes", async (t) => {
@@ -125,7 +143,7 @@ test("CLI help flags do not load config or enter command side effects", async (t
 });
 
 async function runCliDispatch({ command, args }) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-cli-dispatch-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-cli-dispatch-"));
   const configPath = writeDispatchConfig(tempRoot);
   return new Promise((resolve) => {
     let child;
@@ -134,8 +152,9 @@ async function runCliDispatch({ command, args }) {
         cwd: tempRoot,
         env: {
           ...process.env,
-          AGENTIC_FACTORY_LINEAR_CONFIG: configPath,
-          AGENTIC_FACTORY_PHOENIX_URL: "http://not-loopback.invalid:6006",
+          FACTORY_REPO_ROOT: tempRoot,
+          TEAMI_LINEAR_CONFIG: configPath,
+          TEAMI_PHOENIX_URL: "http://not-loopback.invalid:6006",
           NO_COLOR: "1",
         },
         shell: false,
@@ -192,7 +211,7 @@ async function runCliDispatch({ command, args }) {
 }
 
 async function runCliDispatchWithoutConfig({ command, args }) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-cli-help-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-cli-help-"));
   return new Promise((resolve) => {
     let child;
     try {
@@ -200,7 +219,8 @@ async function runCliDispatchWithoutConfig({ command, args }) {
         cwd: tempRoot,
         env: {
           ...process.env,
-          AGENTIC_FACTORY_LINEAR_CONFIG: path.join(tempRoot, "missing-config.json"),
+          FACTORY_REPO_ROOT: tempRoot,
+          TEAMI_LINEAR_CONFIG: path.join(tempRoot, "missing-config.json"),
           NO_COLOR: "1",
         },
         shell: false,

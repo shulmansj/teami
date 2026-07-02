@@ -1,4 +1,4 @@
-export const RUN_ARTIFACT_SCHEMA_VERSION = "agentic-factory-run-artifact/v1";
+export const RUN_ARTIFACT_SCHEMA_VERSION = "teami-run-artifact/v1";
 export const LEGACY_RUN_ARTIFACT_SCHEMA_VERSION = "linear-decomposition-run-artifact/v3";
 
 // Three version axes that happen to share "0.2.0" today but evolve independently

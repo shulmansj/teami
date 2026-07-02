@@ -33,12 +33,8 @@ import {
 const MODULE_DIR = import.meta.dirname;
 const REPO_ROOT = path.resolve(MODULE_DIR, "..", "..", "..", "..");
 
-export const GITHUB_LOCAL_UAT_BEHAVIOR_REPO = Object.freeze({
-  owner: "shulmansj",
-  repo: "af-smoke-test",
-});
 export const DEFAULT_GITHUB_LOCAL_UAT_BRANCH_PREFIX = "af-uat-github-local";
-export const GITHUB_LOCAL_UAT_RUN_PAYLOAD_SCHEMA_ID = "agentic-factory-github-local-uat-payload/v1";
+export const GITHUB_LOCAL_UAT_RUN_PAYLOAD_SCHEMA_ID = "teami-github-local-uat-payload/v1";
 
 const GH_API_HEADERS = Object.freeze([
   "-H",
@@ -57,12 +53,12 @@ class GitHubLocalUatUserError extends Error {
 
 export function parseGitHubLocalUatArgs(argv = process.argv.slice(2), env = process.env) {
   const options = {
-    repoRoot: path.resolve(env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_REPO_ROOT || env.AGENTIC_FACTORY_UAT_REPO_ROOT || REPO_ROOT),
-    workspaceDir: env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_WORKSPACE_DIR
-      ? path.resolve(env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_WORKSPACE_DIR)
+    repoRoot: path.resolve(env.TEAMI_GITHUB_LOCAL_UAT_REPO_ROOT || env.TEAMI_UAT_REPO_ROOT || REPO_ROOT),
+    workspaceDir: env.TEAMI_GITHUB_LOCAL_UAT_WORKSPACE_DIR
+      ? path.resolve(env.TEAMI_GITHUB_LOCAL_UAT_WORKSPACE_DIR)
       : null,
-    branchPrefix: env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_BRANCH_PREFIX || DEFAULT_GITHUB_LOCAL_UAT_BRANCH_PREFIX,
-    keepArtifacts: truthy(env.AGENTIC_FACTORY_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS || env.AGENTIC_FACTORY_UAT_KEEP_ARTIFACTS),
+    branchPrefix: env.TEAMI_GITHUB_LOCAL_UAT_BRANCH_PREFIX || DEFAULT_GITHUB_LOCAL_UAT_BRANCH_PREFIX,
+    keepArtifacts: truthy(env.TEAMI_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS || env.TEAMI_UAT_KEEP_ARTIFACTS),
     help: false,
   };
 
@@ -92,14 +88,14 @@ export function buildGitHubLocalUatUsage() {
     "Usage: npm run uat:github-local -- [--keep-artifacts] [--repo-root <path>] [--workspace-dir <path>] [--branch-prefix af-uat-github-local]",
     "",
     "Live prerequisites:",
-    "- .agentic-factory/github-connection.json must be verified real local_ambient for shulmansj/af-smoke-test.",
+    "- .teami/github-connection.json must be a verified real local_ambient connection to your bound behavior repo (your clone of the product).",
     "- `gh auth status --hostname github.com` must be logged in.",
     "- Local git auth must be able to push a branch to the behavior repo.",
     "",
     "Environment equivalents:",
-    "- AGENTIC_FACTORY_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS=1 keeps the PR and branch.",
-    "- AGENTIC_FACTORY_GITHUB_LOCAL_UAT_WORKSPACE_DIR overrides the disposable internal clone directory.",
-    "- AGENTIC_FACTORY_GITHUB_LOCAL_UAT_BRANCH_PREFIX overrides the suffix under agentic-factory/promotion/.",
+    "- TEAMI_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS=1 keeps the PR and branch.",
+    "- TEAMI_GITHUB_LOCAL_UAT_WORKSPACE_DIR overrides the disposable internal clone directory.",
+    "- TEAMI_GITHUB_LOCAL_UAT_BRANCH_PREFIX overrides the suffix under teami/promotion/.",
   ].join("\n");
 }
 
@@ -331,18 +327,10 @@ export function assertGitHubLocalUatBinding(result, { repoRoot = process.cwd() }
       "github_connection_unbound",
     );
   }
-  const expected = GITHUB_LOCAL_UAT_BEHAVIOR_REPO;
-  const repo = result.repo || {};
   if (result.connection_mode !== "real") {
     throw new GitHubLocalUatUserError(
       `GitHub local UAT requires a real local_ambient connection, got connection_mode=${result.connection_mode || "unknown"}. Re-run npm run github:init without --github-dry-run.`,
       "github_connection_not_real",
-    );
-  }
-  if (repo.owner !== expected.owner || repo.repo !== expected.repo) {
-    throw new GitHubLocalUatUserError(
-      `GitHub local UAT must be bound to ${expected.owner}/${expected.repo}, got ${repo.owner || "unknown"}/${repo.repo || "unknown"}.`,
-      "github_connection_wrong_repo",
     );
   }
   if (result.real_push_enabled !== true) {
@@ -418,7 +406,7 @@ export function assertGitHubLocalUatProvenance({ prBody, evidence, runId } = {})
     throw new Error("github_local_uat_pr_body_missing_run_provenance");
   }
   const serialized = JSON.stringify(evidence || {});
-  if (!serialized.includes(runId) || !serialized.includes("agentic-factory-pr-provenance/v1")) {
+  if (!serialized.includes(runId) || !serialized.includes("teami-pr-provenance/v1")) {
     throw new Error("github_local_uat_evidence_missing_run_provenance");
   }
   return true;
@@ -452,7 +440,7 @@ export function buildGitHubLocalUatPrBody({
     policyHash: sha256Hex("github-local-uat-policy"),
     phoenixScope: {
       origin: "http://127.0.0.1:6006",
-      project_name: "agentic-factory",
+      project_name: "teami",
     },
     evidenceIds: {
       experiments: [runId],
@@ -485,7 +473,7 @@ export function buildGitHubLocalUatPrBody({
       verdict: "pass",
       evidence_counts: { train_examples: 0, test_examples: 1, human_label_authenticity: "local_uat" },
       evidence_lineage: {
-        schema_version: "agentic-factory-evidence-lineage/v1",
+        schema_version: "teami-evidence-lineage/v1",
         run_window: { from: startedAt, to: startedAt, basis: "github_local_uat_harness" },
         run_set_digest: `sha256:${envelopeHash}`,
         safe_phoenix_handles: { experiment_id: runId, dataset_id: "github-local-uat", dataset_version_id: startedAt },
@@ -505,7 +493,7 @@ export function buildGitHubLocalUatPrBody({
       removed_count: 0,
       transformed_count: 0,
     },
-    machineAuthorship: "agentic_factory_github_local_uat",
+    machineAuthorship: "teami_github_local_uat",
     prProvenance,
     allowedOriginPrefix: "http://127.0.0.1:6006",
   });
@@ -522,7 +510,7 @@ function ensureGitHubLocalUatWorkspace({
   branch,
   runGit,
 } = {}) {
-  const dir = path.resolve(workspaceDir || path.join(repoRoot, ".agentic-factory", "github-local-uat"));
+  const dir = path.resolve(workspaceDir || path.join(repoRoot, ".teami", "github-local-uat"));
   const cloneDir = path.join(dir, "repo");
   const cloneUrl = resolveCloneUrl({ selection, runGit });
   fs.mkdirSync(dir, { recursive: true });
@@ -568,7 +556,7 @@ function resolveCloneUrl({ selection, runGit } = {}) {
   }
   if (selection.pushAuth === "ssh") {
     throw new GitHubLocalUatUserError(
-      "GitHub local UAT SSH mode requires an origin remote in the bound checkout.",
+      "GitHub local UAT SSH mode requires an origin remote in the repo root.",
       "github_clone_url_required",
     );
   }
@@ -599,9 +587,9 @@ function commitGitHubLocalUatProposal({ cloneDir, proposalPath, runId, runGit })
   const commit = runGit(
     [
       "-c",
-      "user.name=agentic-factory[bot] (uat)",
+      "user.name=teami[bot] (uat)",
       "-c",
-      "user.email=agentic-factory-uat@placeholder.invalid",
+      "user.email=teami-uat@placeholder.invalid",
       "commit",
       "-m",
       `GitHub local UAT ${runId}`,
@@ -788,7 +776,7 @@ function buildGitHubLocalUatPrProvenance({
   selection,
 } = {}) {
   return {
-    schema_version: "agentic-factory-pr-provenance/v1",
+    schema_version: "teami-pr-provenance/v1",
     source_run_id: runId,
     experiment_receipt_id: `github-local-uat:${runId}`,
     phoenix_experiment_id: runId,
@@ -857,7 +845,7 @@ function summarizeChildEnv(env = null) {
   if (!env || typeof env !== "object") return null;
   const names = Object.keys(env).sort();
   const githubAuthNames = names.filter((name) =>
-    /^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|AGENTIC_FACTORY_GITHUB_|GITHUB_ACCESS_TOKEN|GITHUB_PAT|GIT_ASKPASS)$/i.test(name));
+    /^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|TEAMI_GITHUB_|GITHUB_ACCESS_TOKEN|GITHUB_PAT|GIT_ASKPASS)$/i.test(name));
   return {
     key_count: names.length,
     github_auth_env_names_present: githubAuthNames,

@@ -1,0 +1,17 @@
+{
+  "schema_version": "teami-accepted-runtime-roles/v1",
+  "roles": {
+    "worker": {
+      "runtime": "fake",
+      "model": "worker-model"
+    },
+    "probe_judge": {
+      "runtime": "fake",
+      "model": "judge-model"
+    },
+    "orchestrator": {
+      "runtime": "fake",
+      "model": "driver-model"
+    }
+  }
+}
