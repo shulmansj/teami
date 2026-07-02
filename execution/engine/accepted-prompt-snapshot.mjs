@@ -124,8 +124,8 @@ function splitAcceptedPromptSnapshot(snapshotText) {
 
 function assertSafeAcceptedPromptContent(contentText) {
   for (const sentinel of [
-    "<!-- agentic_factory_promotion:begin -->",
-    "<!-- agentic_factory_promotion:end -->",
+    "<!-- teami_promotion:begin -->",
+    "<!-- teami_promotion:end -->",
   ]) {
     if (contentText.includes(sentinel)) {
       throw new AcceptedPromptSnapshotError("accepted_prompt_snapshot_forbidden_sentinel", sentinel);

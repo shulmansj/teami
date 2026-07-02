@@ -8,8 +8,8 @@
 // a sibling of the control action, and is gated only at the single commit.
 //
 // There are exactly THREE actions:
-//   - invoke_library({ target_key })
-//   - invoke_one_off({ role_label, task, prompt, runtime_role })
+//   - invoke_library({ target_key, instance_id? })
+//   - invoke_one_off({ role_label, task, prompt, runtime_role, instance_id? })
 //   - terminate({ outcome, reason })
 //
 // This module is deliberately ROLE-AGNOSTIC about the run's flow: it knows
@@ -18,9 +18,10 @@
 import {
   AGENT_CHOOSABLE_OUTCOME_REASONS,
 } from "./orchestrator-terminal-vocabulary.mjs";
+import { STABLE_KEY_PATTERN } from "./stable-key-pattern.mjs";
 
 export const CONTROL_ACTION_SCHEMA_VERSION =
-  "agentic-factory-orchestrator-control-action/v1";
+  "teami-orchestrator-control-action/v1";
 
 // The three action kinds, frozen so callers can switch on a stable set.
 export const CONTROL_ACTION_KINDS = Object.freeze([
@@ -61,6 +62,8 @@ const ONE_OFF_REQUIRED_STRING_FIELDS = Object.freeze([
   "prompt",
 ]);
 
+const INSTANCE_ID_FIELD = "instance_id";
+
 // terminate is EXACTLY { outcome, reason } -- no extra fields. The parser
 // REJECTS any additional key so a malformed terminate cannot smuggle a
 // terminal-source control field (the breakdown cut `terminal_source_turn_id`:
@@ -74,6 +77,29 @@ function isRecord(value) {
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function isSafeInstanceId(value) {
+  if (!isNonEmptyString(value)) return false;
+  const segments = value.trim().split("#");
+  return segments.length <= 2 && segments.every((segment) => STABLE_KEY_PATTERN.test(segment));
+}
+
+function normalizedOptionalInstanceId(candidate, actionKind, reasons, { runtimeRole = null } = {}) {
+  if (!Object.hasOwn(candidate, INSTANCE_ID_FIELD)) return null;
+  if (!isSafeInstanceId(candidate.instance_id)) {
+    reasons.push(`${actionKind}_invalid_instance_id`);
+    return null;
+  }
+  const instanceId = candidate.instance_id.trim();
+  if (
+    isNonEmptyString(runtimeRole)
+    && instanceId.includes("#")
+    && !instanceId.startsWith(`${runtimeRole.trim()}#`)
+  ) {
+    reasons.push(`${actionKind}_instance_id_role_mismatch:${instanceId}`);
+  }
+  return instanceId;
 }
 
 function reject(reasons) {
@@ -114,10 +140,12 @@ function parseInvokeLibrary(candidate) {
   if (!isNonEmptyString(candidate.target_key)) {
     reasons.push("invoke_library_missing_target_key");
   }
+  const instanceId = normalizedOptionalInstanceId(candidate, "invoke_library", reasons);
   if (reasons.length > 0) return reject(reasons);
   return accept({
     action: "invoke_library",
     target_key: candidate.target_key.trim(),
+    ...(instanceId ? { instance_id: instanceId } : {}),
   });
 }
 
@@ -136,6 +164,12 @@ function parseInvokeOneOff(candidate, { invocableRoles = ONE_OFF_RUNTIME_ROLES }
   } else if (!allowedRuntimeRoles.includes(candidate.runtime_role.trim())) {
     reasons.push(`invoke_one_off_invalid_runtime_role:${candidate.runtime_role}`);
   }
+  const runtimeRole = isNonEmptyString(candidate.runtime_role)
+    ? candidate.runtime_role.trim()
+    : null;
+  const instanceId = normalizedOptionalInstanceId(candidate, "invoke_one_off", reasons, {
+    runtimeRole,
+  });
   if (reasons.length > 0) return reject(reasons);
   return accept({
     action: "invoke_one_off",
@@ -143,6 +177,7 @@ function parseInvokeOneOff(candidate, { invocableRoles = ONE_OFF_RUNTIME_ROLES }
     task: candidate.task,
     prompt: candidate.prompt,
     runtime_role: candidate.runtime_role.trim(),
+    ...(instanceId ? { instance_id: instanceId } : {}),
   });
 }
 

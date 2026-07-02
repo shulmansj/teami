@@ -49,7 +49,7 @@ const TARGET_SNAPSHOT_PATH =
   "execution/evals/decomposition/accepted-prompts/decomposition-quality-judge.md";
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-undo-answer-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-undo-answer-"));
 }
 
 function hex(label) {
@@ -57,7 +57,7 @@ function hex(label) {
 }
 
 function writeVerifiedGitHubState(root) {
-  const filePath = path.join(root, ".agentic-factory", "github-connection.json");
+  const filePath = path.join(root, ".teami", "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -151,7 +151,7 @@ function mergedMarker({ proposalInstanceId, withUndoFrame = true } = {}) {
     acceptedBaselineId: "sha256:old-accepted",
     normalizedEnvelopeHash: envelopeHash,
     policyHash: "policy-hash",
-    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     evidenceIds: { experiments: ["EXP1"], datasets: [], annotations: [] },
     proposalState: "proposed",
     undoBounds: withUndoFrame
@@ -170,7 +170,7 @@ function mergedPr({ number, proposalInstanceId, withUndoFrame = true }) {
     state: "closed",
     title: `Accepted proposal ${number}`,
     body: renderPromotionMarkerBlock(mergedMarker({ proposalInstanceId, withUndoFrame })),
-    head: { ref: `agentic-factory/promotion/prompt-decomposition-decomposition-quality-judge/${number}` },
+    head: { ref: `teami/promotion/prompt-decomposition-decomposition-quality-judge/${number}` },
     html_url: `mock://github/factory-owner/behavior-rules/pull/${number}`,
     created_at: "2026-06-17T10:00:00.000Z",
     closed_at: MERGED_AT,
@@ -234,7 +234,7 @@ function undoAnswerFor(report, proposalInstanceId) {
 
 test("B-READ: a merged change with no matching live run is not_used + reversible (still current)", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   // The merged version is still the current accepted version (not superseded).
   writeCurrentAcceptedIsMerged(root);
@@ -274,7 +274,7 @@ test("B-READ: a merged change with no matching live run is not_used + reversible
 
 test("B-READ: a merged change a live run consumed is used + not reversible", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   writeCurrentAcceptedIsMerged(root);
   // A LIVE run that consumed THIS target's merged version (captured at load ⇒
@@ -303,7 +303,7 @@ test("B-READ: a merged change a live run consumed is used + not reversible", asy
 
 test("B-READ: the merge-time boundary is gone — a captured-ref match counts even with an earlier completed_at", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   writeCurrentAcceptedIsMerged(root);
   // A LIVE run whose `completed_at` is BEFORE merged_at but whose CAPTURED ref
@@ -339,7 +339,7 @@ test("B-READ: the merge-time boundary is gone — a captured-ref match counts ev
 
 test("B-READ: a merged change with no run-version signal is unknown (possibly-used, conservative)", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   writeCurrentAcceptedIsMerged(root);
   // The run store is empty — the change predates any run-version record.
@@ -362,7 +362,7 @@ test("B-READ: a merged change with no run-version signal is unknown (possibly-us
 
 test("B-READ (Fix 2): a live run with NO usable refs for the target ⇒ unknown, never not_used", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   writeCurrentAcceptedIsMerged(root);
   // A LIVE run with EMPTY accepted_refs has no usable signal for the target. It
@@ -407,7 +407,7 @@ test("B-READ (Fix 2): a live run with NO usable refs for the target ⇒ unknown,
 
 test("B-READ (mixed evidence): a run that touched the target at an UNKNOWN version forbids not_used, even with another run's negative coverage", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   writeCurrentAcceptedIsMerged(root);
   // R0: a live run that consumed THIS target at an older, non-merged version —
@@ -453,7 +453,7 @@ test("B-READ (mixed evidence): a run that touched the target at an UNKNOWN versi
 
 test("B-READ (Fix 3): a superseded change is not reversible even when not_used", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   // The CURRENT accepted version for TARGET is a DIFFERENT (newer) version: a
   // later PR merged a newer version of the same target, superseding this one.
@@ -488,7 +488,7 @@ test("B-READ (Fix 3): a superseded change is not reversible even when not_used",
 
 test("B-READ: when the current accepted ref cannot be resolved, superseded is unknown ⇒ not reversible", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   // No phoenix-assets manifest under root ⇒ the current accepted ref cannot be
   // resolved ⇒ superseded is "unknown" ⇒ conservative (not reversible) even
@@ -522,7 +522,7 @@ test("B-READ: when the current accepted ref cannot be resolved, superseded is un
 
 test("B-READ: an eval-only run does NOT count as consumption", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   writeCurrentAcceptedIsMerged(root);
   // A run that DID consume this target's merged version, but in EVAL mode —
@@ -556,7 +556,7 @@ test("B-READ: an eval-only run does NOT count as consumption", async () => {
 
 test("B-READ worklist authority: a stale registry cache must not override live marker/PR state", async () => {
   const root = tempRoot();
-  const runStoreDir = path.join(root, ".agentic-factory", "runs");
+  const runStoreDir = path.join(root, ".teami", "runs");
   writeVerifiedGitHubState(root);
   writeCurrentAcceptedIsMerged(root);
 
@@ -564,7 +564,7 @@ test("B-READ worklist authority: a stale registry cache must not override live m
   const envelopeHash = hex(proposalInstanceId);
   // A STALE registry cache row claims this proposal is still an OPEN PR (an
   // earlier snapshot). Live PR state below says it is MERGED and accepted.
-  const registryDir = path.join(root, ".agentic-factory", "promotion-candidates");
+  const registryDir = path.join(root, ".teami", "promotion-candidates");
   fs.mkdirSync(registryDir, { recursive: true });
   fs.writeFileSync(path.join(registryDir, `${envelopeHash}.json`), `${JSON.stringify({
     schema_version: PROMOTION_REGISTRY_SCHEMA_VERSION,
@@ -575,7 +575,7 @@ test("B-READ worklist authority: a stale registry cache must not override live m
     candidate_version_id: "PV1",
     accepted_baseline_id: "sha256:old-accepted",
     receipt_id: "expr-authority",
-    phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     evidence_ids: { experiments: ["EXP1"], datasets: [], annotations: [] },
     // Stale cache asserts an OPEN PR #99 (a number that does NOT exist live).
     pr: { number: 99, url: "mock://pr/99", state: "open", dry_run: true },

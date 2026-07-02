@@ -1,6 +1,6 @@
 # Documentation
 
-This map points to Agentic Factory's durable public docs. Use it to find the
+This map points to Teami's durable public docs. Use it to find the
 owner document for a claim before editing or relying on it.
 
 ## Owner Docs

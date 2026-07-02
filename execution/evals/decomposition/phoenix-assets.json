@@ -4,7 +4,7 @@
   "phoenix": {
     "expected_origin": "http://127.0.0.1:6006",
     "server_package_pin": "arize-phoenix==14.13.0",
-    "project_name": "agentic-factory"
+    "project_name": "teami"
   },
   "prompts": [
     {
@@ -16,9 +16,9 @@
       "prompt_name": null,
       "prompt_id": null,
       "accepted_prompt_version_id": "UHJvbXB0VmVyc2lvbjox",
-      "accepted_tag": "agentic_factory_accepted",
+      "accepted_tag": "teami_accepted",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/decomposition-quality-judge.md",
-      "snapshot_sha256": "ebd68b2a9e2a1af4b80714582ce195ed88d3e0c560b66d2c5d2ce83c3abdb3bb",
+      "snapshot_sha256": "c174b595d7728ef7b33a915ee4c0b7a809ca2a1c888ebcf9290c878ba7cb1d53",
       "prompt_version": "UHJvbXB0VmVyc2lvbjox",
       "rubric_version": "1.0.0",
       "failure_taxonomy_version": "1.0.0",
@@ -33,8 +33,8 @@
       "prompt_name": null,
       "prompt_id": null,
       "accepted_prompt_version_id": null,
-      "accepted_tag": "agentic_factory_accepted",
-      "candidate_tag": "agentic_factory_promotion_candidate",
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/pm-product-sufficiency-pass.md",
       "snapshot_sha256": "41fceb1ee15b9aa2c6905fe06e7acfa08eb0c4401e8431a26d7e0e980666bca1",
       "prompt_version": "unpinned-initial"
@@ -48,8 +48,8 @@
       "prompt_name": null,
       "prompt_id": null,
       "accepted_prompt_version_id": null,
-      "accepted_tag": "agentic_factory_accepted",
-      "candidate_tag": "agentic_factory_promotion_candidate",
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/sr-eng-grounding-pass.md",
       "snapshot_sha256": "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843",
       "prompt_version": "unpinned-initial"
@@ -63,10 +63,10 @@
       "prompt_name": null,
       "prompt_id": null,
       "accepted_prompt_version_id": null,
-      "accepted_tag": "agentic_factory_accepted",
-      "candidate_tag": "agentic_factory_promotion_candidate",
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/pm-synthesis.md",
-      "snapshot_sha256": "7655171d4b764f74138b6b9f6d9160a086c7aeb695917daf00f25c04bb280e64",
+      "snapshot_sha256": "708d18dd67ca915d188ee164a40f738c16cfb5c289b67f45b705562c24c8ba60",
       "prompt_version": "unpinned-initial"
     },
     {
@@ -78,8 +78,8 @@
       "prompt_name": null,
       "prompt_id": null,
       "accepted_prompt_version_id": null,
-      "accepted_tag": "agentic_factory_accepted",
-      "candidate_tag": "agentic_factory_promotion_candidate",
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/sr-eng-blocker-check.md",
       "snapshot_sha256": "49b008b257f93f889e5d3931eb0c06c090c5444346840ed1b36b8bc31b35a917",
       "prompt_version": "unpinned-initial"
@@ -93,10 +93,10 @@
       "prompt_name": null,
       "prompt_id": null,
       "accepted_prompt_version_id": null,
-      "accepted_tag": "agentic_factory_accepted",
-      "candidate_tag": "agentic_factory_promotion_candidate",
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/orchestrator-governing.md",
-      "snapshot_sha256": "34b57bcf5ae41321a636b0fd71bd5ef89d2fb71c9173b38697c8276da6e89bb8",
+      "snapshot_sha256": "9230bafbaf10b5d6bd9511898b7f65ce3d3cf3ea507d127d5a866e3fffce3ace",
       "prompt_version": "unpinned-initial"
     }
   ],
@@ -133,12 +133,12 @@
       "artifact_kind": "runtime_role_defaults",
       "materializer": "eval_variant_to_runtime_role_defaults",
       "artifact_path": "execution/evals/decomposition/accepted-runtime-roles.json",
-      "snapshot_sha256": "6dfe02393ec63076cfb3a2166984cf1b3951f16792c9edf1ae3b9b7ca26bea53"
+      "snapshot_sha256": "98b1f2498affda7bcf945fa49e20d68143970ff4105c59e50c9d67a0e265252c"
     }
   ],
   "datasets": [
     {
-      "name": "agentic-factory-decomposition-examples",
+      "name": "teami-decomposition-examples",
       "dataset_id": "RGF0YXNldDox",
       "accepted_dataset_version_id": "RGF0YXNldFZlcnNpb246Mg==",
       "splits": {

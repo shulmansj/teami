@@ -12,6 +12,12 @@ import {
   PROMOTION_MARKER_SENTINEL_BEGIN,
   renderPromotionMarkerBlock,
 } from "../src/promote-candidate.mjs";
+import {
+  emptyDomainRegistry,
+  makeDomainRecord,
+  upsertDomainRecord,
+  writeDomainRegistry,
+} from "../src/domain-registry.mjs";
 import { buildPromotionPrBody } from "../src/promotion-pr-body.mjs";
 import {
   acquireImprovementDraftLock,
@@ -414,7 +420,7 @@ test("valid draft runs the full register -> experiment receipt -> tag chain", as
   assert.equal(result.ok, true);
   assert.equal(result.chain_state, "tagged");
   assert.equal(result.human_name, HUMAN_NAME);
-  assert.equal(result.drafted_by, "agentic_factory_drafter_v1:claude-opus-4-8");
+  assert.equal(result.drafted_by, "teami_drafter_v1:claude-opus-4-8");
   assert.equal(capturedCommand.mode, "session_start");
   assert.equal(capturedCommand.generation_schema_path, IMPROVEMENT_DRAFT_OUTPUT_SCHEMA_PATH);
   const receipt = JSON.parse(fs.readFileSync(result.receipt_path, "utf8"));
@@ -423,7 +429,7 @@ test("valid draft runs the full register -> experiment receipt -> tag chain", as
   assert.equal(receipt.target_key, TARGET_KEY);
   assert.deepEqual(receipt.validated_failure_mode_ids, [VALID_MODE]);
   assert.equal(receipt.supersede_existing_candidate, true);
-  assert.equal(receipt.drafted_by, "agentic_factory_drafter_v1:claude-opus-4-8");
+  assert.equal(receipt.drafted_by, "teami_drafter_v1:claude-opus-4-8");
   assert.equal(receipt.content_sha256, sha256(content));
   assert.equal(receipt.content_byte_size, Buffer.byteLength(content, "utf8"));
   assert.equal(path.basename(result.content_path), receipt.content_path);
@@ -439,19 +445,123 @@ test("valid draft runs the full register -> experiment receipt -> tag chain", as
   });
   assert.equal(chain.registerCalls[0].contentText, composableDraftContent("Improved accepted prompt content"));
   assert.equal(chain.experimentCalls[0].intentFlag, "promotion_candidate");
-  assert.equal(chain.experimentCalls[0].draftedBy, "agentic_factory_drafter_v1:claude-opus-4-8");
+  assert.equal(chain.experimentCalls[0].draftedBy, "teami_drafter_v1:claude-opus-4-8");
   assert.deepEqual(chain.experimentCalls[0].derivedVariant, receipt.derived_variant);
   assert.deepEqual(chain.tagPosts, [{
     pathname: "/v1/prompt_versions/PV-DRAFT/tags",
     body: {
-      name: "agentic_factory_promotion_candidate",
-      description: "Agentic Factory promotion candidate intent; managed experiment receipt recorded before tag.",
+      name: "teami_promotion_candidate",
+      description: "Teami promotion candidate intent; managed experiment receipt recorded before tag.",
     },
   }]);
 
   assert.equal(
     formatImprovementDraftReport(result)[0],
     "Drafted a candidate change for Sr-eng grounding prompt; experiment recorded. Next: promotion will propose it as a PR if it passes the gate.",
+  );
+});
+
+test("drafter emits a github_behavior_repo trace with asked, did, outcome, and settings spans", async () => {
+  const fixture = makeTempRepo();
+  const chain = makeChainFakes();
+  let startArgs = null;
+  let finishArgs = null;
+  const sinkFactory = () => ({
+    async startAgentRun(args) {
+      startArgs = args;
+      return { ok: true, traceId: "33333333333333333333333333333333", run: { run_id: args.runId } };
+    },
+    async finishRun(args) {
+      finishArgs = args;
+      return { status: "trace_exported", traceId: "33333333333333333333333333333333" };
+    },
+    async shutdown() {},
+  });
+
+  const result = await runHarness(fixture, {
+    chain,
+    sinkFactory,
+    resolveRepoIdentity: () => ({
+      ...identityOk(),
+      repo_id: "R_behavior_repo_1",
+    }),
+    runCommand: async () => validDraftJson({
+      draft_content: composableDraftContent("trace-visible draft content"),
+      change_summary: "Trace-visible change summary.",
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.chain_state, "tagged");
+  assert.equal(startArgs.domainId, "support-ops");
+  assert.equal(startArgs.agentRole, "self_improvement_drafter");
+  assert.equal(startArgs.workflowType, "self_improvement_draft");
+  assert.deepEqual(startArgs.resource, {
+    kind: "github_behavior_repo",
+    id: "R_behavior_repo_1",
+    label: "octo/teami",
+  });
+  assert.equal(Object.hasOwn(startArgs, "workspaceId"), false);
+  assert.equal(Object.hasOwn(startArgs, "teamId"), false);
+
+  const trace = finishArgs.result.trace;
+  assert.equal(trace.attributes["resource.kind"], "github_behavior_repo");
+  assert.equal(trace.attributes["resource.id"], "R_behavior_repo_1");
+  assert.equal(trace.attributes["resource.label"], "octo/teami");
+  assert.equal(trace.attributes["github.behavior_repo_id"], "R_behavior_repo_1");
+  assert.equal(trace.attributes["github.behavior_repo_label"], "octo/teami");
+  assert.equal(trace.attributes["teami.domain_id"], "support-ops");
+  assert.equal(trace.attributes["teami.agent_role"], "self_improvement_drafter");
+
+  const spans = Object.fromEntries(trace.spans.map((span) => [span.name, span.attributes]));
+  assert.match(spans["self_improvement_drafter.asked"].prompt, /Teami improvement drafter/);
+  assert.match(spans["self_improvement_drafter.asked"].prompt, new RegExp(TARGET_KEY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(spans["self_improvement_drafter.settings"].runtime, "claude");
+  assert.equal(spans["self_improvement_drafter.settings"].model, "claude-opus-4-8");
+  assert.match(spans["self_improvement_drafter.did"].runtime_output, /trace-visible draft content/);
+  assert.match(spans["self_improvement_drafter.did.parsed"].draft_content, /trace-visible draft content/);
+  assert.equal(spans["self_improvement_drafter.outcome"].draft_id, result.draft_id);
+  assert.equal(spans["self_improvement_drafter.outcome"].receipt_path, result.receipt_path);
+  assert.equal(spans["self_improvement_drafter.outcome"].chain_state, "tagged");
+  assert.equal(finishArgs.result.status, "completed");
+});
+
+test("throwing trace sink leaves drafter outcome and receipt unchanged", async () => {
+  const baseline = makeTempRepo();
+  const baselineResult = await runHarness(baseline, {
+    sinkFactory: noopTraceSinkFactory(),
+    runCommand: async () => validDraftJson({
+      draft_content: composableDraftContent("sink failure comparison content"),
+    }),
+  });
+  const baselineReceipt = JSON.parse(fs.readFileSync(baselineResult.receipt_path, "utf8"));
+
+  const failing = makeTempRepo();
+  const failingResult = await runHarness(failing, {
+    sinkFactory: () => ({
+      async startAgentRun() {
+        throw new Error("synthetic_trace_start_failure");
+      },
+      async finishRun() {
+        throw new Error("synthetic_trace_finish_failure");
+      },
+      async shutdown() {
+        throw new Error("synthetic_trace_shutdown_failure");
+      },
+    }),
+    runCommand: async () => validDraftJson({
+      draft_content: composableDraftContent("sink failure comparison content"),
+    }),
+  });
+  const failingReceipt = JSON.parse(fs.readFileSync(failingResult.receipt_path, "utf8"));
+
+  assert.equal(failingResult.ok, baselineResult.ok);
+  assert.equal(failingResult.chain_state, baselineResult.chain_state);
+  assert.equal(failingResult.draft_id, baselineResult.draft_id);
+  assert.equal(failingResult.content_sha256, baselineResult.content_sha256);
+  assert.deepEqual(
+    normalizeFixturePaths(failingReceipt, failing.repoRoot),
+    normalizeFixturePaths(baselineReceipt, baseline.repoRoot),
   );
 });
 
@@ -549,7 +659,7 @@ test("hostile drafted content remains data through registration and PR rendering
       acceptedBaselineId: `sha256:${"b".repeat(64)}`,
       normalizedEnvelopeHash: "c".repeat(64),
       policyHash: "d".repeat(64),
-      phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+      phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
       evidenceIds: {
         experiments: [receipt.phoenix_experiment_id],
         datasets: [{ dataset_id: "DS1", dataset_version_id: "DSV1" }],
@@ -602,7 +712,7 @@ test("hostile drafted content remains data through registration and PR rendering
   ]) {
     assert.ok(!reviewLayers.includes(forbidden), `review layers must not render hostile draft payload: ${forbidden}`);
   }
-  assert.match(reviewLayers, /Machine-drafted candidate \(agentic_factory_drafter_v1:claude-opus-4-8\)/);
+  assert.match(reviewLayers, /Machine-drafted candidate \(teami_drafter_v1:claude-opus-4-8\)/);
   assert.ok(body.includes("Candidate content excerpt:"));
 });
 
@@ -1155,7 +1265,7 @@ test("phase prompt resume revalidates composability for every pre-tagged state",
     "registration_failed",
     "registered",
     "experiment_failed_no_tag_applied",
-    "experiment_recorded_no_tag_applied",
+    "experiment_recorded",
     "tag_occupied_no_tag_applied",
     "tag_apply_failed",
   ];
@@ -1366,7 +1476,7 @@ test("hostile opportunity drops invalid taxonomy ids and foreign Phoenix links b
           annotation_ids: ["ANN1"],
           phoenix_deep_links: [
             "http://127.0.0.1:6006/datasets/DS1/experiments/EXP1",
-            "http://127.0.0.1:6006/admin/projects/agentic-factory",
+            "http://127.0.0.1:6006/admin/projects/teami",
             "https://evil.example/datasets/DS1/experiments/EXP1",
           ],
         },
@@ -1503,7 +1613,7 @@ function makeTempRepo({
     manifestPath,
     `${JSON.stringify({
       schema_version: 1,
-      phoenix: { expected_origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+      phoenix: { expected_origin: "http://127.0.0.1:6006", project_name: "teami" },
       prompts: [{
         role: DEFAULT_TARGET_ROLE,
         target_key: TARGET_KEY,
@@ -1538,11 +1648,26 @@ function makeTempRepo({
     `${JSON.stringify(policy({ maxDrafts }), null, 2)}\n`,
     "utf8",
   );
+  writeDomainRegistry(
+    { repoRoot },
+    upsertDomainRecord(
+      emptyDomainRegistry(),
+      makeDomainRecord({
+        domainId: "support-ops",
+        status: "active",
+        workspaceId: "workspace-a",
+        workspaceName: "Support Ops",
+        teamId: "team-a",
+        teamKey: "SUP",
+        teamName: "Support Ops",
+      }),
+    ),
+  );
   return {
     repoRoot,
     policyPath,
     draftDir: defaultImprovementDraftDir(repoRoot),
-    registryDir: path.join(repoRoot, ".agentic-factory", "promotion-candidates"),
+    registryDir: path.join(repoRoot, ".teami", "promotion-candidates"),
     config: testConfig(),
   };
 }
@@ -1556,9 +1681,16 @@ async function runHarness(fixture, {
   opportunityHash = null,
   failureModeIds = [VALID_MODE],
   supersedeExistingCandidate = false,
-  datasetName = "agentic-factory-decomposition-examples",
+  datasetName = "teami-decomposition-examples",
   now = () => FIXED_NOW,
   randomHex = randomHexSequence(),
+  sinkFactory,
+  startAgentTrace,
+  startAgentTraceImpl,
+  statusProbe,
+  idFactory,
+  runnerReadyTimeoutMs,
+  onProgress = () => {},
 } = {}) {
   const harness = createImprovementDrafterTestHarness({
     config: fixture.config,
@@ -1570,11 +1702,18 @@ async function runHarness(fixture, {
     runCommand,
     registerPromptInPhoenixImpl: chain.registerPromptInPhoenixImpl,
     runDecompositionExperimentImpl: chain.runDecompositionExperimentImpl,
+    sinkFactory,
+    startAgentTrace,
+    startAgentTraceImpl,
+    statusProbe,
+    idFactory,
+    runnerReadyTimeoutMs,
     ensureReady: chain.ensureReady,
     fetchImpl: chain.fetchImpl,
     now,
     randomHex,
-    env: { AGENTIC_FACTORY_PHOENIX_URL: "http://127.0.0.1:6006" },
+    env: { TEAMI_PHOENIX_URL: "http://127.0.0.1:6006" },
+    onProgress,
   });
   return harness.runImprovementDrafter({
     repoRoot: fixture.repoRoot,
@@ -1584,6 +1723,29 @@ async function runHarness(fixture, {
     datasetName,
     supersedeExistingCandidate,
   });
+}
+
+function noopTraceSinkFactory() {
+  return () => ({
+    async startAgentRun(args) {
+      return { ok: true, traceId: "44444444444444444444444444444444", run: { run_id: args.runId } };
+    },
+    async finishRun() {
+      return { status: "trace_exported", traceId: "44444444444444444444444444444444" };
+    },
+    async shutdown() {},
+  });
+}
+
+function normalizeFixturePaths(value, repoRoot) {
+  if (typeof value === "string") return value.split(repoRoot).join("<repoRoot>");
+  if (Array.isArray(value)) return value.map((entry) => normalizeFixturePaths(entry, repoRoot));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, normalizeFixturePaths(entry, repoRoot)]),
+    );
+  }
+  return value;
 }
 
 function makeChainFakes({
@@ -1619,7 +1781,7 @@ function makeChainFakes({
         prompt_name: promptName,
         prompt_id: promptId,
         prompt_version_id: promptVersionId,
-        receipt_path: path.join(options.repoRoot, ".agentic-factory", "phoenix-prompt-registrations.json"),
+        receipt_path: path.join(options.repoRoot, ".teami", "phoenix-prompt-registrations.json"),
         manifest_mutated: false,
       };
     },
@@ -1629,15 +1791,15 @@ function makeChainFakes({
       return {
         ok: true,
         receipt_id: "expr-draft",
-        receipt_path: path.join(options.repoRoot, ".agentic-factory", "experiments", "expr-draft.json"),
+        receipt_path: path.join(options.repoRoot, ".teami", "experiments", "expr-draft.json"),
         phoenix_experiment_id: "EXP-DRAFT",
       };
     },
-    ensureReady: async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "agentic-factory" }),
+    ensureReady: async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" }),
     fetchImpl: async (url, init = {}) => {
       const parsed = new URL(String(url));
       const method = (init.method || "GET").toUpperCase();
-      if (method === "GET" && parsed.pathname === `/v1/prompts/${promptId}/tags/agentic_factory_promotion_candidate`) {
+      if (method === "GET" && parsed.pathname === `/v1/prompts/${promptId}/tags/teami_promotion_candidate`) {
         tagGets.push({ pathname: parsed.pathname });
         if (tagGetResponse) return tagGetResponse;
         if (!tagVersion) return jsonResponse({ detail: "not found" }, 404);
@@ -1733,7 +1895,7 @@ function testConfig() {
 
 function policy({ maxDrafts = 2 } = {}) {
   return {
-    schema_version: "agentic-factory-promotion-policy/v1",
+    schema_version: "teami-promotion-policy/v1",
     policy_version: "test",
     disabled: false,
     lookback_days: 90,
@@ -1748,13 +1910,13 @@ function policy({ maxDrafts = 2 } = {}) {
       enabled: true,
       freshness_window_days: 14,
       eligible_phoenix: {
-        project_names: ["agentic-factory"],
-        dataset_names: ["agentic-factory-decomposition-examples"],
+        project_names: ["teami"],
+        dataset_names: ["teami-decomposition-examples"],
         split_names: ["train", "test"],
       },
       explicit_intent_signals: {
         managed_experiment_receipt_intent: "promotion_candidate",
-        prompt_version_candidate_tag: "agentic_factory_promotion_candidate",
+        prompt_version_candidate_tag: "teami_promotion_candidate",
         repo_candidate_artifact_intent: "promotion_candidate",
         authenticated_registration: "deferred",
       },
@@ -1836,13 +1998,13 @@ function identityOk() {
   return {
     ok: true,
     connection_mode: "dry_run",
-    repo: { owner: "octo", repo: "agentic-factory" },
+    repo: { owner: "octo", repo: "teami" },
   };
 }
 
 function closedRejectedPr({
   targetKey,
-  headRef = "agentic-factory/promotion/prompt/decomposition/abc123",
+  headRef = "teami/promotion/prompt/decomposition/abc123",
 }) {
   return {
     number: 44,
@@ -1864,7 +2026,7 @@ function markerBody({ targetKey }) {
     acceptedBaselineId: "sha256:baseline",
     normalizedEnvelopeHash: "b".repeat(64),
     policyHash: "c".repeat(64),
-    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     evidenceIds: {
       experiments: ["EXP1"],
       datasets: [{ dataset_id: "DS1", dataset_version_id: "DSV1" }],
@@ -1933,7 +2095,7 @@ async function continueWithChain(fixture, draftId, chain) {
     repoRoot: fixture.repoRoot,
     draftDir: fixture.draftDir,
     draftId,
-    datasetName: "agentic-factory-decomposition-examples",
+    datasetName: "teami-decomposition-examples",
     config: fixture.config,
     policy: policy(),
     registerPromptInPhoenixImpl: chain.registerPromptInPhoenixImpl,
@@ -1962,7 +2124,7 @@ function baseReceipt(overrides = {}) {
       schema_path: IMPROVEMENT_DRAFT_OUTPUT_SCHEMA_PATH,
       generation_schema_path: IMPROVEMENT_DRAFT_OUTPUT_SCHEMA_PATH,
     },
-    drafted_by: "agentic_factory_drafter_v1:claude-opus-4-8",
+    drafted_by: "teami_drafter_v1:claude-opus-4-8",
     content_sha256: overrides.content_sha256 || null,
     content_byte_size: overrides.content_byte_size || 0,
     content_path: overrides.content_path || null,

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking a look at Agentic Factory.
+Thanks for taking a look at Teami.
 
 This repository is public so people can evaluate the product direction,
 implementation quality, and setup experience. Best-effort feedback is welcome

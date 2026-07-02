@@ -1,8 +1,12 @@
 import { hasRunIdLine } from "../../../engine/engine-markdown.mjs";
+import { parseResourceTargetFromDescription } from "./resource-target.mjs";
 
 const DEFAULT_ENDPOINT = "https://api.linear.app/graphql";
 const PAGE_SIZE = 50;
 const LABEL_PAGE_SIZE = 100;
+// Ready candidates hydrate relation edges for blocker state; keep this page
+// capped below project candidate pages to stay under Linear's 10k complexity cap.
+const READY_ISSUE_CANDIDATE_PAGE_SIZE = 10;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 1000;
 const LINEAR_RATE_LIMIT_HEADER_NAMES = [
   "x-ratelimit-requests-remaining",
@@ -80,6 +84,9 @@ const RELATED_ISSUE_FIELDS = `
   identifier
   title
   url
+  state {
+    type
+  }
 `;
 
 const ISSUE_RELATION_FIELDS = `
@@ -127,6 +134,44 @@ const ISSUE_FIELDS = `
 
 const ISSUE_WITH_RELATIONS_FIELDS = `
   ${ISSUE_FIELDS}
+  relations(first: ${LABEL_PAGE_SIZE}, includeArchived: true) {
+    nodes {
+      ${ISSUE_RELATION_FIELDS}
+    }
+  }
+  inverseRelations(first: ${LABEL_PAGE_SIZE}, includeArchived: true) {
+    nodes {
+      ${ISSUE_RELATION_FIELDS}
+    }
+  }
+`;
+
+const READY_ISSUE_CANDIDATE_FIELDS = `
+  id
+  identifier
+  title
+  description
+  url
+  createdAt
+  team {
+    id
+    key
+    name
+  }
+  project {
+    id
+    name
+    url
+  }
+  assignee {
+    id
+    name
+  }
+  state {
+    id
+    name
+    type
+  }
   relations(first: ${LABEL_PAGE_SIZE}, includeArchived: true) {
     nodes {
       ${ISSUE_RELATION_FIELDS}
@@ -423,6 +468,36 @@ export function createLinearGraphqlClient({
     );
   }
 
+  async function createWorkflowState(input = {}) {
+    const data = await request(
+      `
+        mutation CreateWorkflowState($input: WorkflowStateCreateInput!) {
+          workflowStateCreate(input: $input) {
+            success
+            workflowState {
+              ${WORKFLOW_STATE_FIELDS}
+            }
+          }
+        }
+      `,
+      {
+        input: pickDefined({
+          name: input.name,
+          type: input.type,
+          teamId: input.teamId,
+          color: input.color,
+          description: input.description,
+        }),
+      },
+    );
+    return requirePayload(
+      data.workflowStateCreate,
+      "workflowState",
+      normalizeWorkflowState,
+      "Linear workflow state creation",
+    );
+  }
+
   async function listProjectStatuses() {
     return paginateConnection({
       query: `
@@ -553,6 +628,64 @@ export function createLinearGraphqlClient({
     });
   }
 
+  async function getTeamGitAutomationSettings(teamId) {
+    if (typeof teamId !== "string" || teamId.trim() === "") {
+      throw new Error("teamId is required to inspect Linear Git automation settings.");
+    }
+
+    const gitAutomationStates = [];
+    let after = null;
+    let team = null;
+    do {
+      const data = await request(
+        `
+          query TeamGitAutomationSettings($teamId: String!, $after: String, $first: Int!) {
+            team(id: $teamId) {
+              id
+              key
+              name
+              mergeWorkflowState {
+                id
+                name
+                type
+              }
+              gitAutomationStates(first: $first, after: $after, includeArchived: false) {
+                nodes {
+                  id
+                  event
+                  branchPattern
+                  state {
+                    id
+                    name
+                    type
+                  }
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }
+        `,
+        { teamId, after, first: PAGE_SIZE },
+      );
+      if (!data.team?.id) throw new Error(`Linear team ${teamId} was not returned.`);
+      team ||= {
+        id: data.team.id,
+        key: data.team.key || null,
+        name: data.team.name || null,
+        mergeWorkflowState: normalizeNullableWorkflowState(data.team.mergeWorkflowState),
+      };
+      const connection = data.team.gitAutomationStates;
+      if (!connection) throw new Error("Linear team git automation settings were not returned.");
+      gitAutomationStates.push(...connectionNodes(connection).map(normalizeGitAutomationState));
+      after = nextCursor(connection, "team git automation states");
+    } while (after);
+
+    return { ...team, gitAutomationStates };
+  }
+
   async function findTemplatesByName(name, type, teamId) {
     const data = await request(`
       query Templates {
@@ -680,7 +813,27 @@ export function createLinearGraphqlClient({
     );
   }
 
-  async function listPlannedProjectCandidates(teamId, { first = 25, after = null } = {}) {
+  async function archiveProject(projectId) {
+    const data = await request(
+      `
+        mutation ArchiveProject($id: String!) {
+          projectArchive(id: $id) {
+            success
+            entity {
+              ${PROJECT_FIELDS}
+            }
+          }
+        }
+      `,
+      { id: projectId },
+    );
+    const payload = data.projectArchive;
+    if (payload?.success !== true) throw new Error("Linear project archive failed.");
+    if (!payload.entity?.id) throw new Error("Linear project archive did not return an archived project.");
+    return normalizeProjectBase(payload.entity);
+  }
+
+  async function listPlannedProjectCandidates(teamId, { plannedStateId = null, first = 25, after = null } = {}) {
     if (typeof teamId !== "string" || teamId.trim() === "") {
       throw new Error("teamId is required to list planned Linear project candidates.");
     }
@@ -722,9 +875,54 @@ export function createLinearGraphqlClient({
     }
     return {
       candidates: connectionNodes(projectsConnection)
-        .filter((project) => isPlannedProjectCandidateForTeam(project, teamId))
+        .filter((project) => isPlannedProjectCandidateForTeam(project, teamId, plannedStateId))
         .map(normalizePlannedProjectCandidate),
       pageInfo: normalizePageInfo(projectsConnection.pageInfo),
+      rateLimit,
+    };
+  }
+
+  async function listReadyIssueCandidates(
+    teamId,
+    { readyStateId, first = READY_ISSUE_CANDIDATE_PAGE_SIZE, after = null } = {},
+  ) {
+    if (typeof teamId !== "string" || teamId.trim() === "") {
+      throw new Error("teamId is required to list Ready Linear issue candidates.");
+    }
+    if (typeof readyStateId !== "string" || readyStateId.trim() === "") {
+      throw new Error("readyStateId is required to list Ready Linear issue candidates.");
+    }
+
+    const boundedFirst = readyIssueCandidatePageSize(first);
+    const { data, rateLimit } = await requestWithMeta(
+      `
+        query ReadyIssueCandidates($after: String, $first: Int!, $filter: IssueFilter!) {
+          issues(first: $first, after: $after, includeArchived: false, filter: $filter) {
+            nodes {
+              ${READY_ISSUE_CANDIDATE_FIELDS}
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      `,
+      {
+        after,
+        first: boundedFirst,
+        filter: issueFilter({ teamId, stateId: readyStateId }),
+      },
+    );
+    const issuesConnection = data.issues;
+    if (!issuesConnection) {
+      throw new Error("Linear Ready issue candidates query did not return an issues connection.");
+    }
+    return {
+      candidates: connectionNodes(issuesConnection)
+        .filter((issue) => isReadyIssueCandidateForTeam(issue, teamId, readyStateId))
+        .map(normalizeReadyIssueCandidate),
+      pageInfo: normalizePageInfo(issuesConnection.pageInfo),
       rateLimit,
     };
   }
@@ -836,8 +1034,16 @@ export function createLinearGraphqlClient({
     return normalizeIssue(data.issue);
   }
 
-  async function listIssues({ teamId, projectId, query: searchText, includeArchived = false } = {}) {
-    const filter = issueFilter({ teamId, projectId, searchText });
+  async function listIssues({
+    teamId,
+    projectId,
+    query: searchText,
+    includeArchived = false,
+    filter: explicitFilter = null,
+    stateId = null,
+    labelId = null,
+  } = {}) {
+    const filter = explicitFilter || issueFilter({ teamId, projectId, searchText, stateId, labelId });
     return paginateConnection({
       query: `
         query Issues($after: String, $first: Int!, $includeArchived: Boolean!, $filter: IssueFilter) {
@@ -914,6 +1120,26 @@ export function createLinearGraphqlClient({
       },
     );
     return requirePayload(data.issueUpdate, "issue", normalizeIssue, "Linear issue update");
+  }
+
+  async function archiveIssue(issueId) {
+    const data = await request(
+      `
+        mutation ArchiveIssue($id: String!) {
+          issueArchive(id: $id) {
+            success
+            entity {
+              ${ISSUE_FIELDS}
+            }
+          }
+        }
+      `,
+      { id: issueId },
+    );
+    const payload = data.issueArchive;
+    if (payload?.success !== true) throw new Error("Linear issue archive failed.");
+    if (!payload.entity?.id) throw new Error("Linear issue archive did not return an archived issue.");
+    return normalizeIssue(payload.entity);
   }
 
   async function findOrCreateIssueRelation(input = {}) {
@@ -1065,18 +1291,22 @@ export function createLinearGraphqlClient({
     createProjectLabel,
     findIssueLabelsByName,
     createIssueLabel,
+    createWorkflowState,
     listProjectStatuses,
     listWebhooks,
     createWebhook,
     updateWebhook,
     deleteWebhook,
     listWorkflowStates,
+    getTeamGitAutomationSettings,
     findTemplatesByName,
     createTemplate,
     updateTemplate,
     createProject,
     updateProject,
+    archiveProject,
     listPlannedProjectCandidates,
+    listReadyIssueCandidates,
     getProjectSnapshotContext,
     getProjectContext,
     listProjectIssues,
@@ -1086,6 +1316,7 @@ export function createLinearGraphqlClient({
     searchIssues,
     createIssue,
     updateIssue,
+    archiveIssue,
     findOrCreateIssueRelation,
     createProjectUpdate,
     listProjectUpdates,
@@ -1106,10 +1337,12 @@ export function createLinearGraphqlClient({
   }
 }
 
-function issueFilter({ teamId, projectId, searchText }) {
+function issueFilter({ teamId, projectId, searchText, stateId, labelId }) {
   const clauses = [];
   if (teamId) clauses.push({ team: { id: { eq: teamId } } });
   if (projectId) clauses.push({ project: { id: { eq: projectId } } });
+  if (stateId) clauses.push({ state: { id: { eq: stateId } } });
+  if (labelId) clauses.push({ labels: { id: { eq: labelId } } });
   if (searchText) {
     clauses.push({
       or: [
@@ -1197,6 +1430,24 @@ function normalizeWorkflowState(state) {
   };
 }
 
+function normalizeNullableWorkflowState(state) {
+  if (!state) return null;
+  return {
+    id: state.id,
+    name: state.name || null,
+    type: state.type || null,
+  };
+}
+
+function normalizeGitAutomationState(state) {
+  return {
+    id: state.id,
+    event: state.event || null,
+    branchPattern: state.branchPattern || null,
+    state: normalizeNullableWorkflowState(state.state),
+  };
+}
+
 function normalizeTemplate(template) {
   const templateData = parseTemplateData(template.templateData);
   return {
@@ -1238,11 +1489,15 @@ function normalizeProjectBase(project) {
   };
 }
 
-function isPlannedProjectCandidateForTeam(project, teamId) {
-  return (
-    project?.status?.type === "planned" &&
-    connectionNodes(project.teams).some((team) => team?.id === teamId)
-  );
+function isPlannedProjectCandidateForTeam(project, teamId, plannedStateId = null) {
+  const belongsToTeam = connectionNodes(project.teams).some((team) => team?.id === teamId);
+  if (!belongsToTeam) return false;
+  if (plannedStateId) return project?.status?.id === plannedStateId;
+  return project?.status?.type === "planned";
+}
+
+function isReadyIssueCandidateForTeam(issue, teamId, readyStateId) {
+  return issue?.team?.id === teamId && issue?.state?.id === readyStateId;
 }
 
 function normalizePlannedProjectCandidate(project) {
@@ -1254,6 +1509,21 @@ function normalizePlannedProjectCandidate(project) {
       nodes: connectionNodes(project.teams).map((team) => ({ id: team.id })),
     },
   };
+}
+
+function normalizeReadyIssueCandidate(issue) {
+  return {
+    ...normalizeIssue(issue),
+    createdAt: issue.createdAt || null,
+  };
+}
+
+function readyIssueCandidatePageSize(first) {
+  if (first === null || first === undefined) return READY_ISSUE_CANDIDATE_PAGE_SIZE;
+  if (!Number.isInteger(first) || first < 1) {
+    throw new Error("Ready Linear issue candidate page size must be a positive integer.");
+  }
+  return Math.min(first, READY_ISSUE_CANDIDATE_PAGE_SIZE);
 }
 
 function normalizeProjectSnapshotBase(project) {
@@ -1284,11 +1554,13 @@ function normalizeSnapshotIssue(issue) {
 }
 
 function normalizeIssue(issue) {
+  const description = issue.description || "";
+  const resourceTarget = parseResourceTargetFromDescription(description);
   return {
     id: issue.id,
     identifier: issue.identifier || null,
     title: issue.title || "",
-    description: issue.description || "",
+    description,
     url: issue.url || null,
     teamId: issue.team?.id || null,
     team: issue.team
@@ -1327,6 +1599,7 @@ function normalizeIssue(issue) {
         ...connectionNodes(issue.inverseRelations).map(normalizeIssueRelation),
       ].filter((relation) => relation.id),
     ),
+    ...(resourceTarget ? { resource_target: resourceTarget } : {}),
   };
 }
 
@@ -1341,12 +1614,16 @@ function normalizeIssueRelation(relation) {
 
 function normalizeRelatedIssue(issue) {
   if (!issue) return null;
-  return {
+  const normalized = {
     id: issue.id,
     identifier: issue.identifier || null,
     title: issue.title || "",
     url: issue.url || null,
   };
+  if (Object.hasOwn(issue, "state")) {
+    normalized.state = issue.state ? { type: issue.state.type || null } : null;
+  }
+  return normalized;
 }
 
 function connectionNodes(connection) {

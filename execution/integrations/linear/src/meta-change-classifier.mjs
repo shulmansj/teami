@@ -5,7 +5,7 @@ import {
   decompositionEvalNamespacePath,
 } from "./workflows/decomposition/eval-paths.mjs";
 
-export const META_CHANGE_CLASSIFIER_SCHEMA_VERSION = "agentic-factory-meta-change-classifier/v1";
+export const META_CHANGE_CLASSIFIER_SCHEMA_VERSION = "teami-meta-change-classifier/v1";
 
 export const META_CHANGE_CLASSES = Object.freeze([
   "ordinary_semantic",
@@ -28,7 +28,7 @@ const CLASS_PRIORITY = Object.freeze({
 // The classifier's FACTORY-PROTECTION path maps (EXACT_PROTECTED_PATHS minus the
 // ORDINARY_PROMPT_PATHS exception below, PREFIX_PROTECTED_PATHS, and
 // NEW_FILE_SENSITIVE_ROOTS) have a single machine-readable source of record:
-// `maintainers/contracts/protected-slots.json`.
+// `docs/contracts/protected-slots.json`.
 //
 // PROTECTED_SLOTS below is the in-code PROJECTION of that JSON. The engine reads
 // only this embedded projection at runtime — it never reads the JSON file at
@@ -44,11 +44,11 @@ const CLASS_PRIORITY = Object.freeze({
 // To change a factory-protection slot: edit BOTH the JSON and this projection in
 // the same change (the currency test enforces that they move together).
 export const PROTECTED_SLOTS = Object.freeze({
-  schema_version: "agentic-factory-protected-slots/v1",
+  schema_version: "teami-protected-slots/v1",
   exact_paths: Object.freeze([
-    { path: "maintainers/contracts/meta-change-classifier-contract.md", class: "meta_change", surface: "protected_path_map" },
-    { path: "maintainers/contracts/agentic-factory-product-trust-record.md", class: "meta_change", surface: "product_trust_contract" },
-    { path: "maintainers/contracts/authority-custody-defaults.md", class: "authority_change", surface: "authority_custody_contract" },
+    { path: "docs/contracts/meta-change-classifier-contract.md", class: "meta_change", surface: "protected_path_map" },
+    { path: "docs/contracts/teami-product-trust-record.md", class: "meta_change", surface: "product_trust_contract" },
+    { path: "docs/contracts/authority-custody-defaults.md", class: "authority_change", surface: "authority_custody_contract" },
     { path: "docs/promotion-acceptance-policy.md", class: "meta_change", surface: "promotion_acceptance_policy" },
     { path: "docs/self-improvement.md", class: "meta_change", surface: "self_improvement_contract" },
     { path: decompositionEvalNamespacePath("readme.md"), class: "meta_change", surface: "eval_contract" },
@@ -112,7 +112,7 @@ export const PROTECTED_SLOTS = Object.freeze({
     { path: "execution/integrations/linear/src/meta-change-classifier.mjs", class: "meta_change", surface: "meta_change_classifier" },
   ].map((entry) => Object.freeze({ ...entry }))),
   prefix_paths: Object.freeze([
-    { prefix: "maintainers/contracts/", class: "meta_change", surface: "maintainer_contract", broad_default: true },
+    { prefix: "docs/contracts/", class: "meta_change", surface: "maintainer_contract", broad_default: true },
     { prefix: `${DECOMPOSITION_EVAL_NAMESPACE}/rubrics/`, class: "meta_change", surface: "rubric" },
     { prefix: "execution/integrations/linear/src/promotion/", class: "meta_change", surface: "promotion_machinery" },
     { prefix: "execution/integrations/linear/src/promotion-scanner/", class: "meta_change", surface: "promotion_scanner" },
@@ -127,7 +127,7 @@ export const PROTECTED_SLOTS = Object.freeze({
     "execution/",
     "supabase/functions/",
     "supabase/migrations/",
-    "maintainers/contracts/",
+    "docs/contracts/",
   ]),
 });
 

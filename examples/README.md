@@ -2,7 +2,7 @@
 
 Provenance: hand-curated from current output.
 
-Examples show how Agentic Factory artifacts should read without requiring a
+Examples show how Teami artifacts should read without requiring a
 visitor to connect a real Linear workspace.
 
 ## Portfolio Demo

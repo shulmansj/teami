@@ -13,7 +13,7 @@ import {
 const REQUIRED_CAPABILITIES = ["linear.project.planned", "decomposition.trigger_runner.v1"];
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-local-trigger-store-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-local-trigger-store-"));
 }
 
 function sequenceIds() {

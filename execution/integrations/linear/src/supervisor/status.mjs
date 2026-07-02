@@ -1,3 +1,4 @@
+import { doctorCheck } from "../doctor-check.mjs";
 import {
   defaultPromotionCandidateLedgerDir,
   promotionScannerHealthPath,
@@ -36,12 +37,15 @@ export async function localSupervisorDoctorChecks({
     now,
   });
   const checks = [];
-  checks.push({
+  // Posture, not a failure: the foreground gateway is the intended path and OS autostart is an
+  // unshipped operator feature, so this is a non-blocking `warn` (S3 producer-classification), not
+  // a `fail` that would turn doctor red or block onboarding.
+  checks.push(doctorCheck({
     name: "local supervisor OS autostart",
-    ok: false,
+    state: "warn",
     message:
       "DRY-RUN only: no OS login/autostart item is registered; supervisor:run remains an operator command.",
-  });
+  }));
   checks.push({
     name: "local supervisor disabled flag",
     ok: !status.disable.disabled,
@@ -147,6 +151,9 @@ export function formatLocalSupervisorRunReport(result) {
     }
     if (iteration.scanner) {
       lines.push(`    scanner: ${iteration.scanner.status}${iteration.scanner.reason ? ` (${iteration.scanner.reason})` : ""}`);
+    }
+    if (iteration.export) {
+      lines.push(`    export: ${iteration.export.status}${iteration.export.reason ? ` (${iteration.export.reason})` : ""}`);
     }
   }
   return lines;

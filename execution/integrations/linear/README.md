@@ -9,10 +9,10 @@ The intended public setup entrypoint is:
 
 ```text
 npm run init
-npm run domain:bind-repo -- --domain main --path ../product-app
+teami domain grant main --repo owner/product-app
 ```
 
-`npm run init` authorizes Linear in the browser with the Agentic Factory OAuth
+`npm run init` authorizes Linear in the browser with the Teami OAuth
 app, then uses Linear GraphQL to provision the workspace: browser
 authorization, dedicated team, required labels, project status mappings,
 project template, local gateway state, managed or reused local Phoenix, and
@@ -26,7 +26,7 @@ once the public repository enables it.
 
 ## Responsibility Split
 
-Agentic Factory deliberately keeps live authority local.
+Teami deliberately keeps live authority local.
 
 The local gateway polls Linear's current state with the adopter's OAuth grant,
 computes trigger fingerprints, records local wake state, and leases work to a
@@ -42,9 +42,10 @@ adopter machine, and exports trace/eval evidence to local Phoenix.
 The behavior-repo GitHub path uses the adopter's own git/`gh` auth for setup
 transport and reviewable process-change proposal branches. It is distinct from
 product-repo binding. Product-repo binding is a local domain `git_repo`
-checkout binding included by the landed domain resource-binding work. It binds
-one existing local checkout per domain and must not be treated as proved by
-behavior-repo PR access.
+selection included by the landed domain resource-binding work. It binds one
+selected GitHub repo identity per domain; execution clones that repo fresh per
+run through ambient local GitHub authority, then strips the worker checkout. It
+must not be treated as proved by behavior-repo PR access.
 
 If Linear OAuth, local git, or `gh` authority is unavailable, setup, doctor,
 gateway, and proposal paths fail closed or report the local authorization
@@ -65,7 +66,7 @@ runner when work is claimed.
 
 This is technical/operator detail for the local setup slice. It is not a
 raw-command-free setup promise. Setup commands can create or update Linear
-workspace objects and the dedicated Agentic Factory behavior repo connection.
+workspace objects and the dedicated Teami behavior repo connection.
 
 Sandbox operation after setup, required when decomposition work is exercised:
 
@@ -81,7 +82,9 @@ npm run phoenix:stop
 npm run preflight:phoenix
 npm run phoenix:annotate-trace -- <trace_id> <label> <score> <explanation> [--name <dimension>] [--kind HUMAN|LLM|CODE] [--identifier <id>] [--maturity new|calibrating|stable]
 npm run phoenix:promote-run -- <run_id> [dataset_name]
-npm run domain:bind-repo -- --domain main --path ../product-app
+teami domain show main
+teami domain grant main --repo owner/product-app
+teami domain revoke main --repo owner/product-app
 npm run worklist
 npm run uninstall
 npm run doctor:linear
@@ -90,14 +93,15 @@ npm run doctor:linear
 `npm run init` is the runnable setup path. The GitHub phase connects the Agentic
 Factory behavior repo: create or verify the dedicated behavior repo, preserve
 starter/upstream remotes only as template state, verify local git/`gh` access
-to the configured repo, and check PR-generation readiness. Init does not bind
+to the configured repo, and check PR-generation readiness. Init does not grant
 product repos through that behavior-repo connection.
-Product repos are bound explicitly per domain with
-`npm run domain:bind-repo -- --domain <id> --path <path>`, which records the
-one existing checkout path, `owner/repo`, and default branch for that domain.
-That product-repo binding is distinct from the behavior-repo setup under
+Product repos are granted per domain as GitHub coordinates: `owner/repo` and
+default branch, with no local checkout path. Setup can discover the initial
+allowlist, and later scripted changes use `teami domain grant <id>
+--repo <owner/name>` or `teami domain revoke <id> --repo <owner/name>`.
+That product-repo grant set is distinct from the behavior-repo setup under
 `config.github`. Behavior-repo proposal writing is not product-repo access and
-does not prove local `git_repo` checkout binding.
+does not prove local `git_repo` resource access.
 
 The current runnable workflow still uses foreground commands for smoke testing,
 repair, and manual runner operation. `npm run runner` is currently required
@@ -132,7 +136,7 @@ an alias for this local gateway path.
 tool-less `session_start` invocation and return a locally schema-valid
 subagent-turn packet for the installed runtime version. The smoke no longer
 depends on a fixed PM/Sr Eng phase itinerary. The runner reads
-`.agentic-factory/runtime-smoke.json` and fails closed when the current runtime
+`.teami/runtime-smoke.json` and fails closed when the current runtime
 version has not passed that session-start readiness gate. Warm-continuation
 smoke, when explicitly enabled, is recorded as separate non-gating capability
 evidence.
@@ -162,28 +166,27 @@ Remote destructive cleanup is not part of the default command.
 
 Init creates or resolves:
 
-- the configured team, defaulting to `Agentic Factory` with key `AF`
+- the configured team, defaulting to `Teami` with key `AF`
 - project label `Has Open Questions`
-- issue label `Discovery`
-- project status mappings for `backlog`, `planned`, and `started`
-- project template `Agentic Factory Roadmap Item`
+- issue labels `Discovery` and `Needs Principal`
+- project status mappings for `backlog`, `planned`, `in_progress`, and `completed`
+- project template `Teami Roadmap Item`
 
-The config's `issue.statuses.unstarted` key names the fallback existing Linear
-issue status for created execution issues. Adopters may also configure
-`issue.statuses.ready` when their workflow already has a Ready state.
-Decomposition uses the configured Ready state for committed execution issues
-when available, and falls back to the configured unstarted state otherwise.
-Execution issues are created unassigned, and agent output cannot bind Linear
-assignee or label selectors. The issue body carries assignment, output, and
-acceptance criteria so a human or later dispatch workflow can claim the work
-from Linear without hidden routing.
+The config also defines issue status roles for `backlog`, `todo`,
+`in_progress`, `in_review`, `blocked`, and `done`.
 
-Generated Linear IDs are cached in `.agentic-factory/linear.json`, which is
+Decomposition creates committed execution issues in the configured `Todo`
+issue status. Execution issues are created unassigned, and agent output cannot
+bind Linear assignee or label selectors. The issue body carries assignment,
+output, and acceptance criteria so a human or later dispatch workflow can claim
+the work from Linear without hidden routing.
+
+Generated Linear IDs are cached in `.teami/linear.json`, which is
 ignored by git. The cache is a convenience; Linear remains the product-intent
 and live work source of truth.
 
 Accepted decomposition packets and commit artifacts are stored in
-`.agentic-factory/runs/<run_id>.json`, also ignored by git. Run artifacts are
+`.teami/runs/<run_id>.json`, also ignored by git. Run artifacts are
 written atomically with schema/version validation and read-back verification
 before Linear mutations begin.
 
@@ -209,7 +212,7 @@ decomposition wake with `requires_runner_verification=true`.
 The repository includes a deterministic local queue substrate for tests and the
 local gateway path. It implements heartbeat, claim, renew, mutation-start,
 complete, replay, suppression, and dead-letter behavior against local
-Agentic Factory state.
+Teami state.
 
 The runner is the first component allowed to mutate Linear. It must claim a
 local wake-up and receive a lease token before re-reading the project through
@@ -311,7 +314,7 @@ or shell output.
 Annotations follow the canonical contract in
 `execution/evals/decomposition/annotation.schema.json`: the label set is
 `pass | needs_revision | blocking_failure`, the annotation name defaults to
-`decomposition_quality` and must be one of the canonical rubric dimensions
+`quality` and must be one of the canonical rubric dimensions
 (deterministic-check names are `CODE` storage only), and every annotation
 carries `rubric_version`, `failure_taxonomy_version`, and
 `workspace_maturity` metadata. Every annotation requires a non-empty
@@ -354,12 +357,12 @@ promotion), derived at read time and never persisted to Phoenix.
 ## Live Linear Verification
 
 Keep `npm test` deterministic and credential-free. When Linear behavior is part
-of the claim, use the Agentic Factory OAuth credential and Linear GraphQL for
+of the claim, use the Teami OAuth credential and Linear GraphQL for
 live smoke checks against disposable projects or issues, then move test
 artifacts to a terminal state when the check is complete.
 
 Project updates are required for decomposition. The deterministic path is the
-Agentic Factory OAuth plus GraphQL client, not API keys and not substitute
+Teami OAuth plus GraphQL client, not API keys and not substitute
 project comments or documents. Live verification on 2026-06-07 confirmed that
 this path can create a Linear project update with exact authored Markdown, find
 it by `run_id`, and archive the test update afterward. The same live pass
@@ -373,7 +376,7 @@ idempotently.
 
 ## Implemented Service Semantics
 
-- The init service creates or resolves the `Agentic Factory` team, `Has Open
+- The init service creates or resolves the `Teami` team, `Has Open
   Questions` project label, `Discovery` issue label, agreed project status
   mappings, and Linear project template when backed by a client that exposes
   those setup operations.
@@ -404,9 +407,8 @@ idempotently.
   relations are created idempotently.
 - Malformed final issue keys, duplicate decomposition keys, and dangling
   dependencies fail closed before any Linear issue is created.
-- Decomposition-created execution issues use the configured Ready issue status
-  when available, otherwise the configured unstarted status. They are created
-  without assignees or agent-supplied labels.
+- Decomposition-created execution issues use the configured Todo issue status.
+  They are created without assignees or agent-supplied labels.
 - Discovery issues carry a stable decomposition key so retry paths can
   find-or-create the same scoped discovery work.
 - Discovery issue bodies are authored by Sr Eng and committed verbatim after a
@@ -425,7 +427,7 @@ idempotently.
   `dead_letter` as an internal fail-closed state until replay or a self-serve
   repair path can reconcile from the original local run artifact or explicitly
   clean up partial Linear state.
-- `decomposition_quality` is available as an offline scorer over trace and
+- `quality` is available as an offline scorer over trace and
   Linear state; it is not a live decomposition span or mutation gate.
 - `accepted_packet_sufficiency` is available as an offline check that accepted
   packets contain enough serialized context for audit and commit retry. It is

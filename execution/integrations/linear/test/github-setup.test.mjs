@@ -31,12 +31,12 @@ const {
   scanTrackedTreeForSecrets,
 } = githubSetupModule;
 
-const STARTER_URL = "https://github.com/agentic-factory/agentic-factory-starter";
-const SHIPPED_SOURCE_URL = "https://github.com/shulmansj/agentic-factory";
+const STARTER_URL = "https://github.com/teami/teami-starter";
+const SHIPPED_SOURCE_URL = "https://github.com/shulmansj/teami";
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-github-setup-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-github-setup-"));
 }
 
 function runGitOrThrow(args, cwd) {
@@ -145,7 +145,6 @@ function verifiedRealStateFixture({
   repoId = "repo-real-1",
   originApplied = true,
   upstreamUrl = STARTER_URL,
-  checkoutPath = null,
   pushAuth = "https",
   realPushEnabled = true,
 } = {}) {
@@ -163,7 +162,6 @@ function verifiedRealStateFixture({
       url: `https://github.com/${owner}/${name}`,
     },
     default_branch: "main",
-    local_checkout_path: checkoutPath,
     push_auth: pushAuth,
     local_auth: {
       mode: "local_ambient",
@@ -207,15 +205,15 @@ function writeStateFixture(root, state) {
 
 test("real GitHub init binds with local ambient auth without stored GitHub credentials", async () => {
   const root = tempRoot();
-  const behaviorUrl = "https://github.com/acme/agentic-factory";
+  const behaviorUrl = "https://github.com/acme/teami";
   const mock = createMockGitHubSetupTransport({
-    existingRepos: ["acme/agentic-factory"],
+    existingRepos: ["acme/teami"],
     existingRepoDetails: {
-      "acme/agentic-factory": {
-        id: "repo-acme-agentic-factory",
+      "acme/teami": {
+        id: "repo-acme-teami",
         owner: "acme",
-        name: "agentic-factory",
-        full_name: "acme/agentic-factory",
+        name: "teami",
+        full_name: "acme/teami",
         visibility: "private",
         default_branch: "main",
       },
@@ -269,7 +267,7 @@ test("real setup resolves missing behavior repo owner from gh login, prompting i
   assert.deepEqual(prompts, [{
     defaultOwner: "octocat",
     message: [
-      "  Agentic Factory needs a private GitHub repo named \"agentic-factory\" where generated PRs will live.",
+      "  Teami needs a private GitHub repo named \"teami\" where generated PRs will live.",
       "  Press Enter to create it under octocat (your signed-in GitHub CLI account), or type a different GitHub user/org.",
       "  Create repo under [octocat]: ",
     ].join("\n"),
@@ -298,7 +296,7 @@ test("real init emits visible progress immediately after GitHub owner selection"
         return {
           exists: true,
           repo: {
-            id: "repo-octocat-agentic-factory",
+            id: "repo-octocat-teami",
             owner,
             name: repo,
             full_name: `${owner}/${repo}`,
@@ -329,9 +327,9 @@ test("real init emits visible progress immediately after GitHub owner selection"
   });
 
   assert.equal(result.ok, true);
-  const targetIndex = events.indexOf("progress:GitHub repo target: octocat/agentic-factory (private)");
+  const targetIndex = events.indexOf("progress:GitHub repo target: octocat/teami (private)");
   const localRemotesIndex = events.indexOf("progress:GitHub progress: Checking local Git remotes...");
-  const repoCheckIndex = events.indexOf("progress:GitHub progress: Checking whether octocat/agentic-factory is available on GitHub...");
+  const repoCheckIndex = events.indexOf("progress:GitHub progress: Checking whether octocat/teami is available on GitHub...");
   const transportIndex = events.indexOf("transport:get_repository");
   assert.ok(targetIndex >= 0, `missing target progress: ${events.join("\n")}`);
   assert.ok(localRemotesIndex >= 0 && localRemotesIndex < targetIndex, `missing local-remotes progress: ${events.join("\n")}`);
@@ -353,7 +351,7 @@ test("explicit blank github owner (flag or config) fails closed, never defaults 
   }
   const blankConfig = await resolveGitHubSetupSettings({
     config: configWithStarter({
-      behavior_repo: { owner: "  ", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "  ", name: "teami", visibility: "private" },
     }),
     connectionMode: "real",
     isTTY: false,
@@ -367,7 +365,7 @@ test("behavior repo owner flag and config override gh login resolution", async (
   let resolverCalls = 0;
   const configOwner = await resolveGitHubSetupSettings({
     config: configWithStarter({
-      behavior_repo: { owner: "configured-org", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "configured-org", name: "teami", visibility: "private" },
     }),
     requestedOwner: "flag-owner",
     connectionMode: "real",
@@ -383,7 +381,7 @@ test("behavior repo owner flag and config override gh login resolution", async (
 
   const configOnly = await resolveGitHubSetupSettings({
     config: configWithStarter({
-      behavior_repo: { owner: "configured-org", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "configured-org", name: "teami", visibility: "private" },
     }),
     connectionMode: "real",
     isTTY: false,
@@ -422,9 +420,9 @@ test("the local ambient GitHub setup transport ignores renamed-repo redirects du
           ok: true,
           status: 0,
           stdout: JSON.stringify({
-            nameWithOwner: "shulmansj/agentic-factory-prevalidation-20260614",
+            nameWithOwner: "shulmansj/teami-prevalidation-20260614",
             visibility: "PRIVATE",
-            url: "https://github.com/shulmansj/agentic-factory-prevalidation-20260614",
+            url: "https://github.com/shulmansj/teami-prevalidation-20260614",
             defaultBranchRef: { name: "main" },
           }),
           stderr: "",
@@ -437,11 +435,11 @@ test("the local ambient GitHub setup transport ignores renamed-repo redirects du
   const result = await transport.request({
     endpointId: "get_repository",
     owner: "shulmansj",
-    repo: "agentic-factory",
+    repo: "teami",
   });
 
   assert.equal(result.exists, false);
-  assert.equal(result.redirected_repo, "shulmansj/agentic-factory-prevalidation-20260614");
+  assert.equal(result.redirected_repo, "shulmansj/teami-prevalidation-20260614");
 });
 
 test("the local ambient GitHub setup transport uses gh for repo setup and local git for push/probes", async () => {
@@ -463,9 +461,9 @@ test("the local ambient GitHub setup transport uses gh for repo setup and local 
           ok: true,
           status: 0,
           stdout: JSON.stringify({
-            nameWithOwner: "shulmansj/agentic-factory",
+            nameWithOwner: "shulmansj/teami",
             visibility: "PRIVATE",
-            url: "https://github.com/shulmansj/agentic-factory",
+            url: "https://github.com/shulmansj/teami",
             defaultBranchRef: { name: "main" },
           }),
           stderr: "",
@@ -484,19 +482,19 @@ test("the local ambient GitHub setup transport uses gh for repo setup and local 
   const created = await transport.request({
     endpointId: "create_repository",
     owner: "shulmansj",
-    repo: "agentic-factory",
+    repo: "teami",
     params: { visibility: "private" },
   });
   const pushed = await transport.request({
     endpointId: "push_initial_branch",
     owner: "shulmansj",
-    repo: "agentic-factory",
+    repo: "teami",
     params: { branch: "main", head_sha: "abc123" },
   });
   await transport.request({
     endpointId: "verify_default_branch",
     owner: "shulmansj",
-    repo: "agentic-factory",
+    repo: "teami",
     params: { branch: "main" },
   });
 
@@ -504,12 +502,12 @@ test("the local ambient GitHub setup transport uses gh for repo setup and local 
   assert.equal(pushed.pushed, true);
   assert.ok(commandCalls.some((call) =>
     call.command === "gh"
-    && call.args.join(" ") === "repo create shulmansj/agentic-factory --private --disable-issues --disable-wiki",
+    && call.args.join(" ") === "repo create shulmansj/teami --private --disable-issues --disable-wiki",
   ));
   const gitPush = commandCalls.find((call) => call.command === "git" && call.args[0] === "push");
   assert.equal(gitPush.options.cwd, root);
   assert.equal(gitPush.options.env.GIT_TERMINAL_PROMPT, "0");
-  assert.ok(!("AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN" in gitPush.options.env));
+  assert.ok(!("TEAMI_GITHUB_INSTALLATION_TOKEN" in gitPush.options.env));
   assert.ok(!JSON.stringify(commandCalls).includes("ghs_setup"));
 });
 
@@ -582,7 +580,7 @@ test("starter-remote-only checkout: starter origin is preserved as upstream and 
   assert.deepEqual(actions, ["rename_remote", "set_origin"]);
   assert.equal(result.connection.remotes.upstream.url, `${STARTER_URL}.git`);
   assert.equal(result.connection.remotes.upstream.preserved_from, "origin");
-  assert.match(result.connection.remotes.origin.url, /your-github-owner\/agentic-factory$/);
+  assert.match(result.connection.remotes.origin.url, /your-github-owner\/teami$/);
   // Dry-run mode applies nothing to the checkout: the starter remote is still
   // literally `origin` on disk.
   assert.equal(result.connection.remotes.origin.applied, false);
@@ -650,11 +648,11 @@ test("pre-existing adopter-owned GitHub origin is bound as the behavior repo wit
 
 test("ssh and https starter remote spellings normalize to the same identity", () => {
   assert.equal(
-    normalizeGitRemoteUrl("git@github.com:agentic-factory/agentic-factory-starter.git"),
+    normalizeGitRemoteUrl("git@github.com:teami/teami-starter.git"),
     normalizeGitRemoteUrl(`${STARTER_URL}/`),
   );
   const plan = planRemoteLayout({
-    remotes: [{ name: "origin", url: "git@github.com:agentic-factory/agentic-factory-starter.git" }],
+    remotes: [{ name: "origin", url: "git@github.com:teami/teami-starter.git" }],
     starterRemoteUrls: [STARTER_URL],
     behaviorRepoUrl: "https://github.com/o/behavior",
   });
@@ -716,10 +714,10 @@ test("real init resumes a repo created by a prior pending local GitHub run", asy
     repo: {
       owner: "shulmansj",
       owner_source: "flag",
-      name: "agentic-factory",
-      full_name: "shulmansj/agentic-factory",
+      name: "teami",
+      full_name: "shulmansj/teami",
       visibility: "private",
-      url: "https://github.com/shulmansj/agentic-factory",
+      url: "https://github.com/shulmansj/teami",
     },
     default_branch: null,
     remotes: null,
@@ -735,14 +733,14 @@ test("real init resumes a repo created by a prior pending local GitHub run", asy
     verified_at: null,
   });
   const mock = createMockGitHubSetupTransport({
-    existingRepos: ["shulmansj/agentic-factory"],
+    existingRepos: ["shulmansj/teami"],
   });
   const transport = { ...mock, kind: "real" };
   const { result } = await runPhase({
     root,
     transport,
     config: configWithStarter({
-      behavior_repo: { owner: "shulmansj", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "shulmansj", name: "teami", visibility: "private" },
     }),
   });
   assert.equal(result.ok, true);
@@ -754,7 +752,7 @@ test("real init resumes a repo created by a prior pending local GitHub run", asy
   assert.ok(!mock.calls.some((call) => call.endpointId === "create_repository"));
   assert.ok(mock.calls.some((call) => call.endpointId === "push_initial_branch"));
   assert.deepEqual(listRemotes(root), {
-    origin: "https://github.com/shulmansj/agentic-factory",
+    origin: "https://github.com/shulmansj/teami",
     upstream: `${STARTER_URL}.git`,
   });
 });
@@ -769,10 +767,10 @@ test("real init resumes a repo created before a failed local auth verification",
     repo: {
       owner: "shulmansj",
       owner_source: "gh_login",
-      name: "agentic-factory",
-      full_name: "shulmansj/agentic-factory",
+      name: "teami",
+      full_name: "shulmansj/teami",
       visibility: "private",
-      url: "https://github.com/shulmansj/agentic-factory",
+      url: "https://github.com/shulmansj/teami",
     },
     default_branch: null,
     remotes: null,
@@ -789,14 +787,14 @@ test("real init resumes a repo created before a failed local auth verification",
     verified_at: null,
   });
   const mock = createMockGitHubSetupTransport({
-    existingRepos: ["shulmansj/agentic-factory"],
+    existingRepos: ["shulmansj/teami"],
   });
   const transport = { ...mock, kind: "real" };
   const { result } = await runPhase({
     root,
     transport,
     config: configWithStarter({
-      behavior_repo: { owner: "shulmansj", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "shulmansj", name: "teami", visibility: "private" },
     }),
   });
   assert.equal(result.ok, true);
@@ -818,8 +816,8 @@ test("real init resumes an empty repo after a prior failed state overwrote creat
     repo: {
       owner: "shulmansj",
       owner_source: "gh_login",
-      name: "agentic-factory",
-      full_name: "shulmansj/agentic-factory",
+      name: "teami",
+      full_name: "shulmansj/teami",
       visibility: "private",
       url: null,
     },
@@ -832,15 +830,15 @@ test("real init resumes an empty repo after a prior failed state overwrote creat
       {
         reason: "behavior_repo_unreachable",
         repair: "repo was not reachable",
-        detail: "gh could not reach shulmansj/agentic-factory",
+        detail: "gh could not reach shulmansj/teami",
       },
     ],
     verified_at: null,
   });
   const mock = createMockGitHubSetupTransport({
-    existingRepos: ["shulmansj/agentic-factory"],
+    existingRepos: ["shulmansj/teami"],
     existingRepoDetails: {
-      "shulmansj/agentic-factory": { empty: true, visibility: "private" },
+      "shulmansj/teami": { empty: true, visibility: "private" },
     },
   });
   const transport = { ...mock, kind: "real" };
@@ -848,7 +846,7 @@ test("real init resumes an empty repo after a prior failed state overwrote creat
     root,
     transport,
     config: configWithStarter({
-      behavior_repo: { owner: "shulmansj", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "shulmansj", name: "teami", visibility: "private" },
     }),
   });
   assert.equal(result.ok, true);
@@ -889,7 +887,7 @@ test("org-approval-required repo creation stops in a repairable pending state wi
 test("real GitHub phase records local ambient auth without install callbacks", async () => {
   const root = tempRoot();
   const calls = [];
-  const behaviorUrl = "https://github.com/acme/agentic-factory";
+  const behaviorUrl = "https://github.com/acme/teami";
   const runGit = (args) => {
     calls.push({ type: "git", args });
     if (args.join(" ") === "remote -v") {
@@ -913,7 +911,7 @@ test("real GitHub phase records local ambient auth without install callbacks", a
           return {
             exists: true,
             repo: {
-              id: "repo-acme-agentic-factory",
+              id: "repo-acme-teami",
               owner,
               name: repo,
               full_name: `${owner}/${repo}`,
@@ -935,7 +933,7 @@ test("real GitHub phase records local ambient auth without install callbacks", a
   const { result } = await runPhase({
     root,
     config: configWithStarter({
-      behavior_repo: { owner: "acme", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "acme", name: "teami", visibility: "private" },
     }),
     transport,
     runGit,
@@ -1103,7 +1101,7 @@ test("real init mode does not emit the dry-run banner or dry-run connection mode
   const { result, progress } = await runPhase({
     root,
     config: configWithStarter({
-      behavior_repo: { owner: "acme", name: "agentic-factory", visibility: "private" },
+      behavior_repo: { owner: "acme", name: "teami", visibility: "private" },
     }),
     transport,
     runGit: createInMemoryRunGit(),
@@ -1113,7 +1111,7 @@ test("real init mode does not emit the dry-run banner or dry-run connection mode
   assert.equal(result.connection.connection_mode, "real");
   assert.equal(result.connection.adoption_complete, true);
   const output = progress.join("\n");
-  assert.match(output, /GitHub repo target: acme\/agentic-factory \(private\)/);
+  assert.match(output, /GitHub repo target: acme\/teami \(private\)/);
   assert.doesNotMatch(output, /DRY-RUN GITHUB SETUP/);
   assert.doesNotMatch(output, /connection_mode=dry_run/);
 });
@@ -1186,11 +1184,10 @@ test("resolveBehaviorRepoIdentity returns the verified repo identity and connect
 
 test("resolveBehaviorRepoIdentity returns local ambient auth details", () => {
   const root = tempRoot();
-  writeStateFixture(root, verifiedRealStateFixture({ pushAuth: "ssh", checkoutPath: "C:/work/agentic-factory" }));
+  writeStateFixture(root, verifiedRealStateFixture({ pushAuth: "ssh" }));
   const identity = resolveBehaviorRepoIdentity({ repoRoot: root });
   assert.equal(identity.ok, true);
   assert.equal(identity.push_auth, "ssh");
-  assert.equal(identity.checkout_path, "C:/work/agentic-factory");
   assert.equal(identity.real_push_enabled, true);
 });
 
@@ -1241,7 +1238,7 @@ test("doctor reports remote drift against a real verified connection with an exa
 
 test("doctor reports behavior repo reachability and local write auth", async () => {
   const root = tempRoot();
-  writeStateFixture(root, verifiedRealStateFixture({ checkoutPath: root }));
+  writeStateFixture(root, verifiedRealStateFixture());
   const transport = createMockGitHubSetupTransport({
     existingRepos: ["real-owner/real-behavior-repo"],
   });
@@ -1265,7 +1262,7 @@ test("doctor reports behavior repo reachability and local write auth", async () 
 
 test("doctor fails closed when the behavior repo is unreachable with local gh auth", async () => {
   const root = tempRoot();
-  writeStateFixture(root, verifiedRealStateFixture({ checkoutPath: root }));
+  writeStateFixture(root, verifiedRealStateFixture());
   const checks = await githubConnectionDoctorChecks({
     repoRoot: root,
     runGit: createInMemoryRunGit({
@@ -1283,7 +1280,7 @@ test("doctor fails closed when the behavior repo is unreachable with local gh au
 
 test("doctor fails closed when local git write auth cannot push a behavior branch", async () => {
   const root = tempRoot();
-  writeStateFixture(root, verifiedRealStateFixture({ checkoutPath: root }));
+  writeStateFixture(root, verifiedRealStateFixture());
   const runGit = (args, options = {}) => {
     if (args[0] === "push" && args[1] === "--dry-run") {
       return { ok: false, status: 1, stdout: "", stderr: "permission denied" };
@@ -1372,7 +1369,7 @@ test("cli init runs the GitHub phase and fails init (no silent eval-only complet
       setupSource.includes('factoryLauncherCommand("gateway start")') &&
       setupSource.includes('factoryLauncherCommand("doctor")') &&
       setupSource.includes("Setup complete."),
-    "init must end with the platform-aware factory gateway start next step and the factory doctor command",
+    "init must end with the platform-aware teami gateway start next step and the teami doctor command",
   );
   assert.doesNotMatch(setupSource, /running/);
   assert.doesNotMatch(setupSource, /requestSetupGrant|writeInboxSetupGrant|setup_grant_conflict/);

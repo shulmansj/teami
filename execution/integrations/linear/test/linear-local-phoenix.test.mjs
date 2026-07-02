@@ -39,8 +39,10 @@ import {
   boundedRunReceiptProjection,
   enforceTraceContentPolicy,
   findSecretContentKeys,
+  LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
   newTraceId,
 } from "../../../engine/trace-contract.mjs";
+import { PRODUCED_IDENTITIES_TRACE_ATTRIBUTE } from "../../../engine/produced-identities.mjs";
 import {
   buildDatasetUploadPayloadFromTraceReceipt,
   buildTraceAnnotationPayload,
@@ -52,6 +54,10 @@ import { runDecompositionEvalMode } from "../src/trigger-runner.mjs";
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
 const SUBAGENT_TURN_SCHEMA_VERSION = "linear-decomposition-orchestrator-subagent-turn/v2";
+const LOCAL_TOOL_EVENT_DIFF = [
+  "diff --git a/project.md b/project.md",
+  "+keep the local evidence diff in Phoenix",
+].join("\n");
 
 test("Phoenix endpoint normalization is loopback-only and derives the OTLP collector", () => {
   assert.equal(normalizeLocalPhoenixAppUrl("http://127.0.0.1:6006/"), "http://127.0.0.1:6006");
@@ -61,7 +67,7 @@ test("Phoenix endpoint normalization is loopback-only and derives the OTLP colle
 });
 
 test("managed Phoenix reuses an existing Phoenix service without taking ownership", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-reuse-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-reuse-"));
   let installed = false;
   let spawned = false;
   const result = await ensurePhoenixReady({
@@ -89,13 +95,13 @@ test("managed Phoenix reuses an existing Phoenix service without taking ownershi
 });
 
 test("managed Phoenix preserves ownership metadata when its recorded process is still alive", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-managed-preserve-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-managed-preserve-"));
   const paths = phoenixPaths(repoRoot);
   writeServiceMetadata(paths.serviceFile, {
     schema_version: 1,
     app_url: "http://127.0.0.1:6006",
     collector_url: "http://127.0.0.1:6006/v1/traces",
-    project_name: "agentic-factory",
+    project_name: "teami",
     port: 6006,
     managed: true,
     pid: process.pid,
@@ -121,7 +127,7 @@ test("managed Phoenix preserves ownership metadata when its recorded process is 
 });
 
 test("managed Phoenix cold start is the only readiness path marked as started by this call", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-cold-start-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-cold-start-"));
   let probes = 0;
   let installCommands = 0;
   let starts = 0;
@@ -169,14 +175,14 @@ test("Phoenix identity probe distinguishes a non-Phoenix port collision", async 
 });
 
 test("stale managed Phoenix pid metadata is recovered before restart", () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-stale-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-stale-"));
   const paths = phoenixPaths(repoRoot);
   fs.mkdirSync(paths.root, { recursive: true });
   fs.writeFileSync(paths.serviceFile, JSON.stringify({
     schema_version: 1,
     app_url: "http://127.0.0.1:6006",
     collector_url: "http://127.0.0.1:6006/v1/traces",
-    project_name: "agentic-factory",
+    project_name: "teami",
     managed: true,
     pid: 99999999,
     status: "running",
@@ -189,14 +195,14 @@ test("stale managed Phoenix pid metadata is recovered before restart", () => {
 });
 
 test("safe stop refuses to stop reused external Phoenix", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-stop-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-stop-"));
   const paths = phoenixPaths(repoRoot);
   fs.mkdirSync(paths.root, { recursive: true });
   fs.writeFileSync(paths.serviceFile, JSON.stringify({
     schema_version: 1,
     app_url: "http://127.0.0.1:6006",
     collector_url: "http://127.0.0.1:6006/v1/traces",
-    project_name: "agentic-factory",
+    project_name: "teami",
     managed: false,
     pid: 99999999,
     status: "running",
@@ -213,13 +219,13 @@ test("safe stop refuses to stop reused external Phoenix", async () => {
 });
 
 test("managed Phoenix stop waits until the loopback service is gone", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-stop-wait-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-stop-wait-"));
   const paths = phoenixPaths(repoRoot);
   writeServiceMetadata(paths.serviceFile, {
     schema_version: 1,
     app_url: "http://127.0.0.1:6006",
     collector_url: "http://127.0.0.1:6006/v1/traces",
-    project_name: "agentic-factory",
+    project_name: "teami",
     managed: true,
     pid: process.pid,
     status: "running",
@@ -245,7 +251,7 @@ test("managed Phoenix stop waits until the loopback service is gone", async () =
 });
 
 test("trace status writes per-run receipts, health counters, and audit-only dead letters", () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-trace-health-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-trace-health-"));
   recordTraceStatus({
     repoRoot,
     runId: "run-1",
@@ -300,10 +306,21 @@ test("local trace contract keeps base capabilities and excludes secret material"
   assert.deepEqual(findSecretContentKeys({ nested: { api_key: "secret" } }), ["nested.api_key"]);
   assert.deepEqual(findSecretContentKeys({ message: ["Bearer ", "abcdefghijklmnop"].join("") }), ["message"]);
   assert.equal(enforceTraceContentPolicy({ spans: [{ attributes: { token: "secret" } }] }).ok, false);
+  assert.equal(
+    enforceTraceContentPolicy({ spans: [{ attributes: { prompt: "full local prompt" } }] }).reason,
+    "rich_trace_content_not_allowed",
+  );
+  assert.equal(
+    enforceTraceContentPolicy(
+      { spans: [{ attributes: { prompt: "full local prompt" } }] },
+      LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
+    ).ok,
+    true,
+  );
 });
 
 test("local trace receipt includes domain_id, workspace_id, and team_id", () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-trace-domain-receipt-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-trace-domain-receipt-"));
   recordTraceStatus({
     repoRoot,
     runId: "run-domain",
@@ -345,7 +362,7 @@ test("local trace receipt includes domain_id, workspace_id, and team_id", () => 
 });
 
 test("v1-shaped trace receipts return a typed legacy result instead of throwing", () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-trace-legacy-receipt-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-trace-legacy-receipt-"));
   const paths = traceTelemetryPaths(repoRoot);
   fs.mkdirSync(paths.runsDir, { recursive: true });
   fs.writeFileSync(
@@ -365,9 +382,9 @@ test("v1-shaped trace receipts return a typed legacy result instead of throwing"
   assert.match(receipt.detail, /missing_domain_id/);
 });
 
-test("canonical trace contract does not require agentic_factory.domain_name", () => {
-  assert.equal(CANONICAL_DOMAIN_TRACE_ATTRIBUTES.includes("agentic_factory.domain_id"), true);
-  assert.equal(CANONICAL_DOMAIN_TRACE_ATTRIBUTES.includes("agentic_factory.domain_name"), false);
+test("canonical trace contract does not require teami.domain_name", () => {
+  assert.equal(CANONICAL_DOMAIN_TRACE_ATTRIBUTES.includes("teami.domain_id"), true);
+  assert.equal(CANONICAL_DOMAIN_TRACE_ATTRIBUTES.includes("teami.domain_name"), false);
 });
 
 test("OTLP export uses existing trace spans and exporter shuts down only when asked", async () => {
@@ -375,7 +392,7 @@ test("OTLP export uses existing trace spans and exporter shuts down only when as
   const exporter = createLocalPhoenixTraceExporter({
     collectorUrl: "http://127.0.0.1:6006/v1/traces",
     appUrl: "http://127.0.0.1:6006",
-    projectName: "agentic-factory",
+    projectName: "teami",
     traceId: "11111111111111111111111111111111",
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), body: JSON.parse(init.body) });
@@ -394,11 +411,11 @@ test("OTLP export uses existing trace spans and exporter shuts down only when as
   assert.equal(calls.length, 2);
   assert.deepEqual(
     calls[0].body.resourceSpans[0].scopeSpans[0].spans.map((span) => span.name),
-    ["agentic_factory.workflow_run", "load_project_context"],
+    ["teami.workflow_run", "load_project_context"],
   );
   assert.deepEqual(
     calls[1].body.resourceSpans[0].scopeSpans[0].spans.map((span) => span.name),
-    ["agentic_factory.workflow_run", "post_project_update"],
+    ["teami.workflow_run", "post_project_update"],
   );
   assert.equal(calls[1].body.resourceSpans[0].scopeSpans[0].spans[0].status.code, 1);
   assert.equal(exporter.shutdownCalled, false);
@@ -407,17 +424,95 @@ test("OTLP export uses existing trace spans and exporter shuts down only when as
   await assert.rejects(() => exporter.forceFlush({ trace }), /shut down/);
 });
 
+test("local Phoenix exporter accepts rich trace content but still blocks token material", async () => {
+  const calls = [];
+  const exporter = createLocalPhoenixTraceExporter({
+    collectorUrl: "http://127.0.0.1:6006/v1/traces",
+    appUrl: "http://127.0.0.1:6006",
+    projectName: "teami",
+    traceId: "11111111111111111111111111111111",
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(init.body) });
+      return new Response("{}", { status: 200 });
+    },
+  });
+  const prompt = [
+    "Draft decomposition issues from the local project evidence.",
+    "Include exact quoted constraints and rationale.",
+  ].join("\n");
+  const shellOutput = [
+    "diff --git a/src/task.js b/src/task.js",
+    "+export const localEvidence = true;",
+  ].join("\n");
+  const trace = {
+    attributes: { run_id: "run-rich-local" },
+    annotations: [],
+    spans: [{
+      name: "runtime_tool_events",
+      attributes: {
+        prompt,
+        tool_events: [{
+          name: "shell",
+          output: { shell_output: shellOutput },
+        }],
+      },
+      startedAt: "2026-06-09T00:00:00.000Z",
+      endedAt: "2026-06-09T00:00:00.001Z",
+    }],
+  };
+
+  const result = await exporter.forceFlush({
+    trace,
+    run: { run_id: "run-rich-local", status: "running" },
+  });
+
+  assert.equal(result.ok, true);
+  const exportedSpan = calls[0].body.resourceSpans[0].scopeSpans[0].spans
+    .find((span) => span.name === "runtime_tool_events");
+  assert.equal(otlpAttributeValue(exportedSpan.attributes, "prompt"), prompt);
+  assert.deepEqual(
+    otlpAttributeValue(exportedSpan.attributes, "tool_events").map((entry) => JSON.parse(entry)),
+    [{ name: "shell", output: { shell_output: shellOutput } }],
+  );
+
+  await assert.rejects(
+    () => exporter.forceFlush({
+      trace: {
+        attributes: { run_id: "run-secret-local" },
+        annotations: [],
+        spans: [{
+          name: "runtime_tool_events",
+          attributes: {
+            prompt: ["Bearer ", "abcdefghijklmnop"].join(""),
+            tool_events: [{ output: { shell_output: shellOutput } }],
+          },
+        }],
+      },
+      run: { run_id: "run-secret-local", status: "running" },
+    }),
+    /trace_payload_contains_token_material/,
+  );
+});
+
 test("runtime tool-event evidence is redacted and exported with outcome and perspectives", async () => {
   const config = loadLinearConfig({ repoRoot });
   const runId = "run_evid_tool_events";
   const result = await runDecompositionEvalMode({
     linearClient: new PhoenixLinearClient(),
     config,
-    cache: { domainId: "domain-a", workspaceId: "workspace-1", teamId: "team-1" },
+    cache: {
+      domainId: "domain-a",
+      workspaceId: "workspace-1",
+      teamId: "team-1",
+      issueLabels: {
+        Discovery: "ilabel-discovery",
+        "Needs Principal": "ilabel-needs-principal",
+      },
+    },
     projectId: "project-1",
     runId,
     repoRoot,
-    runStoreDir: fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-evid-runs-")),
+    runStoreDir: fs.mkdtempSync(path.join(os.tmpdir(), "teami-evid-runs-")),
     runtimeExecutor: phoenixToolEventRuntimeExecutor(runId),
     orchestratorTurnExecutor: phoenixToolEventOrchestrator(runId),
     roster: phoenixToolEventRoster(),
@@ -429,11 +524,12 @@ test("runtime tool-event evidence is redacted and exported with outcome and pers
   assert.equal(evidenceSpan.attributes.outcome, "product_context_sufficient");
   assert.ok(Array.isArray(evidenceSpan.attributes.perspectives_run));
   assert.ok(Array.isArray(evidenceSpan.attributes.tool_events));
+  assert.equal(evidenceSpan.attributes.tool_events[0].output.shell_output, LOCAL_TOOL_EVENT_DIFF);
   assert.equal(findSecretContentKeys(evidenceSpan).length, 0);
   assert.doesNotMatch(JSON.stringify(evidenceSpan), /Bearer|ghp_|secret-key-value/);
 
   const payload = buildPhoenixOtlpTraceExport({
-    projectName: "agentic-factory",
+    projectName: "teami",
     run: { run_id: runId, status: "evaluated" },
     trace: result.trace,
     traceId: "11111111111111111111111111111111",
@@ -443,18 +539,22 @@ test("runtime tool-event evidence is redacted and exported with outcome and pers
     .find((span) => span.name === "runtime_tool_events");
   assert.equal(otlpAttributeValue(exportedEvidenceSpan.attributes, "outcome"), "product_context_sufficient");
   assert.equal(
-    otlpAttributeValue(exportedEvidenceSpan.attributes, "agentic_factory.outcome"),
+    otlpAttributeValue(exportedEvidenceSpan.attributes, "teami.outcome"),
     "product_context_sufficient",
   );
   assert.ok(Array.isArray(otlpAttributeValue(exportedEvidenceSpan.attributes, "perspectives_run")));
-  assert.ok(Array.isArray(otlpAttributeValue(exportedEvidenceSpan.attributes, "agentic_factory.perspectives_run")));
+  assert.ok(Array.isArray(otlpAttributeValue(exportedEvidenceSpan.attributes, "teami.perspectives_run")));
+  assert.equal(
+    JSON.parse(otlpAttributeValue(exportedEvidenceSpan.attributes, "tool_events")[0]).output.shell_output,
+    LOCAL_TOOL_EVENT_DIFF,
+  );
   assert.equal(findSecretContentKeys(payload).length, 0);
   assert.doesNotMatch(JSON.stringify(payload), /Bearer|ghp_|secret-key-value/);
 });
 
 test("Phoenix REST span payload preserves trace ids, parent ids, and attributes", () => {
   const payload = buildPhoenixRestSpanUpload({
-    projectName: "agentic-factory",
+    projectName: "teami",
     run: { run_id: "run-1", status: "completed" },
     trace: {
       attributes: { run_id: "run-1" },
@@ -482,14 +582,14 @@ test("exporter falls back to Phoenix REST spans when OTLP JSON is unsupported", 
   const exporter = createLocalPhoenixTraceExporter({
     collectorUrl: "http://127.0.0.1:6006/v1/traces",
     appUrl: "http://127.0.0.1:6006",
-    projectName: "agentic-factory",
+    projectName: "teami",
     traceId: "11111111111111111111111111111111",
     fetchImpl: async (url, init = {}) => {
       calls.push({ url: String(url), method: init.method, body: init.body ? JSON.parse(init.body) : null });
       if (String(url).endsWith("/v1/traces")) return new Response("unsupported", { status: 415 });
       if (String(url).includes("/v1/projects?")) return new Response(JSON.stringify({ data: [] }), { status: 200 });
       if (String(url).endsWith("/v1/projects")) return new Response(JSON.stringify({ data: { id: "project-1" } }), { status: 200 });
-      if (String(url).includes("/v1/projects/agentic-factory/spans")) {
+      if (String(url).includes("/v1/projects/teami/spans")) {
         return new Response(JSON.stringify({ total_received: 2, total_queued: 2 }), { status: 202 });
       }
       throw new Error(`unexpected URL ${url}`);
@@ -514,11 +614,11 @@ test("exporter falls back to Phoenix REST spans when OTLP JSON is unsupported", 
 
   assert.equal(result.transport, "phoenix_rest_spans");
   assert.equal(calls[0].url, "http://127.0.0.1:6006/v1/traces");
-  assert.match(calls[1].url, /\/v1\/projects\?name=agentic-factory&limit=10$/);
+  assert.match(calls[1].url, /\/v1\/projects\?name=teami&limit=10$/);
   assert.equal(calls[2].url, "http://127.0.0.1:6006/v1/projects");
-  assert.match(calls[3].url, /\/v1\/projects\/agentic-factory\/spans$/);
+  assert.match(calls[3].url, /\/v1\/projects\/teami\/spans$/);
   assert.equal(calls[3].body.data[1].name, "load_project_context");
-  assert.match(calls[4].url, /\/v1\/projects\/agentic-factory\/spans$/);
+  assert.match(calls[4].url, /\/v1\/projects\/teami\/spans$/);
   assert.equal(calls[4].body.data.at(-1).name, "post_project_update");
 });
 
@@ -526,7 +626,7 @@ test("trace fetch timeouts fail fast instead of hanging mutation", async () => {
   const exporter = createLocalPhoenixTraceExporter({
     collectorUrl: "http://127.0.0.1:6006/v1/traces",
     appUrl: "http://127.0.0.1:6006",
-    projectName: "agentic-factory",
+    projectName: "teami",
     traceId: "11111111111111111111111111111111",
     fetchTimeoutMs: 5,
     fetchImpl: async () => new Promise(() => {}),
@@ -542,14 +642,14 @@ test("trace fetch timeouts fail fast instead of hanging mutation", async () => {
 });
 
 test("content policy rejection through the local sink records one failed run", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-sink-policy-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-sink-policy-"));
   const sink = createLocalPhoenixTraceSink({
     repoRoot,
     ensureReady: async () => ({
       ok: true,
       appUrl: "http://127.0.0.1:6006",
       collectorUrl: "http://127.0.0.1:6006/v1/traces",
-      projectName: "agentic-factory",
+      projectName: "teami",
       managed: true,
     }),
     fetchImpl: async () => new Response("{}", { status: 200 }),
@@ -579,8 +679,146 @@ test("content policy rejection through the local sink records one failed run", a
   assert.equal(health.recent_failure_count, 1);
 });
 
+test("oversized non-rich trace exports a digest span with a root evidence-unavailable marker", async () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-sink-oversized-"));
+  const traceId = "11111111111111111111111111111111";
+  const exportedSpans = [];
+  let rootEvidenceUnavailable = null;
+  const sink = createLocalPhoenixTraceSink({
+    repoRoot,
+    ensureReady: async () => ({
+      ok: true,
+      appUrl: "http://127.0.0.1:6006",
+      collectorUrl: "http://127.0.0.1:6006/v1/traces",
+      projectName: "teami",
+      managed: true,
+    }),
+    fetchImpl: async (url, init = {}) => {
+      if (init.method === "POST") {
+        const body = JSON.parse(init.body);
+        const spans = body.resourceSpans[0].scopeSpans[0].spans;
+        exportedSpans.push(...spans);
+        const root = spans.find((span) => span.name === "teami.workflow_run");
+        if (root) rootEvidenceUnavailable = otlpAttributeValue(root.attributes, "teami.evidence_unavailable");
+        return new Response("{}", { status: 200 });
+      }
+      assert.match(String(url), /\/v1\/projects\/teami\/traces/);
+      return new Response(JSON.stringify({
+        data: [{
+          trace_id: traceId,
+          spans: exportedSpans.map((span) => ({ name: span.name })),
+        }],
+      }), { status: 200 });
+    },
+    idFactory: () => traceId,
+  });
+  const session = await sink.startRun({
+    runId: "run-oversized",
+    wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
+    workspaceId: "workspace-1",
+    domainContext: testDomainContext(),
+  });
+  const trace = {
+    attributes: { run_id: "run-oversized" },
+    annotations: [],
+    spans: Array.from({ length: 230 }, (_, index) => ({
+      name: `oversized_span_${index}`,
+      attributes: {
+        detail: `plain local evidence ${index} ${"x".repeat(420)}`,
+        ordinal: index,
+      },
+      startedAt: "2026-06-09T00:00:00.000Z",
+      endedAt: "2026-06-09T00:00:00.001Z",
+    })),
+  };
+
+  const result = await sink.finishRun({ session, result: { status: "completed", trace } });
+
+  assert.equal(result.status, "trace_exported");
+  assert.ok(exportedSpans.some((span) => span.name === "teami.trace_digest"));
+  assert.ok(rootEvidenceUnavailable, "expected root evidence_unavailable marker");
+  const markers = rootEvidenceUnavailable.map((entry) => JSON.parse(entry));
+  assert.ok(markers.some((entry) => entry.scope === "trace.spans" && entry.reason === "too_many_trace_spans"));
+  assert.ok(markers.some((entry) => entry.scope === "trace.payload" && entry.reason === "trace_payload_too_large"));
+  const health = readTraceHealth({ repoRoot });
+  assert.equal(health.latest_status, "trace_exported");
+  assert.equal(health.consecutive_failure_count, 0);
+  assert.equal(health.recent_failure_count, 0);
+});
+
+test("multi-flush trace verification uses cumulative exported names instead of cumulative payload size", async () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-sink-multiflush-"));
+  const traceId = "11111111111111111111111111111111";
+  const exportedSpans = [];
+  const rootMarkers = [];
+  const sink = createLocalPhoenixTraceSink({
+    repoRoot,
+    ensureReady: async () => ({
+      ok: true,
+      appUrl: "http://127.0.0.1:6006",
+      collectorUrl: "http://127.0.0.1:6006/v1/traces",
+      projectName: "teami",
+      managed: true,
+    }),
+    fetchImpl: async (url, init = {}) => {
+      if (init.method === "POST") {
+        const body = JSON.parse(init.body);
+        const spans = body.resourceSpans[0].scopeSpans[0].spans;
+        exportedSpans.push(...spans);
+        const root = spans.find((span) => span.name === "teami.workflow_run");
+        if (root) rootMarkers.push(otlpAttributeValue(root.attributes, "teami.evidence_unavailable"));
+        return new Response("{}", { status: 200 });
+      }
+      assert.match(String(url), /\/v1\/projects\/teami\/traces/);
+      return new Response(JSON.stringify({
+        data: [{
+          trace_id: traceId,
+          spans: exportedSpans.map((span) => ({ name: span.name })),
+        }],
+      }), { status: 200 });
+    },
+    idFactory: () => traceId,
+  });
+  const session = await sink.startRun({
+    runId: "run-multiflush",
+    wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
+    workspaceId: "workspace-1",
+    domainContext: testDomainContext(),
+  });
+  const trace = { attributes: { run_id: "run-multiflush" }, annotations: [], spans: [] };
+  const appendSpans = (offset) => {
+    trace.spans.push(...Array.from({ length: 20 }, (_, index) => ({
+      name: `batch_span_${offset + index}`,
+      attributes: {
+        detail: `plain batch evidence ${offset + index} ${"y".repeat(1200)}`,
+      },
+      startedAt: "2026-06-09T00:00:00.000Z",
+      endedAt: "2026-06-09T00:00:00.001Z",
+    })));
+  };
+
+  appendSpans(0);
+  await sink.forceFlush({ session, trace, result: { status: "running" }, stage: "checkpoint" });
+  appendSpans(20);
+  await sink.forceFlush({ session, trace, result: { status: "running" }, stage: "checkpoint" });
+  appendSpans(40);
+  assert.equal(enforceTraceContentPolicy(trace, LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS).ok, false);
+  const result = await sink.finishRun({ session, result: { status: "completed", trace } });
+
+  assert.equal(result.status, "trace_exported");
+  assert.equal(exportedSpans.some((span) => span.name === "teami.trace_digest"), false);
+  for (let index = 0; index < 60; index += 1) {
+    assert.ok(exportedSpans.some((span) => span.name === `batch_span_${index}`), `missing batch_span_${index}`);
+  }
+  assert.deepEqual(rootMarkers, [null, null]);
+  const health = readTraceHealth({ repoRoot });
+  assert.equal(health.latest_status, "trace_exported");
+  assert.equal(health.consecutive_failure_count, 0);
+  assert.equal(health.recent_failure_count, 0);
+});
+
 test("trace sink adopts a healthy collector after readiness startup failure instead of reporting phoenix_start_failed", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-sink-adopt-after-failure-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-sink-adopt-after-failure-"));
   let statusCalls = 0;
   const sink = createLocalPhoenixTraceSink({
     repoRoot,
@@ -593,7 +831,7 @@ test("trace sink adopts a healthy collector after readiness startup failure inst
         ok: true,
         appUrl: "http://127.0.0.1:6006",
         collectorUrl: "http://127.0.0.1:6006/v1/traces",
-        projectName: "agentic-factory",
+        projectName: "teami",
       };
     },
     fetchImpl: async () => {
@@ -620,14 +858,14 @@ test("trace sink adopts a healthy collector after readiness startup failure inst
 });
 
 test("multiple trace failures in one run count as one local health failure", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-sink-double-failure-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-sink-double-failure-"));
   const sink = createLocalPhoenixTraceSink({
     repoRoot,
     ensureReady: async () => ({
       ok: true,
       appUrl: "http://127.0.0.1:6006",
       collectorUrl: "http://127.0.0.1:6006/v1/traces",
-      projectName: "agentic-factory",
+      projectName: "teami",
       managed: true,
     }),
     fetchImpl: async () => {
@@ -654,7 +892,7 @@ test("multiple trace failures in one run count as one local health failure", asy
 test("delivery proof queries Phoenix by trace id and required span names", async () => {
   const result = await verifyTraceDelivery({
     appUrl: "http://127.0.0.1:6006",
-    projectName: "agentic-factory",
+    projectName: "teami",
     traceId: "11111111111111111111111111111111",
     requiredSpanNames: ["load_project_context"],
     fetchImpl: async () => new Response(JSON.stringify({
@@ -670,7 +908,7 @@ test("delivery proof queries Phoenix by trace id and required span names", async
 });
 
 test("Phoenix preflight emits and proves a synthetic trace through local OTLP", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-preflight-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-preflight-"));
   let exportedTraceId = null;
   let exportedSpanNames = [];
   const result = await runLocalPhoenixTracePreflight({
@@ -682,7 +920,7 @@ test("Phoenix preflight emits and proves a synthetic trace through local OTLP", 
       ok: true,
       appUrl: "http://127.0.0.1:6006",
       collectorUrl: "http://127.0.0.1:6006/v1/traces",
-      projectName: "agentic-factory",
+      projectName: "teami",
       managed: true,
     }),
     fetchImpl: async (url, init = {}) => {
@@ -693,7 +931,7 @@ test("Phoenix preflight emits and proves a synthetic trace through local OTLP", 
         exportedSpanNames = spans.map((span) => span.name);
         return new Response("{}", { status: 200 });
       }
-      assert.match(String(url), /\/v1\/projects\/agentic-factory\/traces/);
+      assert.match(String(url), /\/v1\/projects\/teami\/traces/);
       return new Response(JSON.stringify({
         data: [{
           trace_id: exportedTraceId,
@@ -715,9 +953,9 @@ test("Phoenix preflight emits and proves a synthetic trace through local OTLP", 
   assert.equal(receipt.team_id, "team-1");
 });
 
-test("OTLP payload carries Phoenix project and Agentic Factory attributes", () => {
+test("OTLP payload carries Phoenix project and Teami attributes", () => {
   const payload = buildPhoenixOtlpTraceExport({
-    projectName: "agentic-factory",
+    projectName: "teami",
     run: {
       run_id: "run-1",
       domain_id: "support-ops",
@@ -727,23 +965,74 @@ test("OTLP payload carries Phoenix project and Agentic Factory attributes", () =
       wake_id: "wake-1",
       status: "completed",
     },
-    trace: { attributes: {}, annotations: [], spans: [] },
+    trace: {
+      attributes: {
+        work_type: "code",
+        selected_resource_id: "repo-2",
+        resource_id: "repo-2",
+        "resource.id": "repo-2",
+      },
+      annotations: [],
+      spans: [],
+    },
     traceId: "11111111111111111111111111111111",
   });
   const attrs = payload.resourceSpans[0].resource.attributes;
   const rootAttrs = payload.resourceSpans[0].scopeSpans[0].spans[0].attributes;
   assert.ok(attrs.some((attr) => attr.key === "openinference.project.name"));
-  assert.ok(rootAttrs.some((attr) => attr.key === "agentic_factory.run_id"));
-  assert.ok(rootAttrs.some((attr) => attr.key === "agentic_factory.domain_id"));
+  assert.ok(rootAttrs.some((attr) => attr.key === "teami.run_id"));
+  assert.ok(rootAttrs.some((attr) => attr.key === "teami.domain_id"));
   assert.ok(rootAttrs.some((attr) => attr.key === "linear.workspace_id"));
   assert.ok(rootAttrs.some((attr) => attr.key === "linear.team_id"));
-  assert.ok(rootAttrs.some((attr) => attr.key === "agentic_factory.behavior_repo_id"));
-  assert.equal(rootAttrs.some((attr) => attr.key === "agentic_factory.domain_name"), false);
+  assert.ok(rootAttrs.some((attr) => attr.key === "teami.behavior_repo_id"));
+  assert.equal(otlpAttributeValue(rootAttrs, "teami.work_type"), "code");
+  assert.equal(otlpAttributeValue(rootAttrs, "teami.selected_resource_id"), "repo-2");
+  assert.equal(otlpAttributeValue(rootAttrs, "selected_resource_id"), "repo-2");
+  assert.equal(otlpAttributeValue(rootAttrs, "resource_id"), "repo-2");
+  assert.equal(rootAttrs.some((attr) => attr.key === "teami.domain_name"), false);
+});
+
+test("OTLP root span exports produced identities as a JSON carrier", () => {
+  const producedIdentities = [{
+    effect_id: "linear_issues",
+    provider: "linear",
+    resource_kind: "linear_issue",
+    target_ids: ["issue-1", "issue-2"],
+    identity: {
+      issue_ids: ["issue-1", "issue-2"],
+      dependency_relation_ids: ["relation-1"],
+      project_update_id: "project-update-1",
+    },
+  }];
+  const payload = buildPhoenixOtlpTraceExport({
+    projectName: "teami",
+    run: {
+      run_id: "run-produced",
+      domain_id: "support-ops",
+      workspace_id: "workspace-1",
+      team_id: "team-1",
+      behavior_repo_id: "local:test",
+      status: "completed",
+    },
+    trace: {
+      attributes: {
+        [PRODUCED_IDENTITIES_TRACE_ATTRIBUTE]: producedIdentities,
+      },
+      annotations: [],
+      spans: [],
+    },
+    traceId: "11111111111111111111111111111111",
+  });
+  const rootAttrs = payload.resourceSpans[0].scopeSpans[0].spans[0].attributes;
+  assert.deepEqual(
+    JSON.parse(otlpAttributeValue(rootAttrs, PRODUCED_IDENTITIES_TRACE_ATTRIBUTE)),
+    producedIdentities,
+  );
 });
 
 test("OTLP root span exports the unpinned runtime marker when present", () => {
   const payload = buildPhoenixOtlpTraceExport({
-    projectName: "agentic-factory",
+    projectName: "teami",
     run: {
       run_id: "run-unpinned",
       domain_id: "support-ops",
@@ -754,7 +1043,7 @@ test("OTLP root span exports the unpinned runtime marker when present", () => {
     },
     trace: {
       attributes: {
-        "agentic_factory.unpinned_runtime": { pm: { model: true } },
+        "teami.unpinned_runtime": { pm: { model: true } },
       },
       annotations: [],
       spans: [],
@@ -763,9 +1052,74 @@ test("OTLP root span exports the unpinned runtime marker when present", () => {
   });
   const rootAttrs = payload.resourceSpans[0].scopeSpans[0].spans[0].attributes;
   assert.deepEqual(
-    JSON.parse(otlpAttributeValue(rootAttrs, "agentic_factory.unpinned_runtime")),
+    JSON.parse(otlpAttributeValue(rootAttrs, "teami.unpinned_runtime")),
     { pm: { model: true } },
   );
+});
+
+test("trace sink receipt provider_update_ids include reused Linear issue ids", async () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-sink-provider-updates-"));
+  const traceId = "11111111111111111111111111111111";
+  const exportedSpans = [];
+  const sink = createLocalPhoenixTraceSink({
+    repoRoot,
+    ensureReady: async () => ({
+      ok: true,
+      appUrl: "http://127.0.0.1:6006",
+      collectorUrl: "http://127.0.0.1:6006/v1/traces",
+      projectName: "teami",
+      managed: true,
+    }),
+    fetchImpl: async (url, init = {}) => {
+      if (init.method === "POST") {
+        const body = JSON.parse(init.body);
+        exportedSpans.push(...body.resourceSpans[0].scopeSpans[0].spans);
+        return new Response("{}", { status: 200 });
+      }
+      assert.match(String(url), /\/v1\/projects\/teami\/traces/);
+      return new Response(JSON.stringify({
+        data: [{
+          trace_id: traceId,
+          spans: exportedSpans.map((span) => ({ name: span.name })),
+        }],
+      }), { status: 200 });
+    },
+    idFactory: () => traceId,
+  });
+  const session = await sink.startRun({
+    runId: "run-provider-updates",
+    wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
+    workspaceId: "workspace-1",
+    domainContext: testDomainContext(),
+  });
+  const trace = {
+    attributes: { run_id: "run-provider-updates" },
+    annotations: [],
+    spans: [{ name: "load_project_context" }],
+  };
+  const producedIdentities = [{
+    effect_id: "linear_issues",
+    provider: "linear",
+    resource_kind: "linear_issue",
+    target_ids: ["issue-1", "issue-2"],
+    identity: {
+      issue_ids: ["issue-1", "issue-2"],
+      dependency_relation_ids: [],
+      project_update_id: "project-update-1",
+    },
+  }];
+
+  const result = await sink.finishRun({
+    session,
+    result: {
+      status: "completed",
+      trace,
+      produced_identities: producedIdentities,
+    },
+  });
+
+  assert.equal(result.status, "trace_exported");
+  assert.deepEqual(result.receipt.provider_update_ids, ["project-update-1", "issue-1", "issue-2"]);
 });
 
 test("Phoenix trace annotation helper posts native annotations and blocks secrets", async () => {
@@ -778,7 +1132,7 @@ test("Phoenix trace annotation helper posts native annotations and blocks secret
     metadata: { reviewer: "maintainer" },
   });
   assert.equal(payload.data[0].annotator_kind, "HUMAN");
-  assert.equal(payload.data[0].name, "decomposition_quality");
+  assert.equal(payload.data[0].name, "quality");
   assert.equal(payload.data[0].result.label, "pass");
   assert.equal(payload.data[0].identifier, "maintainer");
   assert.throws(
@@ -795,7 +1149,7 @@ test("Phoenix trace annotation helper posts native annotations and blocks secret
 
   let posted;
   const result = await createPhoenixTraceAnnotation({
-    repoRoot: fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-annotation-")),
+    repoRoot: fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-annotation-")),
     ensureReady: async () => ({ ok: true, appUrl: "http://127.0.0.1:6006" }),
     fetchImpl: async (url, init = {}) => {
       assert.match(String(url), /\/v1\/trace_annotations\?sync=true$/);
@@ -814,6 +1168,8 @@ test("Phoenix trace annotation helper posts native annotations and blocks secret
   assert.equal(posted.data[0].metadata.rubric_version, "1.0.0");
   assert.equal(posted.data[0].metadata.failure_taxonomy_version, "1.0.0");
   assert.equal(posted.data[0].metadata.workspace_maturity, "new");
+  assert.equal(posted.data[0].metadata.workflow_type, "decomposition");
+  assert.equal(posted.data[0].metadata.eval_namespace, "execution/evals/decomposition");
   assert.deepEqual(result.annotationIds, ["anno-1"]);
 });
 
@@ -834,14 +1190,14 @@ test("Phoenix dataset promotion uses bounded local receipts and auto create or a
   };
   const payload = buildDatasetUploadPayloadFromTraceReceipt({
     receipt,
-    datasetName: "agentic-factory-test",
+    datasetName: "teami-test",
     action: "create",
   });
   assert.equal(payload.inputs[0].run_id, "run-1");
   assert.equal(payload.inputs[0].domain_id, "support-ops");
   assert.equal(payload.inputs[0].trace_id, "11111111111111111111111111111111");
   assert.equal(payload.outputs[0].status, "completed");
-  assert.equal(payload.example_ids[0], "agentic_factory:run-1");
+  assert.equal(payload.example_ids[0], "teami:run-1");
   assert.doesNotMatch(JSON.stringify(payload), /prompt|phase_packet|repo_snippet|shell_output/);
   assert.throws(
     () => buildDatasetUploadPayloadFromTraceReceipt({
@@ -852,7 +1208,7 @@ test("Phoenix dataset promotion uses bounded local receipts and auto create or a
 
   const calls = [];
   const result = await promoteTraceReceiptToPhoenixDataset({
-    repoRoot: fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phoenix-dataset-")),
+    repoRoot: fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-dataset-")),
     ensureReady: async () => ({ ok: true, appUrl: "http://127.0.0.1:6006" }),
     fetchImpl: async (url, init = {}) => {
       calls.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
@@ -865,7 +1221,7 @@ test("Phoenix dataset promotion uses bounded local receipts and auto create or a
       }), { status: 200 });
     },
     receipt,
-    datasetName: "agentic-factory-test",
+    datasetName: "teami-test",
   });
 
   assert.equal(result.action, "create");
@@ -973,6 +1329,7 @@ function phoenixToolEventRuntimeExecutor(runId) {
                 output: {
                   status: "ok",
                   summary: "looked up local files",
+                  shell_output: LOCAL_TOOL_EVENT_DIFF,
                   note: `token ${"ghp_"}abcdefghijklmnop must not leave sanitization`,
                 },
               }],
@@ -1019,7 +1376,15 @@ function otlpValueToJs(value = {}) {
 
 class PhoenixLinearClient {
   constructor() {
-    this.cache = { domainId: "domain-a", workspaceId: "workspace-1", teamId: "team-1" };
+    this.cache = {
+      domainId: "domain-a",
+      workspaceId: "workspace-1",
+      teamId: "team-1",
+      issueLabels: {
+        Discovery: "ilabel-discovery",
+        "Needs Principal": "ilabel-needs-principal",
+      },
+    };
     this.project = {
       id: "project-1",
       name: "Phoenix evidence project",
@@ -1040,11 +1405,19 @@ class PhoenixLinearClient {
       { id: "status-backlog", name: "Backlog", type: "backlog" },
       { id: "status-planned", name: "Planned", type: "planned" },
       { id: "status-started", name: "In Progress", type: "started" },
+      { id: "status-completed", name: "Completed", type: "completed" },
     ];
   }
 
   async listWorkflowStates() {
-    return [{ id: "state-backlog", name: "Backlog", type: "unstarted" }];
+    return [
+      { id: "state-backlog", name: "Backlog", type: "backlog" },
+      { id: "state-todo", name: "Todo", type: "unstarted" },
+      { id: "state-in-progress", name: "In Progress", type: "started" },
+      { id: "state-in-review", name: "In Review", type: "started" },
+      { id: "state-blocked", name: "Blocked", type: "started" },
+      { id: "state-done", name: "Done", type: "completed" },
+    ];
   }
 
   async findProjectLabelsByName(name) {
@@ -1052,11 +1425,16 @@ class PhoenixLinearClient {
   }
 
   async findIssueLabelsByName(name, teamId) {
-    return name === "Discovery" && teamId === "team-1" ? [{ id: "ilabel-discovery", name, teamId }] : [];
+    if (teamId !== "team-1") return [];
+    const labels = [
+      { id: "ilabel-discovery", name: "Discovery", teamId },
+      { id: "ilabel-needs-principal", name: "Needs Principal", teamId },
+    ];
+    return name ? labels.filter((label) => label.name === name) : labels;
   }
 
   async findTemplatesByName(name, type, teamId) {
-    return name === "Agentic Factory Roadmap Item" && type === "project" && teamId === "team-1"
+    return name === "Teami Roadmap Item" && type === "project" && teamId === "team-1"
       ? [{ id: "template-1", name, type, teamId }]
       : [];
   }

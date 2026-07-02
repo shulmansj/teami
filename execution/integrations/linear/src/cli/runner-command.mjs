@@ -10,13 +10,17 @@ import {
   selectGatewayDomains,
 } from "../gateway-loop.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
+import { normalizeLocalPhoenixAppUrl } from "../local-phoenix-manager.mjs";
 import {
   runRuntimeSmokeChecks,
 } from "../runtime-smoke.mjs";
 import { flagValue, parseCliFlags } from "./flags.mjs";
+import { homeStateProbe } from "./home-state.mjs";
 import {
   agenticFactoryHeading,
   compactPairs,
+  formatCommand,
+  humanizeInterval,
   humanizeToken,
   printVerboseHint,
 } from "./operator-output.mjs";
@@ -26,15 +30,17 @@ const GATEWAY_SUCCESS_STATUSES = new Set(["completed", "stopped"]);
 const ATTENTION_STATES = new Set(["rate_limited", "wedged", "degraded", "resume_attention"]);
 const ACTIVE_STATES = new Set(["replaying", "working", "resume_working"]);
 
-export async function runGatewayCommand({ context, command, args }) {
+export async function runGatewayCommand(input) {
+  const { context, command, args } = input;
   const { output } = context;
   const [subcommand, ...rest] = args;
-  if (command === "trigger-status" || subcommand === "status") {
-    return runGatewayStatusCommand({
-      context,
-      command,
-      args: command === "trigger-status" ? args : rest,
-    });
+  if (command === "trigger-status") {
+    // Operator one-pass: actively drains replay + polls Linear "Planned" (can start work).
+    return runGatewayStatusCommand({ context, command, args });
+  }
+  if (subcommand === "status") {
+    // Adopter "is it on?" surface — strictly read-only: no poll, replay, or decomposition.
+    return runGatewayStatusReadOnly({ context, args: rest });
   }
   if (subcommand && !subcommand.startsWith("--")) {
     output.error({
@@ -44,7 +50,7 @@ export async function runGatewayCommand({ context, command, args }) {
     process.exitCode = 2;
     return;
   }
-  return runGatewayLoopCommand({ context, command, args });
+  return runGatewayLoopCommand(input);
 }
 
 export async function runRunnerCommand(input) {
@@ -55,7 +61,14 @@ export async function runTriggerStatusCommand(input) {
   return runGatewayStatusCommand(input);
 }
 
-async function runGatewayLoopCommand({ context, args }) {
+function gatewayWatchLine() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `still watching (${hh}:${mm}) - nothing Planned yet`;
+}
+
+async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
   const { config, repoRoot, output } = context;
   agenticFactoryHeading(output, "gateway");
   let selection;
@@ -67,21 +80,36 @@ async function runGatewayLoopCommand({ context, args }) {
   const onSigterm = () => controller.abort();
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
+  // Live "still watching" heartbeat for the long wait: an animated spinner on a TTY, durable
+  // per-tick lines when piped/CI. Self-ticking (the loop emits no idle-poll event); cleaned up in
+  // finally. The heartbeat installs no signal handler and never changes the exit code, so the
+  // loop's existing Ctrl-C handling is untouched.
+  let heartbeat = null;
+  let ticker = null;
   try {
     selection = resolveGatewaySelection({
       repoRoot,
       config,
       domainId: flags.domain || null,
     });
-    output.info(`Gateway running; polling Linear every ${config.poll?.interval_ms || 10_000}ms.`);
-    result = await runGatewayLoop({
+    const intervalMs = config.poll?.interval_ms || 10_000;
+    output.info(`Watching Linear for Planned projects. Polling every ${humanizeInterval(intervalMs)}; stop with Ctrl-C.`);
+    heartbeat = output.progress(gatewayWatchLine());
+    ticker = setInterval(() => heartbeat?.update(gatewayWatchLine()), intervalMs);
+    if (typeof ticker.unref === "function") ticker.unref();
+    result = await loop({
       repoRoot,
       config,
       registry: selection.registry,
       domains: selection.domains,
       signal: controller.signal,
       maxIterations,
-      onStatus: (event) => renderGatewayStatusEvent(event, output),
+      onStatus: (event) => {
+        // Clear the live heartbeat, print the activity durably, then resume watching.
+        heartbeat?.stop();
+        renderGatewayStatusEvent(event, output);
+        heartbeat = output.progress(gatewayWatchLine());
+      },
     });
   } catch (error) {
     output.error({
@@ -92,6 +120,8 @@ async function runGatewayLoopCommand({ context, args }) {
     process.exitCode = 1;
     return;
   } finally {
+    if (ticker) clearInterval(ticker);
+    heartbeat?.stop();
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
   }
@@ -141,6 +171,48 @@ async function runGatewayStatusCommand({ context, args }) {
   renderGatewayStatusResult(result, output, { repoRoot });
   printVerboseHint(output);
   process.exitCode = gatewayExitCode(result);
+}
+
+// The adopter "is it on?" surface. Strictly read-only: it renders the side-effect-free
+// homeStateProbe (config + registry + the live gateway lock) plus local run evidence. It NEVER
+// polls Linear, drains replay, or starts a decomposition — that active one-pass lives behind
+// `trigger-status`. Always exits 0; it is a status report, not a health gate (that is `doctor`).
+async function runGatewayStatusReadOnly({ context }) {
+  const { config, repoRoot, output } = context;
+  agenticFactoryHeading(output, "gateway status");
+  const probe = homeStateProbe({ repoRoot });
+
+  if (probe.state === "uninitialized") {
+    output.warn("Not set up yet — this checkout has no active factory domain.");
+    output.nextSteps([{ text: formatCommand("init"), hint: "set up your factory" }]);
+    process.exitCode = 0;
+    return;
+  }
+  if (probe.state === "degraded") {
+    output.warn("Local factory state could not be read cleanly.");
+    output.nextSteps([{ text: formatCommand("doctor"), hint: "diagnose and repair" }]);
+    process.exitCode = 0;
+    return;
+  }
+
+  const running = probe.state === "listening";
+  const mark = running
+    ? output.style.green(output.symbols.running)
+    : output.style.dim(output.symbols.stopped);
+  output.raw(`\n  ${mark} ${running ? "Running" : "Stopped"}\n`);
+  output.keyValues(compactPairs([
+    ["Domain", probe.evidence.activeDomainId],
+    ["Poll", `every ${humanizeInterval(config.poll?.interval_ms ?? 10_000)}`],
+    ["Dashboard", normalizeLocalPhoenixAppUrl(process.env.TEAMI_PHOENIX_URL)],
+  ]));
+  if (running) {
+    output.info("Stop: Ctrl-C in the terminal running the gateway.");
+  } else {
+    output.nextSteps([{ text: formatCommand("gateway start"), hint: "open your factory for business" }]);
+  }
+  renderLatestRunEvidence({ repoRoot, output });
+  printVerboseHint(output);
+  process.exitCode = 0;
 }
 
 function resolveGatewaySelection({ repoRoot, config, domainId = null } = {}) {
@@ -442,7 +514,7 @@ function acquireDomainRunnerLock({
   isProcessAlive = defaultIsProcessAlive,
   installHandlers = true,
 } = {}) {
-  const lockPath = path.join(repoRoot, ".agentic-factory", "domains", domainId, ".lock");
+  const lockPath = path.join(repoRoot, ".teami", "domains", domainId, ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const createdAt = toDate(now()).toISOString();
   const token = randomUUID();

@@ -1,12 +1,18 @@
 import { createInterface } from "node:readline/promises";
+import { Buffer } from "node:buffer";
 
 import { writeLinearCache } from "../cache.mjs";
+import { normalizeDoctorChecks } from "../doctor-check.mjs";
+import { buildDomainContext } from "../domain-resolver.mjs";
 import {
   emptyDomainRegistry,
   readDomainRegistry,
+  upsertDomainRecord,
   writeDomainRegistry,
 } from "../domain-registry.mjs";
 import {
+  defaultRunCommand,
+  ghJsonWithAmbientAuth,
   readGitHubConnectionState,
   runGitHubInitPhase,
 } from "../github-setup.mjs";
@@ -35,6 +41,7 @@ import {
 import { runRuntimeSmokeChecks } from "../runtime-smoke.mjs";
 import { createCliOutput } from "./cli-output.mjs";
 import { doctorGraphqlLinear } from "./doctor-command.mjs";
+import { renderDoctorCheckLine } from "./doctor-report.mjs";
 import { hasCliFlag, parseCliFlags } from "./flags.mjs";
 import {
   configWithGithubFlags,
@@ -45,16 +52,23 @@ import {
   createBootstrapLinearCredentialStore,
   promoteSetupCredentialToDomain,
 } from "./local-setup-cleanup.mjs";
+import { formatCommand } from "./operator-output.mjs";
+import {
+  gitRepoResourceId,
+  registerGitRepoResourceKind,
+} from "../../../git/git-repo-materializer.mjs";
+
+const GITHUB_REPO_DISCOVERY_LIMIT = 50;
 
 const LINEAR_SETUP_COMMAND_OPTIONS = Object.freeze({
   "domain:add": {
-    intro: "Agentic Factory will add a domain to the same factory and learning loop, then ask Linear for read/write browser authorization for that domain's workspace.",
+    intro: "Teami will add a domain to the same factory and learning loop, then ask Linear for read/write browser authorization for that domain's workspace.",
     prompt: "Domain name to add to this factory and learning loop: ",
     readyLabel: "Domain",
     runGithubPhase: false,
   },
   init: {
-    intro: "Agentic Factory will ask Linear for read/write browser authorization to verify setup and post project updates. No API key is required.",
+    intro: "Teami will ask Linear for read/write browser authorization to verify setup and post project updates. No API key is required.",
     prompt: "First domain name: ",
     readyLabel: "First domain",
     runGithubPhase: true,
@@ -74,7 +88,7 @@ export async function runLinearSetupCommand({ context, command, args }) {
       : null;
     const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
     const totalSteps = commandOptions.runGithubPhase ? 2 : 1;
-    output.heading(`Agentic Factory ${output.symbols.separator} setup`);
+    output.heading(`Teami ${output.symbols.separator} setup`);
     output.detail(commandOptions.intro);
     if (githubResumeDomain) {
       output.step(1, totalSteps, "Connect Linear");
@@ -131,6 +145,13 @@ export async function runLinearSetupCommand({ context, command, args }) {
     output.detail(`workspace_id=${workspaceAuthorization.workspace.id}`);
     output.detail("Linear setup authorization verified.");
 
+    const repoAllowlistSelection = await discoverAndConfirmDomainGitHubRepos({
+      command,
+      output,
+      runCommand: context.githubDiscoveryRunCommand || context.runCommand || defaultRunCommand,
+      isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    });
+
     const result = await setupLinearDomain({
       client: workspaceAuthorization.setupAuth.client,
       config,
@@ -155,6 +176,28 @@ export async function runLinearSetupCommand({ context, command, args }) {
       onPreview: (line) => output.detail(line),
     });
     printSummary(result.summary, output);
+    if (repoAllowlistSelection.confirmed) {
+      const repoAllowlistUpdate = await persistDomainGitHubRepoAllowlist({
+        repoRoot,
+        domainId: result.domain.id,
+        repos: repoAllowlistSelection.selectedRepos,
+      });
+      result.domain = repoAllowlistUpdate.domain;
+      result.registry = repoAllowlistUpdate.registry;
+      result.context = buildDomainContext({
+        domain: result.domain,
+        config,
+        repoRoot,
+        behaviorRepoId: result.context?.trace?.behavior_repo_id,
+      });
+      if (repoAllowlistUpdate.resources.length === 0) {
+        output.success("Repo allowlist: none (non-code team)");
+      } else {
+        output.success(`Repo allowlist: ${repoAllowlistUpdate.resources.map((resource) => repoLabel(resource.binding)).join(", ")}`);
+      }
+    } else {
+      output.detail("Repo allowlist unchanged; GitHub repo discovery was not confirmed.");
+    }
     output.success(`Team "${result.domain.linear?.team_name || domainName}" created (project template + labels ready)`);
     output.success("Local gateway ready for Planned projects");
     output.info("Linear connected.");
@@ -205,6 +248,349 @@ export async function runLinearSetupCommand({ context, command, args }) {
     if (!result.ok) process.exitCode = 1;
 }
 
+export async function runSetupGitHubRepoDiscoveryStep({
+  repoRoot = process.cwd(),
+  domainId,
+  command = "init",
+  output = createCliOutput(),
+  runCommand = defaultRunCommand,
+  prompt = promptLine,
+  isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  registry = null,
+  writeRegistry = (nextRegistry) => writeDomainRegistry({ repoRoot }, nextRegistry),
+} = {}) {
+  const selection = await discoverAndConfirmDomainGitHubRepos({
+    command,
+    output,
+    runCommand,
+    prompt,
+    isTTY,
+  });
+  if (!selection.confirmed) {
+    return {
+      ...selection,
+      persisted: false,
+      resources: [],
+    };
+  }
+  const persisted = await persistDomainGitHubRepoAllowlist({
+    repoRoot,
+    domainId,
+    repos: selection.selectedRepos,
+    registry,
+    writeRegistry,
+  });
+  return {
+    ...selection,
+    ...persisted,
+    persisted: true,
+  };
+}
+
+export async function discoverAndConfirmDomainGitHubRepos({
+  command = "init",
+  output = createCliOutput(),
+  runCommand = defaultRunCommand,
+  prompt = promptLine,
+  isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  limit = GITHUB_REPO_DISCOVERY_LIMIT,
+} = {}) {
+  output.section("Repository access");
+  let discoveredRepos = [];
+  try {
+    discoveredRepos = discoverGitHubRepos({ runCommand, limit });
+  } catch (error) {
+    output.warn(`GitHub repo discovery skipped: ${error.message}`);
+    output.info(
+      `Fix GitHub CLI auth with gh auth login --hostname github.com, then re-run ${formatCommand(command === "domain:add" ? "domain add" : "init")}.`,
+    );
+    return {
+      confirmed: false,
+      selectedRepos: [],
+      discoveredRepos: [],
+      reason: "github_repo_discovery_failed",
+    };
+  }
+
+  if (discoveredRepos.length === 0) {
+    output.info("No GitHub repos were found for this account. This domain will start as a non-code team.");
+    return {
+      confirmed: true,
+      selectedRepos: [],
+      discoveredRepos,
+      reason: "github_repo_discovery_empty",
+    };
+  }
+
+  if (!isTTY) {
+    output.warn(
+      "GitHub repos were found, but this terminal cannot confirm a repo allowlist. Re-run setup in an interactive terminal to allow code repos.",
+    );
+    return {
+      confirmed: false,
+      selectedRepos: [],
+      discoveredRepos,
+      reason: "github_repo_discovery_not_interactive",
+    };
+  }
+
+  const selectedRepos = await promptGitHubRepoAllowlistSelection({
+    repos: discoveredRepos,
+    output,
+    prompt,
+  });
+  if (selectedRepos.length === 0) {
+    output.info("No repo selected. This domain will start as a non-code team.");
+    return {
+      confirmed: true,
+      selectedRepos,
+      discoveredRepos,
+      reason: "github_repo_allowlist_empty",
+    };
+  }
+
+  output.info(`Repo allowlist confirmed: ${selectedRepos.map(repoLabel).join(", ")}`);
+  await printBuildTestDetectionLines({ repos: selectedRepos, output, runCommand });
+  return {
+    confirmed: true,
+    selectedRepos,
+    discoveredRepos,
+    reason: "github_repo_allowlist_confirmed",
+  };
+}
+
+export function discoverGitHubRepos({
+  runCommand = defaultRunCommand,
+  limit = GITHUB_REPO_DISCOVERY_LIMIT,
+} = {}) {
+  const data = ghJsonWithAmbientAuth({
+    runCommand,
+    args: [
+      "repo",
+      "list",
+      "--limit",
+      String(limit),
+      "--json",
+      "nameWithOwner,defaultBranchRef",
+    ],
+  });
+  return normalizeGitHubRepoList(data);
+}
+
+export async function persistDomainGitHubRepoAllowlist({
+  repoRoot = process.cwd(),
+  domainId,
+  repos = [],
+  registry = null,
+  writeRegistry = (nextRegistry) => writeDomainRegistry({ repoRoot }, nextRegistry),
+} = {}) {
+  if (!nonEmptyString(domainId)) throw new Error("github_repo_allowlist_missing_domain");
+  registerGitRepoResourceKind();
+  const currentRegistry = registry || readDomainRegistry({ repoRoot });
+  if (!currentRegistry) throw new Error("github_repo_allowlist_registry_missing");
+  const domain = currentRegistry.domains.find((candidate) => candidate.id === domainId);
+  if (!domain) throw new Error(`github_repo_allowlist_unknown_domain:${domainId}`);
+
+  const resources = uniqueGitRepoResources(
+    repos.map((repo) => gitRepoResourceFromBinding(gitHubRepoBinding(repo))),
+  );
+  const updatedDomain = {
+    ...structuredClone(domain),
+    resources: [
+      ...(domain.resources || []).filter((resource) => resource.kind !== "git_repo"),
+      ...resources,
+    ],
+  };
+  const nextRegistry = upsertDomainRecord(currentRegistry, updatedDomain);
+  const registryPath = await writeRegistry(nextRegistry);
+  return {
+    domain: nextRegistry.domains.find((candidate) => candidate.id === domainId),
+    registry: nextRegistry,
+    registryPath,
+    resources,
+  };
+}
+
+async function promptGitHubRepoAllowlistSelection({
+  repos = [],
+  output,
+  prompt,
+} = {}) {
+  if (repos.length === 1) {
+    const repo = repos[0];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const answer = await prompt(`Allow this team to work in ${repoLabel(repo)}? [Y/n]: `);
+      const parsed = parseYesNo(answer, { defaultValue: true });
+      if (parsed !== null) return parsed ? [repo] : [];
+      output.warn("Answer y or n.");
+    }
+    return [];
+  }
+
+  output.info("Select GitHub repos this Linear team may work in:");
+  repos.forEach((repo, index) => {
+    output.info(`${index + 1}. ${repoLabel(repo)} (default branch ${repo.default_branch})`);
+  });
+  output.info("0. none (non-code team)");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const answer = await prompt("Choose repo number(s), comma-separated, or 0 for none: ");
+    const parsed = parseRepoNumberSelection(answer, repos.length);
+    if (parsed.ok) return parsed.indexes.map((index) => repos[index]);
+    output.warn(`Enter one or more numbers from 1 to ${repos.length}, separated by commas, or 0 for none.`);
+  }
+  return [];
+}
+
+function parseYesNo(value, { defaultValue = null } = {}) {
+  const normalized = String(value || "").trim().toLocaleLowerCase();
+  if (!normalized && defaultValue !== null) return defaultValue;
+  if (["y", "yes", "1", "true"].includes(normalized)) return true;
+  if (["n", "no", "0", "none", "false"].includes(normalized)) return false;
+  return null;
+}
+
+function parseRepoNumberSelection(value, repoCount) {
+  const normalized = String(value || "").trim().toLocaleLowerCase();
+  if (["0", "none", "no"].includes(normalized)) return { ok: true, indexes: [] };
+  if (!normalized) return { ok: false, indexes: [] };
+  const numbers = normalized
+    .split(/[\s,]+/)
+    .map((part) => Number.parseInt(part, 10));
+  if (numbers.some((number) => !Number.isInteger(number) || number < 1 || number > repoCount)) {
+    return { ok: false, indexes: [] };
+  }
+  const indexes = [...new Set(numbers.map((number) => number - 1))];
+  return { ok: true, indexes };
+}
+
+async function printBuildTestDetectionLines({
+  repos = [],
+  output,
+  runCommand,
+} = {}) {
+  for (const repo of repos) {
+    const plan = detectGitHubRepoBuildTestPlan({ repo, runCommand });
+    if (plan.detected) {
+      output.success(`Build/test auto-detected for ${repoLabel(repo)}: ${plan.setup_command} -> ${plan.test_command}`);
+    } else {
+      output.info(
+        `Build/test not auto-detected for ${repoLabel(repo)}; the first code run will perform a readiness check before editing.`,
+      );
+    }
+  }
+}
+
+export function detectGitHubRepoBuildTestPlan({
+  repo,
+  runCommand = defaultRunCommand,
+} = {}) {
+  let packageJson = null;
+  try {
+    packageJson = fetchGitHubPackageJson({ repo, runCommand });
+  } catch {
+    return { detected: false, reason: "package_json_unreadable" };
+  }
+  if (!packageJson) return { detected: false, reason: "package_json_missing" };
+  const scripts = packageJson.scripts && typeof packageJson.scripts === "object"
+    ? packageJson.scripts
+    : {};
+  const testScript = nonEmptyString(scripts.test);
+  if (!testScript || isNpmInitPlaceholderTest(testScript)) {
+    return { detected: false, reason: "test_script_missing" };
+  }
+  return {
+    detected: true,
+    setup_command: nonEmptyString(scripts.setup) ? "npm run setup" : "npm install",
+    test_command: "npm test",
+  };
+}
+
+function fetchGitHubPackageJson({ repo, runCommand }) {
+  const binding = gitHubRepoBinding(repo);
+  const data = ghJsonWithAmbientAuth({
+    runCommand,
+    args: [
+      "api",
+      `repos/${binding.owner}/${binding.repo}/contents/package.json?ref=${encodeURIComponent(binding.default_branch)}`,
+    ],
+    missingOk: true,
+  });
+  if (!data || data.encoding !== "base64" || typeof data.content !== "string") return null;
+  const text = Buffer.from(data.content.replace(/\s/g, ""), "base64").toString("utf8");
+  return JSON.parse(text);
+}
+
+function normalizeGitHubRepoList(data) {
+  const repos = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(data) ? data : []) {
+    const normalized = normalizeGitHubRepoListEntry(entry);
+    if (!normalized) continue;
+    const id = gitRepoResourceId(normalized);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    repos.push(normalized);
+  }
+  return repos;
+}
+
+function normalizeGitHubRepoListEntry(entry) {
+  const nameWithOwner = nonEmptyString(entry?.nameWithOwner);
+  const defaultBranch = nonEmptyString(entry?.defaultBranchRef?.name);
+  if (!nameWithOwner || !defaultBranch) return null;
+  const parts = nameWithOwner.split("/");
+  if (parts.length !== 2 || !nonEmptyString(parts[0]) || !nonEmptyString(parts[1])) return null;
+  return {
+    owner: parts[0].trim(),
+    repo: parts[1].trim(),
+    default_branch: defaultBranch,
+  };
+}
+
+function gitHubRepoBinding(repo) {
+  const binding = {
+    owner: nonEmptyString(repo?.owner),
+    repo: nonEmptyString(repo?.repo),
+    default_branch: nonEmptyString(repo?.default_branch),
+  };
+  if (!binding.owner) throw new Error("github_repo_binding_missing_owner");
+  if (!binding.repo) throw new Error("github_repo_binding_missing_repo");
+  if (!binding.default_branch) throw new Error("github_repo_binding_missing_default_branch");
+  return binding;
+}
+
+function gitRepoResourceFromBinding(binding) {
+  return {
+    id: gitRepoResourceId(binding),
+    kind: "git_repo",
+    role: "primary",
+    binding,
+  };
+}
+
+function uniqueGitRepoResources(resources = []) {
+  const seen = new Set();
+  const unique = [];
+  for (const resource of resources) {
+    if (seen.has(resource.id)) continue;
+    seen.add(resource.id);
+    unique.push(resource);
+  }
+  return unique;
+}
+
+function repoLabel(repo) {
+  return `${repo.owner}/${repo.repo}`;
+}
+
+function isNpmInitPlaceholderTest(script) {
+  return /^echo\s+["']?Error:\s+no\s+test\s+specified["']?\s*(?:&&|;)\s*exit\s+1$/i.test(String(script || "").trim());
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
 async function runGitHubInitStep({
   repoRoot,
   config,
@@ -242,7 +628,7 @@ async function runGitHubInitStep({
     output.error({
       what: githubFailureTitle(githubPhase.reason),
       why: "Setup needs a verified GitHub connection before promotion PRs can work.",
-      fix: githubPhase.repair || "repair the GitHub connection and rerun npm run init",
+      fix: githubPhase.repair || `repair the GitHub connection and rerun ${formatCommand("init")}`,
     });
     process.exitCode = 1;
     return false;
@@ -280,17 +666,23 @@ async function runFinalGate({
 } = {}) {
   output.section("Verifying setup");
   output.info(`Running your claude/codex once to verify it works${output.symbols.ellipsis} this can take a minute the first time.`);
+  // Don't go silent during the smoke wait: an animated spinner on a TTY, a durable line when
+  // piped/CI. Cleared in finally so it never leaks past the await on either the success or the
+  // throw path (no smoke-runner API change).
+  const smokeProgress = output.progress("Running the runtime check");
   let smoke;
   try {
     smoke = await runSmoke({ config, repoRoot });
   } catch (error) {
     smoke = { ok: false, results: [], error: error.message };
+  } finally {
+    smokeProgress.stop();
   }
   if (smoke.ok) {
     output.success("Runtime check passed");
   } else {
     output.warn("Runtime check did not pass; setup will still complete.");
-    output.info("run npm run runtime-smoke");
+    output.info(`You can re-run the check any time with ${formatCommand("runtime-smoke")}.`);
   }
 
   let checks = [];
@@ -307,36 +699,26 @@ async function runFinalGate({
   } catch (error) {
     checks = [{ name: "health check", ok: false, message: error.message }];
   }
+  checks = normalizeDoctorChecks(checks);
 
-  for (const check of checks) {
-    if (check.ok) {
-      output.success(check.name);
-    } else {
-      output.error({ what: check.name });
-      if (check.message) output.detail(`${check.name}: ${check.message}`);
-    }
-  }
-  const doctorGreen = checks.length > 0 && checks.every((check) => check.ok);
+  for (const check of checks) renderDoctorCheckLine(check, output);
+  // A warning must never fail onboarding: the gate keys off `state`, so only a `fail` blocks.
+  const doctorGreen = checks.length > 0 && checks.every((check) => check.state !== "fail");
   if (doctorGreen) {
     output.success("Setup verified.");
   } else {
     output.error({
       what: "Some setup checks need attention",
-      fix: "fix the checks above, then re-run npm run init (setup is resumable).",
+      fix: `fix the checks above, then re-run ${formatCommand("init")} (setup is resumable).`,
     });
   }
   return { ok: doctorGreen, smokeOk: Boolean(smoke.ok), doctorOk: doctorGreen };
 }
 
-// The repo-local launcher is invoked differently per OS: PowerShell and cmd.exe need the
-// `.\factory.cmd` form (PowerShell will not run a current-dir command by bare name, and
-// `.\factory.cmd` works in both Windows shells), while POSIX shells use `./factory`. Adopter-facing
-// next-step copy must show the form that actually runs on the host, so a fresh setup never hands back
-// a command the user's own shell rejects.
-export function factoryLauncherCommand(subcommand = "") {
-  const launcher = process.platform === "win32" ? ".\\factory.cmd" : "./factory";
-  return subcommand ? `${launcher} ${subcommand}` : launcher;
-}
+// Back-compat alias for the shared launcher-form helper (now `formatCommand` in
+// operator-output.mjs). Re-exported under the original name so existing call sites and the
+// source-pinning tests stay green; new code should import `formatCommand` directly.
+export const factoryLauncherCommand = formatCommand;
 
 async function finishSetupOutput({
   output,
@@ -360,7 +742,7 @@ async function finishSetupOutput({
     runDoctor,
   });
   if (!gate.ok) {
-    output.warn("Setup is resumable — fix the checks above and re-run npm run init.");
+    output.warn(`Setup is resumable — fix the checks above and re-run ${formatCommand("init")}.`);
     process.exitCode = 1;
     return gate;
   }
@@ -369,7 +751,7 @@ async function finishSetupOutput({
     'Move a Linear project to "Planned" to start your first run',
     { text: factoryLauncherCommand("gateway start"), hint: "open your factory for business (polls Linear; Ctrl-C to stop)" },
     { text: factoryLauncherCommand("doctor"), hint: "re-check everything's healthy" },
-    { text: "Local Phoenix (traces)", hint: phoenixAppUrl || "run npm run phoenix:start" },
+    { text: "Local Phoenix (traces)", hint: phoenixAppUrl || `run ${formatCommand("phoenix:start")}` },
   ]);
   if (!output.verbose) {
     output.raw(`\n  ${output.style.dim("(Run with --verbose for full detail.)")}\n`);
@@ -416,7 +798,7 @@ async function authorizeLinearSetupWorkspace({
 
   for (let attempt = 1; attempt <= maxAuthorizationAttempts; attempt += 1) {
     if (!trustLinePrinted) {
-      log("Authorizing grants Agentic Factory read/write access to the entire selected Linear workspace; Linear has no narrower scope.");
+      log("Authorizing grants Teami read/write access to the entire selected Linear workspace; Linear has no narrower scope.");
       trustLinePrinted = true;
     }
     for (const line of workspaceAuthorizationInstructions(selection)) log(line);
@@ -654,7 +1036,7 @@ function explicitWorkspaceExpectation(flags = {}, env = process.env) {
     }
     return flags.workspace.trim();
   }
-  const value = env.AGENTIC_FACTORY_EXPECTED_WORKSPACE;
+  const value = env.TEAMI_EXPECTED_WORKSPACE;
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
@@ -776,7 +1158,7 @@ function explicitInitDomainName(args = []) {
     flags.domain,
     flags["domain-name"],
     ...positionals,
-    process.env.AGENTIC_FACTORY_DOMAIN_NAME,
+    process.env.TEAMI_DOMAIN_NAME,
   ].find((value) => typeof value === "string" && value.trim());
   if (explicit) return explicit.trim();
   return null;

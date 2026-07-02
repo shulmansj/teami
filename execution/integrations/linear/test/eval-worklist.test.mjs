@@ -60,7 +60,7 @@ function writeReceipt(repoRoot, { runId, traceId, projectId, observedAt }) {
 }
 
 function writeRunArtifactFile(repoRoot, { runId, kind = "commit", phasePackets = [] }) {
-  const runsDir = path.join(repoRoot, ".agentic-factory", "runs");
+  const runsDir = path.join(repoRoot, ".teami", "runs");
   fs.mkdirSync(runsDir, { recursive: true });
   fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify({
     schema_version: "linear-decomposition-run-artifact/v1",
@@ -107,7 +107,7 @@ function createPhoenixReadMock({ annotationsByTrace = {} } = {}) {
     const parsed = new URL(String(url));
     if (parsed.pathname === "/v1/projects") {
       return new Response(JSON.stringify({
-        data: [{ id: "UHJvamVjdDox", name: "agentic-factory" }],
+        data: [{ id: "UHJvamVjdDox", name: "teami" }],
       }), { status: 200 });
     }
     if (/^\/v1\/projects\/[^/]+\/trace_annotations$/.test(parsed.pathname)) {
@@ -131,7 +131,7 @@ test("trace annotation payload requires non-empty identifier and canonical name/
     identifier: "steve",
   };
   const payload = buildTraceAnnotationPayload(valid);
-  assert.equal(payload.data[0].name, "decomposition_quality");
+  assert.equal(payload.data[0].name, "quality");
   assert.equal(payload.data[0].identifier, "steve");
   assert.equal(payload.data[0].annotator_kind, "HUMAN");
   // The contract metadata is stamped from the repo-owned artifacts.
@@ -149,7 +149,7 @@ test("trace annotation payload requires non-empty identifier and canonical name/
   // Canonical label set and rubric dimension names; the legacy free-form
   // name/label combinations are rejected at the write path.
   assert.throws(() => buildTraceAnnotationPayload({ ...valid, label: "useful" }), /label must be one of/);
-  assert.throws(() => buildTraceAnnotationPayload({ ...valid, name: "agentic_factory_quality" }), /not canonical/);
+  assert.throws(() => buildTraceAnnotationPayload({ ...valid, name: "teami_quality" }), /not canonical/);
   for (const dimension of QUALITY_DIMENSION_NAMES) {
     assert.doesNotThrow(() => buildTraceAnnotationPayload({ ...valid, name: dimension }));
   }
@@ -245,7 +245,7 @@ test("distinct identifiers coexist; same (name, target, identifier) upserts", as
     });
     return new Response(JSON.stringify({ data }), { status: 200 });
   };
-  const repoRoot = makeRepoRoot("agentic-factory-anno-upsert-");
+  const repoRoot = makeRepoRoot("teami-anno-upsert-");
   const base = {
     repoRoot,
     ensureReady: async () => ({ ok: true, appUrl: "http://127.0.0.1:6006" }),
@@ -272,11 +272,11 @@ test("distinct identifiers coexist; same (name, target, identifier) upserts", as
   });
   assert.equal(store.size, 2, "same (name, target, identifier) must update in place, not duplicate");
   assert.equal(
-    store.get("decomposition_quality|11111111111111111111111111111111|steve").result.label,
+    store.get("quality|11111111111111111111111111111111|steve").result.label,
     "needs_revision",
   );
   assert.equal(
-    store.get("decomposition_quality|11111111111111111111111111111111|decomposition_quality_judge_v1").result.label,
+    store.get("quality|11111111111111111111111111111111|decomposition_quality_judge_v1").result.label,
     "needs_revision",
   );
 });
@@ -398,7 +398,7 @@ test("low-confidence judge heuristics are deterministic and cheap", () => {
 });
 
 test("worklist ranking matches the plan's priority order across fixture classes", async () => {
-  const repoRoot = makeRepoRoot("agentic-factory-worklist-rank-");
+  const repoRoot = makeRepoRoot("teami-worklist-rank-");
   // Priority 1: repeated area (proj-A) with zero human grounding.
   writeReceipt(repoRoot, { runId: "run-low1", traceId: TRACE_IDS.low1, projectId: "proj-A", observedAt: "2026-06-09T01:00:00.000Z" });
   writeReceipt(repoRoot, { runId: "run-low2", traceId: TRACE_IDS.low2, projectId: "proj-A", observedAt: "2026-06-09T02:00:00.000Z" });
@@ -483,7 +483,7 @@ test("worklist ranking matches the plan's priority order across fixture classes"
 
   // Nothing durable is persisted: local stores are unchanged after computing.
   const receiptsDir = path.join(repoRoot, ".agent-shell", "telemetry", "runs");
-  const artifactsDir = path.join(repoRoot, ".agentic-factory", "runs");
+  const artifactsDir = path.join(repoRoot, ".teami", "runs");
   const before = [fs.readdirSync(receiptsDir).sort(), fs.readdirSync(artifactsDir).sort()];
   const lines = formatWorklistReport({ report, items });
   assert.ok(lines.some((line) => line.includes("never persisted")));
@@ -493,7 +493,7 @@ test("worklist ranking matches the plan's priority order across fixture classes"
 });
 
 test("worklist degrades gracefully with an explicit notice when Phoenix is unreachable", async () => {
-  const repoRoot = makeRepoRoot("agentic-factory-worklist-degraded-");
+  const repoRoot = makeRepoRoot("teami-worklist-degraded-");
   writeReceipt(repoRoot, { runId: "run-1", traceId: TRACE_IDS.low1, projectId: "proj-A", observedAt: "2026-06-09T01:00:00.000Z" });
   const fetchImpl = async () => {
     throw new Error("ECONNREFUSED 127.0.0.1:6006");
@@ -520,13 +520,13 @@ test("worklist degrades gracefully with an explicit notice when Phoenix is unrea
 });
 
 test("status report covers per-run flags including dataset-membership receipts", async () => {
-  const repoRoot = makeRepoRoot("agentic-factory-eval-status-");
+  const repoRoot = makeRepoRoot("teami-eval-status-");
   writeReceipt(repoRoot, { runId: "run-promoted", traceId: TRACE_IDS.low1, projectId: "proj-A", observedAt: "2026-06-09T01:00:00.000Z" });
   writeRunArtifactFile(repoRoot, { runId: "run-promoted", kind: "commit" });
-  const artifactsDir = path.join(repoRoot, ".agentic-factory", "runs");
+  const artifactsDir = path.join(repoRoot, ".teami", "runs");
   // Local dataset-membership receipt (sibling file; read-only input here).
   fs.writeFileSync(path.join(artifactsDir, "run-promoted.promotion.json"), JSON.stringify({
-    datasets: [{ name: "agentic-factory-decomposition-examples", dataset_id: "RGF0YXNldDox" }],
+    datasets: [{ name: "teami-decomposition-examples", dataset_id: "RGF0YXNldDox" }],
   }));
   // Preflight receipts are synthetic and never judgment targets.
   writeReceipt(repoRoot, { runId: "phoenix-preflight-1", traceId: TRACE_IDS.low2, projectId: null, observedAt: "2026-06-09T02:00:00.000Z" });
@@ -544,7 +544,7 @@ test("status report covers per-run flags including dataset-membership receipts",
   assert.equal(run.run_id, "run-promoted");
   assert.equal(run.derived_status, "has_human");
   assert.equal(run.promoted_to_dataset, true);
-  assert.deepEqual(run.promoted_datasets, ["agentic-factory-decomposition-examples"]);
+  assert.deepEqual(run.promoted_datasets, ["teami-decomposition-examples"]);
 
   const lines = formatEvalStatusReport(report);
   assert.ok(lines[0].includes("never persisted to Phoenix"));

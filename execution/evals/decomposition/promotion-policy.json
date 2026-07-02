@@ -1,14 +1,14 @@
 {
-  "schema_version": "agentic-factory-promotion-policy/v1",
+  "schema_version": "teami-promotion-policy/v1",
   "policy_version": "5.0.0",
-  "_note": "Repo-owned promotion policy for the agentic_factory.promote_candidate controller (plan ~534-594). Every value is HUMAN-SET: change it by editing this file in a reviewed commit. The controller records policy_version plus the sha256 of this file's exact bytes in every handoff, registry row, and PR marker. Unattended/scanner reads MUST come from the internal clone at default-branch HEAD (resolveTrustedPolicyRead mode 'unattended'); only an explicit user invocation may read the active checkout. The local ledger caches counts for speed but budgets/caps/dedupe truth derives from repo-visible PR markers (CONSTRAINTS #10).",
+  "_note": "Repo-owned promotion policy for the teami.promote_candidate controller (plan ~534-594). Every value is HUMAN-SET: change it by editing this file in a reviewed commit. The controller records policy_version plus the sha256 of this file's exact bytes in every handoff, registry row, and PR marker. Unattended/scanner reads MUST come from the internal clone at default-branch HEAD (resolveTrustedPolicyRead mode 'unattended'); only an explicit user invocation may read the active checkout. The local ledger caches counts for speed but budgets/caps/dedupe truth derives from repo-visible PR markers (CONSTRAINTS #10).",
   "disabled": false,
   "lookback_days": 90,
   "max_open_proposals": 3,
   "proposal_budget": {
     "max_proposals": 5,
     "period_days": 7,
-    "_note": "Per-period proposal budget, counted from repo-visible agentic_factory_promotion markers on PRs created within period_days. Open PRs whose marker says proposal_state=superseded are excluded from the max_open_proposals count (a human still has to close them, but they no longer represent an active ask)."
+    "_note": "Per-period proposal budget, counted from repo-visible teami_promotion markers on PRs created within period_days. Open PRs whose marker says proposal_state=superseded are excluded from the max_open_proposals count (a human still has to close them, but they no longer represent an active ask)."
   },
   "eligible_launch_sources": [
     "managed_manual",
@@ -24,10 +24,10 @@
     "freshness_window_days": 14,
     "eligible_phoenix": {
       "project_names": [
-        "agentic-factory"
+        "teami"
       ],
       "dataset_names": [
-        "agentic-factory-decomposition-examples"
+        "teami-decomposition-examples"
       ],
       "split_names": [
         "train",
@@ -36,7 +36,7 @@
     },
     "explicit_intent_signals": {
       "managed_experiment_receipt_intent": "promotion_candidate",
-      "prompt_version_candidate_tag": "agentic_factory_promotion_candidate",
+      "prompt_version_candidate_tag": "teami_promotion_candidate",
       "repo_candidate_artifact_intent": "promotion_candidate",
       "authenticated_registration": "deferred"
     },

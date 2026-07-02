@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 export const DEFAULT_PHOENIX_APP_URL = "http://127.0.0.1:6006";
-export const DEFAULT_PHOENIX_PROJECT = "agentic-factory";
+export const DEFAULT_PHOENIX_PROJECT = "teami";
 export const DEFAULT_PHOENIX_PACKAGE = "arize-phoenix==14.13.0";
 
 const DEFAULT_START_TIMEOUT_MS = 90_000;
@@ -26,8 +26,8 @@ export function phoenixPaths(repoRoot = process.cwd()) {
 export function resolvePhoenixConfig({
   repoRoot = process.cwd(),
   env = process.env,
-  appUrl = env.AGENTIC_FACTORY_PHOENIX_URL || DEFAULT_PHOENIX_APP_URL,
-  projectName = env.AGENTIC_FACTORY_PHOENIX_PROJECT || DEFAULT_PHOENIX_PROJECT,
+  appUrl = env.TEAMI_PHOENIX_URL || DEFAULT_PHOENIX_APP_URL,
+  projectName = env.TEAMI_PHOENIX_PROJECT || DEFAULT_PHOENIX_PROJECT,
 } = {}) {
   const normalizedAppUrl = normalizeLocalPhoenixAppUrl(appUrl);
   const url = new URL(normalizedAppUrl);
@@ -38,7 +38,7 @@ export function resolvePhoenixConfig({
     host: url.hostname,
     port: Number(url.port || 80),
     projectName,
-    packageSpec: env.AGENTIC_FACTORY_PHOENIX_PACKAGE || DEFAULT_PHOENIX_PACKAGE,
+    packageSpec: env.TEAMI_PHOENIX_PACKAGE || DEFAULT_PHOENIX_PACKAGE,
     ...paths,
   };
 }
@@ -242,7 +242,7 @@ export function recoverStaleServiceMetadata(config) {
 }
 
 async function ensurePhoenixInstalled({ config, runCommand, env, onProgress, commandTimeoutMs }) {
-  if (env.AGENTIC_FACTORY_PHOENIX_SKIP_INSTALL === "1") return;
+  if (env.TEAMI_PHOENIX_SKIP_INSTALL === "1") return;
   if (!fs.existsSync(config.venvDir)) {
     onProgress("Creating local Phoenix Python environment...");
     await runCommand("python", ["-m", "venv", config.venvDir], { env, timeoutMs: commandTimeoutMs });

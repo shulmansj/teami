@@ -129,7 +129,7 @@ test("dev flag honors tunable-role overrides and marks unpinned_runtime", () => 
     orchestrator: { runtime: true, model: true },
   });
   assert.deepEqual(unpinnedRuntimeTraceAttributes(config), {
-    "agentic_factory.unpinned_runtime": {
+    "teami.unpinned_runtime": {
       drafter: { model: true, runtime: true },
       orchestrator: { model: true, runtime: true },
       pm: { model: true, runtime: true },
@@ -348,7 +348,7 @@ function writeAcceptedDefaults(roles) {
   fs.writeFileSync(
     filePath,
     `${JSON.stringify({
-      schema_version: "agentic-factory-accepted-runtime-roles/v1",
+      schema_version: "teami-accepted-runtime-roles/v1",
       _note: "test defaults",
       roles,
     }, null, 2)}\n`,

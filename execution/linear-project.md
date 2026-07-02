@@ -14,7 +14,7 @@ Use native Linear fields for workflow state.
 | Field | Meaning |
 | --- | --- |
 | Name | Human-readable product outcome or initiative name. Prefer the actual customer/user outcome over an internal task phrase. |
-| Team | The dedicated `Agentic Factory` Linear team. Projects inside this team are eligible for product manipulation when state gates pass. |
+| Team | The dedicated `Teami` Linear team. Projects inside this team are eligible for product manipulation when state gates pass. |
 | Status | Decomposition gate. `Planned` means eligible for decomposition; `Backlog` means not eligible; started-type status means execution work exists or is underway. |
 | Labels | `Has Open Questions` means unresolved blockers prevent decomposition. Do not require a general managed-by-this-workflow label in the default path. |
 | Members/lead | Accountable human or owner for product judgment and pilot validation routing. |
@@ -169,7 +169,7 @@ phases, target dates, or broader delivery grouping.
 A project is eligible for decomposition only when all of these are true:
 
 - project status is the configured planned-type status
-- project belongs to the configured `Agentic Factory` team
+- project belongs to the configured `Teami` team
 - `Has Open Questions` label is absent
 - no open `Discovery` issue exists in the project
 - no non-discovery execution issue already exists from a prior run

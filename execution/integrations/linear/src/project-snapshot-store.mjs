@@ -6,7 +6,7 @@ import { defaultRunStoreDir, renameWithRetry } from "../../../engine/run-store.m
 
 // Local, gitignored plumbing for the future rich dataset promotion step.
 // A decomposition run captures the exact Linear project context it ran against
-// into `.agentic-factory/runs/<run_id>.snapshot.json` (a sibling of the run
+// into `.teami/runs/<run_id>.snapshot.json` (a sibling of the run
 // artifact, never inside it). Rich promotion must consume this captured-at-run
 // snapshot (or an explicitly supplied one) and must NEVER pull live Linear
 // state at promotion time; when no snapshot exists the loader returns a typed

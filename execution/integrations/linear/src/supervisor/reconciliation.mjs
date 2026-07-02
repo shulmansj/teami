@@ -6,7 +6,7 @@ import {
 } from "./resume-collectors.mjs";
 
 export const NEXT_RESUME_RECONCILIATION_SCHEMA_VERSION =
-  "agentic-factory-next-resume-reconciliation/v1";
+  "teami-next-resume-reconciliation/v1";
 
 export const PROVISIONAL_PM_STATES = Object.freeze([
   "Working",

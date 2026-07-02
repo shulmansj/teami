@@ -22,7 +22,7 @@ function validate(runResult) {
 test("valid commit orchestrator output passes", () => {
   assert.deepEqual(ORCHESTRATOR_OUTCOMES, ["commit", "pause", "failed_closed"]);
   assert.deepEqual(ORCHESTRATOR_OUTCOME_REASONS.commit, ["synthesis_complete"]);
-  assert.equal(ORCHESTRATOR_OUTPUT_SCHEMA_VERSION, "agentic-factory-orchestrator-turn-output/v1");
+  assert.equal(ORCHESTRATOR_OUTPUT_SCHEMA_VERSION, "teami-orchestrator-turn-output/v1");
 
   const result = validate(validCommitRunResult());
 

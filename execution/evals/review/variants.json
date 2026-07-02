@@ -1,0 +1,12 @@
+{
+  "schema_version": "review-eval-variants/v1",
+  "_note": "Repo-owned candidate variants for review workflow eval runs. The default variant is the accepted baseline with no runtime or prompt overrides.",
+  "default_variant": "accepted_baseline",
+  "variants": {
+    "accepted_baseline": {
+      "description": "Current accepted review behavior: config-resolved role runtimes/models and repo-accepted prompt snapshots. No overrides.",
+      "role_overrides": {},
+      "prompt_overrides": {}
+    }
+  }
+}

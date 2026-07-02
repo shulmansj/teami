@@ -4,10 +4,10 @@ import path from "node:path";
 import { renameWithRetry } from "../../../../engine/run-store.mjs";
 
 export const LOCAL_SUPERVISOR_STATE_SCHEMA_VERSION =
-  "agentic-factory-local-supervisor-state/v1";
+  "teami-local-supervisor-state/v1";
 
 export function localSupervisorDir(repoRoot = process.cwd()) {
-  return path.join(repoRoot, ".agentic-factory", "supervisor");
+  return path.join(repoRoot, ".teami", "supervisor");
 }
 
 export function localSupervisorRegistrationPath(repoRoot = process.cwd()) {

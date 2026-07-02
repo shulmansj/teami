@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-eval-example/v1",
+  "title": "Execution eval dataset example",
+  "description": "Canonical contract for one execution eval dataset example. The input preserves the complete grade-time Judge input: assigned issue, produced PR/diff, tests, terminal output, run metadata, and maintainer-supplied Judge context.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["input", "output", "reference", "metadata"],
+  "properties": {
+    "schema_version": {
+      "description": "Optional example contract version stamp. When present it must match this schema's $id.",
+      "const": "execution-eval-example/v1"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "gradeability",
+        "judge_fixture_input",
+        "maintainer_supplied_context",
+        "source_type",
+        "issue",
+        "produced_artifact",
+        "run_envelope",
+        "source_refs"
+      ],
+      "properties": {
+        "gradeability": {
+          "description": "Only full_input rows may be regraded or used to tune the Judge.",
+          "enum": ["full_input", "detection_only"]
+        },
+        "judge_fixture_input": { "$ref": "#/$defs/judge_fixture_input" },
+        "maintainer_supplied_context": { "$ref": "#/$defs/maintainer_supplied_context" },
+        "source_type": { "const": "linear_issue_execution_snapshot" },
+        "issue": { "$ref": "#/$defs/execution_issue_snapshot" },
+        "produced_artifact": { "$ref": "#/$defs/produced_artifact_snapshot" },
+        "run_envelope": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["workflow_version", "allowed_source_boundaries", "runtime_assignments"],
+          "properties": {
+            "workflow_version": { "type": "string", "minLength": 1 },
+            "allowed_source_boundaries": { "type": "array" },
+            "runtime_assignments": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["worker", "orchestrator"],
+              "properties": {
+                "worker": { "type": "string", "minLength": 1 },
+                "orchestrator": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "source_refs": { "type": "array" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "terminal_status",
+        "terminal_reason",
+        "pull_request",
+        "diff",
+        "files_changed",
+        "tests",
+        "terminal_output"
+      ],
+      "properties": {
+        "terminal_status": {
+          "enum": ["completed", "paused", "failed_closed", "ineligible"]
+        },
+        "terminal_reason": { "type": "string", "minLength": 1 },
+        "pull_request": { "$ref": "#/$defs/pull_request_snapshot" },
+        "diff": {
+          "description": "Bounded captured diff text or structured diff summary.",
+          "type": ["string", "object", "array", "null"]
+        },
+        "files_changed": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "tests": {
+          "description": "Commands run, observed results, and stated gaps.",
+          "type": "array"
+        },
+        "terminal_output": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "human_annotations": {
+          "description": "Human judgments captured for this example.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["name", "label", "score", "failure_modes", "explanation"],
+            "properties": {
+              "name": { "$ref": "#/$defs/annotation_name" },
+              "label": { "$ref": "#/$defs/quality_label" },
+              "score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "failure_modes": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "explanation": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "human_annotation_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_label": { "$ref": "#/$defs/quality_label" },
+        "expected_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label_source", "label_status", "labeled_at"],
+          "properties": {
+            "label_source": { "enum": ["explicit_human", "ambiguous"] },
+            "label_status": { "enum": ["GOLD", "excluded"] },
+            "labeled_at": { "type": "string", "minLength": 1 },
+            "annotator_id": { "type": "string", "minLength": 1 }
+          }
+        },
+        "expected_properties": {
+          "description": "Property-level expectations a Judge can check without an exact golden diff.",
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "properties": {
+            "implements_issue_scope": { "type": "boolean" },
+            "acceptance_criteria_met": { "type": "boolean" },
+            "tests_exercise_change": { "type": "boolean" },
+            "no_unrelated_churn": { "type": "boolean" },
+            "safe_side_effects": { "type": "boolean" },
+            "escalates_product_questions": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "description": "Example metadata is Phoenix-bound: Teami workflow or queue state keys are banned.",
+      "type": "object",
+      "additionalProperties": true,
+      "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+      "required": [
+        "workspace_maturity",
+        "issue_category",
+        "change_risk_level",
+        "lifecycle_state",
+        "dataset_split",
+        "process_version",
+        "rubric_version",
+        "failure_taxonomy_version",
+        "source_trace_id",
+        "source_run_id",
+        "content_retention"
+      ],
+      "properties": {
+        "workspace_maturity": { "enum": ["new", "calibrating", "stable"] },
+        "issue_category": { "enum": ["code", "docs", "tests", "ops", "mixed"] },
+        "change_risk_level": { "enum": ["low", "medium", "high"] },
+        "lifecycle_state": { "enum": ["active", "deprecated"] },
+        "dataset_split": { "enum": ["train", "test", "calibration", "regression"] },
+        "process_version": { "type": "string", "minLength": 1 },
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "source_trace_id": { "type": ["string", "null"] },
+        "source_run_id": { "type": ["string", "null"] },
+        "source_target_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "produced_identity_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/produced_identity_ref" }
+        },
+        "content_retention": { "enum": ["bounded", "rich_local", "sanitized_fixture"] }
+      }
+    }
+  },
+  "$defs": {
+    "no_workflow_state_keys": {
+      "properties": {
+        "needs_relabel": false,
+        "pending_promotion": false,
+        "accepted_by_factory": false,
+        "propose_repo_change": false,
+        "proposal_state": false,
+        "queue_state": false,
+        "workflow_status": false,
+        "assigned": false,
+        "resolved": false
+      }
+    },
+    "judge_fixture_input": {
+      "description": "Verbatim captured evidence fields consumed by the execution Judge.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "source_type",
+        "run",
+        "issue",
+        "pull_request",
+        "diff",
+        "files_changed",
+        "tests",
+        "terminal_output"
+      ],
+      "properties": {
+        "source_type": { "type": "string", "minLength": 1 },
+        "run": { "type": "object", "additionalProperties": true },
+        "issue": { "$ref": "#/$defs/execution_issue_snapshot" },
+        "pull_request": { "$ref": "#/$defs/pull_request_snapshot" },
+        "diff": { "type": ["string", "object", "array", "null"] },
+        "files_changed": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "tests": { "type": "array" },
+        "terminal_output": { "type": "object", "additionalProperties": true },
+        "produced_identities": { "type": "array" }
+      }
+    },
+    "maintainer_supplied_context": {
+      "description": "Maintainer-owned Judge context supplied at grading time.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["rubric_version", "failure_taxonomy_version", "allowed_failure_modes"],
+      "properties": {
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "allowed_failure_modes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "quality_label": {
+      "enum": ["pass", "needs_revision", "blocking_failure"]
+    },
+    "annotation_name": {
+      "enum": [
+        "quality",
+        "correctness",
+        "scope_fit",
+        "acceptance_criteria_met",
+        "test_coverage",
+        "no_unrelated_churn",
+        "code_quality_fit",
+        "safety_and_side_effects",
+        "escalation_judgment",
+        "accepted_packet_sufficiency",
+        "pause_state_correctness"
+      ]
+    },
+    "execution_issue_snapshot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "key", "title", "body", "acceptance_criteria"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "key": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "body": { "type": "string" },
+        "assignment": { "type": ["string", "null"] },
+        "acceptance_criteria": { "type": "array" },
+        "status": { "type": ["string", "null"] },
+        "labels": { "type": "array" }
+      }
+    },
+    "pull_request_snapshot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["title", "body"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "number": { "type": ["string", "number", "null"] },
+        "url": { "type": ["string", "null"] },
+        "title": { "type": "string", "minLength": 1 },
+        "body": { "type": "string" },
+        "branch": { "type": ["string", "null"] },
+        "head_sha": { "type": ["string", "null"] }
+      }
+    },
+    "produced_artifact_snapshot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind", "pull_request", "files_changed"],
+      "properties": {
+        "kind": { "enum": ["git_repo_commit", "github_pull_request", "execution_run"] },
+        "pull_request": { "$ref": "#/$defs/pull_request_snapshot" },
+        "files_changed": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "diff_summary": { "type": ["string", "null"] },
+        "commit": { "type": ["object", "null"], "additionalProperties": true }
+      }
+    },
+    "produced_identity_ref": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["effect_id", "provider", "resource_kind", "target_ids"],
+      "properties": {
+        "effect_id": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "resource_kind": { "type": "string", "minLength": 1 },
+        "target_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

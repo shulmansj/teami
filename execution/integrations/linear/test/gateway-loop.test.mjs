@@ -604,5 +604,5 @@ function emptyResumeReport() {
 }
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-gateway-loop-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-gateway-loop-"));
 }

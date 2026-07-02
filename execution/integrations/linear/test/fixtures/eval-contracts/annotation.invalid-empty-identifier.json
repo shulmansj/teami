@@ -1,6 +1,6 @@
 {
   "_invalid_because": "Canonical annotations require a NON-EMPTY identifier (minLength 1). An empty string is exactly the Phoenix upsert default, so distinct annotators would collapse onto one (name, target, \"\") row. This one carries identifier: \"\".",
-  "name": "decomposition_quality",
+  "name": "quality",
   "annotator_kind": "HUMAN",
   "label": "pass",
   "score": 0.9,

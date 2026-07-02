@@ -10,7 +10,7 @@ import {
 } from "../src/foreground-runner.mjs";
 
 test("foreground runner leaves Phoenix lifecycle to the trace sink instead of pre-stopping it", async () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-foreground-runner-"));
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-foreground-runner-"));
   const cachePath = path.join(repoRoot, "linear-cache.json");
   fs.writeFileSync(cachePath, `${JSON.stringify({ workspaceId: "workspace-1" })}\n`);
   let stopCalled = false;

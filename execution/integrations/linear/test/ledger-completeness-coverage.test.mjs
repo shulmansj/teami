@@ -724,8 +724,10 @@ function isDefinitionOrImport(line) {
 // capture, or the judge cross-path append). One justification line each.
 const ROUTED_SITES = [
   // orchestrator-roster.mjs: roster.resolve().loadSnapshot() — the single library
-  // body load the invoke_library handler threads to recordLibraryLoad.
-  "execution/integrations/linear/src/orchestrator-roster.mjs ::: : () => loadAcceptedPromptSnapshot({ repoRoot, definition: decompositionDefinition, targetKey: key });",
+  // body load the invoke_library handler threads to recordLibraryLoad. (SELFIMP
+  // made this definition-driven: the workflow's own definition replaces the
+  // hardcoded decompositionDefinition; still the run-routed library load.)
+  "execution/integrations/linear/src/orchestrator-roster.mjs ::: : () => loadAcceptedPromptSnapshot({ repoRoot, definition, targetKey: key });",
   // orchestrator-loop.mjs: the run-start governing-prompt load → recordGoverningLoad
   // (moved here from trigger-runner.mjs by the W1a-1 engine-loop split).
   "execution/engine/orchestrator-loop.mjs ::: const governingSnapshot = loadAcceptedPromptSnapshot({",

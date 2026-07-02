@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "phoenix": {
+    "expected_origin": "http://127.0.0.1:6006",
+    "server_package_pin": "arize-phoenix==14.13.0",
+    "project_name": "teami"
+  },
+  "prompts": [
+    {
+      "role": "probe_judge",
+      "target_key": "prompt/probe/probe_judge",
+      "human_name": "Probe quality Judge",
+      "artifact_kind": "accepted_prompt",
+      "materializer": "synthetic_test_fixture",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "teami_accepted",
+      "snapshot_path": "test/fixtures/probe/accepted-prompts/probe-judge.md",
+      "snapshot_sha256": "e36d679ffe7c84d4bd35ca2f1b3f5bb88456d6ff1580229643b6f6faa7810a41",
+      "prompt_version": "probe-accepted-v1",
+      "rubric_version": "probe-rubric-v1",
+      "failure_taxonomy_version": "probe-taxonomy-v1"
+    }
+  ],
+  "evaluators": [
+    {
+      "id": "probe_quality_judge_v1",
+      "kind": "llm",
+      "prompt_role": "probe_judge",
+      "prompt_version_id": null,
+      "model": null
+    },
+    {
+      "id": "probe_artifact_shape_offline_v1",
+      "kind": "code",
+      "code_path": "execution/engine/eval-low-confidence.mjs#detectLowConfidenceReasons"
+    }
+  ],
+  "datasets": [
+    {
+      "name": "teami-probe-examples",
+      "dataset_id": "ProbeDataset1",
+      "accepted_dataset_version_id": "ProbeDatasetVersion1",
+      "splits": {
+        "train": {
+          "name": "train",
+          "split_id": "probe-train"
+        },
+        "test": {
+          "name": "test",
+          "split_id": "probe-test"
+        }
+      },
+      "split_representation": "native"
+    }
+  ],
+  "experiments": [],
+  "evidence": {
+    "annotation_ids": [],
+    "receipt_run_ids": [],
+    "pr_urls": []
+  }
+}

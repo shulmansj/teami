@@ -2,7 +2,10 @@ import { getResourceKind } from "./resource-registry.mjs";
 
 export async function materialize(resource, runContext) {
   const { kind, handle, teardown } = await getResourceKind(resource.kind).materialize(resource, runContext);
-  runContext.resources[resource.kind] = { id: resource.id, kind, role: resource.role, handle };
+  const entry = { id: resource.id, kind, role: resource.role, handle };
+  runContext.resources[resource.id] = entry;
+  runContext.selectedResourceId = resource.id;
+  runContext.selectedResource = entry;
   runContext.resourceManifest.push(getResourceKind(resource.kind).manifestEntry(resource, handle));
   return { kind, handle, teardown };
 }
@@ -12,8 +15,24 @@ export async function materializeDomainResources({
   runId,
   engineRepoRoot,
   runGit,
+  issue = null,
+  issueIdentifier = null,
+  pendingGitIntent = null,
+  gitRemoteUrlOverride = null,
+  gitRemoteUrlOverrides = null,
+  resolveGitRemoteUrl = null,
 }) {
-  const runContext = { runId, engineRepoRoot, resources: {}, resourceManifest: [], runGit };
+  const runContext = runContextWithExecutionFacts({
+    runId,
+    engineRepoRoot,
+    runGit,
+    issue,
+    issueIdentifier,
+    pendingGitIntent,
+    gitRemoteUrlOverride,
+    gitRemoteUrlOverrides,
+    resolveGitRemoteUrl,
+  });
   const teardowns = [];
   let tornDown = false;
 
@@ -40,6 +59,54 @@ export async function materializeDomainResources({
   return { runContext, teardownAll };
 }
 
+export async function materializeRunContext({
+  domainContext,
+  domainResources = domainContext?.resources,
+  runId,
+  engineRepoRoot,
+  runGit,
+  issue = null,
+  issueIdentifier = null,
+  pendingGitIntent = null,
+  gitRemoteUrlOverride = null,
+  gitRemoteUrlOverrides = null,
+  resolveGitRemoteUrl = null,
+  materializeDomainResourcesFn = materializeDomainResources,
+} = {}) {
+  const resources = Array.isArray(domainResources) ? domainResources : [];
+  if (resources.length === 0) {
+    return {
+      materialized: false,
+      runContext: emptyRunContext({
+        runId,
+        engineRepoRoot,
+        runGit,
+        issue,
+        issueIdentifier,
+        pendingGitIntent,
+        gitRemoteUrlOverride,
+        gitRemoteUrlOverrides,
+        resolveGitRemoteUrl,
+      }),
+      teardownAll: async () => {},
+    };
+  }
+
+  const materialized = await materializeDomainResourcesFn({
+    domainResources: resources,
+    runId,
+    engineRepoRoot,
+    runGit,
+    issue,
+    issueIdentifier,
+    pendingGitIntent,
+    gitRemoteUrlOverride,
+    gitRemoteUrlOverrides,
+    resolveGitRemoteUrl,
+  });
+  return { ...materialized, materialized: true };
+}
+
 async function runTeardowns(teardowns) {
   const errors = [];
   for (let index = teardowns.length - 1; index >= 0; index -= 1) {
@@ -52,4 +119,58 @@ async function runTeardowns(teardowns) {
   if (errors.length > 0) {
     throw new AggregateError(errors, "resource_teardown_failed");
   }
+}
+
+function emptyRunContext({
+  runId,
+  engineRepoRoot,
+  runGit,
+  issue,
+  issueIdentifier,
+  pendingGitIntent,
+  gitRemoteUrlOverride,
+  gitRemoteUrlOverrides,
+  resolveGitRemoteUrl,
+} = {}) {
+  return runContextWithExecutionFacts({
+    runId,
+    engineRepoRoot,
+    runGit,
+    issue,
+    issueIdentifier,
+    pendingGitIntent,
+    gitRemoteUrlOverride,
+    gitRemoteUrlOverrides,
+    resolveGitRemoteUrl,
+  });
+}
+
+function runContextWithExecutionFacts({
+  runId,
+  engineRepoRoot,
+  runGit,
+  issue,
+  issueIdentifier,
+  pendingGitIntent,
+  gitRemoteUrlOverride,
+  gitRemoteUrlOverrides,
+  resolveGitRemoteUrl,
+} = {}) {
+  return {
+    runId,
+    engineRepoRoot,
+    resources: {},
+    selectedResourceId: null,
+    selectedResource: null,
+    resourceManifest: [],
+    runGit,
+    ...(issue && typeof issue === "object" ? { issue } : {}),
+    ...(typeof issueIdentifier === "string" && issueIdentifier.trim() !== "" ? { issueIdentifier: issueIdentifier.trim() } : {}),
+    ...(pendingGitIntent && typeof pendingGitIntent === "object" ? { pendingGitIntent } : {}),
+    ...(typeof gitRemoteUrlOverride === "string" && gitRemoteUrlOverride.trim() !== ""
+      ? { gitRemoteUrlOverride: gitRemoteUrlOverride.trim() }
+      : {}),
+    ...(gitRemoteUrlOverrides && typeof gitRemoteUrlOverrides === "object" ? { gitRemoteUrlOverrides } : {}),
+    ...(typeof resolveGitRemoteUrl === "function" ? { resolveGitRemoteUrl } : {}),
+  };
 }

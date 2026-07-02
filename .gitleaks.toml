@@ -1,4 +1,4 @@
-title = "Agentic Factory public secret scanner"
+title = "Teami public secret scanner"
 
 # SEC-U1 allowlist IDs are intentionally narrow and documented here because
 # placeholder examples should never become silent scanner exceptions.
@@ -6,17 +6,19 @@ title = "Agentic Factory public secret scanner"
 # SEC-U1-SCANNER-CONFIG: the scanner config and implementation may contain
 #   detection regexes and synthetic examples needed to test the rules.
 # SEC-U1-SOURCE-PRIVATE-BUILD-TRAIL: the private build repo still contains
-#   planning, review, breakdown, publication-control, and internal maintainer-doc
-#   files (e.g. maintainers/repo-topology.md, which intentionally names the private
-#   repos and dogfood checkout path) that are excluded from the public artifact by
-#   the manifest. This allowlist is active only while the private publication
-#   manifest exists.
+#   private/ and publication-control files that are excluded from the public
+#   artifact by the never-public boundary. This allowlist is active only while
+#   the private boundary marker exists.
 # SEC-U1-SOURCE-PRELAUNCH-HOSTED-HANDLE: the private build repo may temporarily
 #   contain pre-CFG-U1 hosted handles in config.example.json. The public export
 #   does not contain the private manifest marker, so this source-only exception
 #   is not active in the public artifact.
 # SEC-U1-TEST-CREDENTIAL-PLACEHOLDER: deterministic unit tests may use short
 #   fake setup grants and broker credentials that do not meet live-token shape.
+# SEC-U1-TEST-STAGED-BUILD-FIXTURE: frozen staged-build gate fixtures contain
+#   deliberately planted fake findings so later gate modules can prove they fail.
+# SEC-U1-DIR-MODE-FIXTURE: frozen scanner fixtures plant synthetic secret-shaped
+#   values under test/fixtures/security-scan-dir to prove standalone dir scans fail.
 # SEC-U1-TEST-LOCAL-PATH-PLACEHOLDER: deterministic unit tests may use local
 #   path examples to prove path sanitization behavior.
 # SEC-U1-DOC-LOCAL-PATH-PLACEHOLDER: docs may use obvious placeholders such as
@@ -31,22 +33,19 @@ paths = [
   '''^scripts/security-scan\.mjs$''',
 ]
 
-[agentic_factory.source_mode]
-marker_path = "maintainers/publication/public-surface-manifest.csv"
+[teami.source_mode]
+marker_path = "private/publication/never-public.txt"
 allowlist_id = "SEC-U1-SOURCE-PRIVATE-BUILD-TRAIL"
-description = "Private source-only planning, publication-control, and internal maintainer-doc surfaces are excluded from the public artifact."
+description = "Private source-only and publication-control surfaces are excluded from the public artifact."
 paths = [
-  '''^docs/(?:plans|reviews|breakdowns)/''',
-  '''^maintainers/(?:plans|reviews|publication|scripts)/''',
-  '''^maintainers/[^/]+\.md$''',
-  '''^execution/integrations/linear/spikes/''',
+  '''^private/''',
 ]
 
-[[agentic_factory.source_rule_allowlists]]
+[[teami.source_rule_allowlists]]
 allowlist_id = "SEC-U1-SOURCE-PRELAUNCH-HOSTED-HANDLE"
 description = "Temporary source-only exception for CFG-U1-owned prelaunch hosted defaults."
 rules = [
-  "agentic-factory-private-service-handle",
+  "teami-private-service-handle",
 ]
 paths = [
   '''^CHANGELOG\.md$''',
@@ -54,14 +53,14 @@ paths = [
 ]
 
 [[rules]]
-id = "agentic-factory-setup-token"
-description = "Agentic Factory setup grants must never be committed."
-regex = '''\b(af_setup_v1_[A-Za-z0-9][A-Za-z0-9_-]{12,}_[A-Za-z0-9][A-Za-z0-9_-]{24,})\b'''
+id = "teami-setup-token"
+description = "Teami setup grants must never be committed."
+regex = '''\b(tm_setup_v1_[A-Za-z0-9][A-Za-z0-9_-]{12,}_[A-Za-z0-9][A-Za-z0-9_-]{24,})\b'''
 secretGroup = 1
 history = true
-history_regex = '''af_setup_v1_[A-Za-z0-9][A-Za-z0-9_-]{12,}_[A-Za-z0-9][A-Za-z0-9_-]{24,}'''
+history_regex = '''tm_setup_v1_[A-Za-z0-9][A-Za-z0-9_-]{12,}_[A-Za-z0-9][A-Za-z0-9_-]{24,}'''
 keywords = [
-  "af_setup_v1_",
+  "tm_setup_v1_",
 ]
 
 [[rules.allowlists]]
@@ -71,11 +70,31 @@ paths = [
   '''^execution/integrations/linear/test/''',
 ]
 regexes = [
-  '''af_setup_v1_(?:grant_secret|init_grant|github_resume|for_broker|local)''',
+  '''tm_setup_v1_(?:grant_secret|init_grant|github_resume|for_broker|local)''',
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-TEST-STAGED-BUILD-FIXTURE"
+description = "The staged-build planted-secret fixture carries a strict fake setup grant to prove scanner gates fire."
+paths = [
+  '''^test/fixtures/staged-build/''',
+]
+regexes = [
+  '''tm_setup_v1_stagedfixture_FAKESECRET[0-9A-Za-z_-]+''',
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-DIR-MODE-FIXTURE"
+description = "Frozen dir-mode scanner fixtures plant a synthetic setup grant so standalone dir scans can prove they fail."
+paths = [
+  '''^test/fixtures/security-scan-dir/''',
+]
+regexes = [
+  '''tm_setup_v1_fixtureCase12_FAKESECRET0123456789abcdef0123456789''',
 ]
 
 [[rules]]
-id = "agentic-factory-runner-credential"
+id = "teami-runner-credential"
 description = "Runner inbox credentials using the ri_ prefix must never be committed."
 regex = '''\b(ri_[A-Za-z0-9_-]{24,}(?:\.[A-Za-z0-9_-]{24,})?)\b'''
 secretGroup = 1
@@ -86,14 +105,14 @@ keywords = [
 ]
 
 [[rules]]
-id = "agentic-factory-broker-credential"
-description = "Agentic Factory GitHub broker credentials must never be committed."
-regex = '''\b(af_broker_v1\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,})\b'''
+id = "teami-broker-credential"
+description = "Teami GitHub broker credentials must never be committed."
+regex = '''\b(tm_broker_v1\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,})\b'''
 secretGroup = 1
 history = true
-history_regex = '''af_broker_v1\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,}'''
+history_regex = '''tm_broker_v1\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{32,}'''
 keywords = [
-  "af_broker_v1.",
+  "tm_broker_v1.",
 ]
 
 [[rules.allowlists]]
@@ -103,19 +122,19 @@ paths = [
   '''^execution/integrations/linear/test/''',
 ]
 regexes = [
-  '''af_broker_v1\.(?:segment|env|config|repo)\.sig''',
+  '''tm_broker_v1\.(?:segment|env|config|repo)\.sig''',
 ]
 
 [[rules]]
-id = "agentic-factory-token-env-assignment"
-description = "AGENTIC_FACTORY_*TOKEN assignments with secret-shaped values must never be committed."
-regex = '''\bAGENTIC_FACTORY_[A-Z0-9_]*TOKEN\b\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{20,})'''
+id = "teami-token-env-assignment"
+description = "TEAMI_*TOKEN assignments with secret-shaped values must never be committed."
+regex = '''\bTEAMI_[A-Z0-9_]*TOKEN\b\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{20,})'''
 secretGroup = 1
 entropy = 3.5
 history = true
-history_regex = '''AGENTIC_FACTORY_[A-Z0-9_]*TOKEN[[:space:]]*[:=][[:space:]]*["'']?[A-Za-z0-9_./+=-]{32,}'''
+history_regex = '''TEAMI_[A-Z0-9_]*TOKEN[[:space:]]*[:=][[:space:]]*["'']?[A-Za-z0-9_./+=-]{32,}'''
 keywords = [
-  "AGENTIC_FACTORY_",
+  "TEAMI_",
   "TOKEN",
 ]
 
@@ -130,15 +149,15 @@ regexes = [
 ]
 
 [[rules]]
-id = "agentic-factory-broker-signing-key"
-description = "AGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY values must never be committed."
-regex = '''\bAGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY\b\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{24,})'''
+id = "teami-broker-signing-key"
+description = "TEAMI_BROKER_CREDENTIAL_SIGNING_KEY values must never be committed."
+regex = '''\bTEAMI_BROKER_CREDENTIAL_SIGNING_KEY\b\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{24,})'''
 secretGroup = 1
 entropy = 3.5
 history = true
-history_regex = '''AGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY[[:space:]]*[:=][[:space:]]*["'']?[A-Za-z0-9_./+=-]{32,}'''
+history_regex = '''TEAMI_BROKER_CREDENTIAL_SIGNING_KEY[[:space:]]*[:=][[:space:]]*["'']?[A-Za-z0-9_./+=-]{32,}'''
 keywords = [
-  "AGENTIC_FACTORY_BROKER_CREDENTIAL_SIGNING_KEY",
+  "TEAMI_BROKER_CREDENTIAL_SIGNING_KEY",
 ]
 
 [[rules]]
@@ -177,7 +196,7 @@ regexes = [
 ]
 
 [[rules]]
-id = "agentic-factory-private-service-handle"
+id = "teami-private-service-handle"
 description = "Private, prelaunch, or non-setup service handles must not leak into public surfaces."
 regex = '''(?:https://ayhmwtwjthnjziwybtsu\.supabase\.co/[A-Za-z0-9_./?=&%-]*|https://github\.com/shulmansj/zanzibar\b|shulmansj/zanzibar\b)'''
 history = false
@@ -195,7 +214,17 @@ paths = [
   '''^supabase/README\.md$''',
 ]
 regexes = [
-  '''https://ayhmwtwjthnjziwybtsu\.supabase\.co/functions/v1/agentic-factory-(?:inbox|github-broker)(?:/[A-Za-z0-9_./?=&%-]*)?''',
+  '''https://ayhmwtwjthnjziwybtsu\.supabase\.co/functions/v1/teami-(?:inbox|github-broker)(?:/[A-Za-z0-9_./?=&%-]*)?''',
+]
+
+[[rules.allowlists]]
+allowlist_id = "SEC-U1-TEST-STAGED-BUILD-FIXTURE"
+description = "The staged-build planted-private-pattern fixture carries a fake private handle to prove private-pattern gates fire."
+paths = [
+  '''^test/fixtures/staged-build/''',
+]
+regexes = [
+  '''shulmansj/zanzibar''',
 ]
 
 [[rules]]
@@ -224,13 +253,13 @@ regexes = [
 ]
 
 [[rules]]
-id = "agentic-factory-domain-state-path"
-description = "Committed .agentic-factory domain state is local runtime state and must never ship."
-regex = '''^\.agentic-factory/(?:domains\.json|domains/)'''
-path_regex = '''^\.agentic-factory/(?:domains\.json|domains/)'''
+id = "teami-domain-state-path"
+description = "Committed .teami domain state is local runtime state and must never ship."
+regex = '''^\.teami/(?:domains\.json|domains/)'''
+path_regex = '''^\.teami/(?:domains\.json|domains/)'''
 history = false
 keywords = [
-  ".agentic-factory/domains",
+  ".teami/domains",
 ]
 
 [[rules]]

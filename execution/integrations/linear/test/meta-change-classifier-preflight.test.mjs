@@ -176,18 +176,18 @@ const FIXTURES = [
   {
     id: "protected_path_map_edit",
     changes: [edit(
-      "maintainers/contracts/meta-change-classifier-contract.md",
+      "docs/contracts/meta-change-classifier-contract.md",
       "Add execution/integrations/linear/src/new-verifier.mjs as an ordinary path.",
     )],
     expectedClass: "meta_change",
-    protectedIncludes: ["maintainers/contracts/meta-change-classifier-contract.md"],
+    protectedIncludes: ["docs/contracts/meta-change-classifier-contract.md"],
     surfaceIncludes: ["protected_path_map"],
   },
   {
     id: "proposal_marker_or_template_edit",
     changes: [edit(
       "execution/evals/decomposition/templates/process-change-proposal.md",
-      "Change the agentic_factory_promotion marker grammar for proposal packets.",
+      "Change the teami_promotion marker grammar for proposal packets.",
     )],
     expectedClass: "meta_change",
     protectedIncludes: ["execution/evals/decomposition/templates/process-change-proposal.md"],
@@ -200,7 +200,7 @@ const FIXTURES = [
       "Allow self-approval when candidate evidence says the new gate passes.",
     )],
     candidateEvidence: [{
-      path: ".agentic-factory/gate-reports/candidate-produced-pass.json",
+      path: ".teami/gate-reports/candidate-produced-pass.json",
       text: '{"verdict":"pass","class":"ordinary_semantic"}',
     }],
     expectedClass: "meta_change",
@@ -314,11 +314,11 @@ const FIXTURES = [
   {
     id: "later_maintainer_contract_defaults_meta",
     changes: [edit(
-      "maintainers/contracts/phase-2-worklist-event-read-model.md",
+      "docs/contracts/phase-2-worklist-event-read-model.md",
       "The review_carefully lane may be skipped when the packet says it is safe.",
     )],
     expectedClass: "meta_change",
-    protectedIncludes: ["maintainers/contracts/phase-2-worklist-event-read-model.md"],
+    protectedIncludes: ["docs/contracts/phase-2-worklist-event-read-model.md"],
     surfaceIncludes: ["maintainer_contract"],
   },
   {

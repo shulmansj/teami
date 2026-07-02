@@ -14,12 +14,12 @@ export const HOSTED_SURFACE_SPECS = Object.freeze([
   }),
   Object.freeze({
     id: "hosted_inbox_edge_function",
-    relativePath: path.join("supabase", "functions", "agentic-factory-inbox"),
+    relativePath: path.join("supabase", "functions", "teami-inbox"),
     mode: "absent",
   }),
   Object.freeze({
     id: "github_broker_edge_function",
-    relativePath: path.join("supabase", "functions", "agentic-factory-github-broker"),
+    relativePath: path.join("supabase", "functions", "teami-github-broker"),
     mode: "absent",
   }),
   Object.freeze({
@@ -35,20 +35,20 @@ const HOSTED_ENDPOINT_PATTERNS = Object.freeze([
     pattern: /https?:\/\/[a-z0-9-]+\.supabase\.co\/functions\/v1\/[^\s"'<>)]*/i,
   }),
   Object.freeze({
-    id: "agentic_factory_hosted_endpoint_url",
-    pattern: /https?:\/\/[^\s"'<>)]*(?:agentic-factory-(?:inbox|github-broker)|hosted-inbox|github-token-broker)[^\s"'<>)]*/i,
+    id: "teami_hosted_endpoint_url",
+    pattern: /https?:\/\/[^\s"'<>)]*(?:teami-(?:inbox|github-broker)|hosted-inbox|github-token-broker)[^\s"'<>)]*/i,
   }),
   Object.freeze({
     id: "supabase_functions_endpoint_path",
-    pattern: /\bfunctions\/v1\/(?:agentic-factory-inbox|agentic-factory-github-broker)\b/i,
+    pattern: /\bfunctions\/v1\/(?:teami-inbox|teami-github-broker)\b/i,
   }),
   Object.freeze({
     id: "hosted_inbox_endpoint",
-    pattern: /\bagentic-factory-inbox\b/i,
+    pattern: /\bteami-inbox\b/i,
   }),
   Object.freeze({
     id: "github_broker_endpoint",
-    pattern: /\bagentic-factory-github-broker\b/i,
+    pattern: /\bteami-github-broker\b/i,
   }),
   Object.freeze({
     id: "hosted_inbox_client_reference",

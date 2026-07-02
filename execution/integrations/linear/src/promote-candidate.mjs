@@ -16,6 +16,13 @@ export {
   validatePromotionRequest,
 } from "./promotion/request-contract.mjs";
 export {
+  JUDGE_ALIGNMENT_EVIDENCE_SCHEMA_VERSION,
+  JUDGE_IMPROVEMENT_CLAIM,
+  computeJudgeAlignmentMetrics,
+  judgeImprovementEvidenceFromGate,
+  judgeImprovementEvidenceFromProcessGate,
+} from "./promotion/judge-alignment-evidence.mjs";
+export {
   AGENT_BEHAVIOR_PROPOSAL_LABELS,
   AGENT_BEHAVIOR_RUNTIME_DEFAULTS_LABELS,
   AGENT_BEHAVIOR_SCOPE_SCHEMA_VERSION,

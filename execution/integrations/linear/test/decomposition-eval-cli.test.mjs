@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { COMMAND_INDEX } from "../src/cli/dispatch.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import {
   ACCEPTED_BASELINE_VARIANT_ID,
@@ -16,6 +17,7 @@ import {
   formatEvalRunReport,
   resolveDecompositionEvalInput,
   resolveEvalVariant,
+  runDecompositionFixtureRegradeTask,
   runDecompositionEvalTask,
 } from "../src/decomposition-eval-cli.mjs";
 import { PROCESS_VERSION } from "../../../engine/engine-contract-constants.mjs";
@@ -69,7 +71,7 @@ function evalDomainContext() {
 }
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-eval-cli-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-eval-cli-"));
 }
 
 function projectUpdateMarkdownForRun(runId, summary = "Decomposition completed.") {
@@ -94,19 +96,37 @@ function copyAcceptedPromptAssets(root) {
 }
 
 function validExample({ projectId = "project-eval-1" } = {}) {
+  const project = {
+    id: projectId,
+    name: "Customer onboarding pilot",
+    description: null,
+    content: "## Goal\n\nDecompose the onboarding pilot.\n\n## Open Questions\n",
+    status: "planned",
+    labels: [],
+    existing_issues: [],
+  };
   return {
     schema_version: "decomposition-eval-example/v1",
     input: {
-      source_type: "linear_project_snapshot",
-      project: {
-        id: projectId,
-        name: "Customer onboarding pilot",
-        description: null,
-        content: "## Goal\n\nDecompose the onboarding pilot.\n\n## Open Questions\n",
-        status: "planned",
-        labels: [],
-        existing_issues: [],
+      gradeability: "full_input",
+      judge_fixture_input: {
+        project_intent: project,
+        terminal_status: "completed",
+        terminal_reason: "no_blockers",
+        final_issues: [],
+        discovery_issues: [],
+        dependency_relations: [],
+        project_update_markdown: projectUpdateMarkdownForRun("source_run"),
+        open_questions_markdown: null,
+        phase_packet_summaries: [],
       },
+      maintainer_supplied_context: {
+        rubric_version: "1.0.0",
+        failure_taxonomy_version: "1.0.0",
+        allowed_failure_modes: [],
+      },
+      source_type: "linear_project_snapshot",
+      project,
       run_envelope: {
         workflow_version: DECOMPOSITION_FUNCTION_VERSION,
         allowed_source_boundaries: [],
@@ -633,9 +653,9 @@ test("eval task works fully offline: degraded trace, report-only checks with hon
   assert.equal(byName.accepted_packet_sufficiency.annotation.annotator_kind, "CODE");
   // Honest evaluator-input policy (D10): structured issue inputs and the
   // post-mutation pause-state view do not exist in a non-mutating eval run.
-  assert.equal(byName.decomposition_quality.status, "skipped");
+  assert.equal(byName.quality.status, "skipped");
   assert.equal(
-    byName.decomposition_quality.skip_reason,
+    byName.quality.skip_reason,
     "structured_issue_inputs_not_recorded_in_run_artifact",
   );
   assert.equal(byName.pause_state_correctness.status, "skipped");
@@ -668,6 +688,58 @@ test("--example fails closed on schema mismatch and writes nothing", async () =>
   assert.equal(result.reason, "example_schema_mismatch");
   assert.ok(result.schema_errors.length > 0);
   assert.ok(!fs.existsSync(defaultEvalRunStoreDir(root)), "no eval-run record on fail-closed input");
+});
+
+test("fixture regrade grades stored Judge input without rerunning the workflow", async () => {
+  const root = tempRoot();
+  const fixture = validExample();
+  fixture.metadata.source_trace_id = "f".repeat(32);
+  const calls = [];
+
+  const result = await runDecompositionFixtureRegradeTask({
+    repoRoot: root,
+    config,
+    fixture,
+    runJudgeFn: async (args) => {
+      calls.push(args);
+      return {
+        ok: false,
+        judge_state: "judged",
+        reason: "missing_trace_target",
+        judge_inputs: args.fixture.input.judge_fixture_input,
+        judge: { label: "pass", score: 0.9 },
+      };
+    },
+    fetchImpl: async () => {
+      throw new Error("regrade fixture does not need Phoenix in this stubbed path");
+    },
+  });
+
+  assert.equal(result.status, "regraded");
+  assert.equal(result.reran_workflow, false);
+  assert.equal(result.non_mutating, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].fixture, fixture);
+  assert.equal(result.source.mode, "stored_fixture");
+  assert.equal(result.evaluator_inputs.judge_inputs.terminal_reason, "no_blockers");
+});
+
+test("fixture regrade rejects short stored Judge input before invoking the Judge", async () => {
+  const fixture = validExample();
+  delete fixture.input.judge_fixture_input.terminal_reason;
+  const result = await runDecompositionFixtureRegradeTask({
+    repoRoot: tempRoot(),
+    config,
+    fixture,
+    runJudgeFn: async () => {
+      throw new Error("short stored fixture must not invoke the Judge");
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "not_run");
+  assert.equal(result.reason, "example_schema_mismatch");
+  assert.ok(result.schema_errors.some((error) => error.includes('missing required property "terminal_reason"')));
+  assert.equal(result.reran_workflow, false);
 });
 
 test("--run fails closed on a missing captured snapshot and loads a present one", async () => {
@@ -1204,13 +1276,9 @@ test("eval:decomposition is wired as a first-class CLI task", () => {
     packageJson.scripts["eval:decomposition"],
     "node execution/integrations/linear/cli.mjs eval:decomposition",
   );
-  const cliSource = fs.readFileSync(
-    path.resolve(import.meta.dirname, "..", "cli.mjs"),
-    "utf8",
-  );
-  assert.ok(cliSource.includes('command === "eval:decomposition"'));
-  // Post-split, command bodies live in src/cli/dispatch.mjs (cli.mjs keeps the
-  // literal dispatch chain); the wiring pin follows the wiring.
+  assert.ok(COMMAND_INDEX.has("eval:decomposition"));
+  // Post-split, command bodies live in src/cli/dispatch.mjs; the wiring pin
+  // follows the wiring.
   const dispatchSource = fs.readFileSync(
     path.resolve(import.meta.dirname, "..", "src", "cli", "dispatch.mjs"),
     "utf8",

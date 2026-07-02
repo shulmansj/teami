@@ -21,7 +21,7 @@ import {
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
 const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
-test("runtime command cwd is bound to the materialized git worktree handle", async () => {
+test("runtime command cwd is bound to the materialized git clone handle", async () => {
   resetResourceRegistry();
   registerGitRepoResourceKind();
 
@@ -34,28 +34,44 @@ test("runtime command cwd is bound to the materialized git worktree handle", asy
       owner: "acme",
       repo: "app",
       default_branch: "main",
-      local_checkout_path: tempSource,
     },
   };
+  const remoteUrl = "https://github.com/acme/app.git";
   const fakeRunGit = (args, { cwd } = {}) => {
-    if (isGitCommand(args, ["status", "--porcelain"])) {
-      assert.equal(path.resolve(cwd), path.resolve(tempSource));
+    if (isGitCommand(args, ["rev-parse", "--verify"])) {
+      assert.notEqual(path.resolve(cwd), path.resolve(tempSource));
+      assert.equal(args[2], "refs/heads/main^{commit}");
+      return { ok: true, status: 0, stdout: `${BASE_SHA}\n`, stderr: "" };
+    }
+    if (isGitCommand(args, ["clone", "--depth=1", "--branch"])) {
+      assert.notEqual(path.resolve(cwd), path.resolve(tempSource));
+      assert.equal(args[9], remoteUrl);
+      fs.mkdirSync(args[10], { recursive: true });
       return { ok: true, status: 0, stdout: "", stderr: "" };
     }
-    if (isGitCommand(args, ["worktree", "add", "--detach"])) {
-      assert.equal(path.resolve(cwd), path.resolve(tempSource));
-      assert.equal(args[4], "main");
-      fs.mkdirSync(args[3], { recursive: true });
+    if (isGitCommand(args, ["remote", "remove"])) {
+      assert.notEqual(path.resolve(cwd), path.resolve(tempSource));
+      return { ok: true, status: 0, stdout: "", stderr: "" };
+    }
+    if (isGitCommand(args, ["remote"])) {
+      assert.notEqual(path.resolve(cwd), path.resolve(tempSource));
+      return { ok: true, status: 0, stdout: "origin\n", stderr: "" };
+    }
+    if (isGitCommand(args, ["config"])) {
+      assert.notEqual(path.resolve(cwd), path.resolve(tempSource));
+      if (isGitCommand(args, ["config", "--local", "--name-only", "--get-regexp"])) {
+        return { ok: false, status: 1, stdout: "", stderr: "no matching config" };
+      }
+      return { ok: true, status: 0, stdout: "", stderr: "" };
+    }
+    if (isGitCommand(args, ["checkout", "--detach"])) {
+      assert.notEqual(path.resolve(cwd), path.resolve(tempSource));
+      assert.equal(args[2], BASE_SHA);
       return { ok: true, status: 0, stdout: "", stderr: "" };
     }
     if (isGitCommand(args, ["rev-parse", "HEAD"])) {
       assert.notEqual(path.resolve(cwd), path.resolve(tempSource));
       return { ok: true, status: 0, stdout: `${BASE_SHA}\n`, stderr: "" };
-    }
-    if (isGitCommand(args, ["worktree", "remove", "--force"])) {
-      assert.equal(path.resolve(cwd), path.resolve(tempSource));
-      fs.rmSync(args[3], { recursive: true, force: true });
-      return { ok: true, status: 0, stdout: "", stderr: "" };
     }
     return {
       ok: false,
@@ -72,9 +88,11 @@ test("runtime command cwd is bound to the materialized git worktree handle", asy
       runId: "probe-run",
       engineRepoRoot: REPO_ROOT,
       runGit: fakeRunGit,
+      gitRemoteUrlOverride: remoteUrl,
     });
     teardownAll = materializedTeardownAll;
-    const workingDir = runContext.resources.git_repo.handle.workingDir;
+    assert.equal(runContext.selectedResourceId, gitResource.id);
+    const workingDir = runContext.selectedResource.handle.workingDir;
 
     await runRuntimeCommand(
       { command: process.execPath, args: ["-e", "require('fs').writeFileSync('probe.txt','x')"] },

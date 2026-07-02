@@ -1,9 +1,10 @@
 # Normalize text files to LF across Windows, macOS, and Linux.
 * text=auto eol=lf
 
-# The Windows batch launcher must ship with CRLF so cmd.exe parses it. Keep its
+# The Windows batch launchers must ship with CRLF so cmd.exe parses them. Keep their
 # bytes verbatim (-text disables LF normalization) so the git blob — which the
 # publication exporter ships as-is — carries CRLF for adopters on Windows.
+/teami.cmd -text
 /factory.cmd -text
 
 # Binary assets should never be line-ending normalized.

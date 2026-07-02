@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const DEFAULT_FILE_CREDENTIAL_PATH = path.join(".agentic-factory", "linear-oauth-token.json");
+const DEFAULT_FILE_CREDENTIAL_PATH = path.join(".teami", "linear-oauth-token.json");
 const CREDENTIAL_ACCOUNT = "refresh_token";
 const WINDOWS_CREDENTIAL_SCRIPT = `
 $ErrorActionPreference = "Stop"
@@ -126,7 +126,7 @@ export function credentialTargetForConfig(config, repoRoot = process.cwd(), doma
   const oauth = config?.linear?.oauth || {};
   const identityFields = requireCredentialIdentity(domainIdentity, "Linear OAuth credential target");
   const identity = [
-    "agentic-factory-linear-oauth",
+    "teami-linear-oauth",
     oauth.client_id || "",
     oauth.redirect_uri || "",
     path.resolve(repoRoot),
@@ -140,7 +140,7 @@ export function credentialTargetForConfig(config, repoRoot = process.cwd(), doma
 export function legacyCredentialTargetForConfig(config, repoRoot = process.cwd()) {
   const oauth = config?.linear?.oauth || {};
   const identity = [
-    "agentic-factory-linear-oauth",
+    "teami-linear-oauth",
     oauth.client_id || "",
     oauth.redirect_uri || "",
     path.resolve(repoRoot),
@@ -304,7 +304,7 @@ function createLinuxSecretServiceStore({ run, target }) {
         [
           "store",
           "--label",
-          "Agentic Factory Linear OAuth",
+          "Teami Linear OAuth",
           "service",
           target,
           "account",
@@ -379,7 +379,7 @@ function normalizeTokenSet(tokenSet) {
 
 function credentialFilePath({ oauth, domainId }) {
   if (domainId) {
-    return path.join(".agentic-factory", "domains", domainId, "linear-oauth-token.json");
+    return path.join(".teami", "domains", domainId, "linear-oauth-token.json");
   }
   return oauth.credential_file || DEFAULT_FILE_CREDENTIAL_PATH;
 }

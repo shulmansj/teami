@@ -14,12 +14,12 @@ test("production GitHub transport stays dry-run unless the connection state is r
 
 test("production GitHub transport resolves local ambient mode for verified real connections", () => {
   const selection = createProductionGitHubPromotionTransport({
-    repoRoot: "C:/work/factory",
+    repoRoot: "C:/Users/example/factory",
     repoIdentity: {
       connection_mode: "real",
-      repo: { owner: "acme", repo: "agentic-factory" },
+      repo: { owner: "acme", repo: "teami" },
       default_branch: "main",
-      checkout_path: "C:/work/factory",
+      checkout_path: "C:/Users/example/factory",
       push_auth: "ssh",
       real_push_enabled: true,
     },
@@ -27,9 +27,9 @@ test("production GitHub transport resolves local ambient mode for verified real 
   assert.equal(selection.mode, "local_ambient");
   assert.equal(selection.transport.kind, "local_ambient");
   assert.equal(selection.owner, "acme");
-  assert.equal(selection.repo, "agentic-factory");
+  assert.equal(selection.repo, "teami");
   assert.equal(selection.defaultBranch, "main");
-  assert.equal(selection.checkoutPath, "C:/work/factory");
+  assert.equal(selection.checkoutPath, "C:/Users/example/factory");
   assert.equal(selection.pushAuth, "ssh");
   assert.equal(selection.realPushEnabled, true);
 });
@@ -38,7 +38,7 @@ test("verified real connections default to https push auth and disabled real pus
   const selection = createProductionGitHubPromotionTransport({
     repoIdentity: {
       connection_mode: "real",
-      repo: { owner: "acme", repo: "agentic-factory" },
+      repo: { owner: "acme", repo: "teami" },
     },
   });
   assert.equal(selection.mode, "local_ambient");
@@ -62,7 +62,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     return { stdout: JSON.stringify({ number: 2, state: "open" }) };
   });
   const selection = createProductionGitHubPromotionTransport({
-    repoRoot: "C:/work/factory",
+    repoRoot: "C:/Users/example/factory",
     env: {
       PATH: "path-value",
       GH_TOKEN: "ghp_secret123456789",
@@ -73,7 +73,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     },
     repoIdentity: {
       connection_mode: "real",
-      repo: { owner: "acme", repo: "agentic-factory" },
+      repo: { owner: "acme", repo: "teami" },
       push_auth: "ssh",
     },
     spawnImpl,
@@ -108,7 +108,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
   ]);
   for (const call of calls) {
     assert.equal(call.command, "gh");
-    assert.equal(call.options.cwd, "C:/work/factory");
+    assert.equal(call.options.cwd, "C:/Users/example/factory");
     assert.equal(call.options.shell, false);
     assert.equal(call.options.windowsHide, true);
     assert.equal(call.options.env.GH_PROMPT_DISABLED, "1");
@@ -130,7 +130,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     "X-GitHub-Api-Version: 2022-11-28",
     "--method",
     "GET",
-    "repos/acme/agentic-factory/pulls",
+    "repos/acme/teami/pulls",
     "-f",
     "state=open",
     "-F",
@@ -148,7 +148,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     "X-GitHub-Api-Version: 2022-11-28",
     "--method",
     "GET",
-    "repos/acme/agentic-factory/pulls",
+    "repos/acme/teami/pulls",
     "-f",
     "state=closed",
     "-F",
@@ -166,7 +166,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     "X-GitHub-Api-Version: 2022-11-28",
     "--method",
     "GET",
-    "repos/acme/agentic-factory/pulls/2",
+    "repos/acme/teami/pulls/2",
   ]);
   assert.deepEqual(apiCalls[3].args, [
     "api",
@@ -178,7 +178,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     "X-GitHub-Api-Version: 2022-11-28",
     "--method",
     "POST",
-    "repos/acme/agentic-factory/pulls",
+    "repos/acme/teami/pulls",
     "--input",
     "-",
   ]);
@@ -199,7 +199,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     "X-GitHub-Api-Version: 2022-11-28",
     "--method",
     "PATCH",
-    "repos/acme/agentic-factory/pulls/3",
+    "repos/acme/teami/pulls/3",
     "--input",
     "-",
   ]);
@@ -257,7 +257,7 @@ function realSelection({ spawnImpl }) {
   return createProductionGitHubPromotionTransport({
     repoIdentity: {
       connection_mode: "real",
-      repo: { owner: "acme", repo: "agentic-factory" },
+      repo: { owner: "acme", repo: "teami" },
     },
     spawnImpl,
   });
@@ -269,7 +269,7 @@ function request(transport, endpointId, method, path, params = {}) {
     method,
     path,
     owner: "acme",
-    repo: "agentic-factory",
+    repo: "teami",
     params,
   });
 }

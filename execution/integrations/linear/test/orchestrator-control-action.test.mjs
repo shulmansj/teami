@@ -21,7 +21,7 @@ import { decompositionDefinition } from "../src/workflows/decomposition/definiti
 test("the schema is versioned and exposes exactly three action kinds", () => {
   assert.equal(
     CONTROL_ACTION_SCHEMA_VERSION,
-    "agentic-factory-orchestrator-control-action/v1",
+    "teami-orchestrator-control-action/v1",
   );
   assert.deepEqual(CONTROL_ACTION_KINDS, [
     "invoke_library",
@@ -96,6 +96,20 @@ test("invoke_library parses a valid target_key", () => {
   });
 });
 
+test("invoke_library parses an optional instance_id", () => {
+  const result = parseControlAction({
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_synthesis",
+    instance_id: "pm#parallel_a",
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.action, {
+    action: "invoke_library",
+    target_key: "prompt/decomposition/pm_synthesis",
+    instance_id: "pm#parallel_a",
+  });
+});
+
 test("invoke_library rejects a missing target_key", () => {
   const result = parseControlAction({ action: "invoke_library" });
   assert.equal(result.ok, false);
@@ -119,6 +133,67 @@ test("invoke_one_off parses all required fields and a whitelisted runtime_role",
     assert.equal(result.action.role_label, "domain-lens");
     assert.equal(result.action.runtime_role, runtime_role);
   }
+});
+
+test("invoke_one_off parses optional instance_id and still accepts role-only default addressing", () => {
+  const withInstance = parseControlAction(
+    {
+      action: "invoke_one_off",
+      role_label: "domain-lens",
+      task: "Assess regulatory constraints",
+      prompt: "You are a compliance reviewer...",
+      runtime_role: "pm",
+      instance_id: "pm#parallel_a",
+    },
+    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+  );
+  assert.equal(withInstance.ok, true);
+  assert.equal(withInstance.action.instance_id, "pm#parallel_a");
+
+  const roleOnly = parseControlAction(
+    {
+      action: "invoke_one_off",
+      role_label: "domain-lens",
+      task: "Assess regulatory constraints",
+      prompt: "You are a compliance reviewer...",
+      runtime_role: "pm",
+    },
+    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+  );
+  assert.equal(roleOnly.ok, true);
+  assert.equal(Object.hasOwn(roleOnly.action, "instance_id"), false);
+});
+
+test("invoke_one_off rejects unsafe or role-mismatched instance_id values", () => {
+  const invalid = parseControlAction(
+    {
+      action: "invoke_one_off",
+      role_label: "domain-lens",
+      task: "Assess regulatory constraints",
+      prompt: "You are a compliance reviewer...",
+      runtime_role: "pm",
+      instance_id: "bad/path",
+    },
+    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+  );
+  assert.equal(invalid.ok, false);
+  assert.deepEqual(invalid.reasons, ["invoke_one_off_invalid_instance_id"]);
+
+  const mismatched = parseControlAction(
+    {
+      action: "invoke_one_off",
+      role_label: "domain-lens",
+      task: "Assess regulatory constraints",
+      prompt: "You are a compliance reviewer...",
+      runtime_role: "pm",
+      instance_id: "sr_eng#parallel_a",
+    },
+    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+  );
+  assert.equal(mismatched.ok, false);
+  assert.deepEqual(mismatched.reasons, [
+    "invoke_one_off_instance_id_role_mismatch:sr_eng#parallel_a",
+  ]);
 });
 
 test("invoke_one_off rejects a runtime_role outside the whitelist (incl. orchestrator)", () => {

@@ -19,6 +19,8 @@ import {
   QUALITY_DIMENSION_NAMES,
   QUALITY_LABELS,
   RUBRIC_VERSION,
+  resolveEvalContract,
+  scoreFromLabelBand,
 } from "../src/eval-annotation-contract.mjs";
 import { schemaErrors } from "../src/eval-structural-validator.mjs";
 import {
@@ -30,15 +32,22 @@ import {
   normalizeFailureMode,
 } from "../src/quality.mjs";
 import { deriveCandidateTargetKey } from "../src/phoenix-experiment.mjs";
+import { decompositionDefinition } from "../src/workflows/decomposition/definition.mjs";
+import { reviewDefinition } from "../src/workflows/review/definition.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const evalsDir = path.join(repoRoot, "execution", "evals", "decomposition");
+const reviewEvalsDir = path.join(repoRoot, "execution", "evals", "review");
 const fixturesDir = path.join(import.meta.dirname, "fixtures", "eval-contracts");
 
 const exampleSchema = readJson(path.join(evalsDir, "example.schema.json"));
 const annotationSchema = readJson(path.join(evalsDir, "annotation.schema.json"));
 const failureTaxonomy = readJson(path.join(evalsDir, "failure-taxonomy.json"));
 const phoenixAssets = readJson(path.join(evalsDir, "phoenix-assets.json"));
+const reviewExampleSchema = readJson(path.join(reviewEvalsDir, "example.schema.json"));
+const reviewAnnotationSchema = readJson(path.join(reviewEvalsDir, "annotation.schema.json"));
+const reviewFailureTaxonomy = readJson(path.join(reviewEvalsDir, "failure-taxonomy.json"));
+const reviewPhoenixAssets = readJson(path.join(reviewEvalsDir, "phoenix-assets.json"));
 const validExample = readJson(path.join(fixturesDir, "decomposition-example.valid.json"));
 
 // Shared with runtime code via src/eval-annotation-contract.mjs (single source
@@ -111,6 +120,16 @@ test("example schema encodes the dataset example contract enums exactly", () => 
   assert.deepEqual(metadata.dataset_split.enum, ["train", "test", "calibration", "regression"]);
   assert.deepEqual(metadata.content_retention.enum, ["bounded", "rich_local", "sanitized_fixture"]);
   const input = exampleSchema.properties.input.properties;
+  assert.deepEqual(exampleSchema.properties.input.required, [
+    "gradeability",
+    "judge_fixture_input",
+    "maintainer_supplied_context",
+    "source_type",
+    "project",
+    "run_envelope",
+    "source_refs",
+  ]);
+  assert.deepEqual(input.gradeability.enum, ["full_input", "detection_only"]);
   assert.equal(input.source_type.const, "linear_project_snapshot");
   assert.deepEqual(input.project.required, [
     "id",
@@ -121,6 +140,37 @@ test("example schema encodes the dataset example contract enums exactly", () => 
     "existing_issues",
   ]);
   assert.deepEqual(input.run_envelope.properties.runtime_assignments.required, ["pm", "sr_eng"]);
+  assert.deepEqual(exampleSchema.$defs.judge_fixture_input.required, [
+    "project_intent",
+    "terminal_status",
+    "terminal_reason",
+    "final_issues",
+    "discovery_issues",
+    "dependency_relations",
+    "project_update_markdown",
+    "open_questions_markdown",
+    "phase_packet_summaries",
+  ]);
+  assert.deepEqual(exampleSchema.$defs.maintainer_supplied_context.required, [
+    "rubric_version",
+    "failure_taxonomy_version",
+    "allowed_failure_modes",
+  ]);
+  const reference = exampleSchema.properties.reference.properties;
+  assert.equal(reference.expected_label.$ref, "#/$defs/quality_label");
+  assert.equal(reference.expected_score.minimum, 0);
+  assert.equal(reference.expected_score.maximum, 1);
+  assert.deepEqual(reference.provenance.required, ["label_source", "label_status", "labeled_at"]);
+  assert.deepEqual(reference.provenance.properties.label_source.enum, ["explicit_human", "ambiguous"]);
+  assert.deepEqual(reference.provenance.properties.label_status.enum, ["GOLD", "excluded"]);
+  assert.equal(metadata.source_target_ids.items.type, "string");
+  assert.equal(metadata.produced_identity_refs.items.$ref, "#/$defs/produced_identity_ref");
+  assert.deepEqual(exampleSchema.$defs.produced_identity_ref.required, [
+    "effect_id",
+    "provider",
+    "resource_kind",
+    "target_ids",
+  ]);
 });
 
 test("shared eval contract constants module mirrors the canonical schema artifacts exactly", () => {
@@ -130,7 +180,7 @@ test("shared eval contract constants module mirrors the canonical schema artifac
   assert.deepEqual([...QUALITY_LABELS], ["pass", "needs_revision", "blocking_failure"]);
   assert.deepEqual([...ANNOTATOR_KINDS], ["HUMAN", "LLM", "CODE"]);
   assert.deepEqual([...QUALITY_DIMENSION_NAMES], [
-    "decomposition_quality",
+    "quality",
     "project_intent_preservation",
     "issue_executability",
     "dependency_structure",
@@ -147,7 +197,7 @@ test("shared eval contract constants module mirrors the canonical schema artifac
     [...CANONICAL_ANNOTATION_NAMES],
     [...QUALITY_DIMENSION_NAMES, ...DETERMINISTIC_CHECK_ANNOTATION_NAMES],
   );
-  assert.equal(DEFAULT_ANNOTATION_NAME, "decomposition_quality");
+  assert.equal(DEFAULT_ANNOTATION_NAME, "quality");
   assert.deepEqual([...BANNED_WORKFLOW_STATE_METADATA_KEYS], [
     "needs_relabel",
     "pending_promotion",
@@ -171,8 +221,143 @@ test("shared eval contract constants module mirrors the canonical schema artifac
   assert.equal(CONTRACT_FAILURE_TAXONOMY_VERSION, failureTaxonomy.failure_taxonomy_version);
 });
 
+test("resolveEvalContract returns the full decomposition quality contract", () => {
+  const contract = resolveEvalContract(decompositionDefinition, repoRoot);
+  assert.equal(contract.eval_configured, true);
+  assert.equal(contract.reason, null);
+  assert.equal(contract.workflow_type, "decomposition");
+  assert.equal(contract.eval_namespace, "execution/evals/decomposition");
+  assert.equal(contract.paths.manifest, "execution/evals/decomposition/phoenix-assets.json");
+  assert.equal(contract.paths.annotation_schema, "execution/evals/decomposition/annotation.schema.json");
+  assert.equal(contract.paths.example_schema, "execution/evals/decomposition/example.schema.json");
+  assert.equal(
+    contract.absolute_paths.annotation_schema,
+    path.join(evalsDir, "annotation.schema.json"),
+  );
+  assert.deepEqual([...contract.quality_labels], [...QUALITY_LABELS]);
+  assert.deepEqual([...contract.annotator_kinds], [...ANNOTATOR_KINDS]);
+  assert.deepEqual([...contract.canonical_annotation_names], [...CANONICAL_ANNOTATION_NAMES]);
+  assert.deepEqual(
+    [...contract.deterministic_check_annotation_names],
+    [...DETERMINISTIC_CHECK_ANNOTATION_NAMES],
+  );
+  assert.deepEqual([...contract.quality_dimension_names], [...QUALITY_DIMENSION_NAMES]);
+  assert.equal(contract.roll_up_annotation_name, DEFAULT_ANNOTATION_NAME);
+  assert.equal(contract.rubric_version, RUBRIC_VERSION);
+  assert.equal(contract.failure_taxonomy_version, failureTaxonomy.failure_taxonomy_version);
+  assert.equal(contract.failure_taxonomy_workflow_key, "roadmap_decomposition");
+  assert.ok(contract.allowed_failure_modes.includes("missing_acceptance_criteria"));
+  assert.equal(contract.rich_example_dataset_name, phoenixAssets.datasets[0].name);
+  assert.deepEqual(contract.judge_input_contract.judge_fixture_input_fields, [
+    "project_intent",
+    "terminal_status",
+    "terminal_reason",
+    "final_issues",
+    "discovery_issues",
+    "dependency_relations",
+    "project_update_markdown",
+    "open_questions_markdown",
+    "phase_packet_summaries",
+  ]);
+  assert.deepEqual(contract.judge_input_contract.maintainer_supplied_context_fields, [
+    "rubric_version",
+    "failure_taxonomy_version",
+    "allowed_failure_modes",
+  ]);
+  assert.deepEqual(contract.judge_input_contract.required_fields, [
+    ...contract.judge_input_contract.judge_fixture_input_fields,
+    ...contract.judge_input_contract.maintainer_supplied_context_fields,
+  ]);
+  assert.equal(contract.judge_prompt.role, "decomposition_quality_judge");
+  assert.equal(
+    contract.judge_prompt.target_key,
+    "prompt/decomposition/decomposition_quality_judge",
+  );
+  assert.equal(contract.judge_prompt.rubric_version, phoenixAssets.prompts[0].rubric_version);
+  assert.equal(contract.judge_prompt.evaluator_entry.id, "decomposition_quality_judge_v1");
+  assert.deepEqual(
+    contract.findBannedWorkflowStateMetadataKeys({ queue_state: "pending", allowed: true }),
+    ["queue_state"],
+  );
+  assert.equal(contract.scoreWithinLabelBand("pass", 0.9), true);
+  assert.equal(contract.scoreWithinLabelBand("pass", 0.7), false);
+  assert.equal(contract.scoreAtBandBoundary(0.8), true);
+  assert.equal(contract.scoreFromLabelBand("pass"), 0.9);
+  assert.equal(contract.scoreFromLabelBand("needs_revision"), 0.6);
+  assert.equal(contract.scoreFromLabelBand("blocking_failure"), 0.2);
+  assert.equal(scoreFromLabelBand("pass"), 0.9);
+});
+
+test("resolveEvalContract returns the configured Reviewer quality contract", () => {
+  const contract = resolveEvalContract(reviewDefinition, repoRoot);
+  assert.equal(contract.eval_configured, true);
+  assert.equal(contract.reason, null);
+  assert.equal(contract.workflow_type, "review");
+  assert.equal(contract.eval_namespace, "execution/evals/review");
+  assert.equal(contract.paths.annotation_schema, "execution/evals/review/annotation.schema.json");
+  assert.equal(contract.paths.example_schema, "execution/evals/review/example.schema.json");
+  assert.equal(contract.failure_taxonomy_workflow_key, "review");
+  assert.deepEqual([...contract.quality_labels], ["pass", "needs_revision", "blocking_failure"]);
+  assert.deepEqual([...contract.quality_dimension_names], [
+    "quality",
+    "verdict_correctness",
+    "real_issue_detection",
+    "false_positive_avoidance",
+    "reasoning_soundness",
+    "actionability",
+    "severity_calibration",
+    "scope_discipline",
+    "user_risk_explanation",
+  ]);
+  assert.equal(contract.roll_up_annotation_name, "quality");
+  assert.equal(contract.rubric_version, "1.0.0");
+  assert.equal(contract.failure_taxonomy_version, reviewFailureTaxonomy.failure_taxonomy_version);
+  assert.equal(contract.rich_example_dataset_name, "teami-review-examples");
+  assert.equal(contract.judge_prompt.role, "review_quality_judge");
+  assert.equal(contract.judge_prompt.target_key, "prompt/review/review_quality_judge");
+  assert.equal(contract.judge_prompt.rubric_version, reviewPhoenixAssets.prompts[0].rubric_version);
+  assert.equal(contract.judge_prompt.evaluator_entry.id, "review_quality_judge_v1");
+  assert.deepEqual(contract.judge_input_contract.judge_fixture_input_fields, [
+    "reviewed_pr",
+    "reviewer_review",
+    "review_correctness_signal",
+  ]);
+  assert.deepEqual(contract.judge_input_contract.maintainer_supplied_context_fields, [
+    "rubric_version",
+    "failure_taxonomy_version",
+    "allowed_failure_modes",
+  ]);
+  assert.deepEqual(reviewExampleSchema.$defs.judge_fixture_input.required, [
+    "reviewed_pr",
+    "reviewer_review",
+    "review_correctness_signal",
+  ]);
+  assert.deepEqual(reviewExampleSchema.$defs.review_verdict.enum, [
+    "approve",
+    "request-changes",
+    "escalate",
+  ]);
+  assert.deepEqual(reviewAnnotationSchema.$defs.quality_label.enum, [
+    "pass",
+    "needs_revision",
+    "blocking_failure",
+  ]);
+  for (const seededFailureMode of [
+    "review_missed_regression",
+    "review_missed_scope_change",
+    "review_missed_missing_tests",
+    "review_overfocused_on_style",
+    "review_failed_to_explain_user_risk",
+  ]) {
+    assert.ok(
+      contract.allowed_failure_modes.includes(seededFailureMode),
+      `review taxonomy is missing seeded failure mode "${seededFailureMode}"`,
+    );
+  }
+});
+
 test("annotation schema pins the label set, annotator kinds, roll-up name, and score bands", () => {
-  // Constraint: the default-judge label set and the decomposition_quality
+  // Constraint: the default-judge label set and the quality
   // annotation name must not drift.
   assert.deepEqual(annotationSchema.$defs.quality_label.enum, QUALITY_LABELS);
   assert.deepEqual(annotationSchema.$defs.annotator_kind.enum, ANNOTATOR_KINDS);
@@ -212,6 +397,27 @@ test("annotation schema pins the label set, annotator kinds, roll-up name, and s
 
 test("golden example fixture validates against the example schema", () => {
   assertValid(exampleSchema, validExample);
+});
+
+test("example schema accepts D-capture frozen human labels and produced identity refs", () => {
+  const enriched = structuredClone(validExample);
+  enriched.reference.human_annotation_ids = ["anno-human-1"];
+  enriched.reference.expected_label = "pass";
+  enriched.reference.expected_score = 0.9;
+  enriched.reference.provenance = {
+    label_source: "explicit_human",
+    label_status: "GOLD",
+    labeled_at: "2026-06-10T00:05:00.000Z",
+    annotator_id: "adopter-fixture-owner",
+  };
+  enriched.metadata.source_target_ids = ["issue-1", "issue-2"];
+  enriched.metadata.produced_identity_refs = [{
+    effect_id: "linear_issues",
+    provider: "linear",
+    resource_kind: "linear_issue",
+    target_ids: ["issue-1", "issue-2"],
+  }];
+  assertValid(exampleSchema, enriched);
 });
 
 test("invalid example fixtures are rejected for the expected reasons", () => {
@@ -279,6 +485,18 @@ test("invalid example fixtures are rejected for the expected reasons", () => {
     mutate((example) => delete example.input.run_envelope.runtime_assignments.sr_eng),
     'missing required property "sr_eng"',
   );
+  assertInvalid(
+    exampleSchema,
+    mutate((example) => delete example.input.judge_fixture_input.terminal_reason),
+    'missing required property "terminal_reason"',
+  );
+  assertInvalid(
+    exampleSchema,
+    mutate((example) => {
+      example.input.gradeability = "thin_capture";
+    }),
+    "not in enum",
+  );
 });
 
 // Invalid fixtures on disk. Every *.invalid* fixture must declare which schema
@@ -340,7 +558,7 @@ test("invalid fixtures on disk are rejected by the structural checks", () => {
 
 test("valid logical and Phoenix wire annotations validate; malformed ones fail", () => {
   const logicalHuman = {
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "HUMAN",
     label: "pass",
     score: 0.92,
@@ -356,7 +574,7 @@ test("valid logical and Phoenix wire annotations validate; malformed ones fail",
   assertValid(annotationSchema, logicalHuman);
 
   const wireLlm = {
-    name: "decomposition_quality",
+    name: "quality",
     annotator_kind: "LLM",
     trace_id: "0af7651916cd43dd8448eb211c80319c",
     result: {
@@ -459,7 +677,7 @@ test("promotion outcome annotations use the separate minimal label-only contract
   const errorsFor = (value) => schemaErrors(outcomeSchema, value, annotationSchema);
 
   const validOutcome = {
-    name: "agentic_factory_promotion_outcome",
+    name: "teami_promotion_outcome",
     annotator_kind: "CODE",
     trace_id: "0af7651916cd43dd8448eb211c80319c",
     result: { label: "route_to_hitl" },
@@ -470,7 +688,7 @@ test("promotion outcome annotations use the separate minimal label-only contract
       normalized_envelope_hash: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
       repair_state: "none",
     },
-    identifier: "agentic_factory_promotion_controller_v1",
+    identifier: "teami_promotion_controller_v1",
   };
   assert.deepEqual(errorsFor(validOutcome), []);
 
@@ -644,7 +862,7 @@ test("deterministic CODE evaluators emit annotations compatible with the shared 
 });
 
 test("failure taxonomy is versioned and seeded from the documented taxonomy", () => {
-  assert.equal(failureTaxonomy.schema_version, "agentic-factory-failure-taxonomy/v1");
+  assert.equal(failureTaxonomy.schema_version, "teami-failure-taxonomy/v1");
   assert.equal(failureTaxonomy.failure_taxonomy_version, "1.0.0");
   assert.deepEqual(failureTaxonomy.workflows.roadmap_decomposition.failure_modes, [
     "duplicated_project_truth",
@@ -724,7 +942,7 @@ test("phoenix asset manifest pins origin, package, project, and the single candi
   assert.equal(judgePrompt.candidate_tag, undefined);
   for (const prompt of phoenixAssets.prompts) {
     if (prompt.target_key === "prompt/decomposition/decomposition_quality_judge") continue;
-    assert.equal(prompt.candidate_tag, "agentic_factory_promotion_candidate");
+    assert.equal(prompt.candidate_tag, "teami_promotion_candidate");
   }
   // Updated by the human-merged sandbox PR #3 (first accepted behavior-diff
   // promotion): the judge prompt is now pinned to its Phoenix version.
@@ -751,7 +969,7 @@ test("phoenix asset manifest pins origin, package, project, and the single candi
   assert.equal(llmEvaluator.prompt_version_id, null);
 
   const dataset = phoenixAssets.datasets[0];
-  assert.equal(dataset.name, "agentic-factory-decomposition-examples");
+  assert.equal(dataset.name, "teami-decomposition-examples");
   assert.match(dataset.dataset_id ?? "", /^[A-Za-z0-9+/=]+$/);
   assert.match(dataset.accepted_dataset_version_id ?? "", /^[A-Za-z0-9+/=]+$/);
   assert.equal(dataset.split_representation, "native");
@@ -886,7 +1104,7 @@ test("rubric, judge prompt, and proposal template carry versions and required se
     "utf8",
   );
   for (const requiredSection of [
-    "agentic_factory_promotion",
+    "teami_promotion",
     "evidence_counts",
     "human_label_authenticity",
     "evidence_quality",
@@ -915,20 +1133,20 @@ test("rubric, judge prompt, and proposal template carry versions and required se
   const markerMatch = /```json\n([\s\S]*?)```/.exec(template);
   assert.ok(markerMatch, "proposal template must contain fenced JSON blocks");
   const fencedBlocks = [...template.matchAll(/```json\n([\s\S]*?)```/g)];
-  const markerBlock = fencedBlocks.find((block) => block[1].includes("agentic_factory_promotion"));
+  const markerBlock = fencedBlocks.find((block) => block[1].includes("teami_promotion"));
   assert.ok(markerBlock, "proposal template must contain the machine-readable marker block");
   const marker = JSON.parse(markerBlock[1]);
-  assert.equal(marker.agentic_factory_promotion.schema_version, 1);
+  assert.equal(marker.teami_promotion.schema_version, 1);
   // The marker carries every normalized-envelope component the controller
   // cannot re-derive after the fact: requested action and Phoenix scope.
-  assert.equal(marker.agentic_factory_promotion.requested_action, "propose_repo_change");
-  assert.deepEqual(Object.keys(marker.agentic_factory_promotion.phoenix_scope), [
+  assert.equal(marker.teami_promotion.requested_action, "propose_repo_change");
+  assert.deepEqual(Object.keys(marker.teami_promotion.phoenix_scope), [
     "origin",
     "project_name",
   ]);
   // Evidence ids are structured and unambiguous: dataset evidence pins both
   // the dataset id and the exact dataset version id.
-  const evidenceIds = marker.agentic_factory_promotion.evidence_ids;
+  const evidenceIds = marker.teami_promotion.evidence_ids;
   assert.deepEqual(Object.keys(evidenceIds), ["experiments", "datasets", "annotations"]);
   assert.ok(Array.isArray(evidenceIds.experiments));
   assert.ok(Array.isArray(evidenceIds.annotations));

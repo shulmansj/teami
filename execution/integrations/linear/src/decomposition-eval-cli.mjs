@@ -7,6 +7,7 @@ import {
   formatJudgeReport,
   judgeAllowedFailureModes,
   runDecompositionQualityJudge,
+  runStoredDecompositionFixtureJudge,
 } from "./decomposition-quality-judge.mjs";
 import {
   acceptedPacketSufficiencyInputFromArtifact,
@@ -111,15 +112,15 @@ const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
-// Local eval-run record store (.agentic-factory/eval-runs/, gitignored via
-// the existing .agentic-factory/ ignore; same atomic write conventions as the
+// Local eval-run record store (.teami/eval-runs/, gitignored via
+// the existing .teami/ ignore; same atomic write conventions as the
 // run store). Phase artifacts/checkpoints/snapshots for eval runs live in the
 // `runs/` subdirectory of this store so eval custody never mixes with live
-// wake-run custody under .agentic-factory/runs/.
+// wake-run custody under .teami/runs/.
 // ---------------------------------------------------------------------------
 
 export function defaultEvalRunStoreDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "eval-runs");
+  return path.resolve(repoRoot, ".teami", "eval-runs");
 }
 
 export function evalRunRecordPath({ evalRunId, repoRoot = process.cwd(), evalRunStoreDir = null } = {}) {
@@ -673,15 +674,28 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
   }
   const teamId = "eval-team-1";
   const team = { id: teamId, key: config.linear.team.key, name: config.linear.team.name };
-  const statuses = Object.entries(config.linear.project.status_types).map(([semantic, type]) => ({
+  const statuses = Object.entries(config.linear.project.statuses).map(([semantic, status]) => ({
     id: `eval-status-${semantic}`,
-    name: semantic,
-    type,
+    role: semantic,
+    name: status.name,
+    type: status.type,
   }));
-  const statusFor = (semantic) =>
-    statuses.find((status) => status.name === semantic)
-    || statuses.find((status) => status.type === semantic)
-    || { id: "eval-status-unmapped", name: String(semantic), type: String(semantic) };
+  const issueStatuses = Object.entries(config.linear.issue.statuses)
+    .filter(([semantic]) => ["backlog", "todo", "in_progress", "in_review", "blocked", "done"].includes(semantic))
+    .map(([semantic, status]) => ({
+      id: `eval-issue-status-${semantic}`,
+      role: semantic,
+      name: status.name,
+      type: status.type,
+      teamId,
+    }));
+  const statusFor = (semantic) => {
+    const normalized = String(semantic || "").trim().toLowerCase().replace(/\s+/g, "_");
+    return statuses.find((status) => status.role === normalized)
+      || statuses.find((status) => status.type === normalized)
+      || statuses.find((status) => status.name.trim().toLowerCase().replace(/\s+/g, "_") === normalized)
+      || { id: "eval-status-unmapped", name: String(semantic), type: String(semantic) };
+  };
 
   const openQuestionsLabelName = config.linear.project.labels.has_open_questions;
   const snapshotOpenLabel = (project.labels || []).find(
@@ -704,6 +718,12 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
   const discoveryLabel = {
     id: discoveryLabelId || "eval-ilabel-discovery",
     name: discoveryLabelName,
+    teamId,
+  };
+  const needsPrincipalLabelName = config.linear.issue.labels.needs_principal;
+  const needsPrincipalLabel = {
+    id: "eval-ilabel-needs-principal",
+    name: needsPrincipalLabelName,
     teamId,
   };
   const template = {
@@ -745,13 +765,14 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
       return statuses;
     },
     async listWorkflowStates() {
-      return [];
+      return issueStatuses;
     },
     async findProjectLabelsByName(name) {
       return name === hasOpenQuestionsLabel.name ? [hasOpenQuestionsLabel] : [];
     },
     async findIssueLabelsByName(name, forTeamId) {
-      return name === discoveryLabel.name && forTeamId === teamId ? [discoveryLabel] : [];
+      return [discoveryLabel, needsPrincipalLabel]
+        .filter((label) => label.name === name && forTeamId === teamId);
     },
     async findTemplatesByName(name, type, forTeamId) {
       return name === template.name && type === template.type && forTeamId === teamId
@@ -769,9 +790,14 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
   const cache = {
     teamId,
     projectTemplateId: template.id,
-    projectStatuses: Object.fromEntries(statuses.map((status) => [status.name, status.id])),
+    projectStatuses: Object.fromEntries(statuses.map((status) => [status.role, status.id])),
+    projectStatusTypes: Object.fromEntries(statuses.map((status) => [status.role, status.type])),
+    issueStatuses: Object.fromEntries(issueStatuses.map((status) => [status.role, status.id])),
     projectLabels: { [hasOpenQuestionsLabel.name]: hasOpenQuestionsLabel.id },
-    issueLabels: { [discoveryLabel.name]: discoveryLabel.id },
+    issueLabels: {
+      [discoveryLabel.name]: discoveryLabel.id,
+      [needsPrincipalLabel.name]: needsPrincipalLabel.id,
+    },
   };
 
   return {
@@ -792,7 +818,7 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
 // ---------------------------------------------------------------------------
 
 export function buildEvalRunEnvelope({ config } = {}) {
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
   const judgeAssignment = resolveJudgeRuntimeAssignment(config);
   return {
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
@@ -843,7 +869,7 @@ export function createDefaultEvalRuntimeExecutor({ config, repoRoot = process.cw
 // ---------------------------------------------------------------------------
 // The eval task.
 //
-// Returns (and records under .agentic-factory/eval-runs/<eval_run_id>.json):
+// Returns (and records under .teami/eval-runs/<eval_run_id>.json):
 //   { ok, status: "evaluated"|"ineligible"|"failed_closed"|"not_run", reason?,
 //     eval_run_id, variant_id, inputs_hash, non_mutating: true,
 //     mutation_skipped, subagent_invocations, artifact, artifact_path, terminal,
@@ -975,6 +1001,7 @@ export async function runDecompositionEvalTask({
       // the roster so the loop's library invocations load the candidate body for
       // the overridden target instead of the manifest snapshot.
       const evalRoster = createOrchestratorRoster({
+        workflowType: "decomposition",
         repoRoot,
         acceptedPromptOverrides: promptOverridesResolution.acceptedPromptOverrides,
       });
@@ -1053,7 +1080,7 @@ export async function runDecompositionEvalTask({
 
   // Honest evaluator-input mapping (D10): eval mode supplies
   // accepted_packet_sufficiency from the terminal artifact's v3 audit fields;
-  // decomposition_quality structured issue fields and the post-mutation
+  // quality structured issue fields and the post-mutation
   // pause-state project view do NOT exist in a non-mutating eval run, so
   // those checks keep their named skips instead of being fed invented inputs.
   const acceptedPacketSufficiencyInput = acceptedPacketSufficiencyInputFromArtifact(artifact);
@@ -1122,7 +1149,7 @@ export async function runDecompositionEvalTask({
   }
 
   // 7. Local eval-run record for step-8 receipts (atomic write conventions;
-  // gitignored .agentic-factory/ custody).
+  // gitignored .teami/ custody).
   const record = {
     schema_version: EVAL_RUN_RECORD_SCHEMA_VERSION,
     eval_run_id: resolvedEvalRunId,
@@ -1192,6 +1219,79 @@ export async function runDecompositionEvalTask({
     judge: judgeResult,
     record_path: recordPath,
     source: input.source,
+  };
+}
+
+export async function runDecompositionFixtureRegradeTask({
+  repoRoot = process.cwd(),
+  config,
+  fixture = null,
+  examplePath = null,
+  runJudgeFn = runStoredDecompositionFixtureJudge,
+  ensureReady = null,
+  fetchImpl = globalThis.fetch,
+  onProgress = () => {},
+  ...judgeOptions
+} = {}) {
+  let resolvedFixture = fixture;
+  let resolvedPath = null;
+  if (!resolvedFixture && examplePath) {
+    resolvedPath = path.resolve(repoRoot, examplePath);
+    if (!fs.existsSync(resolvedPath)) {
+      return { ok: false, status: "not_run", reason: "missing_example_file", path: resolvedPath };
+    }
+    try {
+      resolvedFixture = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
+    } catch (error) {
+      return {
+        ok: false,
+        status: "not_run",
+        reason: "invalid_example_json",
+        path: resolvedPath,
+        detail: error.message,
+      };
+    }
+  }
+  if (!resolvedFixture) {
+    return { ok: false, status: "not_run", reason: "missing_stored_fixture" };
+  }
+  const errors = schemaErrors(exampleSchema, resolvedFixture, exampleSchema);
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      status: "not_run",
+      reason: "example_schema_mismatch",
+      path: resolvedPath,
+      schema_errors: errors,
+      non_mutating: true,
+      reran_workflow: false,
+    };
+  }
+  const judged = await runJudgeFn({
+    ...judgeOptions,
+    repoRoot,
+    fixture: resolvedFixture,
+    config,
+    ...(ensureReady ? { ensureReady } : {}),
+    fetchImpl,
+    onProgress,
+  });
+  return {
+    ok: judged.ok,
+    status: judged.judge_state === "judged" ? "regraded" : "not_run",
+    reason: judged.reason ?? null,
+    non_mutating: true,
+    reran_workflow: false,
+    source: {
+      mode: "stored_fixture",
+      ...(resolvedPath ? { example_path: resolvedPath } : {}),
+      source_run_id: resolvedFixture.metadata?.source_run_id ?? null,
+      source_trace_id: resolvedFixture.metadata?.source_trace_id ?? null,
+    },
+    evaluator_inputs: {
+      judge_inputs: judged.judge_inputs ?? null,
+    },
+    judge: judged,
   };
 }
 

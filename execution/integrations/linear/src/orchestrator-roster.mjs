@@ -2,31 +2,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { loadAcceptedPromptSnapshot } from "../../../engine/accepted-prompt-snapshot.mjs";
-import {
-  ORCHESTRATOR_GOVERNING_TARGET_KEY,
-} from "../../../engine/engine-orchestrator-contract.mjs";
-import {
-  isDriverSelfImprovementTarget,
-  isExcludedJudgeTarget,
-} from "./promotion/agent-behavior-scope.mjs";
-import { decompositionDefinition } from "./workflows/decomposition/definition.mjs";
-import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.mjs";
+import { evalNamespacePaths } from "../../../engine/eval-namespace.mjs";
+import { getWorkflowDefinition } from "../../../engine/workflow-registry.mjs";
+import "./workflows/decomposition/definition.mjs";
 
 export { ORCHESTRATOR_GOVERNING_TARGET_KEY } from "../../../engine/engine-orchestrator-contract.mjs";
 
 // Repo root, derived the same way trigger-runner.mjs derives MODULE_REPO_ROOT:
 // this module lives at execution/integrations/linear/src/, so four levels up is
-// the repo root that owns execution/evals/decomposition/phoenix-assets.json.
+// the repo root that owns the workflow eval assets.
 const MODULE_REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
 
-// The orchestrator's own governing system prompt is a NORMAL adopter-tunable
-// accepted_prompt manifest entry (the same persona primitive as pm/sr_eng), but
-// it is the DRIVER of the run, not a subagent the orchestrator invokes. So it is
-// excluded from the subagent roster by IDENTITY on this constant — there is no
-// `selectable` manifest field. Selectability is derived; tunability is NOT
-// touched (the governing prompt stays adopter-tunable via
-// isAdopterSelfImprovementTarget, which keys off shape and excludes only the
-// judge). I-2a imports this constant from here to seed the manifest entry.
 // Outcome of resolve(): either a resolution carrying the runtime_role + a lazy
 // snapshot loader, or a rejection carrying a reason. `ok` distinguishes them.
 // The loader yields the FULL verified snapshot (not just the body) because the
@@ -43,17 +29,79 @@ function rejection(reason) {
   return { ok: false, reason };
 }
 
-function readDecompositionManifest(repoRoot) {
-  const manifestPath = path.resolve(repoRoot, DECOMPOSITION_EVAL_PATHS.manifest);
+function readWorkflowManifest(repoRoot, namespacePaths) {
+  const manifestPath = path.resolve(repoRoot, namespacePaths.manifest);
   return JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 }
 
+function resolveWorkflowDefinition(workflowType) {
+  const normalized = typeof workflowType === "string" ? workflowType.trim() : "";
+  if (!normalized) {
+    throw new Error("createOrchestratorRoster_workflow_type_required");
+  }
+  return getWorkflowDefinition(normalized);
+}
+
+function evalAssetAvailability({ repoRoot, namespacePaths }) {
+  const requiredAssets = [
+    ["manifest", namespacePaths.manifest],
+    ["variants", namespacePaths.variants],
+  ];
+  const assets = Object.fromEntries(
+    requiredAssets.map(([name, repoRelativePath]) => {
+      const absolutePath = path.resolve(repoRoot, repoRelativePath);
+      return [
+        name,
+        {
+          repo_relative_path: repoRelativePath,
+          path: absolutePath,
+          exists: fs.existsSync(absolutePath),
+        },
+      ];
+    }),
+  );
+  const missing = Object.entries(assets)
+    .filter(([, asset]) => !asset.exists)
+    .map(([name, asset]) => ({
+      asset: name,
+      repo_relative_path: asset.repo_relative_path,
+      path: asset.path,
+    }));
+  return Object.freeze({
+    promotable: missing.length === 0,
+    reason: missing.length === 0 ? null : "eval_assets_absent",
+    missing,
+    assets,
+  });
+}
+
+function evaluatorRoleSet(definition) {
+  return new Set(
+    (Array.isArray(definition?.engine_owned_evaluator_roles)
+      ? definition.engine_owned_evaluator_roles
+      : []
+    )
+      .map((role) => typeof role === "string" ? role.trim() : "")
+      .filter(Boolean),
+  );
+}
+
+function normalizedRole(entry) {
+  return typeof entry?.role === "string" ? entry.role.trim() : "";
+}
+
+function driverGoverningTargetKey(definition) {
+  return typeof definition?.driver_governing_target_key === "string"
+    ? definition.driver_governing_target_key.trim()
+    : "";
+}
+
 // A manifest entry is a selectable library subagent iff it is a materializer-
-// backed accepted_prompt `prompt/...` entry that is NEITHER the judge (the
-// engine-owned evaluator) NOR the orchestrator's own governing prompt (the
-// driver). This is the Seam-4 derivation: two non-selectable entries, both
-// identifiable through the self-improvement scope authority, no new flag.
-function isSelectableTarget(entry) {
+// backed accepted_prompt `prompt/...` entry that is NEITHER a workflow-owned
+// evaluator prompt NOR the workflow driver's own governing prompt. There is no
+// selectable manifest field; selectability is derived from the workflow
+// definition plus manifest shape.
+function isSelectableTarget(entry, { evaluatorRoles, driverGoverningKey }) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   const targetKey =
     typeof entry.target_key === "string" ? entry.target_key.trim() : "";
@@ -68,16 +116,15 @@ function isSelectableTarget(entry) {
   if (typeof entry.snapshot_path !== "string" || entry.snapshot_path.trim() === "") {
     return false;
   }
-  if (isExcludedJudgeTarget(entry)) return false;
-  if (isDriverSelfImprovementTarget(entry)) return false;
-  if (targetKey === ORCHESTRATOR_GOVERNING_TARGET_KEY) return false;
+  if (evaluatorRoles.has(normalizedRole(entry))) return false;
+  if (targetKey === driverGoverningKey) return false;
   return true;
 }
 
-// Build the Seam-4 roster resolver from phoenix-assets.json.prompts[].
+// Build the roster resolver from the workflow's phoenix-assets.json.prompts[].
 //
-//   createOrchestratorRoster({ manifest?, repoRoot? }) -> {
-//     selectableTargets: string[],          // manifest-derived, judge + governing excluded
+//   createOrchestratorRoster({ workflowType?, manifest?, repoRoot? }) -> {
+//     selectableTargets: string[],          // manifest-derived, evaluator + governing excluded
 //     resolve(target_key) -> { ok: true,  runtime_role, loadSnapshot() }
 //                          | { ok: false, reason }
 //   }
@@ -97,11 +144,19 @@ function isSelectableTarget(entry) {
 // sha). This is how the eval CLI's candidate-prompt overrides reach the loop's
 // library subagent invocations without phase-prompt machinery.
 export function createOrchestratorRoster({
+  workflowType = "decomposition",
   manifest = null,
   repoRoot = MODULE_REPO_ROOT,
   acceptedPromptOverrides = null,
 } = {}) {
-  const resolvedManifest = manifest ?? readDecompositionManifest(repoRoot);
+  const definition = resolveWorkflowDefinition(workflowType);
+  const namespacePaths = evalNamespacePaths(definition);
+  const evalAssets = evalAssetAvailability({ repoRoot, namespacePaths });
+  const resolvedManifest = manifest ?? readWorkflowManifest(repoRoot, namespacePaths);
+  const selectableContext = {
+    evaluatorRoles: evaluatorRoleSet(definition),
+    driverGoverningKey: driverGoverningTargetKey(definition),
+  };
   const prompts = Array.isArray(resolvedManifest?.prompts)
     ? resolvedManifest.prompts
     : [];
@@ -111,10 +166,10 @@ export function createOrchestratorRoster({
       : {};
 
   // Index selectable entries by target_key so resolve() is O(1) and rejects
-  // anything not in the derived selectable set (judge, governing, unknown).
+  // anything not in the derived selectable set (evaluator, governing, unknown).
   const selectableByKey = new Map();
   for (const entry of prompts) {
-    if (isSelectableTarget(entry)) {
+    if (isSelectableTarget(entry, selectableContext)) {
       selectableByKey.set(entry.target_key, entry);
     }
   }
@@ -140,11 +195,16 @@ export function createOrchestratorRoster({
     const override = overrides[key];
     const loadSnapshot = override
       ? () => syntheticOverrideSnapshot(key, override)
-      : () => loadAcceptedPromptSnapshot({ repoRoot, definition: decompositionDefinition, targetKey: key });
+      : () => loadAcceptedPromptSnapshot({ repoRoot, definition, targetKey: key });
     return resolution(runtime_role, loadSnapshot);
   }
 
-  return { selectableTargets, resolve };
+  return {
+    selectableTargets,
+    resolve,
+    promotable: evalAssets.promotable,
+    evalAssets,
+  };
 }
 
 // A synthetic snapshot for an eval candidate-prompt override: the body is the

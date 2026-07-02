@@ -8,7 +8,7 @@
   "team_id": "team-1",
   "linear_project_id": "project-1",
   "terminal_output": {
-    "schema_version": "agentic-factory-orchestrator-turn-output/v1",
+    "schema_version": "teami-orchestrator-turn-output/v1",
     "run_id": "run-legacy-v3-replay",
     "workflow_version": "0.2.0",
     "outcome": "commit",

@@ -1,0 +1,18 @@
+{
+  "schema_version": "teami-accepted-runtime-roles/v1",
+  "_note": "Repo-owned accepted defaults for execution runtime role assignments. Stampable runs use these runtime/model fields; tunable adopter overrides require the unpinned-runtime dev flag and are recorded as unpinned_runtime. execution_quality_judge is maintainer-owned and is not adopter-overridable.",
+  "roles": {
+    "worker": {
+      "runtime": "codex",
+      "model": "gpt-5.5"
+    },
+    "execution_quality_judge": {
+      "runtime": "codex",
+      "model": "gpt-5.5"
+    },
+    "orchestrator": {
+      "runtime": "codex",
+      "model": "gpt-5.5"
+    }
+  }
+}

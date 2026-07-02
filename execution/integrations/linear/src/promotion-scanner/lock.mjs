@@ -7,7 +7,7 @@ import {
 } from "./ledger-store.mjs";
 
 export const PROMOTION_SCANNER_LOCK_SCHEMA_VERSION =
-  "agentic-factory-promotion-scanner-lock/v1";
+  "teami-promotion-scanner-lock/v1";
 export const DEFAULT_SCANNER_LOCK_STALE_MS = 15 * 60 * 1000;
 
 export function acquirePromotionCandidateScannerLock({

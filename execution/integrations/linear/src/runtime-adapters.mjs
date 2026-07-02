@@ -58,18 +58,22 @@ export function deriveResolvableRuntimeRoles(definition = getWorkflowDefinition(
 
 export const RESOLVABLE_RUNTIME_ROLES = deriveResolvableRuntimeRoles();
 
-export function resolveRoleRuntimeAssignments(config) {
-  const definition = getWorkflowDefinition("decomposition");
-  const runtimeConfig = resolveWorkflowRuntime(config, "decomposition");
+export function resolveRoleRuntimeAssignments(config, workflowType) {
+  if (typeof workflowType !== "string" || workflowType.trim() === "") {
+    throw new Error("resolveRoleRuntimeAssignments_workflow_type_required");
+  }
+  const definition = getWorkflowDefinition(workflowType);
+  const runtimeConfig = resolveWorkflowRuntime(config, workflowType);
   const roles = runtimeConfig.roles || {};
   const adapters = runtimeConfig.adapters || {};
   const defaultRuntime = runtimeConfig.default_runtime || "codex";
   const engineOwnedEvaluatorRoles = engineOwnedEvaluatorRoleSet(definition);
+  const resolvableRoles = deriveResolvableRuntimeRoles(definition);
 
   const assignments = {};
-  for (const role of RESOLVABLE_RUNTIME_ROLES) {
+  for (const role of resolvableRoles) {
     const roleConfig = engineOwnedEvaluatorRoles.has(role)
-      ? factoryOwnedRoleConfig({ config, role, roleConfig: roles[role] })
+      ? factoryOwnedRoleConfig({ config, workflowType, role, roleConfig: roles[role] })
       : roles[role];
     assignments[role] = normalizeRoleAssignment({
       role,
@@ -81,7 +85,7 @@ export function resolveRoleRuntimeAssignments(config) {
   return assignments;
 }
 
-// Judge runtime assignment: the decomposition_quality model judge reuses the
+// Judge runtime assignment: the quality model judge reuses the
 // SAME per-role runtime config conventions and adapter layer as the pm/sr_eng
 // roles (workflows.decomposition.roles.judge + runtime.adapters), but is a
 // single one-shot session_start call: warm continuation never applies, and
@@ -89,11 +93,13 @@ export function resolveRoleRuntimeAssignments(config) {
 // subagent-turn schema. The normalized tool policy hardcodes
 // linear_write:false like every other role; the judge module additionally
 // never constructs a Linear client at all (CONSTRAINTS #27).
-export function resolveJudgeRuntimeAssignment(config) {
-  const role = engineOwnedEvaluatorRuntimeRole();
-  const runtimeConfig = resolveWorkflowRuntime(config, "decomposition");
+export function resolveJudgeRuntimeAssignment(config, definition = getWorkflowDefinition("decomposition")) {
+  const workflowType = definition?.workflow_type || "decomposition";
+  const role = engineOwnedEvaluatorRuntimeRole(definition);
+  const runtimeConfig = resolveWorkflowRuntime(config, workflowType);
   const roleConfig = factoryOwnedRoleConfig({
     config,
+    workflowType,
     role,
     roleConfig: runtimeConfig.roles?.[role],
   });
@@ -135,6 +141,7 @@ export function buildRuntimeMetadata({
   acceptedPackets,
   runtimeAssignments,
   runtimeEvidence = {},
+  driverSessionHandle = null,
 } = {}) {
   const metadata = {};
   const packetsByRole = new Map();
@@ -173,6 +180,32 @@ export function buildRuntimeMetadata({
       invocation_mode: "session_start",
       observed_warm_continuation: false,
       tool_policy: assignment.tool_policy,
+    };
+  }
+  const driverHandle = normalizeRuntimeSessionHandle(driverSessionHandle);
+  if (driverHandle) {
+    const role = driverHandle.role;
+    const assignment = runtimeAssignments?.[role] || null;
+    metadata[role] = {
+      role,
+      runtime_name: assignment?.runtime || driverHandle.runtime,
+      model: assignment?.model || null,
+      continuation_requirement: "driver_session_handle",
+      continuation_capability_flags: {
+        warm_continuation_required: assignment?.warm_continuation?.required === true,
+        warm_continuation_ready: false,
+        persisted_session_handles: Boolean(assignment?.capabilities?.persisted_session_handles),
+        structured_output_mode: true,
+        tool_policy_controls: true,
+      },
+      session_handle: driverHandle,
+      last_accepted_role: role,
+      structured_output_validation: "local_canonical",
+      schema_version: SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION,
+      handle_acquisition_mode: "runtime_session_handle",
+      invocation_mode: "session_start",
+      observed_warm_continuation: false,
+      tool_policy: assignment?.tool_policy || {},
     };
   }
   return metadata;
@@ -562,6 +595,16 @@ export function extractRuntimeSessionHandle(output, { role, runId, runtime } = {
   return { id, role, run_id: runId, runtime };
 }
 
+function normalizeRuntimeSessionHandle(handle) {
+  if (!handle || typeof handle !== "object" || Array.isArray(handle)) return null;
+  const id = stringOrNull(handle.id);
+  const role = stringOrNull(handle.role);
+  const runId = stringOrNull(handle.run_id);
+  const runtime = stringOrNull(handle.runtime);
+  if (!id || !role || !runId || !runtime) return null;
+  return { id, role, run_id: runId, runtime };
+}
+
 function runtimeSessionId(output) {
   for (const candidate of runtimePacketCandidates(output)) {
     const id =
@@ -653,23 +696,26 @@ function normalizeRoleAssignment({ role, roleConfig = {}, adapters, defaultRunti
   };
 }
 
+function stringOrNull(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
 function engineOwnedEvaluatorRoleSet(definition = getWorkflowDefinition("decomposition")) {
-  const runtimeRoles = new Set(definition.runtime_assignment_roles || []);
   return new Set(
     (definition.engine_owned_evaluator_roles || [])
-      .filter((role) => runtimeRoles.has(role)),
+      .filter((role) => typeof role === "string" && role.trim() !== ""),
   );
 }
 
 function engineOwnedEvaluatorRuntimeRole(definition = getWorkflowDefinition("decomposition")) {
   const [role] = engineOwnedEvaluatorRoleSet(definition);
-  if (!role) throw new Error("decomposition_engine_owned_evaluator_runtime_role_missing");
+  if (!role) throw new Error(`engine_owned_evaluator_runtime_role_missing:${definition?.workflow_type || "unknown"}`);
   return role;
 }
 
-function factoryOwnedRoleConfig({ config, role, roleConfig = {} } = {}) {
-  if (roleFieldsResolvedFromAcceptedDefaults(config, role)) return roleConfig || {};
-  const accepted = loadAcceptedRuntimeRoleDefaults().defaults?.roles?.[role];
+function factoryOwnedRoleConfig({ config, workflowType = "decomposition", role, roleConfig = {} } = {}) {
+  if (roleFieldsResolvedFromAcceptedDefaults(config, workflowType, role)) return roleConfig || {};
+  const accepted = loadAcceptedRuntimeRoleDefaults({ workflowType }).defaults?.roles?.[role];
   if (!accepted) throw new Error(`accepted_runtime_role_missing:${role}`);
   return {
     ...(roleConfig || {}),
@@ -678,8 +724,8 @@ function factoryOwnedRoleConfig({ config, role, roleConfig = {} } = {}) {
   };
 }
 
-function roleFieldsResolvedFromAcceptedDefaults(config, role) {
-  const sources = config?.workflows?.decomposition?.role_field_sources?.[role];
+function roleFieldsResolvedFromAcceptedDefaults(config, workflowType, role) {
+  const sources = config?.workflows?.[workflowType]?.role_field_sources?.[role];
   return sources?.runtime === "accepted_defaults" && sources?.model === "accepted_defaults";
 }
 

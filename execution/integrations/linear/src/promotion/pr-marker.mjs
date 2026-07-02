@@ -300,7 +300,7 @@ export function supersedeRepairDetail({ createdPrNumber, failures } = {}) {
   return `created PR #${createdPrNumber} but could not mark older PR(s) ${stale} superseded; retry will repair.`;
 }
 
-// Parses agentic_factory_promotion markers out of a PR body — ONLY from
+// Parses teami_promotion markers out of a PR body — ONLY from
 // sentinel-bounded regions. Fenced JSON outside the sentinels (including any
 // fence an adversary smuggles through prose) is never parsed.
 export function parsePromotionMarkers(body) {
@@ -355,7 +355,7 @@ export function updateMarkerInBody(body, patch) {
 // are escaped (no code fence or code span can be opened from prose), and "<"
 // becomes an entity (no HTML, and no fake sentinel comments). Together with
 // sentinel-bounded marker parsing below, adversarial annotation text cannot
-// inject a parseable agentic_factory_promotion marker.
+// inject a parseable teami_promotion marker.
 // ---------------------------------------------------------------------------
 
 const BARE_URL_PATTERN = /\bhttps?:\/\/[^\s)\]}"'<>`]+/gi;

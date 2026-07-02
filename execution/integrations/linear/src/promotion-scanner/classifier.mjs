@@ -178,7 +178,7 @@ function buildPromotionRequestFromCandidate({ candidate, expectedProject }) {
   return {
     schema_version: PROMOTE_CANDIDATE_REQUEST_SCHEMA_VERSION,
     source: "promotion_candidate_scanner",
-    actor_id: "agentic_factory_scanner",
+    actor_id: "teami_scanner",
     expected_project: expectedProject,
     experiment_id: candidate.experiment_id,
     ...(candidate.prompt_version_id ? { prompt_version_id: candidate.prompt_version_id } : {}),

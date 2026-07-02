@@ -1,0 +1,104 @@
+{
+  "terminal_output": {
+    "schema_version": "teami-orchestrator-turn-output/v1",
+    "run_id": "run_decomp_facade_commit",
+    "workflow_version": "0.2.0",
+    "outcome": "commit",
+    "reason": "synthesis_complete",
+    "context_digest": "Synthesized the webhook-inbox project into an agent-ready issue set.",
+    "source_refs": [
+      {
+        "kind": "linear_project",
+        "id": "project-webhook-inbox"
+      }
+    ],
+    "assumptions": [],
+    "constraints": [],
+    "risks": [],
+    "project_update_markdown": "run_id: run_decomp_facade_commit\n\nDecomposed the Event Trigger Webhook Inbox project into an agent-ready issue set.\n\n## What I did with each part of your project\n- Objective + scope became the inbox build and the durable queue.\n- Operator-visible status became its own issue, blocked on the inbox build.",
+    "final_issues": [
+      {
+        "decomposition_key": "webhook-inbox-core",
+        "title": "Build the hosted webhook inbox (authenticate, dedupe, normalize)",
+        "issue_body_markdown": "## Assignment\n\nBuild the hosted inbox.\n\n## Acceptance Criteria\n\n- Authenticates Linear + GitHub events.\n- Dedupes redelivery.\n- Normalizes to the internal wake envelope.",
+        "depends_on": [],
+        "assignment": "Build the hosted inbox: authenticate, dedupe, normalize events to the wake envelope.",
+        "output": "A hosted inbox that emits normalized wake envelopes.",
+        "acceptance_criteria": [
+          "Authenticates events",
+          "Dedupes redelivery",
+          "Normalizes to the wake envelope"
+        ]
+      },
+      {
+        "decomposition_key": "webhook-inbox-queue",
+        "title": "Add the durable wake queue the Workflow Runner drains",
+        "issue_body_markdown": "## Assignment\n\nAdd a durable queue.\n\n## Acceptance Criteria\n\n- Persists wake envelopes durably.\n- Drains in order.",
+        "depends_on": [],
+        "assignment": "Add a durable queue that persists wake envelopes for the Workflow Runner.",
+        "output": "A durable wake queue.",
+        "acceptance_criteria": [
+          "Persists wake envelopes durably",
+          "Drains in order"
+        ]
+      },
+      {
+        "decomposition_key": "webhook-inbox-status",
+        "title": "Expose operator-visible status for every event",
+        "issue_body_markdown": "## Assignment\n\nExpose per-event status.\n\n## Acceptance Criteria\n\n- Every event shows accepted / deduped / refused / enqueued.",
+        "depends_on": [
+          "webhook-inbox-core"
+        ],
+        "assignment": "Expose operator-visible per-event status across surfaces.",
+        "output": "Operator-visible event status.",
+        "acceptance_criteria": [
+          "Every event shows its disposition"
+        ]
+      }
+    ]
+  },
+  "evidence": {
+    "perspectives_run": [
+      {
+        "role": "sr_eng",
+        "outcome": "technical_context_grounded",
+        "instance_id": "sr_eng#default"
+      },
+      {
+        "role": "pm",
+        "outcome": "product_context_sufficient",
+        "instance_id": "pm#default"
+      }
+    ],
+    "evidence_unavailable": [
+      {
+        "scope": "sr_eng.turn.tool_events",
+        "reason": "runtime_tool_event_channel_unavailable"
+      },
+      {
+        "scope": "pm.turn.tool_events",
+        "reason": "runtime_tool_event_channel_unavailable"
+      }
+    ]
+  },
+  "bounds": {
+    "rounds_used": 3,
+    "max_rounds": 1000,
+    "wall_ms": 0,
+    "invocations": 2
+  },
+  "artifact_set_lineage": {
+    "lineage_scope": "artifact_set",
+    "produced_by_turn_id": 3,
+    "commit_decision_turn_id": 3,
+    "informed_by_turn_ids": [
+      "2.1"
+    ],
+    "source_refs": [
+      {
+        "kind": "linear_project",
+        "id": "project-webhook-inbox"
+      }
+    ]
+  }
+}

@@ -1,4 +1,5 @@
 import { extractDecompositionKey, renderAuthoredIssueBody } from "../../issue-body.mjs";
+import { renderResourceTargetBlock } from "../../resource-target.mjs";
 import {
   issueBodyMarkdown,
   issueDependencies,
@@ -10,7 +11,8 @@ import {
 } from "../../linear/shape-resolver.mjs";
 
 export async function createOrReuseExecutionIssues({ client, config, project, shape, issues }) {
-  const issueStatuses = shape.issueStatuses || (await resolveIssueStatuses(client, config, shape.team.id));
+  const issueStatuses = shape.issueStatuses ||
+    (await resolveIssueStatuses(client, config, shape.team.id, shape.cache, { failClosed: true }));
   const created = [];
   const reused = [];
   const issueByKey = new Map();
@@ -26,14 +28,11 @@ export async function createOrReuseExecutionIssues({ client, config, project, sh
 
     const createdIssue = await client.createIssue({
       title: issue.title,
-      description: renderAuthoredIssueBody({
-        decompositionKey,
-        issueBodyMarkdown: issueBodyMarkdown(issue),
-      }),
+      description: renderExecutionIssueBody({ decompositionKey, issue }),
       teamId: shape.team.id,
       projectId: project.id,
       stateId: stateIdForNewExecutionIssue(issue, issueStatuses),
-      labelIds: [],
+      labelIds: workTypeLabelIds(issue, shape),
     });
     created.push(createdIssue);
     issueByKey.set(decompositionKey, createdIssue);
@@ -75,4 +74,27 @@ export async function findIssueByDecompositionKey(client, projectId, decompositi
     return client.findIssueByDecompositionKey(projectId, decompositionKey);
   }
   throw new Error("Linear client must provide listProjectIssues to find issues by decomposition key.");
+}
+
+function renderExecutionIssueBody({ decompositionKey, issue }) {
+  const body = renderAuthoredIssueBody({
+    decompositionKey,
+    issueBodyMarkdown: issueBodyMarkdown(issue),
+  });
+  const resourceTargetBlock = issue?.resource_target
+    ? renderResourceTargetBlock(issue.resource_target)
+    : "";
+  if (!resourceTargetBlock) return body;
+  return `${body.trimEnd()}\n\n${resourceTargetBlock}`;
+}
+
+function workTypeLabelIds(issue, shape) {
+  const label = workTypeLabel(issue?.work_type, shape);
+  return label?.id ? [label.id] : [];
+}
+
+function workTypeLabel(workType, shape) {
+  if (workType === "code") return shape?.issueLabels?.work_type_code || null;
+  if (workType === "non_code") return shape?.issueLabels?.work_type_non_code || null;
+  return null;
 }

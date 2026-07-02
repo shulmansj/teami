@@ -1,6 +1,6 @@
 # Source-Visible Notice
 
-Agentic Factory is public for evaluation, review, and portfolio visibility.
+Teami is public for evaluation, review, and portfolio visibility.
 
 No open-source license has been granted yet. The absence of a license means no
 permission is granted to copy, modify, distribute, sublicense, or reuse this

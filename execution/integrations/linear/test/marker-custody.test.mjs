@@ -18,9 +18,9 @@ import {
 // ---------------------------------------------------------------------------
 // B-CUSTODY: the custody fixture.
 //
-// The PR marker (`agentic_factory_promotion`) is COMMITTED into the repo (the PR
+// The PR marker (`teami_promotion`) is COMMITTED into the repo (the PR
 // body). The 0B custody contract
-// (`maintainers/contracts/authority-custody-defaults.md`) says only redacted,
+// (`docs/contracts/authority-custody-defaults.md`) says only redacted,
 // repo-recordable facts may be committed. This fixture READS the machine-readable
 // field->class map (`marker-custody-map.mjs`, the single source) rather than
 // re-deciding per field, and asserts every field a built marker commits is
@@ -53,7 +53,7 @@ function fullCommittedMarker() {
     policyHash: "b".repeat(64),
     phoenixScope: {
       origin: "http://127.0.0.1:6006",
-      project_name: "agentic-factory",
+      project_name: "teami",
     },
     evidenceIds: {
       experiments: ["EXP1"],
@@ -79,7 +79,7 @@ function fullCommittedMarker() {
       reasons: [{
         id: "protected_path_meta_change",
         class: "meta_change",
-        path: "maintainers/contracts/meta-change-classifier-contract.md",
+        path: "docs/contracts/meta-change-classifier-contract.md",
         surface: "protected_path_map",
       }],
     }),
@@ -139,7 +139,7 @@ test("B-CUSTODY: the leak check catches a non-repo-recordable field (mechanism p
     synthetic_local_handle: { class: CUSTODY_CLASSES.LOCAL_ONLY, why: "synthetic local handle for the mechanism proof" },
   };
   const probe = classifyCommittedMarker(
-    { agentic_factory_promotion: { schema_version: 1, synthetic_local_handle: "x" } },
+    { teami_promotion: { schema_version: 1, synthetic_local_handle: "x" } },
     probeMap,
   );
   const leak = probe.leaks.find((l) => l.path === "synthetic_local_handle");
@@ -154,7 +154,7 @@ test("B-CUSTODY: the leak check catches a non-repo-recordable field (mechanism p
 // committed field can never ship without an explicit custody class.
 test("B-CUSTODY: the exhaustiveness check catches a new unmapped committed field (mechanism proof)", () => {
   const probe = classifyCommittedMarker({
-    agentic_factory_promotion: {
+    teami_promotion: {
       schema_version: 1,
       brand_new_committed_field: "anything",
     },
@@ -181,7 +181,7 @@ test("B-CUSTODY: a nested local-only handle on a datasets[] element is caught as
   };
   const probe = classifyCommittedMarker(
     {
-      agentic_factory_promotion: {
+      teami_promotion: {
         schema_version: 1,
         evidence_ids: {
           datasets: [{ dataset_id: "DS1", local_path: "<local-trace-path>" }],
@@ -203,7 +203,7 @@ test("B-CUSTODY: a nested local-only handle on a datasets[] element is caught as
 // custody class, no matter how deep it is buried.
 test("B-CUSTODY: a new unmapped nested field is caught as unmapped (deep walk)", () => {
   const probe = classifyCommittedMarker({
-    agentic_factory_promotion: {
+    teami_promotion: {
       schema_version: 1,
       evidence_ids: {
         datasets: [{ dataset_id: "DS1", brand_new_nested_field: "anything" }],

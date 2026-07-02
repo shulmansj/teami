@@ -8,7 +8,7 @@ scripts/security-scan.mjs @shulmansj
 SOURCE-VISIBLE.md @shulmansj
 SECURITY.md @shulmansj
 CONTRIBUTING.md @shulmansj
-maintainers/contracts/** @shulmansj
+docs/contracts/** @shulmansj
 
 # Public setup and trust-boundary docs.
 README.md @shulmansj
@@ -31,7 +31,7 @@ execution/integrations/git/** @shulmansj
 execution/integrations/linear/src/domain-*.mjs @shulmansj
 execution/integrations/linear/src/runtime-adapters.mjs @shulmansj
 execution/integrations/linear/src/runtime-command.mjs @shulmansj
-execution/integrations/linear/src/cli/domain-bind-repo-command.mjs @shulmansj
+execution/integrations/linear/src/cli/domain-command.mjs @shulmansj
 execution/integrations/linear/src/cli/doctor-command.mjs @shulmansj
 execution/integrations/linear/src/workflows/decomposition/artifact-apply.mjs @shulmansj
 execution/integrations/linear/src/workflows/decomposition/run-service.mjs @shulmansj

@@ -406,6 +406,22 @@ const BASELINE_ALLOWLIST = [
   "execution/integrations/linear/test/rich-promotion.test.mjs ::: phase_packets ::: entry.rule === \"private_url_redacted\" && entry.path === \"$.output.phase_packets[0].project_update_markdown\"));",
   "execution/integrations/linear/test/rich-promotion.test.mjs ::: phase_packets ::: phase_packets: [terminalOutputSummary()],",
   "execution/integrations/linear/test/rich-promotion.test.mjs ::: phase_packets ::: phase_packets: [{ prompt: \"raw prompt\" }],",
+  // DECOMP-FACADE golden captures of the live decomposition phase-PACKET wire-format
+  // schemas (a kept survivor — the per-turn packet protocol, NOT retired phase-router machinery):
+  "execution/integrations/linear/test/decomp-facade-golden.test.mjs ::: phase-packet ::: \"phase-packet.schema.json\",",
+  "execution/integrations/linear/test/decomp-facade-golden.test.mjs ::: phase-packet ::: \"phase-packet.strict-generation.schema.json\",",
+  "execution/integrations/linear/test/decomp-facade-golden.test.mjs ::: phase-packet ::: \"execution/integrations/linear/schemas/phase-packet.schema.json\",",
+  "execution/integrations/linear/test/decomp-facade-golden.test.mjs ::: phase-packet ::: \"execution/integrations/linear/schemas/phase-packet.strict-generation.schema.json\",",
+  "execution/integrations/linear/test/fixtures/decomp-facade/schemas/phase-packet.schema.json ::: phase-packet ::: \"$id\": \"linear-decomposition-phase-packet/v1\",",
+  "execution/integrations/linear/test/fixtures/decomp-facade/schemas/phase-packet.schema.json ::: phase-packet ::: \"const\": \"linear-decomposition-phase-packet/v1\"",
+  "execution/integrations/linear/test/fixtures/decomp-facade/schemas/phase-packet.strict-generation.schema.json ::: phase-packet ::: \"$id\": \"linear-decomposition-phase-packet/strict-generation/v1\",",
+  "execution/integrations/linear/test/fixtures/decomp-facade/schemas/phase-packet.strict-generation.schema.json ::: phase-packet ::: \"const\": \"linear-decomposition-phase-packet/v1\"",
+  // EXEC-ENTRY: the execution run path builds accepted packets from runtime evidence,
+  // mirroring decomposition's accepted-packet flow (a kept survivor, not retired machinery).
+  "execution/integrations/linear/src/trigger-runner.mjs ::: acceptedPackets ::: acceptedPackets: runtimeEvidencePackets,",
+  // RV-5: the review run path mirrors the SAME kept accepted-packet flow when assembling its
+  // own REVIEW_*-versioned run artifact (a second genuine current survivor, not new machinery).
+  "execution/integrations/linear/src/trigger-runner.mjs ::: acceptedPackets ::: acceptedPackets: runtimeEvidencePackets,",
 ];
 
 // Occurrence counts per key: how many times each survivor key is sanctioned by
@@ -482,7 +498,7 @@ test("RET-CHECK subagent runtime defaults resolve to subagent-turn schemas", () 
     repoRoot: REPO_ROOT,
     configPath: DEFAULT_LINEAR_CONFIG_PATH,
   });
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
 
   for (const role of ["pm", "sr_eng"]) {
     assertSubagentSchemaPath(assignments[role]?.schema_path, `${role}.schema_path`);

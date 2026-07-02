@@ -896,7 +896,7 @@ function arrayOfObjects(value) {
 function normalizePrProvenance(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return {
-    schema_version: "agentic-factory-pr-provenance/v1",
+    schema_version: "teami-pr-provenance/v1",
     source_run_id: nullableString(value.source_run_id ?? value.sourceRunId),
     experiment_receipt_id: nullableString(value.experiment_receipt_id ?? value.experimentReceiptId),
     phoenix_experiment_id: nullableString(value.phoenix_experiment_id ?? value.phoenixExperimentId),

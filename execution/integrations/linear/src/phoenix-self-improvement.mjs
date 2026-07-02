@@ -8,6 +8,7 @@ import {
   findBannedWorkflowStateMetadataKeys,
   QUALITY_DIMENSION_NAMES,
   QUALITY_LABELS,
+  resolveEvalContract,
   RUBRIC_VERSION,
   WORKSPACE_MATURITY_LEVELS,
 } from "./eval-annotation-contract.mjs";
@@ -15,7 +16,37 @@ import { ensurePhoenixReady } from "./local-phoenix-manager.mjs";
 import { findSecretContentKeys } from "../../../engine/trace-contract.mjs";
 
 const DEFAULT_FETCH_TIMEOUT_MS = 5_000;
-const DEFAULT_DATASET_NAME = "agentic-factory-decomposition-runs";
+const DEFAULT_DATASET_NAME = "teami-decomposition-runs";
+const DEFAULT_WORKFLOW_TYPE = "decomposition";
+const DEFAULT_EVAL_NAMESPACE = "execution/evals/decomposition";
+
+function nonEmptyArray(value, fallback) {
+  return Array.isArray(value) && value.length > 0 ? value : fallback;
+}
+
+function annotationContract({
+  evalContract = null,
+  definition = null,
+  repoRoot = process.cwd(),
+} = {}) {
+  const contract = evalContract || (definition ? resolveEvalContract(definition, repoRoot) : null);
+  if (contract && contract.eval_configured !== true) {
+    throw new Error(contract.reason || `workflow_eval_not_configured:${contract.workflow_type || "unknown"}`);
+  }
+  return {
+    annotatorKinds: nonEmptyArray(contract?.annotator_kinds, ANNOTATOR_KINDS),
+    qualityDimensionNames: nonEmptyArray(contract?.quality_dimension_names, QUALITY_DIMENSION_NAMES),
+    canonicalAnnotationNames: nonEmptyArray(contract?.canonical_annotation_names, CANONICAL_ANNOTATION_NAMES),
+    qualityLabels: nonEmptyArray(contract?.quality_labels, QUALITY_LABELS),
+    workspaceMaturityLevels: nonEmptyArray(contract?.workspace_maturity_levels, WORKSPACE_MATURITY_LEVELS),
+    defaultName: contract?.roll_up_annotation_name || DEFAULT_ANNOTATION_NAME,
+    defaultRubricVersion: contract?.rubric_version || RUBRIC_VERSION,
+    defaultFailureTaxonomyVersion: contract?.failure_taxonomy_version || FAILURE_TAXONOMY_VERSION,
+    workflowType: contract?.workflow_type || DEFAULT_WORKFLOW_TYPE,
+    evalNamespace: contract?.eval_namespace || DEFAULT_EVAL_NAMESPACE,
+    findBannedMetadataKeys: contract?.findBannedWorkflowStateMetadataKeys || findBannedWorkflowStateMetadataKeys,
+  };
+}
 
 // Resolves the required annotation identifier. Phoenix upserts annotations by
 // (name, target, identifier) and defaults the identifier to "", so every
@@ -55,35 +86,40 @@ function defaultOsUserName() {
 }
 
 export function buildTraceAnnotationPayload({
+  repoRoot = process.cwd(),
+  definition = null,
+  evalContract = null,
   traceId,
-  name = DEFAULT_ANNOTATION_NAME,
+  name = null,
   label,
   score = null,
   explanation = "",
   annotatorKind = "HUMAN",
   identifier,
   metadata = {},
-  rubricVersion = RUBRIC_VERSION,
-  failureTaxonomyVersion = FAILURE_TAXONOMY_VERSION,
+  rubricVersion = null,
+  failureTaxonomyVersion = null,
   workspaceMaturity = "new",
 } = {}) {
+  const contract = annotationContract({ evalContract, definition, repoRoot });
+  const annotationName = name ?? contract.defaultName;
   if (!/^[0-9a-f]{32}$/i.test(String(traceId || ""))) {
     throw new Error("traceId must be a 32-character hex Phoenix trace id.");
   }
-  if (!ANNOTATOR_KINDS.includes(annotatorKind)) {
-    throw new Error(`annotator_kind must be one of ${ANNOTATOR_KINDS.join("|")} (got "${annotatorKind}").`);
+  if (!contract.annotatorKinds.includes(annotatorKind)) {
+    throw new Error(`annotator_kind must be one of ${contract.annotatorKinds.join("|")} (got "${annotatorKind}").`);
   }
   // HUMAN and LLM quality judgments use the 8 rubric dimension names; the two
   // deterministic-check names are CODE storage only.
-  const allowedNames = annotatorKind === "CODE" ? CANONICAL_ANNOTATION_NAMES : QUALITY_DIMENSION_NAMES;
-  if (!allowedNames.includes(name)) {
+  const allowedNames = annotatorKind === "CODE" ? contract.canonicalAnnotationNames : contract.qualityDimensionNames;
+  if (!allowedNames.includes(annotationName)) {
     throw new Error(
-      `annotation name "${name}" is not canonical for annotator_kind ${annotatorKind}; allowed: ${allowedNames.join(", ")}.`,
+      `annotation name "${annotationName}" is not canonical for annotator_kind ${annotatorKind}; allowed: ${allowedNames.join(", ")}.`,
     );
   }
-  if (!QUALITY_LABELS.includes(label)) {
+  if (!contract.qualityLabels.includes(label)) {
     throw new Error(
-      `annotation label must be one of ${QUALITY_LABELS.join("|")} (got "${label ?? ""}"); the canonical label set must not drift.`,
+      `annotation label must be one of ${contract.qualityLabels.join("|")} (got "${label ?? ""}"); the canonical label set must not drift.`,
     );
   }
   if (!Number.isFinite(score) || score < 0 || score > 1) {
@@ -99,13 +135,17 @@ export function buildTraceAnnotationPayload({
       "annotation identifier is required and must be non-empty: Phoenix upserts by (name, target, identifier) and defaults the identifier to \"\", so an empty identifier can overwrite or merge human/model/code judgments.",
     );
   }
-  if (!WORKSPACE_MATURITY_LEVELS.includes(workspaceMaturity)) {
-    throw new Error(`workspace_maturity must be one of ${WORKSPACE_MATURITY_LEVELS.join("|")} (got "${workspaceMaturity}").`);
+  if (!contract.workspaceMaturityLevels.includes(workspaceMaturity)) {
+    throw new Error(`workspace_maturity must be one of ${contract.workspaceMaturityLevels.join("|")} (got "${workspaceMaturity}").`);
   }
-  if (!String(rubricVersion ?? "").trim() || !String(failureTaxonomyVersion ?? "").trim()) {
+  const resolvedRubricVersion = String(rubricVersion ?? contract.defaultRubricVersion ?? "").trim();
+  const resolvedFailureTaxonomyVersion = String(
+    failureTaxonomyVersion ?? contract.defaultFailureTaxonomyVersion ?? "",
+  ).trim();
+  if (!resolvedRubricVersion || !resolvedFailureTaxonomyVersion) {
     throw new Error("rubric_version and failure_taxonomy_version are required annotation metadata.");
   }
-  const bannedKeys = findBannedWorkflowStateMetadataKeys(metadata);
+  const bannedKeys = contract.findBannedMetadataKeys(metadata);
   if (bannedKeys.length > 0) {
     throw new Error(
       `phoenix_annotation_metadata_contains_workflow_state_keys:${bannedKeys.join(",")} (Phoenix annotations are judgments, never task flags; workflow/queue state must not be written to Phoenix)`,
@@ -115,7 +155,7 @@ export function buildTraceAnnotationPayload({
     throw new Error("metadata.failure_modes must be an array of failure mode ids.");
   }
   const annotation = {
-    name,
+    name: annotationName,
     annotator_kind: annotatorKind,
     trace_id: traceId,
     result: {
@@ -124,11 +164,13 @@ export function buildTraceAnnotationPayload({
       explanation: explanationText,
     },
     metadata: {
-      source: "agentic_factory_local_phoenix",
+      source: "teami_local_phoenix",
       failure_modes: [],
       ...metadata,
-      rubric_version: String(rubricVersion),
-      failure_taxonomy_version: String(failureTaxonomyVersion),
+      workflow_type: contract.workflowType,
+      eval_namespace: contract.evalNamespace,
+      rubric_version: resolvedRubricVersion,
+      failure_taxonomy_version: resolvedFailureTaxonomyVersion,
       workspace_maturity: workspaceMaturity,
     },
     identifier: identifierText,
@@ -146,7 +188,7 @@ export async function createPhoenixTraceAnnotation({
 } = {}) {
   const ready = await ensureReady({ repoRoot, fetchImpl, onProgress });
   if (!ready.ok) throw new Error(ready.reason || "local Phoenix is unavailable");
-  const payload = buildTraceAnnotationPayload(annotation);
+  const payload = buildTraceAnnotationPayload({ ...annotation, repoRoot });
   const body = await phoenixFetchJson({
     appUrl: ready.appUrl,
     pathname: "/v1/trace_annotations",
@@ -168,7 +210,7 @@ export function buildDatasetUploadPayloadFromTraceReceipt({
   receipt,
   datasetName = DEFAULT_DATASET_NAME,
   action = "append",
-  description = "Agentic Factory promoted local trace receipts for Phoenix-native evaluation.",
+  description = "Teami promoted local trace receipts for Phoenix-native evaluation.",
   split = "self_improvement",
   metadata = {},
 } = {}) {
@@ -193,14 +235,14 @@ export function buildDatasetUploadPayloadFromTraceReceipt({
     inputs: [input],
     outputs: [output],
     metadata: [{
-      source: "agentic_factory_local_trace_receipt",
+      source: "teami_local_trace_receipt",
       phoenix_app_url: receipt.phoenix_app_url || null,
       observed_at: receipt.observed_at || null,
       ...metadata,
     }],
     splits: [split],
     span_ids: [null],
-    example_ids: [`agentic_factory:${receipt.run_id}`],
+    example_ids: [`teami:${receipt.run_id}`],
   };
   assertNoSecretContent(payload);
   return payload;
@@ -259,7 +301,7 @@ async function resolveDatasetAction({ appUrl, datasetName, fetchImpl }) {
   return (body.data || []).some((dataset) => dataset.name === datasetName) ? "append" : "create";
 }
 
-async function phoenixFetchJson({
+export async function phoenixFetchJson({
   appUrl,
   pathname,
   searchParams = {},
@@ -303,7 +345,7 @@ async function fetchWithTimeout(url, { fetchImpl, timeoutMs, ...init }) {
   }
 }
 
-function assertNoSecretContent(payload) {
+export function assertNoSecretContent(payload) {
   const secretKeys = findSecretContentKeys(payload);
   if (secretKeys.length > 0) {
     throw new Error(`phoenix_self_improvement_payload_contains_token_material:${secretKeys.join(",")}`);

@@ -1,0 +1,29 @@
+{
+  "schema_version": "teami-failure-taxonomy/v1",
+  "failure_taxonomy_version": "1.0.0",
+  "_note": "Failure modes for the Reviewer quality namespace. The review section keeps the seeded code_review ids stable while adding verdict-producer-specific modes from the approved rubric brief.",
+  "structural": {
+    "_note": "No review-specific deterministic CODE evaluator is shipped in this namespace yet. These ids can be added when a deterministic checker exists.",
+    "failure_modes": []
+  },
+  "workflows": {
+    "review": {
+      "failure_modes": [
+        "review_wrong_approve_missed_bug",
+        "review_wrong_approve_missed_regression",
+        "review_wrong_block_good_work",
+        "review_missed_regression",
+        "review_missed_missing_tests",
+        "review_missed_scope_change",
+        "review_false_positive_block",
+        "review_nitpick_as_blocking",
+        "review_reasoning_unsound",
+        "review_unactionable_request",
+        "review_severity_miscalibrated",
+        "review_overfocused_on_style",
+        "review_out_of_scope_demand",
+        "review_failed_to_explain_user_risk"
+      ]
+    }
+  }
+}

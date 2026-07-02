@@ -684,10 +684,10 @@ export function repairPathForSetupIncompleteCause(cause) {
     return "Rerun npm run init to move the setup OAuth credential into the domain-scoped credential target; npm run reset removes local setup state if needed.";
   }
   if (cause === "cache_write_failed") {
-    return "Fix local filesystem permissions for .agentic-factory, then rerun npm run init or npm run reset.";
+    return "Fix local filesystem permissions for .teami, then rerun npm run init or npm run reset.";
   }
   if (cause === "registry_write_failed") {
-    return "Fix local filesystem permissions for .agentic-factory/domains.json, then rerun npm run init or npm run reset.";
+    return "Fix local filesystem permissions for .teami/domains.json, then rerun npm run init or npm run reset.";
   }
   if (TEAM_CREATE_SETUP_CAUSES.includes(cause)) {
     return "Review the Linear teamCreate error, repair the workspace condition, then rerun npm run init.";
@@ -721,6 +721,18 @@ export async function initLinear({ client, config, cache = null, writeCache } = 
     cache,
     failClosed: true,
   });
+  const workflowStates = await client.listWorkflowStates?.(team.id);
+  if (!workflowStates) {
+    throw new Error("Linear client must provide listWorkflowStates to provision issue statuses.");
+  }
+  const issueStatuses = {};
+  for (const role of ISSUE_STATUS_ROLES) {
+    const statusConfig = config.linear.issue.statuses[role];
+    if (!statusConfig) throw new Error(`Linear issue status role ${role} is not configured.`);
+    const status = await findOrCreateWorkflowState(client, statusConfig, team.id, workflowStates, summary);
+    issueStatuses[role] = status.id;
+  }
+
   const template = await findOrCreateProjectTemplate(client, config, team.id, summary);
 
   const nextCache = {
@@ -733,12 +745,43 @@ export async function initLinear({ client, config, cache = null, writeCache } = 
     projectStatusTypes: Object.fromEntries(
       Object.entries(projectStatuses).map(([key, value]) => [key, value.type]),
     ),
+    issueStatuses,
     projectLabels,
     issueLabels,
   };
 
   await writeCache?.(nextCache);
   return { ok: summary.failed.length === 0, summary, cache: nextCache };
+}
+
+const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "blocked", "done"]);
+const DEFAULT_WORKFLOW_STATE_COLOR = "#f2c94c";
+
+async function findOrCreateWorkflowState(client, { name, type }, teamId, states, summary) {
+  const nameMatches = states.filter((state) => state.name === name);
+  if (nameMatches.length > 1) {
+    throw new Error(`Multiple Linear issue workflow states found named ${name}.`);
+  }
+  if (nameMatches.length === 1) {
+    const state = nameMatches[0];
+    if (state.type !== type) {
+      throw new Error(`Linear issue workflow state ${name} has type ${state.type}, expected ${type}.`);
+    }
+    summary.found.push(`issue-status:${name}`);
+    return state;
+  }
+
+  const state = await client.createWorkflowState({
+    name,
+    type,
+    teamId,
+    color: DEFAULT_WORKFLOW_STATE_COLOR,
+  });
+  if (!states.some((candidate) => candidate.id === state.id)) {
+    states.push(state);
+  }
+  summary.created.push(`issue-status:${name}`);
+  return state;
 }
 
 async function cachedLinearTeam(client, teamId) {

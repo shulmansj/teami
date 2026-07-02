@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-eval-annotation/v1",
+  "title": "Reviewer eval annotation",
+  "description": "Canonical contract for Reviewer quality annotations. The uniform roll-up annotation name is quality; workflow metadata identifies the review namespace.",
+  "oneOf": [
+    { "$ref": "#/$defs/logical_annotation" },
+    { "$ref": "#/$defs/phoenix_wire_annotation" }
+  ],
+  "$defs": {
+    "annotation_name": {
+      "description": "Reviewer quality dimensions. quality is the roll-up; accepted_packet_sufficiency and pause_state_correctness are shared deterministic-check names reserved by the eval resolver.",
+      "enum": [
+        "quality",
+        "verdict_correctness",
+        "real_issue_detection",
+        "false_positive_avoidance",
+        "reasoning_soundness",
+        "actionability",
+        "severity_calibration",
+        "scope_discipline",
+        "user_risk_explanation",
+        "accepted_packet_sufficiency",
+        "pause_state_correctness"
+      ]
+    },
+    "annotator_kind": {
+      "description": "CODE is only for deterministic-check storage. The Judge writes LLM annotations; humans write HUMAN labels.",
+      "enum": ["HUMAN", "LLM", "CODE"]
+    },
+    "quality_label": {
+      "description": "Default Judge label set: pass | needs_revision | blocking_failure.",
+      "enum": ["pass", "needs_revision", "blocking_failure"]
+    },
+    "quality_score": {
+      "description": "Quality score in [0, 1]. Default bands are encoded below.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "pass_band": {
+      "description": "Default score band for pass.",
+      "type": "number",
+      "minimum": 0.8,
+      "maximum": 1
+    },
+    "needs_revision_band": {
+      "description": "Default score band for needs_revision.",
+      "type": "number",
+      "minimum": 0.4,
+      "exclusiveMaximum": 0.8
+    },
+    "blocking_failure_band": {
+      "description": "Default score band for blocking_failure.",
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMaximum": 0.4
+    },
+    "no_workflow_state_keys": {
+      "description": "Denylist for Phoenix-bound metadata: no Teami workflow or queue state may be stored in Phoenix.",
+      "properties": {
+        "needs_relabel": false,
+        "pending_promotion": false,
+        "accepted_by_factory": false,
+        "propose_repo_change": false,
+        "proposal_state": false,
+        "queue_state": false,
+        "workflow_status": false,
+        "assigned": false,
+        "resolved": false
+      }
+    },
+    "annotation_metadata": {
+      "description": "Shared annotation metadata for the review namespace.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["failure_modes"],
+      "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+      "properties": {
+        "failure_modes": {
+          "description": "Failure mode ids drawn from failure-taxonomy.json.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "failure_mode_details": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "workspace_maturity": { "enum": ["new", "calibrating", "stable"] },
+        "workflow_type": { "const": "review" },
+        "eval_namespace": { "const": "execution/evals/review" }
+      }
+    },
+    "identifier": {
+      "description": "Human/user id, Judge id, or code evaluator id. Required and non-empty for Phoenix upsert safety.",
+      "type": "string",
+      "minLength": 1
+    },
+    "human_or_llm_metadata_requirement": {
+      "if": {
+        "properties": { "annotator_kind": { "enum": ["HUMAN", "LLM"] } },
+        "required": ["annotator_kind"]
+      },
+      "then": {
+        "properties": {
+          "metadata": {
+            "required": ["failure_modes", "rubric_version", "failure_taxonomy_version"]
+          }
+        },
+        "required": ["metadata"]
+      }
+    },
+    "logical_annotation": {
+      "title": "Logical annotation shape",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "label", "score", "explanation", "metadata", "identifier"],
+      "properties": {
+        "name": { "$ref": "#/$defs/annotation_name" },
+        "annotator_kind": { "$ref": "#/$defs/annotator_kind" },
+        "label": { "$ref": "#/$defs/quality_label" },
+        "score": { "$ref": "#/$defs/quality_score" },
+        "explanation": { "type": "string", "minLength": 1 },
+        "metadata": { "$ref": "#/$defs/annotation_metadata" },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      },
+      "allOf": [{ "$ref": "#/$defs/human_or_llm_metadata_requirement" }]
+    },
+    "phoenix_wire_annotation": {
+      "title": "Phoenix wire annotation shape",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "result", "identifier"],
+      "anyOf": [{ "required": ["trace_id"] }, { "required": ["span_id"] }],
+      "properties": {
+        "name": { "$ref": "#/$defs/annotation_name" },
+        "annotator_kind": { "$ref": "#/$defs/annotator_kind" },
+        "trace_id": { "type": "string", "minLength": 1 },
+        "span_id": { "type": "string", "minLength": 1 },
+        "result": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label", "score", "explanation"],
+          "properties": {
+            "label": { "$ref": "#/$defs/quality_label" },
+            "score": { "$ref": "#/$defs/quality_score" },
+            "explanation": { "type": "string", "minLength": 1 }
+          }
+        },
+        "metadata": { "$ref": "#/$defs/annotation_metadata" },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      },
+      "allOf": [{ "$ref": "#/$defs/human_or_llm_metadata_requirement" }]
+    },
+    "promotion_outcome_annotation": {
+      "title": "Promotion outcome annotation",
+      "description": "Separate minimal contract for controller outcome annotations; not part of the root oneOf.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "annotator_kind", "result", "metadata", "identifier"],
+      "properties": {
+        "name": { "const": "teami_promotion_outcome" },
+        "annotator_kind": { "const": "CODE" },
+        "trace_id": { "type": "string", "minLength": 1 },
+        "span_id": { "type": "string", "minLength": 1 },
+        "result": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label"],
+          "properties": {
+            "label": { "enum": ["route_to_hitl", "blocked", "superseded"] }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true,
+          "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
+          "required": [
+            "proposal_instance_id",
+            "candidate_target_key",
+            "repo_review_url",
+            "normalized_envelope_hash",
+            "repair_state"
+          ],
+          "properties": {
+            "proposal_instance_id": { "type": "string", "minLength": 1 },
+            "candidate_target_key": { "type": "string", "minLength": 1 },
+            "repo_review_url": { "type": ["string", "null"] },
+            "normalized_envelope_hash": { "type": "string", "minLength": 1 },
+            "repair_state": { "type": "string", "minLength": 1 }
+          }
+        },
+        "identifier": { "$ref": "#/$defs/identifier" }
+      }
+    }
+  }
+}

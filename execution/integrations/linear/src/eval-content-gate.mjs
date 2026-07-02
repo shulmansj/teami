@@ -325,6 +325,34 @@ const phasePacketSummaryPolicy = {
   },
 };
 
+const judgePhasePacketSummaryPolicy = {
+  object: {
+    schema_version: { allow: "string" },
+    run_id: { allow: "string" },
+    phase: { allow: "string" },
+    status: { allow: "string" },
+    reason: { allow: "string" },
+    context_digest: { allow: "string" },
+    source_refs: { array: { allow: "string" } },
+    assumptions: { array: { allow: "string" } },
+    constraints: { array: { allow: "string" } },
+    risks: { array: { allow: "string" } },
+    open_questions_markdown: { allow: "string" },
+    project_update_markdown: { allow: "string" },
+    technical_explanation_markdown: { allow: "string" },
+    perspectives_run: {
+      array: {
+        object: {
+          role: { allow: "string" },
+          outcome: { allow: "string" },
+          evidence_ref: { allow: "string" },
+          failure_code: { allow: "string" },
+        },
+      },
+    },
+  },
+};
+
 const finalIssuePolicy = {
   object: {
     decomposition_key: { allow: "string" },
@@ -358,11 +386,87 @@ const discoveryIssuePolicy = {
   },
 };
 
+const dependencyRelationPolicy = {
+  object: {
+    blocking: { allow: "string" },
+    blocked: { allow: "string" },
+  },
+};
+
+const fixtureLabelProvenancePolicy = {
+  object: {
+    label_source: { allow: "string" },
+    label_status: { allow: "string" },
+    labeled_at: { allow: "string" },
+    annotator_id: { allow: "string" },
+  },
+};
+
+const producedIdentityRefPolicy = {
+  object: {
+    effect_id: { allow: "string" },
+    provider: { allow: "string" },
+    resource_kind: { allow: "string" },
+    target_ids: { array: { allow: "string" } },
+  },
+};
+
+const judgeFixtureInputPolicy = {
+  object: {
+    project_intent: {
+      object: {
+        id: { allow: "string" },
+        name: { allow: "string" },
+        description: { allow: "string" },
+        content: { allow: "string" },
+        status: { allow: "string" },
+        labels: { array: labelPolicy },
+        existing_issues: {
+          array: {
+            object: {
+              id: { allow: "string" },
+              identifier: { allow: "string" },
+              title: { allow: "string" },
+              state: {
+                object: {
+                  id: { allow: "string" },
+                  name: { allow: "string" },
+                  type: { allow: "string" },
+                },
+              },
+              labels: { array: labelPolicy },
+            },
+          },
+        },
+      },
+    },
+    terminal_status: { allow: "string" },
+    terminal_reason: { allow: "string" },
+    final_issues: { array: finalIssuePolicy },
+    discovery_issues: { array: discoveryIssuePolicy },
+    dependency_relations: { array: dependencyRelationPolicy },
+    project_update_markdown: { allow: "string" },
+    open_questions_markdown: { allow: "string" },
+    phase_packet_summaries: { array: judgePhasePacketSummaryPolicy },
+  },
+};
+
+const maintainerSuppliedContextPolicy = {
+  object: {
+    rubric_version: { allow: "string" },
+    failure_taxonomy_version: { allow: "string" },
+    allowed_failure_modes: { array: { allow: "string" } },
+  },
+};
+
 export const RICH_EXAMPLE_CONTENT_POLICY = Object.freeze({
   object: {
     schema_version: { allow: "string" },
     input: {
       object: {
+        gradeability: { allow: "string" },
+        judge_fixture_input: judgeFixtureInputPolicy,
+        maintainer_supplied_context: maintainerSuppliedContextPolicy,
         source_type: { allow: "string" },
         project: {
           object: {
@@ -414,12 +518,7 @@ export const RICH_EXAMPLE_CONTENT_POLICY = Object.freeze({
         final_issues: { array: finalIssuePolicy },
         discovery_issues: { array: discoveryIssuePolicy },
         dependency_relations: {
-          array: {
-            object: {
-              blocking: { allow: "string" },
-              blocked: { allow: "string" },
-            },
-          },
+          array: dependencyRelationPolicy,
         },
         project_update_markdown: { allow: "string" },
         open_questions_markdown: { allow: "string" },
@@ -439,6 +538,9 @@ export const RICH_EXAMPLE_CONTENT_POLICY = Object.freeze({
           },
         },
         human_annotation_ids: { array: { allow: "string" } },
+        expected_label: { allow: "string" },
+        expected_score: { allow: "scalar" },
+        provenance: fixtureLabelProvenancePolicy,
       },
     },
     metadata: {
@@ -453,6 +555,8 @@ export const RICH_EXAMPLE_CONTENT_POLICY = Object.freeze({
         failure_taxonomy_version: { allow: "string" },
         source_trace_id: { allow: "string" },
         source_run_id: { allow: "string" },
+        source_target_ids: { array: { allow: "string" } },
+        produced_identity_refs: { array: producedIdentityRefPolicy },
         content_retention: { allow: "string" },
       },
     },

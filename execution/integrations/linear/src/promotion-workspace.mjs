@@ -7,14 +7,14 @@ import { resolveDefaultBranchRef } from "./promotion-policy.mjs";
 
 // Internal promotion workspace (CONSTRAINTS #14/#15/#16): repo-writing
 // promotion work happens ONLY in a dedicated internal clone under
-// .agentic-factory/promotion-workspace/ (gitignored local custody), never by
+// .teami/promotion-workspace/ (gitignored local custody), never by
 // mutating the adopter's active checkout. Dry-run connections record the push
 // intent; real GitHub connections use the adopter's ambient local git auth.
 //
 // Commits are attributed to a local automation placeholder unless overridden by
 // the adopter in their checkout.
 
-export const PROMOTION_BRANCH_NAMESPACE = "agentic-factory/promotion";
+export const PROMOTION_BRANCH_NAMESPACE = "teami/promotion";
 
 export function controllerNamespacePr(pr) {
   const headRef = pr?.head?.ref ?? pr?.head_ref ?? null;
@@ -23,14 +23,14 @@ export function controllerNamespacePr(pr) {
 
 export const PROMOTION_BOT_IDENTITY_PLACEHOLDER = Object.freeze({
   // Replace with an adopter-approved automation identity when desired.
-  name: "agentic-factory[bot] (placeholder)",
-  email: "agentic-factory-bot@placeholder.invalid",
+  name: "teami[bot] (placeholder)",
+  email: "teami-bot@placeholder.invalid",
 });
 
 const PROMOTION_TRAILER_KEYS = Object.freeze({
-  envelope: "Agentic-Factory-Promotion-Envelope",
-  instance: "Agentic-Factory-Promotion-Instance",
-  target: "Agentic-Factory-Promotion-Target",
+  envelope: "Teami-Promotion-Envelope",
+  instance: "Teami-Promotion-Instance",
+  target: "Teami-Promotion-Target",
 });
 
 const PROMOTION_CANDIDATE_KINDS = Object.freeze([
@@ -39,12 +39,12 @@ const PROMOTION_CANDIDATE_KINDS = Object.freeze([
 
 // Single definition of the marker grammar; promote-candidate re-exports these
 // so every consumer (controller, drafter, tests) shares one source of truth.
-export const PROMOTION_MARKER_KEY = "agentic_factory_promotion";
-export const PROMOTION_MARKER_SENTINEL_BEGIN = "<!-- agentic_factory_promotion:begin -->";
-export const PROMOTION_MARKER_SENTINEL_END = "<!-- agentic_factory_promotion:end -->";
+export const PROMOTION_MARKER_KEY = "teami_promotion";
+export const PROMOTION_MARKER_SENTINEL_BEGIN = "<!-- teami_promotion:begin -->";
+export const PROMOTION_MARKER_SENTINEL_END = "<!-- teami_promotion:end -->";
 
 export function defaultPromotionWorkspaceDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "promotion-workspace");
+  return path.resolve(repoRoot, ".teami", "promotion-workspace");
 }
 
 export function promotionWorkspaceCloneDir(workspaceDir) {
@@ -67,7 +67,7 @@ export function defaultRunGit(args, { cwd, env, exactEnv = false } = {}) {
 }
 
 // Deterministic branch namespace (CONSTRAINTS #15):
-// agentic-factory/promotion/<candidate-target-slug>/<short-envelope-hash>.
+// teami/promotion/<candidate-target-slug>/<short-envelope-hash>.
 // The slug flattens the candidate_target_key's slashes so the target stays
 // readable while the short envelope hash disambiguates proposal instances.
 export function promotionBranchName({ candidateTargetKey, envelopeHash }) {

@@ -50,10 +50,10 @@ const EXPECTED_RUNTIME_ROLE_BASELINE_ID = `sha256:${
 const EXPECTED_POLICY_BASELINE_ID = `sha256:${acceptedStateHash(manifest)}`;
 const NOW = new Date("2026-06-10T03:00:00.000Z");
 const PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION_V1 =
-  "agentic-factory-promotion-scanner-ledger/v1";
+  "teami-promotion-scanner-ledger/v1";
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-scanner-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-scanner-"));
 }
 
 function runGitOrThrow(args, cwd) {
@@ -128,7 +128,7 @@ function fetchRouter({
 }
 
 function readyUp() {
-  return { ok: true, appUrl: "http://127.0.0.1:6006", projectName: "agentic-factory" };
+  return { ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" };
 }
 
 function scannerRouting(overrides = {}) {
@@ -136,13 +136,13 @@ function scannerRouting(overrides = {}) {
     enabled: true,
     freshness_window_days: 14,
     eligible_phoenix: {
-      project_names: ["agentic-factory"],
+      project_names: ["teami"],
       dataset_names: ["eval-ds"],
       split_names: ["train", "test"],
     },
     explicit_intent_signals: {
       managed_experiment_receipt_intent: "promotion_candidate",
-      prompt_version_candidate_tag: "agentic_factory_promotion_candidate",
+      prompt_version_candidate_tag: "teami_promotion_candidate",
       repo_candidate_artifact_intent: "promotion_candidate",
       authenticated_registration: "deferred",
     },
@@ -207,7 +207,7 @@ function writePhoenixAssets(root, {
     phoenix: {
       expected_origin: "http://127.0.0.1:6006",
       server_package_pin: "arize-phoenix==14.13.0",
-      project_name: "agentic-factory",
+      project_name: "teami",
     },
     prompts: [{
       role: "sr_eng",
@@ -217,8 +217,8 @@ function writePhoenixAssets(root, {
       prompt_name: "sr_eng_grounding_pass",
       prompt_id: "P1",
       accepted_prompt_version_id: acceptedPromptVersionId,
-      accepted_tag: "agentic_factory_accepted",
-      candidate_tag: "agentic_factory_promotion_candidate",
+      accepted_tag: "teami_accepted",
+      candidate_tag: "teami_promotion_candidate",
       snapshot_path: snapshotRelative,
       snapshot_sha256: snapshotSha,
       rubric_version: "1.0.0",
@@ -259,7 +259,7 @@ function writeRuntimeOnlyPhoenixAssets(root) {
     phoenix: {
       expected_origin: "http://127.0.0.1:6006",
       server_package_pin: "arize-phoenix==14.13.0",
-      project_name: "agentic-factory",
+      project_name: "teami",
     },
     prompts: [],
     evaluators: [],
@@ -303,8 +303,8 @@ function phasePromptFixture(root, {
       prompt_name: promptName,
       prompt_id: "P-PM",
       accepted_prompt_version_id: acceptedPromptVersionId,
-      accepted_tag: "agentic_factory_accepted",
-      candidate_tag: "agentic_factory_promotion_candidate",
+      accepted_tag: "teami_accepted",
+      candidate_tag: "teami_promotion_candidate",
       snapshot_path: snapshotRelative,
       snapshot_sha256: snapshotSha,
     },
@@ -313,7 +313,7 @@ function phasePromptFixture(root, {
 }
 
 function writeVerifiedGitHubState(root, overrides = {}) {
-  const filePath = path.join(root, ".agentic-factory", "github-connection.json");
+  const filePath = path.join(root, ".teami", "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const state = {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -360,7 +360,7 @@ function writeReceipt(root, {
 } = {}) {
   const resolvedBaselineId = baselineId || expectedBaselineIdForTarget(candidateTargetKey);
   const receipt = {
-    schema_version: "agentic-factory-managed-experiment-receipt/v1",
+    schema_version: "teami-managed-experiment-receipt/v1",
     receipt_id: receiptId,
     source,
     created_at: launchedAt,
@@ -395,18 +395,18 @@ function writeReceipt(root, {
         },
       },
       promotion_policy: null,
-      workspace_eval_policy: { schema_version: "agentic-factory-workspace-eval-policy/v1", sha256: "1".repeat(64) },
+      workspace_eval_policy: { schema_version: "teami-workspace-eval-policy/v1", sha256: "1".repeat(64) },
       actor: { os_username: "test", authenticity: "asserted" },
       launched_at: launchedAt,
-      phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
-      agentic_factory_run_id: `afexp-${receiptId}`,
+      phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
+      teami_run_id: `afexp-${receiptId}`,
       ...(draftedBy ? { drafted_by: draftedBy } : {}),
     },
     phoenix_experiment_id: experimentId,
     events: [{ type: "launched", at: launchedAt }],
     amendments,
   };
-  const dir = path.join(root, ".agentic-factory", "experiments");
+  const dir = path.join(root, ".teami", "experiments");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, `${receiptId}.json`), `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
   return receipt;
@@ -422,7 +422,7 @@ function experimentFixture({
   id = "EXP1",
   datasetId = "DS1",
   datasetVersionId = "DSV1",
-  projectName = "agentic-factory",
+  projectName = "teami",
 } = {}) {
   return { id, dataset_id: datasetId, dataset_version_id: datasetVersionId, project_name: projectName, metadata: {} };
 }
@@ -441,7 +441,7 @@ function markerBody({
     acceptedBaselineId: EXPECTED_BASELINE_ID,
     normalizedEnvelopeHash: envelopeHash,
     policyHash: "b".repeat(64),
-    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     evidenceIds: { experiments: ["EXP0"], datasets: [{ dataset_id: "DS1", dataset_version_id: "DSV1" }], annotations: [] },
     proposalState: state,
   }));
@@ -473,7 +473,7 @@ async function runScanner({
     fetchImpl: fetchImpl || fetchRouter(),
     githubTransport,
     promoteCandidateFn: controller,
-    env: { AGENTIC_FACTORY_PROMOTION_WRITE_GUARD: "fail_closed" },
+    env: { TEAMI_PROMOTION_WRITE_GUARD: "fail_closed" },
     now: () => NOW,
   });
   const progress = [];
@@ -527,10 +527,13 @@ test("scanner ledger rows derive outcome statuses and evidence display classes",
       detail: "no mapped materializer",
       terminal: true,
       improvement_opportunity: improvementOpportunity,
+      normalized_envelope_hash: "e".repeat(64),
     }),
   });
   assert.equal(opportunity.result.candidates[0].status, "improvement_opportunity");
   assert.deepEqual(opportunity.result.candidates[0].improvement_opportunity, improvementOpportunity);
+  assert.equal(opportunity.result.candidates[0].opportunity_hash, "e".repeat(64));
+  assert.equal(opportunity.result.candidates[0].normalized_envelope_hash, "e".repeat(64));
   assert.equal(opportunity.result.health.summary.improvement_opportunity_count, 1);
 
   const repairRoot = tempRoot();
@@ -550,7 +553,7 @@ test("scanner ledger rows derive outcome statuses and evidence display classes",
     openPullRequests: [{
       number: 301,
       body: markerBody(),
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/budget" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/budget" },
       created_at: "2026-06-10T01:00:00.000Z",
     }],
   });
@@ -566,7 +569,7 @@ test("scanner ledger rows derive outcome statuses and evidence display classes",
   const repoStateRoot = tempRoot();
   writePolicy(repoStateRoot);
   writeReceipt(repoStateRoot);
-  const statePath = path.join(repoStateRoot, ".agentic-factory", "github-connection.json");
+  const statePath = path.join(repoStateRoot, ".teami", "github-connection.json");
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -581,7 +584,7 @@ test("scanner ledger rows derive outcome statuses and evidence display classes",
     promoteCandidateFn: async () => {
       throw new Error("controller should not be called");
     },
-    env: { AGENTIC_FACTORY_PROMOTION_WRITE_GUARD: "fail_closed" },
+    env: { TEAMI_PROMOTION_WRITE_GUARD: "fail_closed" },
     now: () => NOW,
   });
   const repoState = await repoStateHarness.scanPromotionCandidates({ repoRoot: repoStateRoot });
@@ -677,7 +680,7 @@ test("v1 scanner ledger migrates deterministically and corrupt cache rebuilds wi
     openPullRequests: [{
       number: 401,
       body: markerBody(),
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/cache" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/cache" },
       created_at: "2026-06-10T01:00:00.000Z",
     }],
   });
@@ -703,6 +706,8 @@ test("formatted scanner output uses exact plain-English headlines and internal d
         candidate_target_key: "prompt/decomposition/sr_eng_grounding_pass",
         reason: "controller_invoked",
         controller_reason: "improvement_opportunity_no_proposed_change",
+        opportunity_hash: "0".repeat(64),
+        normalized_envelope_hash: "0".repeat(64),
         improvement_opportunity: { human_name: "Judge prompt" },
       },
       {
@@ -766,6 +771,7 @@ test("formatted scanner output uses exact plain-English headlines and internal d
   assert.ok(lines.includes("Proposal limit reached; no new proposals until an open proposal closes (3/3 open)."));
   assert.ok(lines.includes("GitHub connection needs attention before proposals can be checked."));
   assert.ok(lines.includes("  internal: improvement_opportunity_no_proposed_change"));
+  assert.ok(lines.includes(`  next: npm run draft-improvement -- --opportunity ${"0".repeat(64)}`));
   assert.ok(lines.includes("  internal: stale_evidence"));
   assert.ok(lines.includes("  internal: github_transport_unavailable"));
   assert.equal(lines.some((line) => line.includes("needs_reconciliation")), false);
@@ -879,7 +885,7 @@ test("unattended scanner reads accepted pins and repo candidate artifacts from t
         pr: { number: 501, url: "mock://pr/clone", dry_run: true },
       };
     },
-    env: { AGENTIC_FACTORY_PROMOTION_WRITE_GUARD: "fail_closed" },
+    env: { TEAMI_PROMOTION_WRITE_GUARD: "fail_closed" },
     now: () => NOW,
   });
   const result = await harness.scanPromotionCandidates({ repoRoot: root });
@@ -999,7 +1005,7 @@ test("scanner ignores a judge candidate even though the judge is in the manifest
       prompt_name: "decomposition_quality_judge",
       prompt_id: "P-JUDGE",
       accepted_prompt_version_id: null,
-      accepted_tag: "agentic_factory_accepted",
+      accepted_tag: "teami_accepted",
       snapshot_path: "execution/evals/decomposition/accepted-prompts/decomposition-quality-judge.md",
       snapshot_sha256: createHash("sha256").update(judgeSnapshotText).digest("hex"),
     }],
@@ -1128,7 +1134,7 @@ test("scanner treats drafted_by managed receipts as ordinary promotion-intent ca
     experimentId: "EXP1",
     promptVersionId: "PV-DRAFT",
     candidateVersionId: "PV-DRAFT",
-    draftedBy: "agentic_factory_drafter_v1:test-model",
+    draftedBy: "teami_drafter_v1:test-model",
   });
   const { result, calls } = await runScanner({
     root,
@@ -1144,7 +1150,7 @@ test("scanner treats drafted_by managed receipts as ordinary promotion-intent ca
   assert.equal(result.candidates.length, 1);
   assert.equal(result.candidates[0].status, "controller_called_pr_opened");
   assert.equal(result.candidates[0].reason, "controller_invoked");
-  assert.equal(receipt.launch.drafted_by, "agentic_factory_drafter_v1:test-model");
+  assert.equal(receipt.launch.drafted_by, "teami_drafter_v1:test-model");
   assert.equal(calls[0].request.source, "promotion_candidate_scanner");
   assert.equal(calls[0].request.experiment_id, "EXP1");
   assert.equal(calls[0].request.prompt_version_id, "PV-DRAFT");
@@ -1237,7 +1243,7 @@ test("scanner lock enforces a single local writer", async () => {
   const ledgerDir = defaultPromotionCandidateLedgerDir(root);
   fs.mkdirSync(ledgerDir, { recursive: true });
   fs.writeFileSync(promotionScannerLockPath(ledgerDir), JSON.stringify({
-    schema_version: "agentic-factory-promotion-scanner-lock/v1",
+    schema_version: "teami-promotion-scanner-lock/v1",
     pid: 12345,
     acquired_at: NOW.toISOString(),
   }));
@@ -1272,7 +1278,7 @@ test("policy disable, max-open cap, and period budget suppress controller calls 
     openPullRequests: [{
       number: 10,
       body: markerBody(),
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/aaaa" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/aaaa" },
       created_at: "2026-06-10T01:00:00.000Z",
     }],
   });
@@ -1312,7 +1318,7 @@ test("policy disable, max-open cap, and period budget suppress controller calls 
     closedPullRequests: [{
       number: 11,
       body: markerBody({ proposalInstanceId: "prop-recent", envelopeHash: "c".repeat(64) }),
-      head: { ref: "agentic-factory/promotion/prompt-decomposition-sr-eng-grounding-pass/bbbb" },
+      head: { ref: "teami/promotion/prompt-decomposition-sr-eng-grounding-pass/bbbb" },
       created_at: "2026-06-10T02:00:00.000Z",
       closed_at: "2026-06-10T02:30:00.000Z",
       merged_at: null,
@@ -1332,7 +1338,7 @@ test("scanner uses only verified resolveBehaviorRepoIdentity state for repo mark
   const root = tempRoot();
   writePolicy(root);
   writeReceipt(root);
-  const statePath = path.join(root, ".agentic-factory", "github-connection.json");
+  const statePath = path.join(root, ".teami", "github-connection.json");
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,

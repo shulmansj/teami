@@ -37,7 +37,7 @@ Phoenix state.
 
 | File | Owns |
 | --- | --- |
-| [`example.schema.json`](example.schema.json) | The dataset example contract: input (project snapshot + run envelope), output (terminal artifacts), reference (human annotations + expected properties), metadata (versions, splits, retention). |
+| [`example.schema.json`](example.schema.json) | The dataset example contract: `input` carries the complete captured Judge input (`judge_fixture_input`) plus separated maintainer context and `gradeability`; legacy project/run-envelope fields remain for eval reruns. |
 | [`annotation.schema.json`](annotation.schema.json) | The annotation contract in both its logical shape and the Phoenix wire shape, including the fixed label set and documented score bands. |
 | [`failure-taxonomy.json`](failure-taxonomy.json) | The versioned failure taxonomy shared by human, model, and code signals. |
 | [`phoenix-assets.json`](phoenix-assets.json) | The accepted Phoenix asset manifest: exact accepted prompt/evaluator/dataset version pins and experiment evidence ids. |
@@ -60,7 +60,7 @@ These are load-bearing and verified by tests
 (`execution/integrations/linear/test/eval-contracts.test.mjs`):
 
 - The annotation label set is exactly `pass | needs_revision | blocking_failure`
-  and the roll-up annotation name stays `decomposition_quality`. Neither may
+  and the roll-up annotation name stays `quality`. Neither may
   drift.
 - Every canonical annotation requires a non-empty `identifier` (human/user id,
   judge id, or code evaluator id). Phoenix upserts by
@@ -105,7 +105,7 @@ These are load-bearing and verified by tests
 - Human-label authenticity is reported as `asserted` in MVP because local
   Phoenix does not authenticate annotators. Never claim `authenticated`.
 - Exactly one promotion-candidate tag exists per Phoenix prompt:
-  `agentic_factory_promotion_candidate`. The tag is an intent signal only —
+  `teami_promotion_candidate`. The tag is an intent signal only —
   never accepted behavior, never queue authority. Moving the tag supersedes the
   prior candidate for that prompt target. Accepted behavior is marked only by
   the pins in `phoenix-assets.json`.
@@ -174,7 +174,7 @@ Shape (`decomposition-eval-variants/v1`):
 
 Eval runs that use a variant record the variant id, its overrides, and the
 inputs hash in the local eval-run record under
-`.agentic-factory/eval-runs/<eval_run_id>.json` (gitignored local custody) so
+`.teami/eval-runs/<eval_run_id>.json` (gitignored local custody) so
 later experiment receipts can attribute results to the exact candidate.
 
 ## Phoenix experiments and managed receipts
@@ -190,13 +190,13 @@ disclosed in the summary and the receipt — never claimed as native split
 evidence.
 
 Every launch writes a managed-experiment receipt to
-`.agentic-factory/experiments/<receipt_id>.json` (gitignored local custody):
+`.teami/experiments/<receipt_id>.json` (gitignored local custody):
 source `managed_manual`, intent, candidate target key, launch baseline
 (derived from `phoenix-assets.json`, never from caller input), candidate
 version, dataset + dataset version, split, evaluator versions, workspace eval
 policy version/hash (`promotion_policy` is a null placeholder until the
 promotion policy artifact exists), asserted actor, timestamps, Phoenix scope,
-Agentic Factory run ID, and the Phoenix experiment ID written back as soon as
+Teami run ID, and the Phoenix experiment ID written back as soon as
 it is known — the experiment ID is the primary join for the candidate-intent
 scanner, because the pinned Phoenix cannot enumerate experiments by prompt
 version. Receipt/run IDs are also stamped into the experiment's create-time
@@ -208,6 +208,41 @@ policy explicitly marks the dataset/variant path as a self-improvement
 candidate; **no automation policy artifact exists yet**, so the default is
 always `exploratory` and `promotion_candidate` requires the explicit flag.
 Experiments are evidence, never intent by themselves.
+
+### Live baseline re-pin
+
+Baseline experiment pins are live-Phoenix evidence and are not updated by
+`npm test`. Re-pin them only in a maintainer PR after a local Phoenix run:
+
+```bash
+npm run phoenix:experiment-decomposition -- teami-decomposition-examples --variant accepted_baseline --intent exploratory
+```
+
+Then update only the relevant `experiments[]` baseline row in
+`phoenix-assets.json` with the new `experiment_id`, dataset id/version if
+Phoenix returned a newer dataset version, and the advisory mean in `_note`.
+The exact decomposition baseline rows currently owned by this manifest are:
+
+- `purpose: "baseline"`,
+  `candidate_target_key: "prompt/decomposition/sr_eng_grounding_pass"`,
+  `dataset_id: "RGF0YXNldDox"`,
+  `dataset_version_id: "RGF0YXNldFZlcnNpb246Mg=="`,
+  `accepted_artifact_hash_vector.snapshot_sha256:
+  "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843"`.
+- `purpose: "baseline"`, no `candidate_target_key`,
+  `dataset_id: "RGF0YXNldDox"`,
+  `dataset_version_id: "RGF0YXNldFZlcnNpb246Mg=="`,
+  `project_name: "Experiment-7cf2a684e812e741c360e605"`.
+
+The WS-C score migration uses one live re-baseline to cover both the uniform
+`quality` annotation rename and the band-derived score change. The online eval
+self-run shape is: query the pinned dataset, run the accepted behavior
+variant, let the Judge write `quality` annotations whose scores are derived
+from the namespace label bands, compare against the manifest-pinned baseline,
+and review the manifest pin update in git. After re-pinning, run
+`npm run eval:gate -- --experiment <fresh_receipt_id>` for the fresh evidence
+receipt; stale candidate receipts must fail with `baseline_identity_current`
+and be rerun rather than compared across score semantics.
 
 Receipts are append-only: `npm run phoenix:experiment-amend -- <receipt_id>
 --action register|reclassify|withdraw --reason <text> [--experiment-id <id>]
@@ -251,9 +286,9 @@ Phoenix assets were evidence vs which repo artifacts own accepted behavior)
 plus machine-local best-effort test-split exposure history; the advisory
 `evidence_quality` / `promotion_risk` labels are assigned by the promotion
 controller, never by the gate. The report goes to stdout and a local record
-under `.agentic-factory/gate-reports/<id>.json` — never to Phoenix.
+under `.teami/gate-reports/<id>.json` — never to Phoenix.
 
-## Promotion controller (`agentic_factory.promote_candidate`)
+## Promotion controller (`teami.promote_candidate`)
 
 `npm run promote-candidate -- --input <request.json>` is the one promotion
 controller every surface calls. The request envelope supplies context only —
@@ -284,14 +319,14 @@ contains the accepted snapshot edit and the `phoenix-assets.json` manifest pin
 edit together; merging that PR is the human acceptance act. The PR body, not a
 committed proposal file, carries the human review surface: proposed change,
 what changes, why now, risk, a standalone evidence summary that survives
-Phoenix loss, and exactly one sentinel-bounded `agentic_factory_promotion`
+Phoenix loss, and exactly one sentinel-bounded `teami_promotion`
 marker. The evidence summary passes through the same content gate as rich
 promotion plus GitHub Markdown escaping.
 
 New-style promotion commits also carry the immutable envelope trailers
-`Agentic-Factory-Promotion-Envelope`,
-`Agentic-Factory-Promotion-Instance`, and
-`Agentic-Factory-Promotion-Target`. Resume and orphan-branch recovery verify
+`Teami-Promotion-Envelope`,
+`Teami-Promotion-Instance`, and
+`Teami-Promotion-Target`. Resume and orphan-branch recovery verify
 those trailers against the current normalized envelope, while old-style
 branches with committed `proposals/<proposal_instance_id>.md` files remain
 readable through the proposal-file fallback during migration. If PR creation
@@ -339,7 +374,7 @@ The terminal MVP success is still `route_to_hitl`: a HITL PR carrying the
 marker — never an auto-merge. The GitHub client stays endpoint-allowlisted and
 has no merge, mark-ready, review, comment, webhook, workflow, or admin
 codepath. Every controller stage lands in the durable registry
-`.agentic-factory/promotion-candidates/<envelope-hash>.json` so recovery
+`.teami/promotion-candidates/<envelope-hash>.json` so recovery
 resumes instead of duplicating, and the Phoenix `promotion_outcome` annotation
 is written only after the PR is created or the controller terminally blocks.
 

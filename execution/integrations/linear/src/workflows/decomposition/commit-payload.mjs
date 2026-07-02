@@ -5,6 +5,7 @@ import {
 } from "../../../../../engine/engine-markdown.mjs";
 import { STABLE_KEY_PATTERN } from "../../../../../engine/stable-key-pattern.mjs";
 import { evaluateDecompositionQualityOffline } from "../../quality.mjs";
+import { WORK_TYPES } from "../execution/work-type.mjs";
 
 const COMMIT_PROJECT_UPDATE_SUMMARY =
   "Decomposition completed with a synthesis-ready issue set.";
@@ -81,7 +82,7 @@ function requireProjectUpdateWithRunId(terminalOutput, failureReasons) {
   }
 }
 
-function validateFinalIssues(finalIssues, failureReasons) {
+export function validateFinalIssues(finalIssues, failureReasons) {
   if (!Array.isArray(finalIssues)) {
     failureReasons.push("missing_final_issues");
     return;
@@ -127,6 +128,14 @@ function validateFinalIssues(finalIssues, failureReasons) {
       !issue.acceptance_criteria.every(nonEmptyString)
     ) {
       failureReasons.push("missing_final_issue_acceptance_criteria");
+    }
+
+    if (Object.hasOwn(issue, "work_type") && !WORK_TYPES.includes(issue.work_type)) {
+      failureReasons.push("invalid_final_issue_work_type");
+    }
+
+    if (Object.hasOwn(issue, "resource_target") && !validResourceTarget(issue.resource_target)) {
+      failureReasons.push("invalid_final_issue_resource_target");
     }
   }
 
@@ -178,7 +187,7 @@ function dependenciesFromFinalIssues(finalIssues) {
 // shape. This is ALIAS-ONLY: it maps camelCase/alternate spellings onto the
 // canonical keys. It NEVER synthesizes issue substance; missing authored values
 // stay missing so the commit floor rejects them instead of inventing content.
-function normalizeFinalIssuesForOrchestrator(finalIssues) {
+export function normalizeFinalIssuesForOrchestrator(finalIssues) {
   if (!Array.isArray(finalIssues)) return [];
   return finalIssues.map((issue) => {
     const source = isRecord(issue) ? issue : {};
@@ -199,8 +208,25 @@ function normalizeFinalIssuesForOrchestrator(finalIssues) {
     assignAuthoredField(normalized, "output", source.output);
     const acceptanceCriteria = source.acceptance_criteria ?? source.acceptanceCriteria;
     if (acceptanceCriteria !== undefined) normalized.acceptance_criteria = acceptanceCriteria;
+    if (Object.hasOwn(source, "work_type") || Object.hasOwn(source, "workType")) {
+      normalized.work_type = source.work_type ?? source.workType;
+    }
+    if (Object.hasOwn(source, "resource_target") || Object.hasOwn(source, "resourceTarget")) {
+      normalized.resource_target = normalizeResourceTargetForOrchestrator(
+        source.resource_target ?? source.resourceTarget,
+      );
+    }
     return normalized;
   });
+}
+
+function normalizeResourceTargetForOrchestrator(resourceTarget) {
+  if (!isRecord(resourceTarget)) return resourceTarget;
+  const normalized = {};
+  if (Object.hasOwn(resourceTarget, "kind")) normalized.kind = resourceTarget.kind;
+  if (Object.hasOwn(resourceTarget, "id")) normalized.id = resourceTarget.id;
+  if (Object.hasOwn(resourceTarget, "repo_scope")) normalized.repo_scope = resourceTarget.repo_scope;
+  return normalized;
 }
 
 function assignAuthoredField(target, key, value) {
@@ -237,4 +263,13 @@ function nonEmptyString(value) {
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validResourceTarget(value) {
+  if (!isRecord(value)) return false;
+  const allowedKeys = new Set(["kind", "id", "repo_scope"]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) return false;
+  if (!nonEmptyString(value.kind) || !nonEmptyString(value.id)) return false;
+  if (Object.hasOwn(value, "repo_scope") && !nonEmptyString(value.repo_scope)) return false;
+  return true;
 }

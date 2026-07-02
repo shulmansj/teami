@@ -15,7 +15,7 @@ import {
 import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.mjs";
 
 export const PROMOTION_WRITE_GUARD_ACTIVATION_ENV =
-  "AGENTIC_FACTORY_PROMOTION_WRITE_GUARD";
+  "TEAMI_PROMOTION_WRITE_GUARD";
 export const PROMOTION_WRITE_GUARD_REPORT_ONLY = "report_only";
 export const PROMOTION_WRITE_GUARD_FAIL_CLOSED = "fail_closed";
 
@@ -32,7 +32,7 @@ export const PROMOTION_WRITE_GUARD_OWNER_COPY = Object.freeze({
     why_it_matters:
       "This matters because adopter self-improvement may tune manifest-declared agent behavior, not factory behavior such as promotion policy, proposal creation, credentials, write authority, or maintainer-owned eval gates.",
     next_safe_action:
-      "Next safe action: discard or investigate the candidate; factory behavior changes must go through normal maintainer-owned Agentic Factory development.",
+      "Next safe action: discard or investigate the candidate; factory behavior changes must go through normal maintainer-owned Teami development.",
   }),
   unknown_sensitive_blocked: Object.freeze({
     waiting: "This self-improvement candidate touched an unknown surface.",
@@ -81,7 +81,7 @@ export function resolvePromotionWriteGuardActivationState({
 } = {}) {
   if (activationState) return normalizeActivationState(activationState, "explicit");
   const raw = env?.[PROMOTION_WRITE_GUARD_ACTIVATION_ENV]
-    ?? env?.AGENTIC_FACTORY_CLASSIFIER_ENFORCEMENT
+    ?? env?.TEAMI_CLASSIFIER_ENFORCEMENT
     ?? "";
   return normalizeActivationState(raw, raw ? "env" : "default_pre_activation");
 }

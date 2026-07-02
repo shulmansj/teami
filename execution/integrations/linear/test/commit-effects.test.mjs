@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applyCommitEffects } from "../../../engine/commit-effects.mjs";
+import {
+  PRODUCED_IDENTITIES_TRACE_ATTRIBUTE,
+  projectAndAttachProducedIdentities,
+} from "../../../engine/produced-identities.mjs";
 
 test("applyCommitEffects probes, skips satisfied effects, applies and verifies pending effects in order", async () => {
   const events = [];
@@ -37,11 +41,12 @@ test("applyCommitEffects probes, skips satisfied effects, applies and verifies p
   });
 
   assert.deepEqual(result, {
-    ok: true,
+    outcome: "ok",
     applied: [
       { id: "already-done", identity: "existing" },
       { id: "needs-apply", identity: "created" },
     ],
+    produced_identities: [],
   });
   assert.deepEqual(events, [
     ["probe", "already-done", ctx],
@@ -76,7 +81,7 @@ test("applyCommitEffects returns pending_effect_id and stops at the first failed
   });
 
   assert.deepEqual(result, {
-    ok: false,
+    outcome: "pending",
     pending_effect_id: "first",
     reason: "simulated_partial_failure",
   });
@@ -84,6 +89,47 @@ test("applyCommitEffects returns pending_effect_id and stops at the first failed
     ["probe", "first"],
     ["apply", "first"],
   ]);
+});
+
+test("projectAndAttachProducedIdentities uses effect adapters and rejects raw result/trace identity", () => {
+  const trace = { attributes: {}, spans: [], annotations: [] };
+  const produced = projectAndAttachProducedIdentities({
+    trace,
+    effects: [
+      {
+        id: "fake_resource",
+        provider: "fake",
+        producedIdentity: {
+          resource_kind: "fake_record",
+          target_ids: (identity) => identity.ids,
+          identity: (identity) => ({ ids: identity.ids, batch_id: identity.batch_id }),
+        },
+      },
+      {
+        id: "unsafe_resource",
+        provider: "fake",
+        producedIdentity: {
+          resource_kind: "unsafe_record",
+          target_ids: (identity) => identity.ids,
+          identity: (identity) => ({ ids: identity.ids, result: identity.result }),
+        },
+      },
+    ],
+    applied: [
+      { id: "fake_resource", identity: { ids: ["target-1"], batch_id: "batch-1" } },
+      { id: "unsafe_resource", identity: { ids: ["target-2"], result: { trace } } },
+    ],
+  });
+
+  assert.deepEqual(produced, [{
+    effect_id: "fake_resource",
+    provider: "fake",
+    resource_kind: "fake_record",
+    target_ids: ["target-1"],
+    identity: { ids: ["target-1"], batch_id: "batch-1" },
+  }]);
+  assert.deepEqual(trace.attributes[PRODUCED_IDENTITIES_TRACE_ATTRIBUTE], produced);
+  assert.doesNotThrow(() => JSON.stringify(trace));
 });
 
 function fakeEffect(id, overrides = {}) {

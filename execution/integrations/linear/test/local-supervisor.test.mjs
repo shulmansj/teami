@@ -22,12 +22,17 @@ import {
   runLocalSupervisorLoop,
   setLocalSupervisorDisabled,
 } from "../src/local-supervisor.mjs";
+import { COMMAND_INDEX } from "../src/cli/dispatch.mjs";
+import {
+  runSupervisorAutonomousDiagnosisScanStep,
+  runSupervisorExportStep,
+} from "../src/supervisor/jobs.mjs";
 
 const repoCheckout = path.resolve(import.meta.dirname, "../../../..");
 
 function tempRepo() {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-local-supervisor-"));
-  fs.mkdirSync(path.join(repoRoot, ".agentic-factory"), { recursive: true });
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-local-supervisor-"));
+  fs.mkdirSync(path.join(repoRoot, ".teami"), { recursive: true });
   return repoRoot;
 }
 
@@ -45,7 +50,7 @@ function testConfig(overrides = {}) {
 }
 
 function writeWorkspaceCache(repoRoot) {
-  const cachePath = path.join(repoRoot, ".agentic-factory", "linear.json");
+  const cachePath = path.join(repoRoot, ".teami", "linear.json");
   fs.writeFileSync(
     cachePath,
     `${JSON.stringify({
@@ -84,7 +89,7 @@ function writeJson(filePath, value) {
 }
 
 function writeRunArtifact(repoRoot, runId, artifact) {
-  writeJson(path.join(repoRoot, ".agentic-factory", "runs", `${runId}.json`), {
+  writeJson(path.join(repoRoot, ".teami", "runs", `${runId}.json`), {
     schema_version: "linear-decomposition-run-artifact/v1",
     workflow_version: "0.2.0",
     run_id: runId,
@@ -118,6 +123,8 @@ test("local supervisor registration requires explicit consent and writes only a 
   assert.equal(registered.registration.local_credential_custody.owns_new_credentials, false);
   assert.match(registered.registration.os_registration.todo, /not implemented/);
   assert.ok(registered.registration.authorized_capabilities.includes("scanner_work"));
+  assert.ok(registered.registration.authorized_capabilities.includes("export"));
+  assert.ok(registered.registration.authorized_capabilities.includes("autonomous_diagnosis_scan"));
   for (const forbidden of [
     "auto_merge",
     "apply_behavior_change",
@@ -134,6 +141,53 @@ test("local supervisor registration requires explicit consent and writes only a 
     assert.ok(registered.registration.forbidden_capabilities.includes(forbidden), forbidden);
     assert.equal(registered.registration.authorized_capabilities.includes(forbidden), false, forbidden);
   }
+});
+
+test("supervisor export runs the fixture export slot and autonomous diagnosis scan is invoked", async () => {
+  const repoRoot = tempRepo();
+  const progress = [];
+  const exportResult = await runSupervisorExportStep({
+    repoRoot,
+    disable: {},
+    runFixtureDatasetExportFn: async ({ repoRoot: exportRepoRoot }) => {
+      assert.equal(exportRepoRoot, repoRoot);
+      return {
+        ok: true,
+        status: "skipped",
+        reason: "fixture_export_consent_required",
+      };
+    },
+    onProgress: (line) => progress.push(line),
+  });
+  assert.equal(exportResult.ok, true);
+  assert.equal(exportResult.status, "skipped");
+  assert.equal(exportResult.reason, "fixture_export_consent_required");
+  assert.ok(progress.some((line) => line.includes("fixture dataset export")));
+
+  const disabledExport = await runSupervisorExportStep({
+    disable: { export_disabled: true },
+  });
+  assert.equal(disabledExport.ok, true);
+  assert.equal(disabledExport.status, "skipped");
+  assert.equal(disabledExport.reason, "export_disabled");
+
+  const diagnosisResult = await runSupervisorAutonomousDiagnosisScanStep({
+    repoRoot,
+    disable: {},
+    onProgress: (line) => progress.push(line),
+  });
+  assert.equal(diagnosisResult.ok, true);
+  assert.equal(diagnosisResult.status, "idle");
+  assert.equal(diagnosisResult.reason, null);
+  assert.equal(diagnosisResult.scanned_count, 0);
+  assert.ok(progress.some((line) => line.includes("autonomous diagnosis scan")));
+
+  const disabledDiagnosis = await runSupervisorAutonomousDiagnosisScanStep({
+    disable: { autonomous_diagnosis_scan_disabled: true },
+  });
+  assert.equal(disabledDiagnosis.ok, true);
+  assert.equal(disabledDiagnosis.status, "skipped");
+  assert.equal(disabledDiagnosis.reason, "autonomous_diagnosis_scan_disabled");
 });
 
 test("foreground runner and supervisor source do not expose direct GitHub proposal authority", () => {
@@ -176,8 +230,8 @@ test("local supervisor run leaves gateway autostart deferred and runs the scanne
         status: "ok",
         scan_id: "scan-1",
         candidates: [],
-        ledger_path: path.join(repoRoot, ".agentic-factory", "promotion-candidates", "scanner-ledger.json"),
-        health_path: path.join(repoRoot, ".agentic-factory", "promotion-candidates", "scanner-health.json"),
+        ledger_path: path.join(repoRoot, ".teami", "promotion-candidates", "scanner-ledger.json"),
+        health_path: path.join(repoRoot, ".teami", "promotion-candidates", "scanner-health.json"),
       };
     },
     now: () => new Date("2026-06-10T10:01:00.000Z"),
@@ -191,11 +245,19 @@ test("local supervisor run leaves gateway autostart deferred and runs the scanne
   assert.equal(result.iterations[0].runner.reason, LOCAL_SUPERVISOR_HARDFLOOR_RUNNER_STUB_REASON);
   assert.match(result.iterations[0].runner.detail, /Gateway autostart is deferred/);
   assert.equal(result.iterations[0].scanner.status, "ok");
+  assert.equal(result.iterations[0].export.status, "skipped");
+  assert.equal(result.iterations[0].export.reason, "fixture_export_consent_required");
+  assert.equal(result.iterations[0].autonomous_diagnosis_scan.status, "idle");
+  assert.equal(result.iterations[0].autonomous_diagnosis_scan.reason, null);
 
   const state = JSON.parse(fs.readFileSync(localSupervisorStatePath(repoRoot), "utf8"));
   assert.equal(state.status, "ok");
   assert.equal(state.last_iteration.runner.reason, LOCAL_SUPERVISOR_HARDFLOOR_RUNNER_STUB_REASON);
-  assert.match(formatLocalSupervisorRunReport(result).join("\n"), /gateway_autostart_deferred/);
+  assert.equal(state.last_iteration.export.reason, "fixture_export_consent_required");
+  assert.equal(state.last_iteration.autonomous_diagnosis_scan.status, "idle");
+  const formatted = formatLocalSupervisorRunReport(result).join("\n");
+  assert.match(formatted, /gateway_autostart_deferred/);
+  assert.match(formatted, /fixture_export_consent_required/);
 });
 
 test("local supervisor propagates scanner report-only state without adding a writer", async () => {
@@ -218,8 +280,8 @@ test("local supervisor propagates scanner report-only state without adding a wri
           status: "promotion_write_report_only",
           reason: "promotion_write_guard_pre_activation_unattended_report_only",
         }],
-        ledger_path: path.join(repoRoot, ".agentic-factory", "promotion-candidates", "scanner-ledger.json"),
-        health_path: path.join(repoRoot, ".agentic-factory", "promotion-candidates", "scanner-health.json"),
+        ledger_path: path.join(repoRoot, ".teami", "promotion-candidates", "scanner-ledger.json"),
+        health_path: path.join(repoRoot, ".teami", "promotion-candidates", "scanner-health.json"),
       };
     },
     now: () => new Date("2026-06-10T10:01:00.000Z"),
@@ -336,7 +398,7 @@ test("local supervisor status and cleanup report local-only state", async () => 
 
 test("next-resume reconciliation classifies aged, commit-unconfirmed, resumed, and attention work", async () => {
   const repoRoot = tempRepo();
-  const scannerDir = path.join(repoRoot, ".agentic-factory", "promotion-candidates");
+  const scannerDir = path.join(repoRoot, ".teami", "promotion-candidates");
   writeJson(localSupervisorStatePath(repoRoot), {
     schema_version: LOCAL_SUPERVISOR_STATE_SCHEMA_VERSION,
     status: "ok",
@@ -351,7 +413,7 @@ test("next-resume reconciliation classifies aged, commit-unconfirmed, resumed, a
     },
   });
   writeJson(path.join(scannerDir, "scanner-health.json"), {
-    schema_version: "agentic-factory-promotion-scanner-health/v1",
+    schema_version: "teami-promotion-scanner-health/v1",
     scan_id: "scan-1",
     status: "ok",
     started_at: "2026-06-10T11:50:00.000Z",
@@ -359,7 +421,7 @@ test("next-resume reconciliation classifies aged, commit-unconfirmed, resumed, a
     summary: { candidate_count: 1 },
   });
   writeJson(path.join(scannerDir, "scanner-ledger.json"), {
-    schema_version: "agentic-factory-promotion-scanner-ledger/v1",
+    schema_version: "teami-promotion-scanner-ledger/v1",
     entries: [{
       candidate_key: "candidate-attention",
       source: "managed_experiment_receipt",
@@ -380,8 +442,8 @@ test("next-resume reconciliation classifies aged, commit-unconfirmed, resumed, a
     kind: "commit",
     linear_project_id: "project-commit",
   });
-  writeJson(path.join(repoRoot, ".agentic-factory", "runs", "unconfirmed-linear-mutation-intents", "run-commit.json"), {
-    schema_version: "agentic-factory-unconfirmed-linear-mutation-intent/v1",
+  writeJson(path.join(repoRoot, ".teami", "runs", "unconfirmed-linear-mutation-intents", "run-commit.json"), {
+    schema_version: "teami-unconfirmed-linear-mutation-intent/v1",
     run_id: "run-commit",
     artifact_kind: "commit",
     linear_project_id: "project-commit",
@@ -417,8 +479,8 @@ test("next-resume reconciliation classifies aged, commit-unconfirmed, resumed, a
 
 test("next-resume reconciliation surfaces local proposal registry records as Proposal ready", async () => {
   const repoRoot = tempRepo();
-  writeJson(path.join(repoRoot, ".agentic-factory", "promotion-candidates", "a".repeat(64) + ".json"), {
-    schema_version: "agentic-factory-promotion-candidate-registry/v1",
+  writeJson(path.join(repoRoot, ".teami", "promotion-candidates", "a".repeat(64) + ".json"), {
+    schema_version: "teami-promotion-candidate-registry/v1",
     normalized_envelope_hash: "a".repeat(64),
     proposal_instance_id: "prop-ready",
     candidate_target_key: "prompt/decomposition/decomposition_quality_judge",
@@ -446,9 +508,9 @@ test("next-resume reconciliation surfaces local proposal registry records as Pro
 
 test("next-resume reconciliation surfaces scanner v2 ledger statuses", async () => {
   const repoRoot = tempRepo();
-  const scannerDir = path.join(repoRoot, ".agentic-factory", "promotion-candidates");
+  const scannerDir = path.join(repoRoot, ".teami", "promotion-candidates");
   writeJson(path.join(scannerDir, "scanner-health.json"), {
-    schema_version: "agentic-factory-promotion-scanner-health/v2",
+    schema_version: "teami-promotion-scanner-health/v2",
     scan_id: "scan-v2",
     status: "ok",
     started_at: "2026-06-10T11:50:00.000Z",
@@ -456,7 +518,7 @@ test("next-resume reconciliation surfaces scanner v2 ledger statuses", async () 
     summary: { candidate_count: 4 },
   });
   writeJson(path.join(scannerDir, "scanner-ledger.json"), {
-    schema_version: "agentic-factory-promotion-scanner-ledger/v2",
+    schema_version: "teami-promotion-scanner-ledger/v2",
     entries: [
       {
         candidate_key: "candidate-ready-v2",
@@ -511,11 +573,9 @@ test("next-resume reconciliation surfaces scanner v2 ledger statuses", async () 
 });
 
 test("next-resume CLI source pin uses local reconciliation without gateway wake claims", () => {
-  const cliSource = fs.readFileSync(
-    path.join(repoCheckout, "execution", "integrations", "linear", "cli.mjs"),
-    "utf8",
-  );
-  assert.match(cliSource, /supervisor:reconcile/);
+  // Post-cutover, supervisor:reconcile is wired through the descriptor registry
+  // (cli.mjs is a dumb argv shim), so the pin follows the registry routing.
+  assert.ok(COMMAND_INDEX.has("supervisor:reconcile"));
   // Post-split, the reconcile wiring and inspectTriggerStatus body live in
   // src/cli/ modules; the pins follow the wiring (end anchor re-homed to the
   // next function in runner-command.mjs).

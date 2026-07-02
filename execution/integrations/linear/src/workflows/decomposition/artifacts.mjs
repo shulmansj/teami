@@ -3,6 +3,9 @@ import {
   ENGINE_VERSION,
   RUN_ARTIFACT_SCHEMA_VERSION,
 } from "../../../../../engine/engine-contract-constants.mjs";
+import {
+  normalizeArtifactSetLineage,
+} from "../../../../../engine/produced-identities.mjs";
 import { requireAuthoredMarkdown } from "../../../../../engine/engine-markdown.mjs";
 import {
   DECOMPOSITION_FUNCTION_VERSION,
@@ -113,6 +116,7 @@ export function terminalArtifact({
   const terminalRunId = runId || terminalOutput.run_id;
   const kind = terminalOutput.outcome === "commit" ? "commit" : "pause";
   const runtimeEvidencePackets = packetsFromRuntimeEvidence(runtimeEvidence);
+  const artifactSetLineage = normalizeArtifactSetLineage(runResult?.artifact_set_lineage);
   if (terminalOutput.outcome === "commit" && runtimeEvidencePackets.length === 0) {
     throw new Error("runtime_evidence_turns_required_for_terminal_metadata");
   }
@@ -148,6 +152,7 @@ export function terminalArtifact({
     // timestamp B-READ uses for the post-merge boundary; `execution_mode`
     // (live vs eval) lets a read-only eval run be excluded from consumption.
     ...(Array.isArray(acceptedRefs) && acceptedRefs.length > 0 ? { accepted_refs: acceptedRefs } : {}),
+    ...(artifactSetLineage ? { artifact_set_lineage: artifactSetLineage } : {}),
     completed_at: completedAt || new Date().toISOString(),
     ...(typeof executionMode === "string" && executionMode !== "" ? { execution_mode: executionMode } : {}),
   };

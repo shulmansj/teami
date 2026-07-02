@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  DEFAULT_ANNOTATION_NAME,
   QUALITY_LABELS,
   scoreWithinLabelBand,
 } from "./eval-annotation-contract.mjs";
@@ -416,10 +417,10 @@ export async function collectExperimentEvidence({
       humans,
       llms,
       codes,
-      judge_label: llms.find((entry) => entry.name === "decomposition_quality")?.label ?? null,
-      judge_score: llms.find((entry) => entry.name === "decomposition_quality")?.score ?? null,
+      judge_label: llms.find((entry) => entry.name === DEFAULT_ANNOTATION_NAME)?.label ?? null,
+      judge_score: llms.find((entry) => entry.name === DEFAULT_ANNOTATION_NAME)?.score ?? null,
       human_labels: humans
-        .filter((entry) => entry.name === "decomposition_quality")
+        .filter((entry) => entry.name === DEFAULT_ANNOTATION_NAME)
         .map((entry) => ({ identifier: entry.identifier, label: entry.label, score: entry.score })),
       judge_errors: judgeErrors,
       disagreements: status.disagreements,
@@ -464,7 +465,7 @@ export async function collectExperimentEvidence({
 // ---------------------------------------------------------------------------
 
 export const PR_DISAGREEMENT_DISCLOSURE_SCHEMA_VERSION =
-  "agentic-factory-pr-disagreement-disclosure/v1";
+  "teami-pr-disagreement-disclosure/v1";
 
 export function buildPrDisagreementDisclosure({
   items = [],

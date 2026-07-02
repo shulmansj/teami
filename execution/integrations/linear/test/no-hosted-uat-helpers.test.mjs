@@ -55,9 +55,9 @@ test("no-hosted UAT args accept the gateway and GitHub local selectors", () => {
   assert.equal(parsed.keepArtifacts, true);
 
   const fromEnv = parseNoHostedUatArgs([], {
-    AGENTIC_FACTORY_NO_HOSTED_UAT_DOMAIN: "env-domain",
-    AGENTIC_FACTORY_NO_HOSTED_UAT_BRANCH_PREFIX: "env-no-hosted",
-    AGENTIC_FACTORY_NO_HOSTED_UAT_KEEP_ARTIFACTS: "yes",
+    TEAMI_NO_HOSTED_UAT_DOMAIN: "env-domain",
+    TEAMI_NO_HOSTED_UAT_BRANCH_PREFIX: "env-no-hosted",
+    TEAMI_NO_HOSTED_UAT_KEEP_ARTIFACTS: "yes",
   });
   assert.equal(fromEnv.domainId, "env-domain");
   assert.equal(fromEnv.branchPrefix, "env-no-hosted");
@@ -81,11 +81,11 @@ test("no-hosted config assertion accepts the current local-only public config", 
 });
 
 test("no-hosted config assertion rejects hosted inbox, webhook, broker, and GitHub App state", () => {
-  const hostedUrl = "https://abc123.supabase.co/functions/v1/agentic-factory-inbox/status";
+  const hostedUrl = "https://abc123.supabase.co/functions/v1/teami-inbox/status";
   const findings = findHostedConfigurationFindings({
     config: {
       inbox: { url: hostedUrl },
-      github: { token_broker: { url: "https://example.invalid/agentic-factory-github-broker" } },
+      github: { token_broker: { url: "https://example.invalid/teami-github-broker" } },
     },
     domainRegistry: {
       domains: [{ id: "support", linear: { webhook_id: "wh_123" } }],
@@ -101,7 +101,7 @@ test("no-hosted config assertion rejects hosted inbox, webhook, broker, and GitH
   assert.equal(findings.some((finding) => finding.id === "supabase_functions_url"), true);
   assert.throws(
     () => assertNoHostedConfiguration({
-      config: { github: { app_slug: "agentic-factory" } },
+      config: { github: { app_slug: "teami" } },
     }),
     /hosted_configuration_detected/,
   );
@@ -109,22 +109,22 @@ test("no-hosted config assertion rejects hosted inbox, webhook, broker, and GitH
 
 test("hosted endpoint scanner rejects AF-hosted URLs and allows local/GitHub URLs", () => {
   const clean = scanHostedEndpointReferences({
-    github: "https://github.com/shulmansj/agentic-factory",
+    github: "https://github.com/shulmansj/teami",
     oauth: "http://127.0.0.1:8723/linear/oauth/callback",
-    branch: "agentic-factory/promotion/af-uat-github-local/20260625",
+    branch: "teami/promotion/af-uat-github-local/20260625",
   });
   assert.equal(clean.ok, true);
 
   const leaked = scanHostedEndpointReferences({
-    inbox: "https://abc123.supabase.co/functions/v1/agentic-factory-inbox/status",
-    broker: "POST /functions/v1/agentic-factory-github-broker/token",
+    inbox: "https://abc123.supabase.co/functions/v1/teami-inbox/status",
+    broker: "POST /functions/v1/teami-github-broker/token",
     client: "hosted-inbox-client.mjs",
   });
   assert.equal(leaked.ok, false);
   const ids = new Set(leaked.findings.map((finding) => finding.id));
   for (const id of [
     "supabase_functions_url",
-    "agentic_factory_hosted_endpoint_url",
+    "teami_hosted_endpoint_url",
     "hosted_inbox_endpoint",
     "supabase_functions_endpoint_path",
     "github_broker_endpoint",
@@ -152,7 +152,7 @@ test("hosted surface file assertion catches deleted executable modules and edge 
   );
   fs.mkdirSync(path.dirname(hostedClient), { recursive: true });
   fs.writeFileSync(hostedClient, "export {};\n", "utf8");
-  fs.mkdirSync(path.join(tempRoot, "supabase", "functions", "agentic-factory-inbox"), { recursive: true });
+  fs.mkdirSync(path.join(tempRoot, "supabase", "functions", "teami-inbox"), { recursive: true });
 
   const findings = findHostedSurfaceFiles({ repoRoot: tempRoot });
   assert.equal(findings.some((finding) => finding.id === "hosted_inbox_client"), true);

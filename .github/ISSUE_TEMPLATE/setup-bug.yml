@@ -1,5 +1,5 @@
 name: Setup bug
-description: Report a problem with installing, configuring, or running Agentic Factory.
+description: Report a problem with installing, configuring, or running Teami.
 title: "[Setup bug]: "
 labels: ["setup", "feedback"]
 body:

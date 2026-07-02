@@ -12,7 +12,7 @@ import {
 } from "./orchestrator-terminal-vocabulary.mjs";
 
 export const ORCHESTRATOR_OUTPUT_SCHEMA_VERSION =
-  "agentic-factory-orchestrator-turn-output/v1";
+  "teami-orchestrator-turn-output/v1";
 
 export const ORCHESTRATOR_OUTCOMES = GENERIC_CORE_OUTCOMES;
 export const ORCHESTRATOR_OUTCOME_REASONS = GENERIC_CORE_OUTCOME_REASONS;

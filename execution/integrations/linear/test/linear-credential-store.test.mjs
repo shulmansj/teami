@@ -82,8 +82,8 @@ test("New-format credential target builders throw when domain or workspace ids a
 });
 
 test("file credential store is explicit, ignored-local, and round-trips token sets", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-linear-credential-"));
-  const filePath = path.join(tempDir, ".agentic-factory", "linear-oauth-token.json");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-linear-credential-"));
+  const filePath = path.join(tempDir, ".teami", "linear-oauth-token.json");
   const store = createFileCredentialStore({ filePath, target: "target-1" });
 
   assert.equal(store.kind, "file");

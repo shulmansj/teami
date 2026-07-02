@@ -11,7 +11,7 @@ import {
 } from "./ledger-store.mjs";
 
 export const REPO_CANDIDATE_ARTIFACT_STUB_SCHEMA_VERSION =
-  "agentic-factory-repo-candidate-artifact-stub/v1";
+  "teami-repo-candidate-artifact-stub/v1";
 
 function readTrustedRepoArtifactJson({ internalCloneDir, ref, relativePath }) {
   const read = gitShowText({ internalCloneDir, ref, relativePath });

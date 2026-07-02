@@ -159,8 +159,8 @@ checking.>
 ## Machine-readable marker
 
 Keep this SENTINEL-BOUNDED fenced JSON block in the PR body exactly once,
-including the `<!-- agentic_factory_promotion:begin -->` /
-`<!-- agentic_factory_promotion:end -->` HTML-comment sentinels around the
+including the `<!-- teami_promotion:begin -->` /
+`<!-- teami_promotion:end -->` HTML-comment sentinels around the
 fence. Cross-machine dedupe, rejection memory, supersede handling, and proposal
 budget checks parse ONLY
 sentinel-bounded markers — fenced JSON outside the sentinels is never parsed,
@@ -204,10 +204,10 @@ when merged, in the same normalized shape as a run-version record's
 `accepted_refs[]` entry, so the read-time undo answer can join it against the run
 records; it is the NEW post-merge version, not the OLD `accepted_baseline_id`.
 
-<!-- agentic_factory_promotion:begin -->
+<!-- teami_promotion:begin -->
 ```json
 {
-  "agentic_factory_promotion": {
+  "teami_promotion": {
     "schema_version": 1,
     "proposal_instance_id": "<stable id>",
     "requested_action": "propose_repo_change",
@@ -219,7 +219,7 @@ records; it is the NEW post-merge version, not the OLD `accepted_baseline_id`.
     "policy_hash": "<hash>",
     "phoenix_scope": {
       "origin": "<local Phoenix origin, e.g. http://127.0.0.1:6006>",
-      "project_name": "<Phoenix project name, e.g. agentic-factory>"
+      "project_name": "<Phoenix project name, e.g. teami>"
     },
     "evidence_ids": {
       "experiments": ["<experiment id>"],
@@ -236,7 +236,7 @@ records; it is the NEW post-merge version, not the OLD `accepted_baseline_id`.
     "superseded_by": null,
     "repair_state": "<none|packet_completeness_repair_needed|evidence_repair_needed|phoenix_audit_retry_needed|supersede_retry_needed|branch_repair_needed|github_connection_repair_needed>",
     "packet": {
-      "schema_version": "agentic-factory-proposal-packet/v1",
+      "schema_version": "teami-proposal-packet/v1",
       "source": "<not_rendered|structured_packet>",
       "guard_status": "<not_evaluated|passed|blocked>",
       "copy_class": "<decision_ready|review_carefully|blocked_for_repair|fyi_receipt|internal_only>",
@@ -248,7 +248,7 @@ records; it is the NEW post-merge version, not the OLD `accepted_baseline_id`.
       "authority_custody_access_present": false
     },
     "undo_bounds": {
-      "schema_version": "agentic-factory-marker-undo-bounds/v1",
+      "schema_version": "teami-marker-undo-bounds/v1",
       "what_undo_changes": "<plain-language description of what undoing restores: the prior accepted prompt version, or the prior accepted default role assignments>",
       "external_side_effects": false
     },
@@ -260,4 +260,4 @@ records; it is the NEW post-merge version, not the OLD `accepted_baseline_id`.
   }
 }
 ```
-<!-- agentic_factory_promotion:end -->
+<!-- teami_promotion:end -->

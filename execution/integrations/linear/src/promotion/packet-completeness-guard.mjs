@@ -22,8 +22,8 @@ export const PACKET_COMPLETENESS_BLOCKED_OWNER_COPY = Object.freeze({
     "Repair the packet inputs and rerun promotion; only a proposal whose packet guard passes should be used for owner review.",
 });
 
-const BLOCKED_NOTICE_BEGIN = "<!-- agentic_factory_promotion_repair_notice:begin -->";
-const BLOCKED_NOTICE_END = "<!-- agentic_factory_promotion_repair_notice:end -->";
+const BLOCKED_NOTICE_BEGIN = "<!-- teami_promotion_repair_notice:begin -->";
+const BLOCKED_NOTICE_END = "<!-- teami_promotion_repair_notice:end -->";
 
 export function ownerCopyForPacketCompletenessRepair() {
   return [

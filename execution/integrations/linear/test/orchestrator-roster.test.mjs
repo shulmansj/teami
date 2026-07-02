@@ -44,8 +44,8 @@ function governingManifestEntry() {
     human_name: "Orchestrator governing prompt",
     artifact_kind: "accepted_prompt",
     materializer: "phoenix_prompt_version_to_accepted_prompt_snapshot",
-    accepted_tag: "agentic_factory_accepted",
-    candidate_tag: "agentic_factory_promotion_candidate",
+    accepted_tag: "teami_accepted",
+    candidate_tag: "teami_promotion_candidate",
     snapshot_path:
       "execution/evals/decomposition/accepted-prompts/orchestrator-governing.md",
     snapshot_sha256: "0".repeat(64),

@@ -1,5 +1,5 @@
 {
-  "schema_version": "agentic-factory-failure-taxonomy/v1",
+  "schema_version": "teami-failure-taxonomy/v1",
   "failure_taxonomy_version": "1.0.0",
   "_note": "Canonical versioned failure taxonomy shared by human annotation, model judges, and deterministic checks. The workflows sections are judgment failure modes seeded from the taxonomy previously embedded in docs/self-improvement.md; the structural section mirrors the deterministic CODE evaluators. Expand only when real traces reveal recurring gaps; expansion is a process change and bumps failure_taxonomy_version. Annotations record the failure_taxonomy_version they were judged against so cross-version comparisons can be gated.",
   "structural": {

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "linear-decomposition-orchestrator-subagent-turn/v2",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "reason",
+    "context_digest",
+    "source_refs",
+    "assumptions",
+    "constraints",
+    "risks"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "linear-decomposition-orchestrator-subagent-turn/v2"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "continue",
+        "blocked"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "product_context_sufficient",
+        "technical_context_grounded",
+        "synthesis_complete",
+        "no_blockers",
+        "needs_product_input",
+        "needs_discovery",
+        "needs_constraint_decision"
+      ]
+    },
+    "context_digest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_refs": {
+      "type": "array"
+    },
+    "assumptions": {
+      "type": "array"
+    },
+    "constraints": {
+      "type": "array"
+    },
+    "risks": {
+      "type": "array"
+    },
+    "open_questions_markdown": {
+      "type": "string"
+    },
+    "project_update_markdown": {
+      "type": "string"
+    },
+    "technical_explanation_markdown": {
+      "type": "string"
+    },
+    "discovery_issues": {
+      "type": "array"
+    },
+    "final_issues": {
+      "type": "array"
+    }
+  }
+}

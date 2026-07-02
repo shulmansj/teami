@@ -1,6 +1,6 @@
 # Security Policy
 
-Agentic Factory is a source-visible portfolio preview. Security reports are
+Teami is a source-visible portfolio preview. Security reports are
 handled on a best-effort basis; no response SLA is promised.
 
 ## Reporting A Vulnerability
@@ -15,7 +15,7 @@ not include the vulnerability details there.
 
 ## Scope
 
-Reports are in scope when they affect the current public Agentic Factory source
+Reports are in scope when they affect the current public Teami source
 tree, Linear OAuth setup, local gateway polling, ambient GitHub proposal path,
 local runner behavior, or documented setup process.
 

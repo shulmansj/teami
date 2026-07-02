@@ -59,8 +59,8 @@ test("gateway UAT args accept flags and env for disposable team selection", () =
   assert.equal(parsed.keepArtifacts, true);
 
   const fromEnv = parseGatewayUatArgs([], {
-    AGENTIC_FACTORY_UAT_DOMAIN: "env-domain",
-    AGENTIC_FACTORY_UAT_PREFIX: "ENV-UAT",
+    TEAMI_UAT_DOMAIN: "env-domain",
+    TEAMI_UAT_PREFIX: "ENV-UAT",
   });
   assert.equal(fromEnv.domainId, "env-domain");
   assert.equal(fromEnv.prefix, "ENV-UAT");

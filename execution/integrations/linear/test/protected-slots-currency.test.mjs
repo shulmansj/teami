@@ -11,7 +11,7 @@ import {
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const protectedSlotsPath = path.join(
   repoRoot,
-  "maintainers/contracts/protected-slots.json",
+  "docs/contracts/protected-slots.json",
 );
 const protectedSlotsJson = JSON.parse(
   fs.readFileSync(protectedSlotsPath, "utf8"),
@@ -64,7 +64,7 @@ test("protected-slots.json and the PROTECTED_SLOTS projection are identical", ()
 });
 
 test("protected-slots.json declares the expected single-source schema", () => {
-  assert.equal(protectedSlotsJson.schema_version, "agentic-factory-protected-slots/v1");
+  assert.equal(protectedSlotsJson.schema_version, "teami-protected-slots/v1");
   assert.ok(Array.isArray(protectedSlotsJson.exact_paths));
   assert.ok(Array.isArray(protectedSlotsJson.prefix_paths));
   assert.ok(Array.isArray(protectedSlotsJson.sensitive_roots));
@@ -181,6 +181,30 @@ test("a new file under a sensitive root with no map entry fails closed as unknow
 
   const result = classifyMetaAuthorityChange({
     changes: [added(newPath, '{"value":"ordinary_semantic"}')],
+  });
+  assert.equal(result.class, "unknown_sensitive");
+  assert.equal(result.fail_closed, true);
+  assert.ok(
+    result.reasons.some((reason) => reason.id === "unknown_new_sensitive_surface"),
+    `expected unknown_new_sensitive_surface reason: ${JSON.stringify(result.reasons)}`,
+  );
+  assert.ok(result.affected_surfaces.includes("new_sensitive_surface"));
+});
+
+test("a new docs/contracts file with no map entry fails closed as unknown_sensitive", () => {
+  const sensitiveRoot = "docs/contracts/";
+  assert.ok(
+    PROTECTED_SLOTS.sensitive_roots.includes(sensitiveRoot),
+    "fixture assumes docs/contracts/ is a sensitive root",
+  );
+  const newPath = "docs/contracts/new-public-contract.md";
+  const hasExact = PROTECTED_SLOTS.exact_paths.some((entry) => entry.path === newPath);
+  const hasPrefix = PROTECTED_SLOTS.prefix_paths.some((entry) => newPath.startsWith(entry.prefix));
+  assert.equal(hasExact, false, "fixture path must have no exact protected-slot entry");
+  assert.equal(hasPrefix, true, "fixture path must be covered only by the broad contract prefix");
+
+  const result = classifyMetaAuthorityChange({
+    changes: [added(newPath, "A new public contract cannot ship without owner-reviewed map facts.")],
   });
   assert.equal(result.class, "unknown_sensitive");
   assert.equal(result.fail_closed, true);

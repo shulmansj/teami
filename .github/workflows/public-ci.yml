@@ -2,6 +2,9 @@ name: Public trust suite
 
 on:
   pull_request:
+  pull_request_review:
+    types:
+      - submitted
   push:
     branches:
       - main
@@ -9,6 +12,9 @@ on:
 
 permissions:
   contents: read
+  # Limited to updating the staged-build delta PR comment. No secrets or pull_request_target are used.
+  issues: write
+  pull-requests: write
 
 jobs:
   trust-suite:
@@ -42,20 +48,30 @@ jobs:
           npm run security:secrets
           npm run security:secrets:history
 
+      - name: Install ripgrep
+        # The staged-build gate's private-pattern scan shells out to ripgrep.
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Public export hygiene and audit checks
         shell: bash
+        env:
+          # Limited to posting the staged-build ship-delta PR comment via the assembled gate.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          if [[ -f maintainers/publication/export-public-artifact.mjs ]]; then
-            node --check maintainers/publication/export-public-artifact.mjs
-            node maintainers/publication/export-public-artifact.mjs --self-test
-            node --check maintainers/publication/verify-public-artifact.mjs
-            node maintainers/publication/verify-public-artifact.mjs --self-test
-            node --check maintainers/publication/run-public-export-audit.mjs
-            node maintainers/publication/run-public-export-audit.mjs --self-test
+          if [[ -f private/publication/export-public-artifact.mjs ]]; then
+            node --check private/publication/export-public-artifact.mjs
+            # The assembled staged-build gate replaces the exporter --self-test: it produces the
+            # candidate public tree (--gate) and runs every check module (scanners, hygiene,
+            # conservation, ship-delta, adoptability, guard-coverage) plus content-vs-infra triage.
+            node private/publication/run-staged-build-gate.mjs
+            node --check private/publication/verify-public-artifact.mjs
+            node private/publication/verify-public-artifact.mjs --self-test
+            node --check private/publication/run-public-export-audit.mjs
+            node private/publication/run-public-export-audit.mjs --self-test
           else
-            forbidden_path_regex='^(docs/(plans|reviews|breakdowns)|maintainers/(plans|reviews|publication)|\.agentic-factory/)'
+            forbidden_path_regex='^(docs/(plans|reviews|breakdowns)|maintainers/(plans|reviews)|\.teami/|private/)'
             if git ls-files | grep -E "$forbidden_path_regex"; then
               echo "::error::Private planning, publication, or runtime-state paths are present in the public artifact."
               exit 1
@@ -63,7 +79,8 @@ jobs:
 
             if git log --all --name-only --pretty=format: -- \
               docs/plans docs/reviews docs/breakdowns \
-              maintainers/plans maintainers/reviews maintainers/publication \
+              maintainers/plans maintainers/reviews private/publication \
+              private \
               | grep -q .; then
               echo "::error::Private planning or publication paths are present in public artifact history."
               exit 1

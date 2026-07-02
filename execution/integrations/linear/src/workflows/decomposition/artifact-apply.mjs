@@ -34,6 +34,11 @@ export const DECOMPOSITION_COMMIT_EFFECTS = Object.freeze([
     id: LINEAR_ISSUES_EFFECT_ID,
     provider: "linear",
     op: "create_issues",
+    producedIdentity: Object.freeze({
+      resource_kind: "linear_issue",
+      target_ids: linearIssuesTargetIds,
+      identity: linearIssuesProducedIdentity,
+    }),
     probe: probeLinearIssuesEffect,
     apply: applyLinearIssuesEffect,
     verify: verifyLinearIssuesEffect,
@@ -145,34 +150,45 @@ async function applyCommitArtifactEffects({
     runId,
     environment,
     durable_record,
+    artifactSetLineage: artifact?.artifact_set_lineage,
     linearIssuesAppliedIdentity: null,
   };
-  const applied = await applyCommitEffects({ effects: commitEffects, ctx });
-  if (!applied.ok) {
+  const applyResult = await applyCommitEffects({ effects: commitEffects, ctx, trace });
+  if (applyResult.outcome !== "ok") {
     recordSpan(trace, "commit_effect_pending", {
-      pending_effect_id: applied.pending_effect_id,
-      reason: applied.reason,
+      pending_effect_id: applyResult.pending_effect_id,
+      reason: applyResult.reason,
       run_id: artifact.run_id,
       // A single durable commit intent has been written; provider effects are
       // not a cross-provider transaction and converge by idempotent replay.
       atomicity: "durable_commit_intent_not_provider_transaction",
     });
     if (shouldThrowPendingEffect) {
-      throw new Error(applied.reason || `commit_effect_pending:${applied.pending_effect_id}`);
+      throw new Error(applyResult.reason || `commit_effect_pending:${applyResult.pending_effect_id}`);
     }
     return {
       status: "pending",
-      pending_effect_id: applied.pending_effect_id,
-      reason: applied.reason,
+      pending_effect_id: applyResult.pending_effect_id,
+      reason: applyResult.reason,
       trace,
     };
   }
 
-  const linearIssues = applied.applied.find((effect) => effect.id === LINEAR_ISSUES_EFFECT_ID);
-  return linearIssues?.identity?.result || {
+  const linearIssues = applyResult.applied.find((effect) => effect.id === LINEAR_ISSUES_EFFECT_ID);
+  const producedIdentities = applyResult.produced_identities;
+  const artifactWithProducedIdentities = {
+    ...artifact,
+    produced_identities: producedIdentities,
+  };
+  const result = linearIssues?.identity?.result || {
     status: "completed",
-    applied: applied.applied,
+    applied: applyResult.applied,
     trace,
+  };
+  return {
+    ...result,
+    produced_identities: producedIdentities,
+    artifact: artifactWithProducedIdentities,
   };
 }
 
@@ -264,7 +280,8 @@ export async function pauseProjectFromArtifact({ client, project, shape, artifac
 }
 
 export async function commitIssuesFromArtifact({ client, config, project, shape, artifact, trace, replayed, onBeforeLinearMutation }) {
-  const issueStatuses = await resolveIssueStatuses(client, config, shape.team.id);
+  const issueStatuses = shape.issueStatuses ||
+    await resolveIssueStatuses(client, config, shape.team.id, shape.cache, { failClosed: true });
   await onBeforeLinearMutation?.({ artifactKind: artifact.kind, runId: artifact.run_id, trace });
   const creation = await createOrReuseExecutionIssues({
     client,
@@ -278,7 +295,7 @@ export async function commitIssuesFromArtifact({ client, config, project, shape,
   });
 
   await client.updateProject(project.id, {
-    statusId: shape.projectStatuses.started.id,
+    statusId: shape.projectStatuses.in_progress.id,
   });
 
   recordSpan(trace, "create_linear_issues_or_pause_project", {
@@ -289,7 +306,7 @@ export async function commitIssuesFromArtifact({ client, config, project, shape,
     dependency_relations_created: creation.relationsCreated.length,
     dependency_relations_reused: creation.relationsReused.length,
     idempotent: creation.created.length === 0 && creation.relationsCreated.length === 0,
-    moved_project_to_status_id: shape.projectStatuses.started.id,
+    moved_project_to_status_id: shape.projectStatuses.in_progress.id,
   });
 
   const updateResult = await postAuthoredProjectUpdate({
@@ -367,7 +384,7 @@ async function readLinearIssuesEffectState(ctx) {
     issueByKey.set(key, existing);
   }
 
-  const expectedStatusId = ctx.shape.projectStatuses.started.id;
+  const expectedStatusId = ctx.shape.projectStatuses.in_progress.id;
   if (project.status?.id !== expectedStatusId) {
     return { ok: false, reason: "linear_project_status_not_started" };
   }
@@ -482,6 +499,23 @@ function linearIssuesIdentityFromVerifiedState({ issues, relations, project, pro
       trace,
     },
   };
+}
+
+function linearIssuesTargetIds(identity) {
+  return stringIds(identity?.issue_ids);
+}
+
+function linearIssuesProducedIdentity(identity) {
+  return {
+    issue_ids: stringIds(identity?.issue_ids),
+    dependency_relation_ids: stringIds(identity?.dependency_relation_ids),
+    project_update_id: identity?.project_update_id || null,
+  };
+}
+
+function stringIds(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((value) => String(value || "")).filter(Boolean);
 }
 
 export async function resumeFromArtifact({ client, project, shape, artifact, trace, replayed, onBeforeLinearMutation }) {

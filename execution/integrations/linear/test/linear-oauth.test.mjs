@@ -18,7 +18,7 @@ import {
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 let browserAuthPortChain = Promise.resolve();
 
-test("config requires Agentic Factory OAuth setup fields", () => {
+test("config requires Teami OAuth setup fields", () => {
   const config = loadLinearConfig({ repoRoot });
   validateLinearConfig(config, "test-config");
 

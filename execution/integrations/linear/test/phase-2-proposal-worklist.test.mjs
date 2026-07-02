@@ -27,11 +27,11 @@ const NOW = new Date("2026-06-17T12:00:00.000Z");
 const TARGET = "prompt/decomposition/decomposition_quality_judge";
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-phase-2-worklist-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-phase-2-worklist-"));
 }
 
 function writeVerifiedGitHubState(root) {
-  const filePath = path.join(root, ".agentic-factory", "github-connection.json");
+  const filePath = path.join(root, ".teami", "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -77,7 +77,7 @@ function marker({
     acceptedBaselineId: "sha256:accepted",
     normalizedEnvelopeHash: envelopeHash,
     policyHash: "policy-hash",
-    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenixScope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     evidenceIds: {
       experiments: ["EXP1"],
       datasets: [{ dataset_id: "DS1", dataset_version_id: "DSV1" }],
@@ -103,7 +103,7 @@ function pr({
     state,
     title,
     body,
-    head: { ref: `agentic-factory/promotion/prompt-decomposition-decomposition-quality-judge/${number}` },
+    head: { ref: `teami/promotion/prompt-decomposition-decomposition-quality-judge/${number}` },
     html_url: `mock://github/factory-owner/behavior-rules/pull/${number}`,
     created_at: "2026-06-17T10:00:00.000Z",
     closed_at: state === "closed" ? "2026-06-17T11:00:00.000Z" : null,
@@ -113,7 +113,7 @@ function pr({
 }
 
 function writeRegistryRecord(root, overrides = {}) {
-  const dir = path.join(root, ".agentic-factory", "promotion-candidates");
+  const dir = path.join(root, ".teami", "promotion-candidates");
   const envelopeHash = overrides.normalized_envelope_hash || hex(overrides.proposal_instance_id || "registry");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, `${envelopeHash}.json`), `${JSON.stringify({
@@ -125,7 +125,7 @@ function writeRegistryRecord(root, overrides = {}) {
     candidate_version_id: "PV1",
     accepted_baseline_id: "sha256:accepted",
     receipt_id: "expr-registry",
-    phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "agentic-factory" },
+    phoenix_scope: { origin: "http://127.0.0.1:6006", project_name: "teami" },
     evidence_ids: { experiments: ["EXP1"], datasets: [], annotations: [] },
     labels: { evidence_quality: "low", promotion_risk: "high_risk" },
     gate: {
@@ -146,7 +146,7 @@ function writeRegistryRecord(root, overrides = {}) {
 }
 
 function writeScannerFiles(root) {
-  const dir = path.join(root, ".agentic-factory", "promotion-candidates");
+  const dir = path.join(root, ".teami", "promotion-candidates");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "scanner-ledger.json"), `${JSON.stringify({
     schema_version: PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION,
@@ -192,7 +192,7 @@ function writeScannerFiles(root) {
 }
 
 function writeScannerFixture(root, entries) {
-  const dir = path.join(root, ".agentic-factory", "promotion-candidates");
+  const dir = path.join(root, ".teami", "promotion-candidates");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "scanner-ledger.json"), `${JSON.stringify({
     schema_version: PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION,
@@ -293,14 +293,14 @@ test("Phase 2 proposal worklist derives every contract state from existing facts
       }),
     ],
   });
-  const beforeFiles = fs.readdirSync(path.join(root, ".agentic-factory", "promotion-candidates")).sort();
+  const beforeFiles = fs.readdirSync(path.join(root, ".teami", "promotion-candidates")).sort();
 
   const report = await collectPhase2ProposalWorklist({
     repoRoot: root,
     githubTransport: transport,
     now: () => NOW,
   });
-  const afterFiles = fs.readdirSync(path.join(root, ".agentic-factory", "promotion-candidates")).sort();
+  const afterFiles = fs.readdirSync(path.join(root, ".teami", "promotion-candidates")).sort();
 
   assert.deepEqual(afterFiles, beforeFiles, "read model must not write a worklist or mutate scanner/registry files");
   assert.deepEqual(PHASE_2_PROPOSAL_STATE_NAME_LIST, [

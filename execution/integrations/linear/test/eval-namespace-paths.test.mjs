@@ -8,6 +8,7 @@ import {
 } from "../src/config.mjs";
 import {
   ANNOTATION_SCHEMA_PATH,
+  EXAMPLE_SCHEMA_PATH,
   FAILURE_TAXONOMY_PATH,
   PHOENIX_ASSETS_PATH,
 } from "../src/eval-annotation-contract.mjs";
@@ -17,6 +18,7 @@ import {
 import {
   PROMOTION_POLICY_PATH,
   PROMOTION_POLICY_RELATIVE_PATH,
+  resolvePromotionPolicyPath,
 } from "../src/promotion-policy.mjs";
 import {
   PROTECTED_SLOTS,
@@ -36,6 +38,8 @@ const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..", "..");
 
 const legacyEvalPaths = Object.freeze({
   manifest: "execution/evals/decomposition/phoenix-assets.json",
+  annotation_schema: "execution/evals/decomposition/annotation.schema.json",
+  example_schema: "execution/evals/decomposition/example.schema.json",
   accepted_runtime: "execution/evals/decomposition/accepted-runtime-roles.json",
   proposals: "execution/evals/decomposition/proposals",
   policy: "execution/evals/decomposition/promotion-policy.json",
@@ -105,7 +109,8 @@ test("migrated public path exports preserve legacy absolute and relative paths",
 
   assert.equal(PHOENIX_ASSETS_PATH, legacyAbsolute(legacyEvalPaths.manifest));
   assert.equal(FAILURE_TAXONOMY_PATH, legacyAbsolute(legacyEvalPaths.taxonomy));
-  assert.equal(ANNOTATION_SCHEMA_PATH, legacyAbsolute(legacyNamespacePaths.annotation_schema));
+  assert.equal(ANNOTATION_SCHEMA_PATH, legacyAbsolute(legacyEvalPaths.annotation_schema));
+  assert.equal(EXAMPLE_SCHEMA_PATH, legacyAbsolute(legacyEvalPaths.example_schema));
   assert.equal(PROMOTION_POLICY_PATH, legacyAbsolute(legacyEvalPaths.policy));
   assert.equal(DEFAULT_EVAL_VARIANTS_PATH, legacyAbsolute(legacyEvalPaths.variants));
   assert.equal(WORKSPACE_EVAL_POLICY_PATH, legacyAbsolute(legacyNamespacePaths.workspace_policy));
@@ -123,8 +128,8 @@ test("classifier eval-path projection preserves legacy classifier paths", () => 
     legacyNamespacePaths.workspace_policy,
     legacyEvalPaths.variants,
     legacyEvalPaths.taxonomy,
-    legacyNamespacePaths.example_schema,
-    legacyNamespacePaths.annotation_schema,
+    legacyEvalPaths.example_schema,
+    legacyEvalPaths.annotation_schema,
     legacyNamespacePaths.proposal_template,
     legacyNamespacePaths.judge_prompt,
     legacyEvalPaths.accepted_runtime,
@@ -136,6 +141,13 @@ test("classifier eval-path projection preserves legacy classifier paths", () => 
     PROTECTED_SLOTS.prefix_paths.some((entry) => entry.prefix === legacyNamespacePaths.rubrics_prefix),
     true,
   );
+});
+
+test("promotion policy path resolver returns absolute and trusted relative forms", () => {
+  assert.deepEqual(resolvePromotionPolicyPath(decompositionDefinition, repoRoot), {
+    path: legacyAbsolute(legacyEvalPaths.policy),
+    relativePath: legacyEvalPaths.policy,
+  });
 });
 
 function legacyAbsolute(repoRelativePath) {

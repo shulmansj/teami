@@ -19,7 +19,7 @@ test("the orchestrator runs on a NORMAL runtime role (scaffolded, added in I-2b)
   assert.equal(ORCHESTRATOR_RUNTIME_ROLE, "orchestrator");
 });
 
-test("executeOrchestratorTurn returns { controlAction, evidence, producedContent?, sessionHandle } with a STUBBED runtime", async () => {
+test("executeOrchestratorTurn returns { controlAction, evidence, prompt, raw_output, producedContent?, sessionHandle } with a STUBBED runtime", async () => {
   const roster = createOrchestratorRoster();
   const seen = {};
   const turn = await executeOrchestratorTurn({
@@ -37,6 +37,8 @@ test("executeOrchestratorTurn returns { controlAction, evidence, producedContent
       return {
         controlAction: { action: "invoke_library", target_key: input.selectableTargets[0] },
         evidence: { perspectives_run: [] },
+        prompt: "orchestrator prompt sent to runtime",
+        raw_output: "orchestrator raw runtime output",
         producedContent: { draft_final_issues: [{ decomposition_key: "k1" }] },
         sessionHandle: "handle-1",
       };
@@ -48,6 +50,8 @@ test("executeOrchestratorTurn returns { controlAction, evidence, producedContent
     "controlAction",
     "evidence",
     "producedContent",
+    "prompt",
+    "raw_output",
     "sessionHandle",
   ]);
   // controlAction is the VALIDATED, normalized control action.
@@ -57,6 +61,8 @@ test("executeOrchestratorTurn returns { controlAction, evidence, producedContent
   assert.ok("producedContent" in turn);
   assert.deepEqual(turn.producedContent.draft_final_issues, [{ decomposition_key: "k1" }]);
   assert.notEqual(turn.evidence, turn.producedContent);
+  assert.equal(turn.prompt, "orchestrator prompt sent to runtime");
+  assert.equal(turn.raw_output, "orchestrator raw runtime output");
   assert.equal(turn.sessionHandle, "handle-1");
 
   // The roster's selectableTargets are passed to the runtime so the orchestrator
@@ -78,11 +84,15 @@ test("executeOrchestratorTurn omits producedContent when the turn authored nothi
     }),
   });
   assert.ok(!("producedContent" in turn));
+  assert.equal(turn.prompt, null);
+  assert.equal(turn.raw_output, null);
   assert.equal(turn.controlAction.action, "terminate");
   assert.equal(turn.controlAction.outcome, "pause");
 });
 
-test("executeOrchestratorTurn rejects an invalid control action from the runtime", async () => {
+test("executeOrchestratorTurn rejects an invalid control action from the runtime and surfaces a bounded transcript", async () => {
+  const longPrompt = "orchestrator prompt ".repeat(400);
+  const longRawOutput = "orchestrator raw output ".repeat(400);
   await assert.rejects(
     () =>
       executeOrchestratorTurn({
@@ -92,9 +102,20 @@ test("executeOrchestratorTurn rejects an invalid control action from the runtime
         bounds: {},
         orchestratorRuntime: async () => ({
           controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete", sneaky: 1 },
+          prompt: longPrompt,
+          raw_output: longRawOutput,
         }),
       }),
-    /orchestrator_turn_invalid_control_action/,
+    (error) => {
+      assert.match(error.message, /orchestrator_turn_invalid_control_action/);
+      assert.equal(typeof error.prompt, "string");
+      assert.equal(typeof error.raw_output, "string");
+      assert.ok(error.prompt.length <= 4096);
+      assert.ok(error.raw_output.length <= 4096);
+      assert.ok(longPrompt.startsWith(error.prompt.slice(0, 64)));
+      assert.ok(longRawOutput.startsWith(error.raw_output.slice(0, 64)));
+      return true;
+    },
   );
 });
 
@@ -151,9 +172,10 @@ test("buildOrchestratorPrompt keeps the factory contract code-owned outside the 
   const factoryContractSnippets = [
     "Reply with EXACTLY ONE JSON object that satisfies the provided schema.",
     "control_action is REQUIRED and is exactly ONE of:",
-    "- invoke_library({ action: \"invoke_library\", target_key }) to run a named library subagent;",
-    "- invoke_one_off({ action: \"invoke_one_off\", role_label, task, prompt, runtime_role }) to run an improvised subagent (runtime_role is one of pm|sr_eng);",
+    "- invoke_library({ action: \"invoke_library\", target_key, instance_id? }) to run a named library subagent;",
+    "- invoke_one_off({ action: \"invoke_one_off\", role_label, task, prompt, runtime_role, instance_id? }) to run an improvised subagent (runtime_role is one of pm|sr_eng);",
     "- terminate({ action: \"terminate\", outcome, reason }) to end the run (outcome commit -> reason synthesis_complete; outcome pause -> reason product_questions|discovery_needed|needs_pm_review).",
+    "Optional instance_id: omit it for the role's default instance; supply a fresh safe id to spawn a same-role non-default instance; reuse the resolved instance_id from a prior turn to continue it.",
     "produced_content is a SIBLING of control_action (NOT a field inside it).",
     "When you terminate with outcome commit, produced_content MUST include:",
     "- final_issues: an array of agent-ready issues, each { decomposition_key, title, issue_body_markdown, depends_on, assignment, output, acceptance_criteria };",
@@ -168,7 +190,7 @@ test("buildOrchestratorPrompt keeps the factory contract code-owned outside the 
   assert.match(tunedPrompt, /^ADOPTER TUNED GOVERNING BODY\n\nrun_id: run-factory-contract\n/);
   assert.match(
     emptyGovernancePrompt,
-    /^You are the Agentic Factory decomposition orchestrator\. Decide which subagents to run and when to terminate\.\n\nrun_id: run-factory-contract\n/,
+    /^You are the Teami decomposition orchestrator\. Decide which subagents to run and when to terminate\.\n\nrun_id: run-factory-contract\n/,
   );
 });
 

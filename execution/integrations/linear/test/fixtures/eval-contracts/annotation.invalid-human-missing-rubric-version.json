@@ -1,6 +1,6 @@
 {
   "_invalid_because": "HUMAN (and LLM) quality annotations must record metadata.rubric_version and metadata.failure_taxonomy_version; this one carries only failure_modes, so it matches neither the logical nor the Phoenix wire shape.",
-  "name": "decomposition_quality",
+  "name": "quality",
   "annotator_kind": "HUMAN",
   "label": "pass",
   "score": 0.9,

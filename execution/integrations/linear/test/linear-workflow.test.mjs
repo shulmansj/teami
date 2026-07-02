@@ -21,11 +21,13 @@ import {
   initLinear,
   replayPersistedDecompositionRun,
   resumeProjectAfterQuestions,
+  resolveLinearShape,
   runDecomposition,
   setupLinearDomain,
   verifyDeclaredWorkspace,
 } from "../src/linear-service.mjs";
 import {
+  DOMAIN_REGISTRY_SCHEMA_VERSION,
   domainRegistryPath,
   emptyDomainRegistry,
   makeDomainRecord,
@@ -95,7 +97,8 @@ import {
   writeProjectSnapshot,
 } from "../src/project-snapshot-store.mjs";
 import { readRunArtifact, writeRunArtifact } from "../../../engine/run-store.mjs";
-import { runDecompositionOrchestrator } from "../src/trigger-runner.mjs";
+import { PRODUCED_IDENTITIES_TRACE_ATTRIBUTE } from "../../../engine/produced-identities.mjs";
+import { finishWakeFromRunnerResult, runDecompositionOrchestrator } from "../src/trigger-runner.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
@@ -132,7 +135,9 @@ function commitOrchestrator(runId, { produced = commitProducedContent(runId) } =
 
 test("init provisions required Linear substrate and keeps the default project template blank", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const client = new MemoryLinearClient();
+  const client = new MemoryLinearClient({
+    workflowStates: nativeWorkflowStates(),
+  });
   let writtenCache = null;
 
   const first = await initLinear({
@@ -145,10 +150,22 @@ test("init provisions required Linear substrate and keeps the default project te
 
   assert.equal(first.ok, true);
   assert.equal(client.teams.length, 1);
-  assert.equal(client.teams[0].name, "Agentic Factory");
+  assert.equal(client.teams[0].name, "Teami");
   assert.equal(client.teams[0].key, "AF");
   assert.equal(client.projectLabels.map((label) => label.name).sort().join(","), "Has Open Questions");
-  assert.equal(client.issueLabels.map((label) => label.name).join(","), "Discovery");
+  assert.equal(client.issueLabels.map((label) => label.name).sort().join(","), "Code,Discovery,Needs Principal,Non-code");
+  assert.deepEqual(
+    client.workflowStates.map((state) => `${state.name}:${state.type}`).sort(),
+    [
+      "Backlog:backlog",
+      "Blocked:started",
+      "Done:completed",
+      "In Progress:started",
+      "In Review:started",
+      "Ready:unstarted",
+      "Todo:unstarted",
+    ],
+  );
   assert.equal(client.templates.length, 1);
   assert.match(client.templates[0].templateData.content, /## Problem Or Opportunity/);
   assert.match(client.templates[0].templateData.content, /## Desired Outcome/);
@@ -159,13 +176,328 @@ test("init provisions required Linear substrate and keeps the default project te
   assert.doesNotMatch(client.templates[0].templateData.content, /## Discovery Findings/);
   assert.doesNotMatch(client.templates[0].templateData.content, /None\./);
   assert.equal(writtenCache.projectStatuses.planned, "status-planned");
+  assert.equal(writtenCache.projectStatuses.in_progress, "status-started");
+  assert.equal(writtenCache.projectStatuses.completed, "status-completed");
+  assert.deepEqual(writtenCache.issueStatuses, {
+    backlog: "state-backlog",
+    todo: "state-todo",
+    in_progress: "state-in-progress",
+    in_review: "state-in-review",
+    blocked: "state-blocked",
+    done: "state-done",
+  });
 
   const second = await initLinear({ client, config, cache: writtenCache });
   assert.equal(second.ok, true);
   assert.equal(client.teams.length, 1);
   assert.equal(client.projectLabels.length, 1);
-  assert.equal(client.issueLabels.length, 1);
+  assert.equal(client.issueLabels.length, 4);
+  assert.equal(client.workflowStates.length, 7);
   assert.equal(client.templates.length, 1);
+});
+
+test("Memory Linear client creates workflow states with read-back list semantics", async () => {
+  const client = new MemoryLinearClient();
+
+  const created = await client.createWorkflowState({
+    name: "Review Gate",
+    type: "started",
+    teamId: "team-1",
+    color: "#f2c94c",
+    description: "Ready for human review.",
+  });
+  const states = await client.listWorkflowStates("team-1");
+
+  assert.deepEqual(created, {
+    id: "state-review-gate",
+    name: "Review Gate",
+    type: "started",
+    teamId: "team-1",
+  });
+  assert.deepEqual(
+    states.find((state) => state.id === created.id),
+    created,
+  );
+});
+
+test("init caches all configured project statuses by id and type without creation", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const originalStatuses = client.projectStatuses.map((status) => ({ ...status }));
+
+  const result = await initLinear({ client, config });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.cache.projectStatuses, {
+    backlog: "status-backlog",
+    planned: "status-planned",
+    in_progress: "status-started",
+    completed: "status-completed",
+  });
+  assert.deepEqual(result.cache.projectStatusTypes, {
+    backlog: "backlog",
+    planned: "planned",
+    in_progress: "started",
+    completed: "completed",
+  });
+  assert.deepEqual(client.projectStatuses, originalStatuses);
+});
+
+test("init provisions configured issue statuses by reusing natives and creating missing workflow states", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: nativeWorkflowStates(),
+  });
+  const originalNativeIds = Object.fromEntries(client.workflowStates.map((state) => [state.name, state.id]));
+
+  const result = await initLinear({ client, config });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.cache.issueStatuses, {
+    backlog: "state-backlog",
+    todo: "state-todo",
+    in_progress: "state-in-progress",
+    in_review: "state-in-review",
+    blocked: "state-blocked",
+    done: "state-done",
+  });
+  assert.equal(result.cache.issueStatuses.backlog, originalNativeIds.Backlog);
+  assert.equal(result.cache.issueStatuses.todo, originalNativeIds.Todo);
+  assert.equal(result.cache.issueStatuses.in_progress, originalNativeIds["In Progress"]);
+  assert.equal(result.cache.issueStatuses.done, originalNativeIds.Done);
+  assert.deepEqual(
+    client.workflowStates.filter((state) => ["In Review", "Blocked"].includes(state.name)),
+    [
+      { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
+      { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    ],
+  );
+});
+
+test("init rerun keeps issue status provisioning idempotent", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: nativeWorkflowStates(),
+  });
+  const first = await initLinear({ client, config });
+  const stateCount = client.workflowStates.length;
+
+  const second = await initLinear({ client, config, cache: first.cache });
+
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.cache.issueStatuses, first.cache.issueStatuses);
+  assert.equal(client.workflowStates.length, stateCount);
+});
+
+test("init fails loud when an issue workflow state has the wrong type", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      ...nativeWorkflowStates(),
+      { id: "state-blocked-wrong", name: "Blocked", type: "completed" },
+    ],
+  });
+  let wroteCache = false;
+
+  await assert.rejects(
+    () =>
+      initLinear({
+        client,
+        config,
+        writeCache: () => {
+          wroteCache = true;
+        },
+      }),
+    /Linear issue workflow state Blocked has type completed, expected started\./,
+  );
+  assert.equal(wroteCache, false);
+});
+
+test("init fails loud on duplicate same-name issue workflow states before cache write", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      ...nativeWorkflowStates(),
+      { id: "state-blocked", name: "Blocked", type: "started" },
+      { id: "state-blocked-copy", name: "Blocked", type: "started" },
+    ],
+  });
+  let wroteCache = false;
+
+  await assert.rejects(
+    () =>
+      initLinear({
+        client,
+        config,
+        writeCache: () => {
+          wroteCache = true;
+        },
+      }),
+    /Multiple Linear issue workflow states found named Blocked\./,
+  );
+  assert.equal(wroteCache, false);
+});
+
+test("init rerun prefers cached project status ids and remains idempotent", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const first = await initLinear({ client, config });
+  assert.equal(first.ok, true);
+
+  client.projectStatuses.push({ id: "status-planned-copy", name: "Planned Copy", type: "planned" });
+  const statusCount = client.projectStatuses.length;
+  const projectLabelCount = client.projectLabels.length;
+  const issueLabelCount = client.issueLabels.length;
+  const templateCount = client.templates.length;
+
+  const second = await initLinear({ client, config, cache: first.cache });
+  const shape = await resolveLinearShape({ client, config, cache: second.cache });
+
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.cache.projectStatuses, first.cache.projectStatuses);
+  assert.deepEqual(second.cache.projectStatusTypes, first.cache.projectStatusTypes);
+  assert.equal(client.projectStatuses.length, statusCount);
+  assert.equal(client.projectLabels.length, projectLabelCount);
+  assert.equal(client.issueLabels.length, issueLabelCount);
+  assert.equal(client.templates.length, templateCount);
+  for (const role of ["backlog", "planned", "in_progress", "completed"]) {
+    assert.equal(shape.projectStatuses[role].id, first.cache.projectStatuses[role]);
+    assert.equal(shape.projectStatuses[role].resolution, "stable_id");
+  }
+});
+
+test("init fails loud when a cached project status has the wrong type", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const first = await initLinear({ client, config });
+  assert.equal(first.ok, true);
+  client.projectStatuses.find((status) => status.id === "status-planned").type = "started";
+  let wroteCache = false;
+
+  await assert.rejects(
+    () =>
+      initLinear({
+        client,
+        config,
+        cache: first.cache,
+        writeCache: () => {
+          wroteCache = true;
+        },
+      }),
+    /Cached Linear project status planned has type started, expected planned\./,
+  );
+  assert.equal(wroteCache, false);
+});
+
+test("init fails loud on ambiguous project status native type without cached id", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  client.projectStatuses.push({ id: "status-planned-copy", name: "Planned Copy", type: "planned" });
+  let wroteCache = false;
+
+  await assert.rejects(
+    () =>
+      initLinear({
+        client,
+        config,
+        writeCache: () => {
+          wroteCache = true;
+        },
+      }),
+    /Cannot resolve project status mapping 'planned' by native type 'planned': found 2\./,
+  );
+  assert.equal(wroteCache, false);
+});
+
+test("resolveLinearShape exposes all configured project status roles", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const result = await initLinear({ client, config });
+
+  const shape = await resolveLinearShape({ client, config, cache: result.cache });
+
+  assert.deepEqual(Object.keys(shape.projectStatuses).sort(), [
+    "backlog",
+    "completed",
+    "in_progress",
+    "planned",
+  ]);
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(shape.projectStatuses).map(([role, status]) => [
+        role,
+        { id: status.id, type: status.type, resolution: status.resolution },
+      ]),
+    ),
+    {
+      backlog: { id: "status-backlog", type: "backlog", resolution: "stable_id" },
+      planned: { id: "status-planned", type: "planned", resolution: "stable_id" },
+      in_progress: { id: "status-started", type: "started", resolution: "stable_id" },
+      completed: { id: "status-completed", type: "completed", resolution: "stable_id" },
+    },
+  );
+});
+
+test("resolveLinearShape exposes all configured issue status roles", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const result = await initLinear({ client, config });
+
+  const shape = await resolveLinearShape({ client, config, cache: result.cache });
+
+  assert.deepEqual(Object.keys(shape.issueStatuses).sort(), [
+    "backlog",
+    "blocked",
+    "done",
+    "in_progress",
+    "in_review",
+    "todo",
+  ]);
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(shape.issueStatuses).map(([role, status]) => [
+        role,
+        { id: status.id, type: status.type, resolution: status.resolution },
+      ]),
+    ),
+    {
+      backlog: { id: "state-backlog", type: "backlog", resolution: "stable_id" },
+      todo: { id: "state-todo", type: "unstarted", resolution: "stable_id" },
+      in_progress: { id: "state-in-progress", type: "started", resolution: "stable_id" },
+      in_review: { id: "state-in-review", type: "started", resolution: "stable_id" },
+      blocked: { id: "state-blocked", type: "started", resolution: "stable_id" },
+      done: { id: "state-done", type: "completed", resolution: "stable_id" },
+    },
+  );
+});
+
+test("resolveLinearShape exposes optional configured work_type issue labels", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const result = await initLinear({ client, config });
+
+  const shape = await resolveLinearShape({ client, config, cache: result.cache });
+
+  assert.equal(shape.issueLabels.work_type_code.id, "ilabel-code");
+  assert.equal(shape.issueLabels.work_type_code.name, "Code");
+  assert.equal(shape.issueLabels.work_type_non_code.id, "ilabel-non-code");
+  assert.equal(shape.issueLabels.work_type_non_code.name, "Non-code");
+});
+
+test("resolveLinearShape tolerates unprovisioned optional work_type labels without cached ids", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const result = await initLinear({ client, config });
+  client.issueLabels = client.issueLabels.filter((label) => !["Code", "Non-code"].includes(label.name));
+  const oldCache = structuredClone(result.cache);
+  delete oldCache.issueLabels.Code;
+  delete oldCache.issueLabels["Non-code"];
+
+  const shape = await resolveLinearShape({ client, config, cache: oldCache });
+
+  assert.equal(shape.issueLabels.discovery.id, "ilabel-discovery");
+  assert.equal(Object.hasOwn(shape.issueLabels, "work_type_code"), false);
+  assert.equal(Object.hasOwn(shape.issueLabels, "work_type_non_code"), false);
 });
 
 test("Init without a domain name does not mutate anything", async () => {
@@ -789,7 +1121,7 @@ test("bare init resumes a single setup_incomplete domain instead of asking for a
 
 test("bare init resumes GitHub when Linear is active but GitHub setup is incomplete", () => {
   const registry = {
-    schema_version: "agentic-factory-domain-registry/v1",
+    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
     domains: [
       {
         id: "turnip",
@@ -1355,7 +1687,7 @@ test("Webhook id and team id land in the registry entry", async () => {
 
 test("Bootstrap to promotion flow lands tokens under the domain-scoped target before active registry", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-credential-promotion-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-credential-promotion-"));
   const client = new MemoryLinearClient();
   let registry = emptyDomainRegistry();
   const bootstrapStore = createLinearCredentialStore({
@@ -1509,10 +1841,10 @@ test("domain:add and init share setupLinearDomain for a second workspace with is
 
 test("Failure mid-add leaves the first domain registry entry, credentials, and cache byte-identical", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-domain-add-isolation-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-add-isolation-"));
   let registry = emptyDomainRegistry();
   const credentialStatePath = (domainId) =>
-    path.join(tempRoot, ".agentic-factory", "domains", domainId, "runner-credential-state.json");
+    path.join(tempRoot, ".teami", "domains", domainId, "runner-credential-state.json");
 
   await setupLinearDomain({
     client: new MemoryLinearClient({ workspaceId: "workspace-1" }),
@@ -1584,7 +1916,7 @@ test("Failure mid-add leaves the first domain registry entry, credentials, and c
 test("trigger-status all-domains display resolves wake contract identity through the local registry", () => {
   const config = loadLinearConfig({ repoRoot });
   const registry = {
-    schema_version: "agentic-factory-domain-registry/v1",
+    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
     domains: [
       makeDomainRecord({
         domainId: "support-ops",
@@ -1639,8 +1971,8 @@ test("trigger-status all-domains display resolves wake contract identity through
 });
 
 test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runner-lock-dead-"));
-  const lockPath = path.join(tempRoot, ".agentic-factory", "domains", "support-ops", ".lock");
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-dead-"));
+  const lockPath = path.join(tempRoot, ".teami", "domains", "support-ops", ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(
     lockPath,
@@ -1673,8 +2005,8 @@ test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", 
 });
 
 test("runner lock breaks a stale live-pid lock after the stale age", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runner-lock-stale-"));
-  const lockPath = path.join(tempRoot, ".agentic-factory", "domains", "support-ops", ".lock");
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-stale-"));
+  const lockPath = path.join(tempRoot, ".teami", "domains", "support-ops", ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(
     lockPath,
@@ -1702,7 +2034,7 @@ test("runner lock breaks a stale live-pid lock after the stale age", () => {
 });
 
 test("runner lock live-pid contention yields the clean already-running message", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runner-lock-live-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-live-"));
   const lock = acquireDomainRunnerLock({
     repoRoot: tempRoot,
     domainId: "support-ops",
@@ -1725,7 +2057,7 @@ test("runner lock live-pid contention yields the clean already-running message",
 });
 
 test("runner lock release only removes the lock when the token still matches", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runner-lock-token-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-token-"));
   const lock = acquireDomainRunnerLock({
     repoRoot: tempRoot,
     domainId: "support-ops",
@@ -1748,10 +2080,10 @@ test("runner lock release only removes the lock when the token still matches", (
 
 test("uninstall with a registry and ambiguous domain selection fails before cleanup", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-ambiguous-uninstall-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-ambiguous-uninstall-"));
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const supervisorRegistrationPath = path.join(tempRoot, ".agentic-factory", "supervisor", "registration.json");
+  const supervisorRegistrationPath = path.join(tempRoot, ".teami", "supervisor", "registration.json");
   const registry = upsertDomainRecord(
     upsertDomainRecord(
       emptyDomainRegistry(),
@@ -1800,7 +2132,7 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
 
 test("uninstall with a registry and one active domain still marks only that domain removed", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-single-domain-uninstall-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-single-domain-uninstall-"));
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
   const registry = upsertDomainRecord(
@@ -1836,10 +2168,10 @@ test("uninstall with a registry and one active domain still marks only that doma
 
 test("reset with a removed-status ghost entry and no credentials completes and wipes local state", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-reset-removed-ghost-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-reset-removed-ghost-"));
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const domainCachePath = path.join(tempRoot, ".agentic-factory", "domains", "zztest-secondary", "linear.json");
+  const domainCachePath = path.join(tempRoot, ".teami", "domains", "zztest-secondary", "linear.json");
   const registry = upsertDomainRecord(
     emptyDomainRegistry(),
     makeDomainRecord({
@@ -1883,7 +2215,7 @@ test("reset with a removed-status ghost entry and no credentials completes and w
 
 test("supervisor command context falls back to legacy when the domain registry is absent", () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-supervisor-no-registry-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-supervisor-no-registry-"));
   const context = resolveSupervisorCommandContext({
     config,
     repoRoot: tempRoot,
@@ -1898,7 +2230,7 @@ test("supervisor command context falls back to legacy when the domain registry i
 
 test("supervisor command context surfaces corrupt registry JSON instead of legacy fallback", () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-supervisor-corrupt-registry-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-supervisor-corrupt-registry-"));
   const registryPath = domainRegistryPath(tempRoot);
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, "{ not json", "utf8");
@@ -1916,7 +2248,7 @@ test("supervisor command context surfaces corrupt registry JSON instead of legac
 
 test("supervisor command context uses healthy domain registry context", () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-supervisor-domain-registry-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-supervisor-domain-registry-"));
   const registry = upsertDomainRecord(
     emptyDomainRegistry(),
     makeDomainRecord({
@@ -1939,7 +2271,7 @@ test("supervisor command context uses healthy domain registry context", () => {
   assert.equal(context.domainId, "support-ops");
   assert.equal(Object.hasOwn(context, "runnerCredentialStore"), false);
   assert.equal(context.config.linear.team.key, "SUP");
-  assert.match(context.cachePath.replace(/\\/g, "/"), /\/\.agentic-factory\/domains\/support-ops\/linear\.json$/);
+  assert.match(context.cachePath.replace(/\\/g, "/"), /\/\.teami\/domains\/support-ops\/linear\.json$/);
 });
 
 test("doctor fails closed when project status native type mappings are ambiguous", async () => {
@@ -1971,7 +2303,7 @@ test("doctor fails closed when project status native type mappings are ambiguous
 });
 
 test("doctor on a healthy single-domain setup shows one domain block", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-domain-doctor-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-doctor-"));
   const registry = upsertDomainRecord(
     emptyDomainRegistry(),
     makeDomainRecord({
@@ -1981,7 +2313,7 @@ test("doctor on a healthy single-domain setup shows one domain block", () => {
       workspaceName: "Example Workspace",
       teamId: "team-1",
       teamKey: "AF",
-      teamName: "Agentic Factory",
+      teamName: "Teami",
       webhookId: "webhook-1",
     }),
   );
@@ -1994,7 +2326,7 @@ test("doctor on a healthy single-domain setup shows one domain block", () => {
   assert.equal(result.checks.length, 1);
   assert.equal(result.checks[0].name, "domain support-ops");
   assert.match(result.checks[0].message, /active/);
-  assert.match(result.checks[0].message, /team=team-1 AF Agentic Factory/);
+  assert.match(result.checks[0].message, /team=team-1 AF Teami/);
 });
 
 test("doctor on a two-domain fixture reports each domain independently with setup repair text", () => {
@@ -2035,11 +2367,11 @@ test("doctor on a two-domain fixture reports each domain independently with setu
 });
 
 test("doctor with a deliberately corrupted registry refuses to guess and names the repair path", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-domain-doctor-corrupt-"));
-  const registryPath = path.join(tempRoot, ".agentic-factory", "domains.json");
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-doctor-corrupt-"));
+  const registryPath = path.join(tempRoot, ".teami", "domains.json");
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, "{ not json", "utf8");
-  const legacyCachePath = path.join(tempRoot, ".agentic-factory", "linear.json");
+  const legacyCachePath = path.join(tempRoot, ".teami", "linear.json");
   fs.writeFileSync(
     legacyCachePath,
     JSON.stringify({
@@ -2239,6 +2571,83 @@ test("an eval-mode decomposition run records execution_mode eval on the run-vers
   const persisted = readRunArtifact({ runId, runStoreDir });
   assert.equal(persisted.execution_mode, "eval");
   assert.deepEqual(persisted.accepted_refs, orchestratorRun.acceptedRefs);
+});
+
+test("produced identities carry artifact-set lineage when a prior turn authored the committed content", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = await initializedClient(config);
+  const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
+  const runId = "run-artifact-set-lineage";
+  const runStoreDir = tempRunStore();
+  let turn = 0;
+  const orchestratorTurnExecutor = async () => {
+    turn += 1;
+    if (turn === 1) {
+      return {
+        controlAction: { action: "invoke_library", target_key: "prompt/decomposition/pm_product_sufficiency_pass" },
+        evidence: null,
+      };
+    }
+    if (turn === 2) {
+      return {
+        controlAction: { action: "invoke_library", target_key: "prompt/decomposition/sr_eng_grounding_pass" },
+        producedContent: commitProducedContent(runId),
+        evidence: null,
+      };
+    }
+    return {
+      controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+      evidence: null,
+    };
+  };
+
+  const orchestratorRun = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-artifact-set-lineage", object_id: project.id },
+    event: null,
+    project,
+    config,
+    runtimeExecutor: fakeSubagentExecutor(),
+    orchestratorTurnExecutor,
+    roster: fakeRoster(),
+    repoRoot,
+  });
+
+  assert.equal(orchestratorRun.output.terminal_output.outcome, "commit");
+  assert.equal(orchestratorRun.output.artifact_set_lineage.produced_by_turn_id, 2);
+  assert.equal(orchestratorRun.output.artifact_set_lineage.commit_decision_turn_id, 3);
+
+  const result = await runDecomposition({
+    client,
+    config,
+    cache: client.cache,
+    projectId: project.id,
+    runStoreDir,
+    runResult: orchestratorRun.output,
+    environment: orchestratorRun.environment,
+    runtimeEvidence: orchestratorRun.runtimeEvidence,
+    runId,
+    acceptedRefs: orchestratorRun.acceptedRefs,
+  });
+
+  assert.equal(result.status, "completed");
+  const lineage = result.produced_identities[0].artifact_set_lineage;
+  assert.deepEqual(lineage, {
+    lineage_scope: "artifact_set",
+    produced_by_turn_id: 2,
+    commit_decision_turn_id: 3,
+    informed_by_turn_ids: ["1.1"],
+    source_refs: [{ kind: "linear_project", id: "project-1" }],
+  });
+  assert.notEqual(lineage.produced_by_turn_id, lineage.commit_decision_turn_id);
+  assert.deepEqual(result.artifact.artifact_set_lineage, lineage);
+  assert.deepEqual(result.artifact.produced_identities[0].artifact_set_lineage, lineage);
+  assert.deepEqual(
+    result.trace.attributes[PRODUCED_IDENTITIES_TRACE_ATTRIBUTE][0].artifact_set_lineage,
+    lineage,
+  );
+  assert.deepEqual(readRunArtifact({ runId, runStoreDir }).artifact_set_lineage, lineage);
+  assert.equal(JSON.stringify(result.produced_identities).includes("terminal_source_turn_id"), false);
 });
 
 test("a first-pass pause needs only one subagent turn and commits authored prose exactly", async () => {
@@ -2506,7 +2915,7 @@ test("happy path creates issues, posts the authored completion update, and keeps
   assert.equal(result.created.length, 2);
   assert.equal(result.relationsCreated.length, 1);
   assert.equal(client.projects[0].status.id, "status-started");
-  assert.deepEqual(client.issues.map((issue) => issue.state.id), ["state-backlog", "state-backlog"]);
+  assert.deepEqual(client.issues.map((issue) => issue.state.id), ["state-todo", "state-todo"]);
   assert.deepEqual(client.issues.map((issue) => extractDecompositionKey(issue.description)), [
     "project-plan",
     "project-build",
@@ -2516,7 +2925,7 @@ test("happy path creates issues, posts the authored completion update, and keeps
     client.projectUpdates[0].body,
     projectUpdateMarkdownForRun("run-happy", "Decomposition completed with two issues."),
   );
-  assert.equal(result.trace.annotations.some((annotation) => annotation.name === "decomposition_quality"), false);
+  assert.equal(result.trace.annotations.some((annotation) => annotation.name === "quality"), false);
 
   const offline = evaluateDecompositionQualityOffline({
     issues: commitFinalIssues("run-happy").map((issue) => ({
@@ -2527,20 +2936,20 @@ test("happy path creates issues, posts the authored completion update, and keeps
     })),
     dependencies: result.relationsCreated,
   });
-  assert.equal(offline.name, "decomposition_quality");
+  assert.equal(offline.name, "quality");
   assert.equal(offline.label, "pass");
 });
 
 const FIRST_SUCCESSFUL_SESSION_MANUAL_VALIDATION_CHECKLIST = [
   "Manual validation checklist (live Linear sandbox):",
   "1. Create a Planned project with no Has Open Questions label, open Discovery issue, or prior execution issue.",
-  "2. Trigger decomposition and confirm non-discovery execution issues appear, with at least one in Ready.",
-  "3. Open a Ready issue cold and confirm its body has a decomposition key, concrete assignment, output, acceptance criteria, and dependency context.",
+  "2. Trigger decomposition and confirm non-discovery execution issues appear in Todo.",
+  "3. Open a Todo issue cold and confirm its body has a decomposition key, concrete assignment, output, acceptance criteria, and dependency context.",
   "4. Read the project update's What I did with each part of your project section and confirm open risks are understandable in product terms.",
 ].join("\n");
 
-test("first successful session creates pick-up-able Ready issues and accountability prose", async () => {
-  const config = configWithReadyStatus(loadLinearConfig({ repoRoot }));
+test("first successful session creates pick-up-able Todo issues and accountability prose", async () => {
+  const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, {
     statusId: "status-planned",
@@ -2589,16 +2998,16 @@ test("first successful session creates pick-up-able Ready issues and accountabil
   assert.ok(createdExecutionIssues.length >= 1);
   assert.equal(createdExecutionIssues.length, result.created.length);
 
-  const configuredReadyState = client.workflowStates.find(
-    (state) => state.name === config.linear.issue.statuses.ready.name,
+  const configuredTodoState = client.workflowStates.find(
+    (state) => state.name === config.linear.issue.statuses.todo.name,
   );
-  assert.ok(configuredReadyState);
-  const readyUnassignedIssue = createdExecutionIssues.find(
-    (issue) => issue.state.id === configuredReadyState.id && issue.assigneeId === undefined,
+  assert.ok(configuredTodoState);
+  const todoUnassignedIssue = createdExecutionIssues.find(
+    (issue) => issue.state.id === configuredTodoState.id && issue.assigneeId === undefined,
   );
-  assert.ok(readyUnassignedIssue);
-  assert.equal(readyUnassignedIssue.assigneeId, undefined);
-  assert.equal(readyUnassignedIssue.assignee, undefined);
+  assert.ok(todoUnassignedIssue);
+  assert.equal(todoUnassignedIssue.assigneeId, undefined);
+  assert.equal(todoUnassignedIssue.assignee, undefined);
 
   assert.equal(result.artifact.terminal_output.outcome, "commit");
   const terminalFinalIssues = result.artifact.terminal_output.final_issues || result.artifact.final_issues;
@@ -2664,7 +3073,7 @@ test("first successful session creates pick-up-able Ready issues and accountabil
   );
   assert.equal(/proposal|acceptance/i.test(client.projects[0].status.name), false);
   assert.match(FIRST_SUCCESSFUL_SESSION_MANUAL_VALIDATION_CHECKLIST, /live Linear sandbox/);
-  assert.match(FIRST_SUCCESSFUL_SESSION_MANUAL_VALIDATION_CHECKLIST, /Open a Ready issue cold/);
+  assert.match(FIRST_SUCCESSFUL_SESSION_MANUAL_VALIDATION_CHECKLIST, /Open a Todo issue cold/);
 });
 
 test("commit appends advisory quality line to the existing project update before apply", async () => {
@@ -2728,6 +3137,143 @@ test("commit appends advisory quality line to the existing project update before
   );
 });
 
+test("quality judge advisory records own-run spans for judged, missing, and invalid without non-judgment annotations", async () => {
+  const scenarios = [
+    {
+      state: "judged",
+      resultFor(runId, authoredUpdate) {
+        return {
+          ok: true,
+          judge_state: "judged",
+          run_id: runId,
+          trace_id: "bbbbccccddddeeeeffff000011112222",
+          trace_status: "trace_exported",
+          evaluator_id: "decomposition_quality_judge_v1",
+          identifier: "decomposition_quality_judge_v1:judge-model-test",
+          model: "judge-model-test",
+          runtime: "codex",
+          prompt_source: "repo_accepted_snapshot",
+          prompt_version: "sha256:judge-prompt-test",
+          rubric_version: "1.0.0",
+          failure_taxonomy_version: "1.0.0",
+          judge_inputs: { terminal_status: "completed", project_update_markdown: authoredUpdate },
+          judge_prompt: `judge prompt for ${runId}`,
+          raw_output: "{\"label\":\"pass\",\"score\":0.91,\"explanation\":\"ok\",\"failure_modes\":[]}",
+          judge: {
+            label: "pass",
+            score: 0.91,
+            explanation: "The issue set preserves the stated project sections.",
+            failure_modes: [],
+            failure_mode_details: [],
+          },
+          low_confidence_reasons: [],
+          storage: "phoenix_native",
+          annotation_ids: ["anno-test"],
+        };
+      },
+    },
+    {
+      state: "judge_missing",
+      resultFor(runId, authoredUpdate) {
+        return {
+          ok: false,
+          judge_state: "judge_missing",
+          reason: "judge_runtime_failed:timeout",
+          run_id: runId,
+          trace_id: "bbbbccccddddeeeeffff000011112222",
+          trace_status: "trace_exported",
+          evaluator_id: "decomposition_quality_judge_v1",
+          identifier: "decomposition_quality_judge_v1:judge-model-test",
+          model: "judge-model-test",
+          runtime: "codex",
+          prompt_source: "repo_accepted_snapshot",
+          prompt_version: "sha256:judge-prompt-test",
+          rubric_version: "1.0.0",
+          failure_taxonomy_version: "1.0.0",
+          judge_inputs: { terminal_status: "completed", project_update_markdown: authoredUpdate },
+          judge_prompt: `judge prompt for ${runId}`,
+          raw_output: "runtime failed before a judgment was produced",
+          judge: null,
+          low_confidence_reasons: [],
+          storage: "report_only",
+          annotation_ids: [],
+        };
+      },
+    },
+    {
+      state: "judge_invalid",
+      resultFor(runId, authoredUpdate) {
+        return {
+          ok: false,
+          judge_state: "judge_invalid",
+          reason: "malformed_judge_output:invalid_json_output",
+          parse_failures: ["invalid_json_output"],
+          run_id: runId,
+          trace_id: "bbbbccccddddeeeeffff000011112222",
+          trace_status: "trace_exported",
+          evaluator_id: "decomposition_quality_judge_v1",
+          identifier: "decomposition_quality_judge_v1:judge-model-test",
+          model: "judge-model-test",
+          runtime: "codex",
+          prompt_source: "repo_accepted_snapshot",
+          prompt_version: "sha256:judge-prompt-test",
+          rubric_version: "1.0.0",
+          failure_taxonomy_version: "1.0.0",
+          judge_inputs: { terminal_status: "completed", project_update_markdown: authoredUpdate },
+          judge_prompt: `judge prompt for ${runId}`,
+          raw_output: "not json",
+          raw_output_excerpt: "not json",
+          judge: null,
+          low_confidence_reasons: [],
+          storage: "report_only",
+          annotation_ids: [],
+        };
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const config = loadLinearConfig({ repoRoot });
+    const client = await initializedClient(config);
+    const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
+    const runId = `run-quality-judge-span-${scenario.state}`;
+    const authoredUpdate = projectUpdateMarkdownForRun(
+      runId,
+      `Decomposition completed while the advisory judge returned ${scenario.state}.`,
+    );
+    const judgeResult = scenario.resultFor(runId, authoredUpdate);
+
+    const result = await runDecomposition({
+      client,
+      config,
+      cache: client.cache,
+      projectId: project.id,
+      runStoreDir: tempRunStore(),
+      environment: safeEnvironment(),
+      runtimeEvidence: runtimeEvidenceForRun(runId),
+      runResult: commitRunResult(runId, {
+        terminalOutput: { project_update_markdown: authoredUpdate },
+      }),
+      qualityJudge: async () => judgeResult,
+    });
+
+    assert.equal(result.status, "completed", scenario.state);
+    const span = result.trace.spans.find((candidate) => candidate.name === "quality_judge_run");
+    assert.ok(span, `${scenario.state} should record a quality_judge_run span`);
+    assert.equal(span.attributes.judge_state, scenario.state);
+    assert.equal(span.attributes.asked.prompt, judgeResult.judge_prompt);
+    assert.deepEqual(span.attributes.asked.inputs, judgeResult.judge_inputs);
+    assert.equal(span.attributes.did.raw_output, judgeResult.raw_output);
+    assert.equal(span.attributes.outcome.judge_state, scenario.state);
+    assert.deepEqual(span.attributes.outcome.annotation_ids, judgeResult.annotation_ids);
+    assert.equal(span.attributes.settings.model, "judge-model-test");
+    if (scenario.state !== "judged") {
+      assert.deepEqual(span.attributes.outcome.annotation_ids, [], `${scenario.state} must not carry annotation ids`);
+      assert.equal(result.trace.annotations.length, 0, `${scenario.state} must not write trace annotations`);
+    }
+  }
+});
+
 test("pause proceeds with an unavailable advisory line when the quality judge returns null", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
@@ -2785,8 +3331,8 @@ test("terminal decomposition requires accepted subagent turn evidence for runtim
   assert.equal(client.projects[0].status.id, "status-planned");
 });
 
-test("issue creation uses configured Ready for committed execution issues without assignees", async () => {
-  const config = configWithReadyStatus(loadLinearConfig({ repoRoot }));
+test("issue creation uses configured Todo for committed execution issues without assignees", async () => {
+  const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
   const shape = await shapeForClient(client);
@@ -2800,14 +3346,14 @@ test("issue creation uses configured Ready for committed execution issues withou
   assert.equal(second.reused.length, 2);
   assert.equal(second.relationsCreated.length, 0);
   assert.equal(second.relationsReused.length, 1);
-  assert.deepEqual(client.issues.map((issue) => issue.state.id), ["state-ready", "state-ready"]);
+  assert.deepEqual(client.issues.map((issue) => issue.state.id), ["state-todo", "state-todo"]);
   assert.deepEqual(client.issues.map((issue) => issue.assigneeId), [undefined, undefined]);
   assert.deepEqual(client.issues.map((issue) => issue.labelIds), [[], []]);
   assert.equal(extractDecompositionKey("* Decomposition key: live-linear-key\n\nBody"), "live-linear-key");
 });
 
 test("hostile project prose cannot bind execution issue assignee or label selectors", async () => {
-  const config = configWithReadyStatus(loadLinearConfig({ repoRoot }));
+  const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   client.issueLabels.push({ id: "ilabel-attacker", name: "Attacker", teamId: "team-1" });
   const attackerAssigneeId = "attacker-agent";
@@ -2850,7 +3396,7 @@ test("hostile project prose cannot bind execution issue assignee or label select
   });
 
   assert.equal(result.status, "completed");
-  assert.deepEqual(client.issues.map((issue) => issue.state.id), ["state-ready", "state-ready"]);
+  assert.deepEqual(client.issues.map((issue) => issue.state.id), ["state-todo", "state-todo"]);
   assert.deepEqual(client.issues.map((issue) => issue.assigneeId), [undefined, undefined]);
   assert.deepEqual(client.issues.map((issue) => issue.labelIds), [[], []]);
   assert.deepEqual(client.issues.map((issue) => issue.labels), [[], []]);
@@ -2870,7 +3416,7 @@ test("hostile project prose cannot retarget the commit's team/project/state writ
   // retargeting demands into the orchestrator's structured final_issues, then
   // asserts the resolved write destination is unchanged. A future regression
   // that lets prose bind the destination fails here.
-  const config = configWithReadyStatus(loadLinearConfig({ repoRoot }));
+  const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const engineTeamId = client.teams[0].id;
   const attackerTeamId = "team-attacker-99";
@@ -2918,11 +3464,11 @@ test("hostile project prose cannot retarget the commit's team/project/state writ
   assert.equal(result.status, "completed");
   assert.equal(client.issues.length, 2);
   // Every issue is written to the ENGINE-resolved team + project, never the
-  // attacker's, and lands in the config-resolved Ready state.
+  // attacker's, and lands in the config-resolved Todo state.
   for (const issue of client.issues) {
     assert.equal(issue.teamId, engineTeamId, "team write target must be the engine shape team");
     assert.equal(issue.projectId, engineProjectId, "project write target must be the engine project");
-    assert.equal(issue.state.id, "state-ready", "issue state must be the config-resolved Ready state");
+    assert.equal(issue.state.id, "state-todo", "issue state must be the config-resolved Todo state");
   }
   // The attacker identifiers and the exfiltration target never reach Linear in
   // ANY field of the created issues.
@@ -3056,7 +3602,7 @@ test("replay reruns terminal validation and gate before applying a persisted com
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
-      teamName: "Agentic Factory",
+      teamName: "Teami",
       webhookId: "webhook-1",
     }),
   });
@@ -3379,7 +3925,7 @@ test("accepted artifacts persist before Linear mutation and replay ignores chang
     workspaceId: "workspace-1",
     teamId: "team-1",
     teamKey: "AF",
-    teamName: "Agentic Factory",
+    teamName: "Teami",
     webhookId: "webhook-1",
   });
   const replayed = await replayPersistedDecompositionRun({
@@ -3416,6 +3962,22 @@ test("replay skips the Linear issue effect when the probe sees the committed sta
   });
   assert.equal(first.status, "completed");
   assert.equal(client.projectUpdates.length, 1);
+  const expectedProducedIdentities = [{
+    effect_id: "linear_issues",
+    provider: "linear",
+    resource_kind: "linear_issue",
+    target_ids: ["issue-1", "issue-2"],
+    identity: {
+      issue_ids: ["issue-1", "issue-2"],
+      dependency_relation_ids: ["relation-1"],
+      project_update_id: "project-update-1",
+    },
+  }];
+  assert.deepEqual(first.produced_identities, expectedProducedIdentities);
+  assert.deepEqual(first.artifact.produced_identities, expectedProducedIdentities);
+  assert.deepEqual(first.trace.attributes[PRODUCED_IDENTITIES_TRACE_ATTRIBUTE], expectedProducedIdentities);
+  assertNoResultOrTraceKeys(first.produced_identities);
+  assert.doesNotThrow(() => JSON.stringify(first.trace));
 
   const mutationCalls = [];
   const replayed = await runDecomposition({
@@ -3431,7 +3993,7 @@ test("replay skips the Linear issue effect when the probe sees the committed sta
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
-      teamName: "Agentic Factory",
+      teamName: "Teami",
       webhookId: "webhook-1",
     }),
     onBeforeLinearMutation: (event) => mutationCalls.push(event),
@@ -3444,6 +4006,38 @@ test("replay skips the Linear issue effect when the probe sees the committed sta
   assert.equal(replayed.reused.length, 2);
   assert.equal(replayed.relationsCreated.length, 0);
   assert.equal(replayed.relationsReused.length, 1);
+  assert.deepEqual(replayed.produced_identities, expectedProducedIdentities);
+  assert.deepEqual(replayed.artifact.produced_identities, expectedProducedIdentities);
+  assert.deepEqual(replayed.trace.attributes[PRODUCED_IDENTITIES_TRACE_ATTRIBUTE], expectedProducedIdentities);
+  assertNoResultOrTraceKeys(replayed.produced_identities);
+  assert.doesNotThrow(() => JSON.stringify(replayed.trace));
+});
+
+test("runner wake completion provider_update_ids include reused Linear issue ids", async () => {
+  const completeCalls = [];
+  const result = await finishWakeFromRunnerResult({
+    store: {
+      async completeWake(input) {
+        completeCalls.push(input);
+        return {
+          wake: { id: input.wakeId, status: input.status },
+          run: { provider_update_ids: input.providerUpdateIds },
+        };
+      },
+    },
+    wake: { id: "wake-1" },
+    runnerId: "runner-1",
+    leaseToken: "lease-1",
+    result: {
+      status: "completed",
+      projectUpdate: { id: "project-update-1" },
+      created: [],
+      reused: [{ id: "issue-1" }, { id: "issue-2" }],
+    },
+  });
+
+  assert.deepEqual(completeCalls[0].providerUpdateIds, ["project-update-1", "issue-1", "issue-2"]);
+  assert.deepEqual(result.run.provider_update_ids, ["project-update-1", "issue-1", "issue-2"]);
 });
 
 test("fresh commit returns the full apply result when runner relation readback is limited", async () => {
@@ -3540,7 +4134,7 @@ test("legacy v3 commit artifacts migrate on read and replay intentionally", asyn
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
-      teamName: "Agentic Factory",
+      teamName: "Teami",
       webhookId: "webhook-1",
     }),
   });
@@ -3660,7 +4254,7 @@ test("persisted artifact replayed against the wrong project fails before Linear 
           workspaceId: "workspace-1",
           teamId: "team-1",
           teamKey: "AF",
-          teamName: "Agentic Factory",
+          teamName: "Teami",
           webhookId: "webhook-1",
         }),
       }),
@@ -3708,7 +4302,7 @@ test("checkpoint artifacts are explicit non-terminal replay states", async () =>
           workspaceId: "workspace-1",
           teamId: "team-1",
           teamKey: "AF",
-          teamName: "Agentic Factory",
+          teamName: "Teami",
           webhookId: "webhook-1",
         }),
       }),
@@ -3740,7 +4334,7 @@ test("legacy v3 checkpoint artifacts are readable but still rejected at replay",
           workspaceId: "workspace-1",
           teamId: "team-1",
           teamKey: "AF",
-          teamName: "Agentic Factory",
+          teamName: "Teami",
           webhookId: "webhook-1",
         }),
       }),
@@ -3876,7 +4470,7 @@ test("replaying a persisted run never overwrites the original project snapshot",
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
-      teamName: "Agentic Factory",
+      teamName: "Teami",
       webhookId: "webhook-1",
     }),
   });
@@ -4012,11 +4606,11 @@ test("traces include stable domain_id, workspace_id, team_id, and behavior repo 
     }),
   });
 
-  assert.equal(result.trace.attributes["agentic_factory.domain_id"], "domain-a");
+  assert.equal(result.trace.attributes["teami.domain_id"], "domain-a");
   assert.equal(result.trace.attributes["linear.workspace_id"], "workspace-a");
   assert.equal(result.trace.attributes["linear.team_id"], "team-a");
-  assert.equal(result.trace.attributes["agentic_factory.behavior_repo_id"], "local:test-behavior");
-  assert.equal(Object.hasOwn(result.trace.attributes, "agentic_factory.domain_name"), false);
+  assert.equal(result.trace.attributes["teami.behavior_repo_id"], "local:test-behavior");
+  assert.equal(Object.hasOwn(result.trace.attributes, "teami.domain_name"), false);
 });
 
 test("emitted trace attrs never contain fabricated domain_id without context or cache identity", async () => {
@@ -4036,7 +4630,7 @@ test("emitted trace attrs never contain fabricated domain_id without context or 
   });
 
   assert.equal(result.status, "ineligible");
-  assert.equal(Object.hasOwn(result.trace.attributes, "agentic_factory.domain_id"), false);
+  assert.equal(Object.hasOwn(result.trace.attributes, "teami.domain_id"), false);
   assert.equal(Object.hasOwn(result.trace.attributes, "domain_id"), false);
   assert.equal(result.trace.attributes["linear.workspace_id"], "workspace-1");
   assert.equal(result.trace.attributes["linear.team_id"], "team-1");
@@ -4109,7 +4703,7 @@ test("runtime config accepts session_start subagents without warm continuation",
 
 test("per-role runtime config supports different Codex and Claude session start commands", () => {
   const config = loadLinearConfig({ repoRoot });
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
   assert.equal(assignments.pm.runtime, "claude");
   assert.equal(assignments.pm.model, "claude-opus-4-8");
   assert.deepEqual(assignments.pm.warm_continuation, { enabled: false, required: false });
@@ -4297,15 +4891,15 @@ test("per-role runtime config supports different Codex and Claude session start 
           },
         },
       },
-    }).sr_eng.tool_policy.linear_write,
+    }, "decomposition").sr_eng.tool_policy.linear_write,
     false,
   );
 });
 
 test("runtime command schema paths resolve against explicit repo root", () => {
   const config = loadLinearConfig({ repoRoot });
-  const assignments = resolveRoleRuntimeAssignments(config);
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runtime-schema-root-"));
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runtime-schema-root-"));
   const schemaPath = path.join(tempDir, "schema.json");
   const schema = {
     type: "object",
@@ -4341,7 +4935,7 @@ test("runtime command schema paths resolve against explicit repo root", () => {
 
 test("warm continuation fails loudly until smoke tests pass and handles match role and run", () => {
   const config = withWarmContinuationRoles(loadLinearConfig({ repoRoot }));
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
   const schemaJson = fs.readFileSync(
     path.join(repoRoot, "execution/integrations/linear/schemas/subagent-turn.schema.json"),
     "utf8",
@@ -4472,7 +5066,7 @@ test("warm continuation fails loudly until smoke tests pass and handles match ro
 
 test("runtime smoke checks cache version-keyed session_start subagent readiness", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runtime-smoke-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runtime-smoke-"));
   const cachePath = path.join(tempDir, "runtime-smoke.json");
   const commands = [];
   const runCommand = async (command) => {
@@ -4488,12 +5082,12 @@ test("runtime smoke checks cache version-keyed session_start subagent readiness"
 
   assert.equal(result.ok, true);
   const cache = readRuntimeSmokeCache(cachePath);
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
   assert.equal(cache.schema_version, RUNTIME_SMOKE_SCHEMA_VERSION);
-  assert.equal(commands.some((command) => command.mode === "warm_required"), false);
+  assert.equal(commands.some((command) => command.mode === "warm_required"), true);
   const smokeCommands = commands.filter((command) => command.mode === "session_start");
   const smokePrompts = smokeCommands.map(runtimePromptFromCommand);
-  assert.equal(smokeCommands.length, 2);
+  assert.equal(smokeCommands.length, 3);
   for (const command of smokeCommands) {
     assert.equal(command.schema_version, SUBAGENT_TURN_SCHEMA_VERSION);
     assert.match(command.schema_path, /subagent-turn\.schema\.json$/);
@@ -4565,7 +5159,7 @@ test("runtime smoke checks cache version-keyed session_start subagent readiness"
 
 test("runtime smoke records parked warm continuation failures without gating readiness", async () => {
   const config = withWarmContinuationRoles(loadLinearConfig({ repoRoot }));
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runtime-smoke-warm-parked-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runtime-smoke-warm-parked-"));
   const cachePath = path.join(tempDir, "runtime-smoke.json");
   const commands = [];
   const runCommand = async (command) => {
@@ -4585,7 +5179,7 @@ test("runtime smoke records parked warm continuation failures without gating rea
   assert.equal(result.ok, true);
   assert.equal(commands.some((command) => command.mode === "warm_required"), true);
   const cache = readRuntimeSmokeCache(cachePath);
-  const assignments = resolveRoleRuntimeAssignments(config);
+  const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
   const smoke = smokeTestsFromRuntimeSmokeCache(cache)[runtimeAssignmentSmokeKey(assignments.pm, "2.1.117")];
   assert.equal(smoke.session_start, true);
   assert.equal(smoke.schema_output, true);
@@ -4595,7 +5189,7 @@ test("runtime smoke records parked warm continuation failures without gating rea
   assert.match(smoke.warm_error, /parked warm continuation unavailable/);
 
   const doctorChecks = await runtimeSmokeDoctorChecks({ config, cache, runCommand: fakeRuntimeSmokeCommand });
-  assert.equal(doctorChecks.every((check) => check.ok), true);
+  assert.equal(doctorChecks.every((check) => check.ok), false);
 });
 
 // I-6 DONE-condition (fixture-level, no real CLI): the smoke turn validator is
@@ -4637,7 +5231,7 @@ test("runtime smoke turn validator accepts a valid role-agnostic turn fixture an
 
 test("runtime smoke cache is keyed by role assignment identity, not runtime alone", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runtime-smoke-identity-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runtime-smoke-identity-"));
   const cachePath = path.join(tempDir, "runtime-smoke.json");
   const sameRuntimeConfig = {
     ...config,
@@ -4660,15 +5254,14 @@ test("runtime smoke cache is keyed by role assignment identity, not runtime alon
     runCommand: fakeRuntimeSmokeCommand,
   });
   assert.equal(result.ok, true);
-  // pm (pm-model) and sr_eng (eng-model) are now distinct claude identities, and
+  // pm (pm-model) and sr_eng (eng-model) are distinct claude identities,
   // judge/drafter/orchestrator collapse into one shared default claude-opus
-  // identity — three unique assignments, proving the cache keys on assignment
-  // identity, not runtime alone.
-  assert.equal(result.results.length, 3);
+  // identity, and execution.orchestrator adds a warm-required codex identity.
+  assert.equal(result.results.length, 4);
   assert.equal(result.results.every((item) => item.cached === false), true);
 
   const cache = readRuntimeSmokeCache(cachePath);
-  const assignments = resolveRoleRuntimeAssignments(sameRuntimeConfig);
+  const assignments = resolveRoleRuntimeAssignments(sameRuntimeConfig, "decomposition");
   assert.ok(smokeTestsFromRuntimeSmokeCache(cache)[runtimeAssignmentSmokeKey(assignments.pm, "2.1.117")]);
   assert.ok(smokeTestsFromRuntimeSmokeCache(cache)[runtimeAssignmentSmokeKey(assignments.sr_eng, "2.1.117")]);
   assert.ok(smokeTestsFromRuntimeSmokeCache(cache)[runtimeAssignmentSmokeKey(assignments.judge, "2.1.117")]);
@@ -4676,7 +5269,7 @@ test("runtime smoke cache is keyed by role assignment identity, not runtime alon
 
 test("runtime smoke and doctor fail closed when runtime version cannot be detected", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-runtime-smoke-version-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runtime-smoke-version-"));
   const cachePath = path.join(tempDir, "runtime-smoke.json");
   const runCommand = async (command) => {
     if (command.mode === "version") return `${command.runtime} development build`;
@@ -4814,7 +5407,8 @@ async function shapeForClient(client) {
     projectStatuses: {
       backlog: client.projectStatuses.find((status) => status.id === "status-backlog"),
       planned: client.projectStatuses.find((status) => status.id === "status-planned"),
-      started: client.projectStatuses.find((status) => status.id === "status-started"),
+      in_progress: client.projectStatuses.find((status) => status.id === "status-started"),
+      completed: client.projectStatuses.find((status) => status.id === "status-completed"),
     },
     projectLabels: {
       hasOpenQuestions: client.projectLabels.find((label) => label.id === "plabel-open"),
@@ -4823,7 +5417,12 @@ async function shapeForClient(client) {
       discovery: client.issueLabels.find((label) => label.id === "ilabel-discovery"),
     },
     issueStatuses: {
-      unstarted: client.workflowStates.find((state) => state.id === "state-backlog"),
+      backlog: client.workflowStates.find((state) => state.id === "state-backlog"),
+      todo: client.workflowStates.find((state) => state.id === "state-todo"),
+      in_progress: client.workflowStates.find((state) => state.id === "state-in-progress"),
+      in_review: client.workflowStates.find((state) => state.id === "state-in-review"),
+      blocked: client.workflowStates.find((state) => state.id === "state-blocked"),
+      done: client.workflowStates.find((state) => state.id === "state-done"),
       ready: client.workflowStates.find((state) => state.id === "state-ready"),
     },
   };
@@ -5237,7 +5836,7 @@ function discoveryPausePackets(runId) {
 }
 
 function tempRunStore() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-linear-runs-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-linear-runs-"));
 }
 
 function runArtifactFixturePath(name) {
@@ -5257,6 +5856,15 @@ function writeRunArtifactFixture(runStoreDir, name) {
     "utf8",
   );
   return artifact;
+}
+
+function assertNoResultOrTraceKeys(value) {
+  if (!value || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value)) {
+    assert.notEqual(key, "result");
+    assert.notEqual(key, "trace");
+    assertNoResultOrTraceKeys(nested);
+  }
 }
 
 function projectUpdateMarkdownForRun(runId, summary) {
@@ -5290,7 +5898,7 @@ function fileCredentialConfig(config) {
 }
 
 function domainEntrySnapshotPath(repoRoot, domainId) {
-  return path.join(repoRoot, ".agentic-factory", "domains", domainId, "registry-entry.json");
+  return path.join(repoRoot, ".teami", "domains", domainId, "registry-entry.json");
 }
 
 function writeDomainEntrySnapshot({ repoRoot, registry, domainId }) {
@@ -5445,9 +6053,32 @@ function registryWithWorkspace({
   );
 }
 
+function nativeWorkflowStates() {
+  return [
+    { id: "state-backlog", name: "Backlog", type: "backlog" },
+    { id: "state-todo", name: "Todo", type: "unstarted" },
+    { id: "state-in-progress", name: "In Progress", type: "started" },
+    { id: "state-ready", name: "Ready", type: "unstarted" },
+    { id: "state-done", name: "Done", type: "completed" },
+  ];
+}
+
+function defaultWorkflowStates() {
+  return [
+    { id: "state-backlog", name: "Backlog", type: "backlog" },
+    { id: "state-todo", name: "Todo", type: "unstarted" },
+    { id: "state-in-progress", name: "In Progress", type: "started" },
+    { id: "state-ready", name: "Ready", type: "unstarted" },
+    { id: "state-in-review", name: "In Review", type: "started" },
+    { id: "state-blocked", name: "Blocked", type: "started" },
+    { id: "state-done", name: "Done", type: "completed" },
+  ];
+}
+
 class MemoryLinearClient {
   constructor({
     statuses,
+    workflowStates,
     teamCreateError = null,
     workspaceId = "workspace-1",
     workspaceName = "Example Workspace",
@@ -5461,12 +6092,9 @@ class MemoryLinearClient {
         { id: "status-backlog", name: "Backlog", type: "backlog" },
         { id: "status-planned", name: "Planned", type: "planned" },
         { id: "status-started", name: "In Progress", type: "started" },
+        { id: "status-completed", name: "Completed", type: "completed" },
       ];
-    this.workflowStates = [
-      { id: "state-backlog", name: "Backlog", type: "unstarted" },
-      { id: "state-ready", name: "Ready", type: "unstarted" },
-      { id: "state-done", name: "Done", type: "completed" },
-    ];
+    this.workflowStates = (workflowStates || defaultWorkflowStates()).map((state) => ({ ...state }));
     this.templates = [];
     this.projects = [];
     this.issues = [];
@@ -5540,7 +6168,8 @@ class MemoryLinearClient {
   }
 
   async createIssueLabel(input) {
-    const label = { id: "ilabel-discovery", ...input };
+    const slug = String(input.name || "label").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const label = { id: `ilabel-${slug || this.issueLabels.length + 1}`, ...input };
     this.issueLabels.push(label);
     return label;
   }
@@ -5572,6 +6201,18 @@ class MemoryLinearClient {
 
   async listWorkflowStates() {
     return this.workflowStates;
+  }
+
+  async createWorkflowState(input) {
+    const slug = String(input.name || "state").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const state = {
+      id: `state-${slug || this.workflowStates.length + 1}`,
+      name: input.name,
+      type: input.type,
+      teamId: input.teamId || null,
+    };
+    this.workflowStates.push(state);
+    return state;
   }
 
   async createProject(input) {

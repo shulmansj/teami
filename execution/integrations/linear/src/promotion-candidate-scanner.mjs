@@ -2,7 +2,11 @@ import path from "node:path";
 
 import { ensurePhoenixReady } from "./local-phoenix-manager.mjs";
 import { promoteCandidate } from "./promote-candidate.mjs";
-import { PROMOTION_POLICY_PATH, resolveTrustedPolicyRead } from "./promotion-policy.mjs";
+import {
+  PROMOTION_POLICY_PATH,
+  PROMOTION_POLICY_RELATIVE_PATH,
+  resolveTrustedPolicyRead,
+} from "./promotion-policy.mjs";
 import {
   ownerCopyForPromotionWriteGuard,
   resolvePromotionWriteGuard,
@@ -12,6 +16,7 @@ import {
   agentBehaviorTargetsFromManifest,
   agentBehaviorPromptTargetsFromManifest,
 } from "./promotion/agent-behavior-scope.mjs";
+import { decompositionDefinition } from "./workflows/decomposition/definition.mjs";
 import {
   defaultPromotionWorkspaceDir,
   ensurePromotionWorkspace,
@@ -94,6 +99,7 @@ export const UNTRUSTED_SCANNER_OVERRIDE_KEYS = Object.freeze([
   "promoteCandidateFn",
   "githubTransport",
   "policyPath",
+  "policyRelativePath",
   "receiptDir",
   "ledgerDir",
   "env",
@@ -129,6 +135,7 @@ async function scanPromotionCandidatesWithOverrides({
   promoteCandidateFn = promoteCandidate,
   githubTransport = null,
   policyPath = PROMOTION_POLICY_PATH,
+  policyRelativePath = PROMOTION_POLICY_RELATIVE_PATH,
   receiptDir = null,
   ledgerDir = null,
   env = process.env,
@@ -197,6 +204,7 @@ async function scanPromotionCandidatesWithOverrides({
     const policyRead = resolveTrustedPolicyRead({
       mode: policyReadMode,
       policyPath,
+      policyRelativePath,
       internalCloneDir,
     });
     if (!policyRead.ok) {
@@ -256,10 +264,16 @@ async function scanPromotionCandidatesWithOverrides({
       ? readPhoenixAssetsManifestFromTrustedClone({ internalCloneDir })
       : readPhoenixAssetsManifestFromActiveCheckout({ repoRoot });
     const scannerAgentBehaviorTargets = manifestResolution.ok
-      ? agentBehaviorTargetsFromManifest(manifestResolution.manifest)
+      ? agentBehaviorTargetsFromManifest({
+        definition: decompositionDefinition,
+        manifest: manifestResolution.manifest,
+      })
       : [];
     const scannerPromptTargets = manifestResolution.ok
-      ? agentBehaviorPromptTargetsFromManifest(manifestResolution.manifest)
+      ? agentBehaviorPromptTargetsFromManifest({
+        definition: decompositionDefinition,
+        manifest: manifestResolution.manifest,
+      })
       : [];
     const scannerAgentBehaviorTargetKeys = new Set(
       scannerAgentBehaviorTargets.map((target) => target.target_key),
@@ -388,6 +402,10 @@ async function scanPromotionCandidatesWithOverrides({
         terminal: controllerResult.terminal ?? null,
         evidence_repair: Boolean(controllerResult.evidence_repair),
         improvement_opportunity: controllerResult.improvement_opportunity ?? null,
+        opportunity_hash: controllerResult.opportunity_hash
+          ?? (controllerResult.reason === "improvement_opportunity_no_proposed_change"
+            ? controllerResult.normalized_envelope_hash ?? null
+            : null),
         proposal_instance_id: controllerResult.proposal_instance_id ?? null,
         normalized_envelope_hash: controllerResult.normalized_envelope_hash ?? null,
         pr_title: controllerResult.pr_title ?? controllerResult.pr?.title ?? null,

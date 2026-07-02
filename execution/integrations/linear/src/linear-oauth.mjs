@@ -452,7 +452,7 @@ async function startOAuthCallbackServer({ redirectUri, expectedState, timeoutMs 
         title: "Linear authorization received",
         heading: "Linear authorization received",
         body:
-          "Return to your terminal to confirm the authorized Linear workspace. Agentic Factory will not create anything until the workspace is verified.",
+          "Return to your terminal to confirm the authorized Linear workspace. Teami will not create anything until the workspace is verified.",
         next: "You can close this tab.",
       }));
       resolveCallback(code);

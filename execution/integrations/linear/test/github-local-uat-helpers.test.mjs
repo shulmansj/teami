@@ -17,22 +17,22 @@ import {
 test("github-local UAT args parse flags and env without touching GitHub", () => {
   const parsed = parseGitHubLocalUatArgs([
     "--repo-root",
-    "C:/work/factory",
+    "C:/Users/example/factory",
     "--workspace-dir",
-    "C:/tmp/factory-uat",
+    "C:/Users/example/factory-uat",
     "--branch-prefix",
     "af-uat-github-local/custom",
     "--keep-artifacts",
   ], {});
 
-  assert.equal(parsed.repoRoot, path.resolve("C:/work/factory"));
-  assert.equal(parsed.workspaceDir, path.resolve("C:/tmp/factory-uat"));
+  assert.equal(parsed.repoRoot, path.resolve("C:/Users/example/factory"));
+  assert.equal(parsed.workspaceDir, path.resolve("C:/Users/example/factory-uat"));
   assert.equal(parsed.branchPrefix, "af-uat-github-local/custom");
   assert.equal(parsed.keepArtifacts, true);
 
   const envParsed = parseGitHubLocalUatArgs([], {
-    AGENTIC_FACTORY_GITHUB_LOCAL_UAT_BRANCH_PREFIX: "env-prefix",
-    AGENTIC_FACTORY_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS: "1",
+    TEAMI_GITHUB_LOCAL_UAT_BRANCH_PREFIX: "env-prefix",
+    TEAMI_GITHUB_LOCAL_UAT_KEEP_ARTIFACTS: "1",
   });
   assert.equal(envParsed.branchPrefix, "env-prefix");
   assert.equal(envParsed.keepArtifacts, true);
@@ -46,7 +46,7 @@ test("github-local UAT rejects unsafe branch prefixes before live I/O", () => {
   );
   assert.equal(
     githubLocalUatBranchName({ branchPrefix: "af-uat-github-local", stamp: "20260625T010203" }),
-    "agentic-factory/promotion/af-uat-github-local/20260625T010203",
+    "teami/promotion/af-uat-github-local/20260625T010203",
   );
 });
 
@@ -59,21 +59,22 @@ test("github-local UAT binding guard fails before gh or network work", () => {
     () => assertGitHubLocalUatBinding({
       ok: true,
       connection_mode: "dry_run",
-      repo: { owner: "shulmansj", repo: "af-smoke-test" },
+      repo: { owner: "acme", repo: "widgets" },
       real_push_enabled: false,
       default_branch: "main",
     }),
     /requires a real local_ambient connection/,
   );
-  assert.throws(
-    () => assertGitHubLocalUatBinding({
-      ok: true,
-      connection_mode: "real",
-      repo: { owner: "someone", repo: "else" },
-      real_push_enabled: true,
-      default_branch: "main",
-    }),
-    /must be bound to shulmansj\/af-smoke-test/,
+  const arbitraryRepoBinding = {
+    ok: true,
+    connection_mode: "real",
+    repo: { owner: "acme", repo: "widgets" },
+    real_push_enabled: true,
+    default_branch: "main",
+  };
+  assert.equal(
+    assertGitHubLocalUatBinding(arbitraryRepoBinding),
+    arbitraryRepoBinding,
   );
 });
 
@@ -138,18 +139,18 @@ test("github-local UAT credential scanner uses GitHub redaction semantics", () =
 
 test("github-local UAT PR body and evidence carry visible run provenance", () => {
   const runId = "github-local-uat-20260625T010203-abcdef";
-  const branch = "agentic-factory/promotion/af-uat-github-local/20260625T010203";
+  const branch = "teami/promotion/af-uat-github-local/20260625T010203";
   const selection = {
     mode: "local_ambient",
-    owner: "shulmansj",
-    repo: "af-smoke-test",
+    owner: "acme",
+    repo: "widgets",
     defaultBranch: "main",
-    checkoutPath: "C:/work/agentic-factory",
+    checkoutPath: "C:/Users/example/teami",
     pushAuth: "ssh",
     realPushEnabled: true,
   };
   const prProvenance = {
-    schema_version: "agentic-factory-pr-provenance/v1",
+    schema_version: "teami-pr-provenance/v1",
     source_run_id: runId,
     experiment_receipt_id: `github-local-uat:${runId}`,
     phoenix_experiment_id: runId,

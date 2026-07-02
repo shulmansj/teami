@@ -3,12 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  FAILURE_TAXONOMY_PATH,
-  FAILURE_TAXONOMY_VERSION,
-  PHOENIX_ASSETS_PATH,
+  DEFAULT_ANNOTATION_NAME,
   QUALITY_LABELS,
-  RUBRIC_VERSION,
+  resolveEvalContract,
 } from "./eval-annotation-contract.mjs";
+import {
+  combineStoredJudgeFixtureInput,
+  judgeInputCompletenessFailures,
+  normalizeJudgeInput,
+  projectJudgeInputForFixture,
+} from "../../../engine/judge-input-contract.mjs";
 import { detectLowConfidenceReasons } from "./eval-status.mjs";
 import { ensurePhoenixReady } from "./local-phoenix-manager.mjs";
 import { createPhoenixTraceAnnotation } from "./phoenix-self-improvement.mjs";
@@ -37,7 +41,7 @@ import { decompositionDefinition } from "./workflows/decomposition/definition.mj
 
 export { DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY } from "./promotion-target-keys.mjs";
 
-// Track D: the first decomposition_quality model judge.
+// Track D: the first quality model judge.
 //
 // Architecture (PHOENIX-CAPABILITIES Q1 / RISK 5): the pinned Phoenix REST
 // surface has NO evaluator identity, so the judge is CODE-FIRST — executed
@@ -89,9 +93,39 @@ const ADVISORY_TEXT_LIMIT = 600;
 // parse-away behavior.
 // ---------------------------------------------------------------------------
 
-export function loadJudgePromptContract() {
+function judgeOptions(options = {}) {
+  if (options?.workflow_type && options?.eval_namespace) {
+    return { definition: options, repoRoot: MODULE_REPO_ROOT, evalContract: null };
+  }
+  return {
+    definition: options.definition || decompositionDefinition,
+    repoRoot: options.repoRoot || MODULE_REPO_ROOT,
+    evalContract: options.evalContract || null,
+  };
+}
+
+function resolvedEvalContractForJudge(options = {}) {
+  const { definition, repoRoot, evalContract } = judgeOptions(options);
+  const contract = evalContract || resolveEvalContract(definition, repoRoot);
+  if (contract.eval_configured !== true) {
+    throw new Error(contract.reason || `workflow_eval_not_configured:${definition?.workflow_type || "unknown"}`);
+  }
+  if (!contract.judge_prompt?.target_key) {
+    throw new Error(`quality_judge_prompt_unconfigured:${contract.workflow_type || "unknown"}`);
+  }
+  if (!contract.judge_prompt?.evaluator_entry?.id) {
+    throw new Error("phoenix-assets.json has no llm evaluator entry for the judge prompt role.");
+  }
+  return contract;
+}
+
+export function loadJudgePromptContract(options = {}) {
+  const resolved = judgeOptions(options);
   const contract = loadPromptRegistrationContract({
-    targetKey: DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY,
+    definition: resolved.definition,
+    repoRoot: resolved.repoRoot,
+    evalContract: resolved.evalContract,
+    targetKey: options.targetKey || null,
   });
   if (!contract.evaluatorEntry?.id) {
     throw new Error("phoenix-assets.json has no llm evaluator entry for the judge prompt role.");
@@ -99,22 +133,35 @@ export function loadJudgePromptContract() {
   return contract;
 }
 
-export function loadPromptRegistrationContract({ targetKey = DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY } = {}) {
-  const manifest = JSON.parse(fs.readFileSync(PHOENIX_ASSETS_PATH, "utf8"));
+export function loadPromptRegistrationContract({
+  targetKey = null,
+  definition = decompositionDefinition,
+  repoRoot = MODULE_REPO_ROOT,
+  evalContract = null,
+} = {}) {
+  const namespaceContract = evalContract || resolveEvalContract(definition, repoRoot);
+  const manifest = namespaceContract.manifest;
+  if (!manifest) {
+    throw new Error(`phoenix-assets.json is unavailable for ${definition?.workflow_type || "unknown"}.`);
+  }
+  const resolvedTargetKey = targetKey || namespaceContract.judge_prompt?.target_key;
+  if (!resolvedTargetKey) {
+    throw new Error(`phoenix-assets.json has no prompt entry for target ${targetKey}.`);
+  }
   const entry = (manifest.prompts || []).find(
-    (prompt) => prompt.target_key === targetKey
-      || (targetKey === DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY && prompt.role === "decomposition_quality_judge"),
+    (prompt) => prompt.target_key === resolvedTargetKey
+      || (resolvedTargetKey === DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY && prompt.role === "decomposition_quality_judge"),
   );
   if (!entry) {
-    throw new Error(`phoenix-assets.json has no prompt entry for target ${targetKey}.`);
+    throw new Error(`phoenix-assets.json has no prompt entry for target ${resolvedTargetKey}.`);
   }
   const evaluatorEntry = (manifest.evaluators || []).find(
     (evaluator) => evaluator.kind === "llm" && evaluator.prompt_role === entry.role,
   ) || null;
   const snapshot = loadAcceptedPromptSnapshot({
-    repoRoot: MODULE_REPO_ROOT,
-    definition: decompositionDefinition,
-    targetKey,
+    repoRoot,
+    definition,
+    targetKey: resolvedTargetKey,
     includeHeaderInContent: true,
     failOnDrift: false,
     rejectUnsafeContent: false,
@@ -124,7 +171,10 @@ export function loadPromptRegistrationContract({ targetKey = DECOMPOSITION_QUALI
     manifest,
     entry,
     evaluatorEntry,
-    targetKey,
+    evalContract: namespaceContract,
+    targetKey: resolvedTargetKey,
+    manifestPath: namespaceContract.absolute_paths.manifest,
+    manifestRelativePath: namespaceContract.paths.manifest,
     snapshotPath: snapshot.snapshotPath,
     snapshotText: snapshot.contentBytes,
     snapshotSha256: snapshot.snapshotSha256,
@@ -136,15 +186,125 @@ export function loadPromptRegistrationContract({ targetKey = DECOMPOSITION_QUALI
   };
 }
 
-// Failure-mode ids the decomposition_quality judge may use: the structural
-// modes plus the roadmap_decomposition workflow modes from the versioned
-// taxonomy (the judge prompt forbids inventing ids outside the provided list).
-export function judgeAllowedFailureModes() {
-  const taxonomy = JSON.parse(fs.readFileSync(FAILURE_TAXONOMY_PATH, "utf8"));
-  return [...new Set([
-    ...(taxonomy.structural?.failure_modes || []),
-    ...(taxonomy.workflows?.roadmap_decomposition?.failure_modes || []),
-  ])];
+// Failure-mode ids the quality judge may use: the structural modes plus the
+// namespace workflow modes from the versioned taxonomy (the judge prompt
+// forbids inventing ids outside the provided list).
+export function judgeAllowedFailureModes(options = {}) {
+  return [...resolvedEvalContractForJudge(options).allowed_failure_modes];
+}
+
+export function buildMaintainerSuppliedContext({
+  evalContract = null,
+  definition = decompositionDefinition,
+  repoRoot = MODULE_REPO_ROOT,
+} = {}) {
+  const contract = evalContract || resolveEvalContract(definition, repoRoot);
+  return {
+    rubric_version: contract.rubric_version,
+    failure_taxonomy_version: contract.failure_taxonomy_version,
+    allowed_failure_modes: [...(contract.allowed_failure_modes || [])],
+  };
+}
+
+export function buildJudgeFixtureInput({ judgeInputs, evalContract = null } = {}) {
+  const contract = evalContract || resolveEvalContract(decompositionDefinition, MODULE_REPO_ROOT);
+  return projectJudgeInputForFixture(judgeInputs, contract.judge_input_contract);
+}
+
+export function buildStoredFixtureJudgeInputs({
+  fixture,
+  evalContract = null,
+  definition = decompositionDefinition,
+  repoRoot = MODULE_REPO_ROOT,
+  refreshMaintainerContext = true,
+} = {}) {
+  const contract = evalContract || resolveEvalContract(definition, repoRoot);
+  const maintainerSuppliedContext = refreshMaintainerContext
+    ? buildMaintainerSuppliedContext({ evalContract: contract })
+    : null;
+  return combineStoredJudgeFixtureInput({
+    fixtureInput: fixture?.input,
+    contract: contract.judge_input_contract,
+    maintainerSuppliedContext,
+  });
+}
+
+function decompositionJudgeInputCompletenessFailures(inputs, contract) {
+  const failures = judgeInputCompletenessFailures(inputs, contract);
+  if (
+    ["completed", "paused"].includes(inputs?.terminal_status)
+    && typeof inputs?.project_update_markdown !== "string"
+  ) {
+    failures.push("missing:project_update_markdown");
+  }
+  if (inputs?.terminal_status === "paused" && typeof inputs?.open_questions_markdown !== "string") {
+    failures.push("missing:open_questions_markdown");
+  }
+  return [...new Set(failures)];
+}
+
+function judgeInputCompletenessFailuresForDefinition({ inputs, contract, definition }) {
+  if (definition?.workflow_type === "decomposition") {
+    return decompositionJudgeInputCompletenessFailures(inputs, contract);
+  }
+  return judgeInputCompletenessFailures(inputs, contract);
+}
+
+function buildGenericJudgeInputs({
+  artifact,
+  snapshot,
+  evalContract,
+  runId = null,
+} = {}) {
+  const contract = evalContract?.judge_input_contract;
+  if (!contract) {
+    return {
+      ok: false,
+      reason: "judge_input_incomplete",
+      failures: ["judge_input_contract_missing"],
+    };
+  }
+  const inputs = {};
+  for (const field of contract.required_fields || []) {
+    if (field === "source_type") {
+      inputs.source_type = artifact?.source_type
+        || snapshot?.source_type
+        || `${evalContract.workflow_type}_run_snapshot`;
+      continue;
+    }
+    if (field === "run") {
+      inputs.run = artifact?.run || snapshot?.run || genericRunJudgeInput({
+        artifact,
+        snapshot,
+        workflowType: evalContract.workflow_type,
+        runId,
+      });
+      continue;
+    }
+    if (Object.hasOwn(artifact || {}, field)) {
+      inputs[field] = artifact[field];
+      continue;
+    }
+    if (Object.hasOwn(snapshot || {}, field)) {
+      inputs[field] = snapshot[field];
+    }
+  }
+  const failures = judgeInputCompletenessFailures(inputs, contract);
+  if (failures.length > 0) return { ok: false, reason: "judge_input_incomplete", failures };
+  return { ok: true, inputs: normalizeJudgeInput(inputs) };
+}
+
+function genericRunJudgeInput({ artifact, snapshot, workflowType, runId }) {
+  const project = isRecord(snapshot?.project) ? snapshot.project : {};
+  const resource = artifact?.resource || snapshot?.resource || {
+    kind: `${workflowType}_resource`,
+    id: project.id || artifact?.domain_id || runId,
+    ...(project.name ? { label: project.name } : {}),
+  };
+  return {
+    run_id: artifact?.run_id || runId,
+    resource,
+  };
 }
 
 export function judgeAnnotationIdentifier({ evaluatorId, model }) {
@@ -206,6 +366,50 @@ function dependencyRelationsFromIssues(issues) {
   return relations;
 }
 
+function finalIssueJudgeFields(issue) {
+  return pickDefined({
+    decomposition_key: issue?.decomposition_key,
+    decompositionKey: issue?.decompositionKey,
+    title: issue?.title,
+    issue_body_markdown: issue?.issue_body_markdown,
+    issueBodyMarkdown: issue?.issueBodyMarkdown,
+    assignment: issue?.assignment,
+    output: issue?.output,
+    acceptanceCriteria: issue?.acceptanceCriteria,
+    acceptance_criteria: issue?.acceptance_criteria,
+    depends_on: issue?.depends_on,
+    dependsOn: issue?.dependsOn,
+  });
+}
+
+function discoveryIssueJudgeFields(issue) {
+  return pickDefined({
+    decomposition_key: issue?.decomposition_key,
+    decompositionKey: issue?.decompositionKey,
+    title: issue?.title,
+    body_markdown: issue?.body_markdown,
+    in_session_research: issue?.in_session_research,
+    evidence_gap: issue?.evidence_gap,
+    depends_on: issue?.depends_on,
+    dependsOn: issue?.dependsOn,
+  });
+}
+
+function pickDefined(fields) {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined),
+  );
+}
+
+function perspectiveRunJudgeFields(entry) {
+  return pickDefined({
+    role: entry?.role,
+    outcome: entry?.outcome,
+    evidence_ref: entry?.evidence_ref,
+    failure_code: entry?.failure_code,
+  });
+}
+
 function phasePacketSummaries(artifact) {
   if (isRecord(artifact?.terminal_output)) {
     const terminal = artifact.terminal_output;
@@ -219,7 +423,7 @@ function phasePacketSummaries(artifact) {
       risks: terminal.risks ?? [],
       source_refs: terminal.source_refs ?? [],
       ...(Array.isArray(artifact?.evidence?.perspectives_run)
-        ? { perspectives_run: artifact.evidence.perspectives_run }
+        ? { perspectives_run: artifact.evidence.perspectives_run.map(perspectiveRunJudgeFields) }
         : {}),
     }];
   }
@@ -244,25 +448,41 @@ function isRecord(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-export function buildJudgeInputs({ artifact, snapshot, allowedFailureModes }) {
+export function buildJudgeInputs({
+  artifact,
+  snapshot,
+  allowedFailureModes,
+  evalContract = null,
+} = {}) {
+  const contract = evalContract || resolveEvalContract(decompositionDefinition, MODULE_REPO_ROOT);
   const terminal = terminalStateFromArtifact(artifact);
   if (!terminal.ok) return { ok: false, reason: terminal.cause };
+  const finalIssues = (terminal.final_issues || []).map(finalIssueJudgeFields);
+  const discoveryIssues = (terminal.discovery_issues || []).map(discoveryIssueJudgeFields);
+  const inputs = {
+    project_intent: snapshot.project,
+    terminal_status: terminal.terminal_status,
+    terminal_reason: terminal.terminal_reason,
+    final_issues: finalIssues,
+    discovery_issues: discoveryIssues,
+    dependency_relations: dependencyRelationsFromIssues(finalIssues),
+    project_update_markdown: terminal.project_update_markdown,
+    open_questions_markdown: terminal.open_questions_markdown,
+    phase_packet_summaries: phasePacketSummaries(artifact),
+    rubric_version: contract.rubric_version,
+    failure_taxonomy_version: contract.failure_taxonomy_version,
+    allowed_failure_modes: allowedFailureModes || contract.allowed_failure_modes,
+  };
+  const failures = decompositionJudgeInputCompletenessFailures(
+    inputs,
+    contract.judge_input_contract,
+  );
+  if (failures.length > 0) {
+    return { ok: false, reason: "judge_input_incomplete", failures };
+  }
   return {
     ok: true,
-    inputs: {
-      project_intent: snapshot.project,
-      terminal_status: terminal.terminal_status,
-      terminal_reason: terminal.terminal_reason,
-      final_issues: terminal.final_issues,
-      discovery_issues: terminal.discovery_issues,
-      dependency_relations: dependencyRelationsFromIssues(terminal.final_issues),
-      project_update_markdown: terminal.project_update_markdown,
-      open_questions_markdown: terminal.open_questions_markdown,
-      phase_packet_summaries: phasePacketSummaries(artifact),
-      rubric_version: RUBRIC_VERSION,
-      failure_taxonomy_version: FAILURE_TAXONOMY_VERSION,
-      allowed_failure_modes: allowedFailureModes,
-    },
+    inputs: normalizeJudgeInput(inputs),
   };
 }
 
@@ -284,12 +504,15 @@ export function buildJudgePrompt({ instructionText, inputs }) {
 // Anything else is judge_invalid — never coerced, never guessed.
 // ---------------------------------------------------------------------------
 
-export function judgeOutputValidationFailures(candidate, { allowedFailureModes }) {
+export function judgeOutputValidationFailures(candidate, {
+  allowedFailureModes,
+  qualityLabels = QUALITY_LABELS,
+} = {}) {
   const failures = [];
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
     return ["judge_output_not_object"];
   }
-  if (!QUALITY_LABELS.includes(candidate.label)) {
+  if (!qualityLabels.includes(candidate.label)) {
     failures.push(`label_not_canonical:${String(candidate.label ?? "missing")}`);
   }
   if (typeof candidate.score !== "number" || !Number.isFinite(candidate.score)
@@ -316,13 +539,16 @@ export function judgeOutputValidationFailures(candidate, { allowedFailureModes }
   return [...new Set(failures)];
 }
 
-function normalizeJudgeOutput(candidate) {
+function normalizeJudgeOutput(candidate, { scoreFromLabelBand = null } = {}) {
   const rawModes = [...new Set(candidate.failure_modes.map((mode) => mode.trim()))];
   const normalizedModes = [...new Set(rawModes.map(normalizeFailureMode))];
   const hasParameterized = rawModes.some((mode) => mode.includes(":"));
+  const derivedScore = typeof scoreFromLabelBand === "function"
+    ? scoreFromLabelBand(candidate.label)
+    : null;
   return {
     label: candidate.label,
-    score: candidate.score,
+    score: Number.isFinite(derivedScore) ? derivedScore : candidate.score,
     explanation: candidate.explanation.trim(),
     failure_modes: normalizedModes,
     // Raw parameterized diagnostics (<base_id>:<param>) are preserved as
@@ -331,8 +557,19 @@ function normalizeJudgeOutput(candidate) {
   };
 }
 
-export function parseJudgeOutput(output, { allowedFailureModes } = {}) {
-  const allowed = allowedFailureModes || judgeAllowedFailureModes();
+export function parseJudgeOutput(output, {
+  allowedFailureModes = null,
+  qualityLabels = null,
+  definition = decompositionDefinition,
+  repoRoot = MODULE_REPO_ROOT,
+  evalContract = null,
+} = {}) {
+  const contract = (!allowedFailureModes || !qualityLabels)
+    ? resolvedEvalContractForJudge({ definition, repoRoot, evalContract })
+    : null;
+  const allowed = allowedFailureModes || contract.allowed_failure_modes;
+  const labels = qualityLabels || contract.quality_labels;
+  const scoreFromLabelBand = evalContract?.scoreFromLabelBand || contract?.scoreFromLabelBand || null;
   const candidates = extractRuntimeJsonCandidates(output);
   if (candidates.length === 0) {
     return { ok: false, failures: ["invalid_json_output"] };
@@ -340,8 +577,11 @@ export function parseJudgeOutput(output, { allowedFailureModes } = {}) {
   const valid = [];
   let firstFailure = null;
   for (const candidate of candidates) {
-    const failures = judgeOutputValidationFailures(candidate, { allowedFailureModes: allowed });
-    if (failures.length === 0) valid.push(normalizeJudgeOutput(candidate));
+    const failures = judgeOutputValidationFailures(candidate, {
+      allowedFailureModes: allowed,
+      qualityLabels: labels,
+    });
+    if (failures.length === 0) valid.push(normalizeJudgeOutput(candidate, { scoreFromLabelBand }));
     else firstFailure ||= failures;
   }
   if (valid.length === 0) {
@@ -410,7 +650,7 @@ function oneLineAdvisoryText(value) {
 }
 
 // ---------------------------------------------------------------------------
-// Local judge-attempt receipt (.agentic-factory/runs/<run_id>.judge.json):
+// Local judge-attempt receipt (.teami/runs/<run_id>.judge.json):
 // append-only attempt records so judge_missing / judge_invalid stay visible
 // to the derived worklist without ever writing workflow state to Phoenix.
 // ---------------------------------------------------------------------------
@@ -458,7 +698,7 @@ function appendJudgeAttempt({ runId, repoRoot, runStoreDir, attempt }) {
 // Judge execution.
 // ---------------------------------------------------------------------------
 
-// Runs the decomposition_quality model judge for one terminal decomposition
+// Runs the quality model judge for one terminal decomposition
 // run and writes the LLM annotation through the shared write path.
 //
 // Accepts EITHER a run id (loads the local run artifact, captured project
@@ -474,6 +714,7 @@ function appendJudgeAttempt({ runId, repoRoot, runStoreDir, attempt }) {
 //     failure_taxonomy_version, judge: {label, score, explanation,
 //     failure_modes, failure_mode_details}|null, low_confidence_reasons,
 //     storage: "phoenix_native"|"report_only"|null, annotation_ids,
+//     judge_inputs?, judge_prompt?, raw_output?,
 //     reason?, parse_failures?, receipt_path? }
 //
 // `ok` is true only when a valid judgment was produced AND stored as a
@@ -481,7 +722,11 @@ function appendJudgeAttempt({ runId, repoRoot, runStoreDir, attempt }) {
 // annotation or deterministic checks: they are report/receipt records only.
 export async function runDecompositionQualityJudge({
   repoRoot = process.cwd(),
+  evalRepoRoot = MODULE_REPO_ROOT,
+  definition = decompositionDefinition,
+  evalContract = null,
   runId = null,
+  judgeInputs = null,
   artifact = null,
   snapshot = null,
   receipt = null,
@@ -500,8 +745,13 @@ export async function runDecompositionQualityJudge({
   onProgress = () => {},
   now = () => new Date().toISOString(),
 } = {}) {
-  const contract = loadJudgePromptContract();
-  const evaluatorId = contract.evaluatorEntry.id;
+  const activeEvalContract = evalContract || resolvedEvalContractForJudge({ definition, repoRoot: evalRepoRoot });
+  const promptContract = loadJudgePromptContract({
+    definition,
+    repoRoot: evalRepoRoot,
+    evalContract: activeEvalContract,
+  });
+  const evaluatorId = promptContract.evaluatorEntry.id;
 
   const notRun = (reason, extra = {}) => ({
     ok: false,
@@ -516,32 +766,48 @@ export async function runDecompositionQualityJudge({
     runtime: null,
     prompt_source: null,
     prompt_version: null,
-    rubric_version: RUBRIC_VERSION,
-    failure_taxonomy_version: FAILURE_TAXONOMY_VERSION,
+    rubric_version: activeEvalContract.rubric_version,
+    failure_taxonomy_version: activeEvalContract.failure_taxonomy_version,
     judge: null,
     low_confidence_reasons: [],
     storage: null,
     annotation_ids: [],
+    workflow_type: activeEvalContract.workflow_type,
+    eval_namespace: activeEvalContract.eval_namespace,
     ...extra,
   });
 
   // 0. Accepted baseline integrity: the repo snapshot is the accepted judge
   // behavior; drift between the file and the manifest pin fails closed.
-  if (contract.drift) {
+  if (promptContract.drift) {
     return notRun("accepted_prompt_snapshot_drift", {
-      detail: `snapshot ${contract.snapshotPath} hashes to ${contract.snapshotSha256} but phoenix-assets.json pins ${contract.expectedSha256}; editing the accepted judge prompt is a process change.`,
+      detail: `snapshot ${promptContract.snapshotPath} hashes to ${promptContract.snapshotSha256} but phoenix-assets.json pins ${promptContract.expectedSha256}; editing the accepted judge prompt is a process change.`,
     });
   }
 
   // 1. Judge runtime assignment (config-driven, same conventions as pm/sr_eng).
-  const assignment = resolveJudgeRuntimeAssignment(config);
+  const assignment = resolveJudgeRuntimeAssignment(config, definition);
   if (!assignment.model) {
     return notRun("judge_model_not_configured", {
-      detail: "configure workflows.decomposition.roles.judge.model (the model identity is part of the stable judge annotation identifier).",
+      detail: `configure workflows.${activeEvalContract.workflow_type}.roles.${assignment.role}.model (the model identity is part of the stable judge annotation identifier).`,
     });
   }
   const identifier = judgeAnnotationIdentifier({ evaluatorId, model: assignment.model });
 
+  const allowedFailureModes = activeEvalContract.allowed_failure_modes;
+  let effectiveRunId = runId || artifact?.run_id || null;
+  let built = null;
+  if (judgeInputs) {
+    const failures = judgeInputCompletenessFailuresForDefinition({
+      inputs: judgeInputs,
+      contract: activeEvalContract.judge_input_contract,
+      definition,
+    });
+    if (failures.length > 0) {
+      return notRun("judge_input_incomplete", { run_id: effectiveRunId, failures });
+    }
+    built = { ok: true, inputs: normalizeJudgeInput(judgeInputs) };
+  } else {
   // 2. Resolve the run artifact (in-memory wins; otherwise local store).
   let resolvedArtifact = artifact;
   if (!resolvedArtifact && runId) {
@@ -552,7 +818,7 @@ export async function runDecompositionQualityJudge({
     }
   }
   if (!resolvedArtifact) return notRun("missing_run_artifact");
-  const effectiveRunId = resolvedArtifact.run_id || runId;
+  effectiveRunId = resolvedArtifact.run_id || runId;
 
   // 3. Resolve the captured project snapshot (Model Judge Policy: project
   // intent comes from the captured snapshot; fail closed when missing).
@@ -572,13 +838,21 @@ export async function runDecompositionQualityJudge({
   }
 
   // 4. Input assembly (terminal runs only — the judge judges outcomes).
-  const allowedFailureModes = judgeAllowedFailureModes();
-  const built = buildJudgeInputs({
-    artifact: resolvedArtifact,
-    snapshot: resolvedSnapshot,
-    allowedFailureModes,
-  });
-  if (!built.ok) return notRun(built.reason, { run_id: effectiveRunId });
+  built = activeEvalContract.workflow_type === "decomposition"
+    ? buildJudgeInputs({
+      artifact: resolvedArtifact,
+      snapshot: resolvedSnapshot,
+      allowedFailureModes,
+      evalContract: activeEvalContract,
+    })
+    : buildGenericJudgeInputs({
+      artifact: resolvedArtifact,
+      snapshot: resolvedSnapshot,
+      evalContract: activeEvalContract,
+      runId: effectiveRunId,
+    });
+  if (!built.ok) return notRun(built.reason, { run_id: effectiveRunId, failures: built.failures });
+  }
 
   // 5. Trace target from the trace receipt (or explicit traceId in eval mode).
   const resolvedReceipt = receipt
@@ -598,9 +872,9 @@ export async function runDecompositionQualityJudge({
   // 6. Judge prompt content: the repo-accepted snapshot by default; a Phoenix
   // candidate prompt version ONLY via the explicit experiment flag, labeled
   // as such in all output metadata.
-  let instructionText = contract.snapshotText;
+  let instructionText = promptContract.snapshotText;
   let promptSource = "repo_accepted_snapshot";
-  let promptVersion = `sha256:${contract.snapshotSha256}`;
+  let promptVersion = `sha256:${promptContract.snapshotSha256}`;
   let phoenixReadyForWrites = null;
   if (candidatePromptVersionId) {
     const candidate = await fetchCandidatePromptVersion({
@@ -622,6 +896,7 @@ export async function runDecompositionQualityJudge({
     phoenixReadyForWrites = candidate.ready;
   }
 
+  const judgePrompt = buildJudgePrompt({ instructionText, inputs: built.inputs });
   const base = {
     run_id: effectiveRunId,
     trace_id: validTraceTarget ? traceTarget : null,
@@ -632,8 +907,12 @@ export async function runDecompositionQualityJudge({
     runtime: assignment.runtime,
     prompt_source: promptSource,
     prompt_version: promptVersion,
-    rubric_version: RUBRIC_VERSION,
-    failure_taxonomy_version: FAILURE_TAXONOMY_VERSION,
+    rubric_version: activeEvalContract.rubric_version,
+    failure_taxonomy_version: activeEvalContract.failure_taxonomy_version,
+    workflow_type: activeEvalContract.workflow_type,
+    eval_namespace: activeEvalContract.eval_namespace,
+    judge_inputs: built.inputs,
+    judge_prompt: judgePrompt,
   };
 
   const finishAttempt = (result) => {
@@ -652,8 +931,10 @@ export async function runDecompositionQualityJudge({
           runtime: assignment.runtime,
           prompt_source: promptSource,
           prompt_version: promptVersion,
-          rubric_version: RUBRIC_VERSION,
-          failure_taxonomy_version: FAILURE_TAXONOMY_VERSION,
+          rubric_version: activeEvalContract.rubric_version,
+          failure_taxonomy_version: activeEvalContract.failure_taxonomy_version,
+          workflow_type: activeEvalContract.workflow_type,
+          eval_namespace: activeEvalContract.eval_namespace,
           trace_id: result.trace_id,
           storage: result.storage,
           reason: result.reason ?? null,
@@ -676,7 +957,7 @@ export async function runDecompositionQualityJudge({
   // ONLY the prompt — no Linear client, no mutation surface of any kind.
   const command = buildSessionStartRuntimeCommand({
     assignment,
-    prompt: buildJudgePrompt({ instructionText, inputs: built.inputs }),
+    prompt: judgePrompt,
     repoRoot,
   });
 
@@ -703,13 +984,18 @@ export async function runDecompositionQualityJudge({
   // 8. Strict parse; malformed output -> judge_invalid + worklist visibility
   // through the local judge receipt (derived at read time, never persisted
   // to Phoenix).
-  const parsed = parseJudgeOutput(output, { allowedFailureModes });
+  const parsed = parseJudgeOutput(output, {
+    allowedFailureModes,
+    qualityLabels: activeEvalContract.quality_labels,
+    evalContract: activeEvalContract,
+  });
   if (!parsed.ok) {
     return finishAttempt({
       ok: false,
       judge_state: "judge_invalid",
       reason: `malformed_judge_output:${parsed.failures.join(",")}`,
       parse_failures: parsed.failures,
+      raw_output: String(output ?? ""),
       raw_output_excerpt: String(output ?? "").slice(0, RAW_OUTPUT_EXCERPT_LIMIT),
       ...base,
       judge: null,
@@ -725,12 +1011,13 @@ export async function runDecompositionQualityJudge({
   // written to Phoenix (the annotation itself is the judgment and IS stored).
   const lowConfidenceReasons = detectLowConfidenceReasons({
     annotation: {
-      name: "decomposition_quality",
+      name: activeEvalContract.roll_up_annotation_name || DEFAULT_ANNOTATION_NAME,
       label: judge.label,
       score: judge.score,
       explanation: judge.explanation,
       metadata: { failure_modes: judge.failure_modes },
     },
+    evalContract: activeEvalContract,
   });
 
   // 10. Store the judgment as an LLM annotation via the shared write path.
@@ -740,6 +1027,7 @@ export async function runDecompositionQualityJudge({
       judge_state: "judged",
       reason: traceTarget ? "invalid_trace_target" : "missing_trace_target",
       ...base,
+      raw_output: String(output ?? ""),
       judge,
       low_confidence_reasons: lowConfidenceReasons,
       storage: "report_only",
@@ -762,8 +1050,9 @@ export async function runDecompositionQualityJudge({
       ensureReady: phoenixReadyForWrites ? async () => phoenixReadyForWrites : ensureReady,
       fetchImpl,
       onProgress,
+      evalContract: activeEvalContract,
       traceId: traceTarget,
-      name: "decomposition_quality",
+      name: activeEvalContract.roll_up_annotation_name || DEFAULT_ANNOTATION_NAME,
       label: judge.label,
       score: judge.score,
       explanation: judge.explanation,
@@ -781,12 +1070,15 @@ export async function runDecompositionQualityJudge({
         judge_prompt_version: promptVersion,
         source_run_id: effectiveRunId,
       },
+      rubricVersion: activeEvalContract.rubric_version,
+      failureTaxonomyVersion: activeEvalContract.failure_taxonomy_version,
       workspaceMaturity: maturity,
     });
     return finishAttempt({
       ok: true,
       judge_state: "judged",
       ...base,
+      raw_output: String(output ?? ""),
       judge,
       low_confidence_reasons: lowConfidenceReasons,
       storage: "phoenix_native",
@@ -798,12 +1090,68 @@ export async function runDecompositionQualityJudge({
       judge_state: "judged",
       reason: `annotation_write_failed:${error.message}`,
       ...base,
+      raw_output: String(output ?? ""),
       judge,
       low_confidence_reasons: lowConfidenceReasons,
       storage: "report_only",
       annotation_ids: [],
     });
   }
+}
+
+export async function runStoredDecompositionFixtureJudge({
+  fixture,
+  examplePath = null,
+  repoRoot = process.cwd(),
+  evalRepoRoot = MODULE_REPO_ROOT,
+  definition = decompositionDefinition,
+  evalContract = null,
+  refreshMaintainerContext = true,
+  ...judgeOptions
+} = {}) {
+  let resolvedFixture = fixture;
+  if (!resolvedFixture && examplePath) {
+    try {
+      resolvedFixture = JSON.parse(fs.readFileSync(examplePath, "utf8"));
+    } catch (error) {
+      return {
+        ok: false,
+        judge_state: "not_run",
+        reason: "stored_fixture_unreadable",
+        detail: error.message,
+        path: examplePath,
+      };
+    }
+  }
+  const contract = evalContract || resolveEvalContract(definition, evalRepoRoot);
+  const built = buildStoredFixtureJudgeInputs({
+    fixture: resolvedFixture,
+    evalContract: contract,
+    definition,
+    repoRoot: evalRepoRoot,
+    refreshMaintainerContext,
+  });
+  if (!built.ok) {
+    return {
+      ok: false,
+      judge_state: "not_run",
+      reason: built.reason,
+      failures: built.failures,
+      gradeability: built.gradeability ?? resolvedFixture?.input?.gradeability ?? null,
+      workflow_type: contract.workflow_type,
+      eval_namespace: contract.eval_namespace,
+    };
+  }
+  return runDecompositionQualityJudge({
+    ...judgeOptions,
+    repoRoot,
+    evalRepoRoot,
+    definition,
+    evalContract: contract,
+    runId: judgeOptions.runId ?? resolvedFixture?.metadata?.source_run_id ?? null,
+    traceId: judgeOptions.traceId ?? resolvedFixture?.metadata?.source_trace_id ?? null,
+    judgeInputs: built.inputs,
+  });
 }
 
 async function fetchCandidatePromptVersion({
@@ -879,7 +1227,7 @@ function phoenixProviderForRuntime(runtime) {
 }
 
 export function registrationReceiptPath(repoRoot = process.cwd()) {
-  return path.join(repoRoot, ".agentic-factory", JUDGE_PROMPT_REGISTRATION_RECEIPT_FILE);
+  return path.join(repoRoot, ".teami", JUDGE_PROMPT_REGISTRATION_RECEIPT_FILE);
 }
 
 function defaultPromptNameForTarget(contract) {
@@ -888,31 +1236,41 @@ function defaultPromptNameForTarget(contract) {
   return contract.targetKey.split("/").at(-1);
 }
 
-function resolvePromptRuntimeAssignment({ contract, config }) {
-  if (contract.targetKey === DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY || contract.entry.role === "decomposition_quality_judge") {
-    const assignment = resolveJudgeRuntimeAssignment(config);
+function resolvePromptRuntimeAssignment({ contract, config, definition = decompositionDefinition }) {
+  const workflowType = contract.evalContract?.workflow_type || definition.workflow_type;
+  const judgePrompt = contract.evalContract?.judge_prompt || null;
+  if (
+    contract.targetKey === judgePrompt?.target_key
+    || contract.targetKey === DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY
+    || contract.entry.role === judgePrompt?.role
+    || contract.entry.role === "decomposition_quality_judge"
+  ) {
+    const assignment = resolveJudgeRuntimeAssignment(config, definition);
     return assignment.model
       ? { ok: true, assignment }
       : {
           ok: false,
           reason: "judge_model_not_configured",
-          detail: "configure workflows.decomposition.roles.judge.model before registering the judge prompt.",
+          detail: `configure workflows.${workflowType}.roles.${assignment.role}.model before registering the judge prompt.`,
         };
   }
-  const assignments = config ? resolveRoleRuntimeAssignments(config) : {};
+  const assignments = config ? resolveRoleRuntimeAssignments(config, workflowType) : {};
   const assignment = assignments[contract.entry.role];
   return assignment?.model
     ? { ok: true, assignment }
     : {
       ok: false,
       reason: "prompt_model_not_configured",
-      detail: `configure workflows.decomposition.roles.${contract.entry.role}.model before registering ${contract.targetKey}.`,
+      detail: `configure workflows.${workflowType}.roles.${contract.entry.role}.model before registering ${contract.targetKey}.`,
       };
 }
 
 export async function registerPromptInPhoenix({
   repoRoot = process.cwd(),
-  targetKey = DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY,
+  evalRepoRoot = MODULE_REPO_ROOT,
+  targetKey = null,
+  definition = decompositionDefinition,
+  evalContract = null,
   config = null,
   promptName = null,
   contentText = null,
@@ -923,7 +1281,12 @@ export async function registerPromptInPhoenix({
 } = {}) {
   let contract;
   try {
-    contract = loadPromptRegistrationContract({ targetKey });
+    contract = loadPromptRegistrationContract({
+      targetKey,
+      definition,
+      repoRoot: evalRepoRoot,
+      evalContract,
+    });
   } catch (error) {
     return { ok: false, reason: "prompt_target_unavailable", detail: error.message, target_key: targetKey };
   }
@@ -940,7 +1303,7 @@ export async function registerPromptInPhoenix({
   const registeredContentSha256 = hasCallerSuppliedContent
     ? createHash("sha256").update(registeredContent, "utf8").digest("hex")
     : contract.snapshotSha256;
-  const assignmentResolution = resolvePromptRuntimeAssignment({ contract, config });
+  const assignmentResolution = resolvePromptRuntimeAssignment({ contract, config, definition });
   if (!assignmentResolution.ok) return { ok: false, ...assignmentResolution, target_key: targetKey };
   const assignment = assignmentResolution.assignment;
   const provider = phoenixProviderForRuntime(assignment.runtime);
@@ -973,10 +1336,10 @@ export async function registerPromptInPhoenix({
         prompt: {
           name,
           description: hasCallerSuppliedContent
-            ? `Agentic Factory ${contract.entry.human_name || contract.entry.role || targetKey} (caller-supplied candidate registration).`
-            : `Agentic Factory ${contract.entry.human_name || contract.entry.role || targetKey} (repo-accepted snapshot registration).`,
+            ? `Teami ${contract.entry.human_name || contract.entry.role || targetKey} (caller-supplied candidate registration).`
+            : `Teami ${contract.entry.human_name || contract.entry.role || targetKey} (repo-accepted snapshot registration).`,
           metadata: {
-            source: "agentic_factory_prompt_registration",
+            source: "teami_prompt_registration",
             target_key: contract.targetKey,
             role: contract.entry.role,
             human_name: contract.entry.human_name || null,
@@ -1035,7 +1398,7 @@ export async function registerPromptInPhoenix({
   // committed manifest is intentionally untouched; until the pin is accepted,
   // the repo snapshot (sha256 baseline) remains the accepted judge behavior.
   const stagedPin = {
-    manifest_path: PHOENIX_ASSETS_PATH,
+    manifest_path: contract.manifestPath,
     prompts: [{
       role: contract.entry.role,
       target_key: contract.targetKey,
@@ -1102,7 +1465,7 @@ export async function registerPromptInPhoenix({
 export async function registerJudgePromptInPhoenix(options = {}) {
   return registerPromptInPhoenix({
     ...options,
-    targetKey: DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY,
+    targetKey: options.targetKey ?? null,
   });
 }
 
@@ -1118,7 +1481,7 @@ function appendRegistrationReceipt(filePath, registration) {
     }
   }
   const receipt = {
-    schema_version: "agentic-factory-prompt-registration-receipt/v1",
+    schema_version: "teami-prompt-registration-receipt/v1",
     updated_at: registration.registered_at,
     registrations: [...existing, registration],
   };
@@ -1140,7 +1503,7 @@ function appendRegistrationReceipt(filePath, registration) {
 export function formatJudgeReport(result) {
   const lines = [];
   lines.push(
-    `decomposition_quality judge for run ${result.run_id || "unknown"} (trace ${result.trace_id || "none"}${result.trace_status ? `, ${result.trace_status}` : ""}):`,
+    `quality judge for run ${result.run_id || "unknown"} (trace ${result.trace_id || "none"}${result.trace_status ? `, ${result.trace_status}` : ""}):`,
   );
   lines.push(
     `  state: ${result.judge_state}${result.reason ? ` (${result.reason})` : ""}`,

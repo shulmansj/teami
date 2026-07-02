@@ -18,7 +18,7 @@ proposal.
 ## Labels
 
 The label set is fixed: `pass | needs_revision | blocking_failure`. It must not
-drift, and the roll-up annotation name stays `decomposition_quality`.
+drift, and the roll-up annotation name stays `quality`.
 
 - `pass`: no material failure modes. The decomposition could be handed to
   execution agents as-is.
@@ -46,12 +46,12 @@ pretending to judge taste.
 
 ## Dimensions
 
-Each dimension is a separate annotation `name`. `decomposition_quality` is the
+Each dimension is a separate annotation `name`. `quality` is the
 roll-up used for default gates; the narrower dimensions explain why the roll-up
 passed or failed. Failure modes attached to any dimension come from the
 versioned taxonomy in [`../failure-taxonomy.json`](../failure-taxonomy.json).
 
-### `decomposition_quality` (roll-up)
+### `quality` (roll-up)
 
 Overall end-to-end quality: would a competent team accept this decomposition as
 the working plan for the project? Weigh the dimensions below; any critical

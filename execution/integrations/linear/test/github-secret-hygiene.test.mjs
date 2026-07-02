@@ -22,7 +22,7 @@ test("redactGitHubSecrets redacts GitHub token values, bearer values, and auth e
     `authorization: ${bearer}`,
     `GH_TOKEN=${classic}`,
     `GITHUB_TOKEN="${pat}"`,
-    "GIT_ASKPASS=/tmp/agentic-factory-askpass.sh",
+    "GIT_ASKPASS=/tmp/teami-askpass.sh",
   ].join("\n");
 
   const redacted = redactGitHubSecrets(diagnostic);
@@ -47,7 +47,7 @@ test("scrubGitHubAuthEnv strips GitHub auth env without mutating the caller env"
     GITHUB_TOKEN: "github-token",
     GH_ENTERPRISE_TOKEN: "gh-enterprise-token",
     GITHUB_ENTERPRISE_TOKEN: "github-enterprise-token",
-    AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN: "installation-token",
+    TEAMI_GITHUB_INSTALLATION_TOKEN: "installation-token",
     GITHUB_ACCESS_TOKEN: "github-access-token",
     GITHUB_PAT: "github-pat",
     GIT_ASKPASS: "askpass-helper",
@@ -63,7 +63,7 @@ test("scrubGitHubAuthEnv strips GitHub auth env without mutating the caller env"
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
-    "AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN",
+    "TEAMI_GITHUB_INSTALLATION_TOKEN",
     "GITHUB_ACCESS_TOKEN",
     "GITHUB_PAT",
     "GIT_ASKPASS",

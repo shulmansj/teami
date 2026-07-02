@@ -1,9 +1,12 @@
+import { LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS } from "../../../engine/trace-contract.mjs";
+
 // Bridges the engine's per-turn span push-stream (Seam 8 — the loop calls
 // spanSink.recordOrchestratorTurn / recordSubagentTurn each turn) into the run's
 // exported Phoenix trace, so operators see turn-level spans by DEFAULT (not only
 // when a test injects a capturing sink). The engine emits already-scrubbed
-// attribute bags; this maps each to a trace span (matching trace.mjs#recordSpan)
-// and drains them into result.trace before traceSink.finishRun exports it.
+// attribute bags using this LOCAL sink's full-content policy; this maps each to
+// a trace span (matching trace.mjs#recordSpan) and drains them into result.trace
+// before traceSink.finishRun exports it.
 //
 // Best-effort and side-effect-free on the run: every method swallows its own
 // errors, so observability can never change the run outcome. Accumulate-then-drain
@@ -22,6 +25,7 @@ export function createOrchestratorTurnTraceSink({ now = () => new Date() } = {})
   }
 
   return {
+    traceContentPolicy: LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
     recordOrchestratorTurn(span) {
       record(orchestratorTurnSpanName(span), span);
     },

@@ -2,7 +2,7 @@
 
 Provenance: illustrative future artifact.
 
-This demo is a synthetic, publishable walkthrough of Agentic Factory's core
+This demo is a synthetic, publishable walkthrough of Teami's core
 story: a human writes product intent in Linear, the workflow decomposes it into
 agent-ready issues, and eval evidence identifies a process improvement worth
 human review.
@@ -21,7 +21,7 @@ one Linear-backed roadmap item instead of rebuilding spreadsheets every week.
 The demo shows:
 
 1. The roadmap item as a Linear project body.
-2. The execution issues Agentic Factory would create from that project.
+2. The execution issues Teami would create from that project.
 3. The project update a human would read after decomposition.
 4. A local improvement proposal based on decomposition eval results.
 

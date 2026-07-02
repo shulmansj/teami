@@ -1,0 +1,12 @@
+{
+  "schema_version": "probe-eval-variants/v1",
+  "default_variant": "accepted_baseline",
+  "variants": {
+    "accepted_baseline": {
+      "description": "Frozen accepted probe baseline.",
+      "role_overrides": {},
+      "prompt_overrides": {},
+      "judge_candidate_prompt_version_id": null
+    }
+  }
+}

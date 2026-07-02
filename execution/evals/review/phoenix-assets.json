@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "_note": "Accepted Phoenix asset manifest for the review workflow. Null Phoenix pins mean the repo snapshot is the accepted behavior until a prompt/version is registered and accepted through the process-change path.",
+  "phoenix": {
+    "expected_origin": "http://127.0.0.1:6006",
+    "server_package_pin": "arize-phoenix==14.13.0",
+    "project_name": "teami"
+  },
+  "prompts": [
+    {
+      "role": "review_quality_judge",
+      "target_key": "prompt/review/review_quality_judge",
+      "human_name": "Reviewer quality Judge",
+      "artifact_kind": "accepted_prompt",
+      "manifest_path": "execution/evals/review/phoenix-assets.json",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "teami_accepted",
+      "snapshot_path": "execution/evals/review/accepted-prompts/review-quality-judge.md",
+      "snapshot_sha256": "2939a20f5ed18f606a436147aae138be27945fb8fa14f6902f6df96ca45099e7",
+      "prompt_version": "unpinned-initial",
+      "rubric_version": "1.0.0",
+      "failure_taxonomy_version": "1.0.0",
+      "_note": "The Judge prompt is maintainer-owned evaluator behavior and intentionally has no promotion candidate tag. The adopter-owned Reviewer worker prompt remains the tunable persona target."
+    },
+    {
+      "role": "reviewer",
+      "target_key": "prompt/review/reviewer",
+      "human_name": "Review reviewer prompt",
+      "artifact_kind": "accepted_prompt",
+      "manifest_path": "execution/evals/review/phoenix-assets.json",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
+      "snapshot_path": "execution/evals/review/accepted-prompts/reviewer.md",
+      "snapshot_sha256": "7572670cfd021ebebe00a24e6ba3e553b67fb7e063d5f7d387e98c1c85085457",
+      "prompt_version": "unpinned-initial"
+    },
+    {
+      "role": "orchestrator",
+      "target_key": "prompt/review/orchestrator_governing",
+      "human_name": "Review orchestrator governing prompt",
+      "artifact_kind": "accepted_prompt",
+      "manifest_path": "execution/evals/review/phoenix-assets.json",
+      "materializer": "phoenix_prompt_version_to_accepted_prompt_snapshot",
+      "prompt_name": null,
+      "prompt_id": null,
+      "accepted_prompt_version_id": null,
+      "accepted_tag": "teami_accepted",
+      "candidate_tag": "teami_promotion_candidate",
+      "snapshot_path": "execution/evals/review/accepted-prompts/orchestrator-governing.md",
+      "snapshot_sha256": "5ce0e16005676ec03d393b5648b7e210a6846c8391f773ae07d994c9c2ccf7f1",
+      "prompt_version": "unpinned-initial",
+      "_note": "The governing prompt is adopter-tunable accepted behavior, but it is excluded from the selectable reviewer roster by the review workflow definition's driver_governing_target_key."
+    }
+  ],
+  "evaluators": [
+    {
+      "id": "review_quality_judge_v1",
+      "kind": "llm",
+      "prompt_role": "review_quality_judge",
+      "prompt_version_id": null,
+      "model": null,
+      "_note": "Evaluator identity is repo-owned; prompt_version_id and model are pinned when the Judge prompt is first registered and run."
+    }
+  ],
+  "rules": [
+    {
+      "target_key": "rule/review/runtime_role_assignments",
+      "human_name": "Review runtime role assignments",
+      "artifact_kind": "runtime_role_defaults",
+      "manifest_path": "execution/evals/review/phoenix-assets.json",
+      "materializer": "eval_variant_to_runtime_role_defaults",
+      "artifact_path": "execution/evals/review/accepted-runtime-roles.json",
+      "snapshot_sha256": "8e4d457cceaebae2dcf3aa5146c9392d20e58e239a4a302b2f9f40a0dd89f195"
+    }
+  ],
+  "datasets": [
+    {
+      "name": "teami-review-examples",
+      "dataset_id": null,
+      "accepted_dataset_version_id": null,
+      "splits": {
+        "train": {
+          "name": "train",
+          "split_id": null
+        },
+        "test": {
+          "name": "test",
+          "split_id": null
+        }
+      },
+      "split_representation": "native",
+      "_note": "Curated Reviewer quality examples. Phoenix ids are null until the dataset is uploaded and accepted through the fixture export flow."
+    }
+  ],
+  "experiments": [],
+  "evidence": {
+    "annotation_ids": [],
+    "receipt_run_ids": [],
+    "pr_urls": []
+  }
+}

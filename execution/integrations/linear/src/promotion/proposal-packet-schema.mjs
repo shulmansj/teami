@@ -1,4 +1,4 @@
-export const PROPOSAL_PACKET_SCHEMA_VERSION = "agentic-factory-proposal-packet/v1";
+export const PROPOSAL_PACKET_SCHEMA_VERSION = "teami-proposal-packet/v1";
 
 export const PROPOSAL_PACKET_MARKER_SOURCES = Object.freeze([
   "not_rendered",

@@ -48,7 +48,7 @@ const AUDIT_FIELDS = Object.freeze({
 });
 
 function tempRepoRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `agentic-factory-check-emission-${label}-`));
+  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-check-emission-${label}-`));
 }
 
 function commitArtifact(runId) {
@@ -283,7 +283,7 @@ test("emission loads the run artifact and trace receipt and writes CODE annotati
       .map((check) => [check.name, check.skip_reason]),
   );
   assert.deepEqual(skipReasons, {
-    decomposition_quality: "structured_issue_inputs_not_recorded_in_run_artifact",
+    quality: "structured_issue_inputs_not_recorded_in_run_artifact",
     pause_state_correctness: "not_applicable_run_not_paused",
   });
 
@@ -306,7 +306,7 @@ test("deterministic checks emit through an externally managed healthy Phoenix co
       ok: true,
       appUrl: "http://127.0.0.1:6006",
       collectorUrl: "http://127.0.0.1:6006/v1/traces",
-      projectName: "agentic-factory",
+      projectName: "teami",
       managed: false,
       reused: true,
       started: false,
@@ -441,7 +441,7 @@ test("eval-mode parity: in-memory artifact, explicit trace id, and supplied eval
     artifact,
     traceId: TRACE_ID,
     checkInputs: {
-      decomposition_quality: {
+      quality: {
         issues: [{
           assignment: "Do the work",
           output: "The deliverable",
@@ -474,15 +474,15 @@ test("eval-mode parity: in-memory artifact, explicit trace id, and supplied eval
   const byName = Object.fromEntries(posts.map((post) => [post.data[0].name, post.data[0]]));
   assert.deepEqual(Object.keys(byName).sort(), [
     "accepted_packet_sufficiency",
-    "decomposition_quality",
     "pause_state_correctness",
+    "quality",
   ]);
   for (const entry of Object.values(byName)) {
     assert.equal(entry.annotator_kind, "CODE");
     assert.equal(entry.trace_id, TRACE_ID);
   }
-  assert.equal(byName.decomposition_quality.identifier, "decomposition_quality_offline_v1");
-  assert.equal(byName.decomposition_quality.result.label, "pass");
+  assert.equal(byName.quality.identifier, "decomposition_quality_offline_v1");
+  assert.equal(byName.quality.result.label, "pass");
   assert.equal(byName.pause_state_correctness.identifier, "pause_state_correctness_offline_v1");
   assert.equal(byName.pause_state_correctness.result.label, "pass");
 });

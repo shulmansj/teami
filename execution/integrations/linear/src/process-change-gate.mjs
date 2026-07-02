@@ -58,12 +58,12 @@ import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.m
 // condition below.
 //
 // The gate report goes to stdout plus a local record under
-// .agentic-factory/gate-reports/<id>.json (gitignored via .agentic-factory/,
+// .teami/gate-reports/<id>.json (gitignored via .teami/,
 // atomic write). It is NEVER written to Phoenix (CONSTRAINTS #3): the wipe
 // test says gate outcomes are workflow state, and Phoenix loss must never
 // lose them.
 
-export const GATE_REPORT_SCHEMA_VERSION = "agentic-factory-process-change-gate-report/v1";
+export const GATE_REPORT_SCHEMA_VERSION = "teami-process-change-gate-report/v1";
 
 // Named gate conditions, in evaluation order (plan ~1683-1695: a process
 // change should land only when all of these hold).
@@ -85,12 +85,12 @@ export const GATE_CONDITION_IDS = Object.freeze([
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 
 // ---------------------------------------------------------------------------
-// Local gate-report record store (.agentic-factory/gate-reports/; gitignored
+// Local gate-report record store (.teami/gate-reports/; gitignored
 // local custody; atomic temp+rename+read-back like the sibling stores).
 // ---------------------------------------------------------------------------
 
 export function defaultGateReportDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".agentic-factory", "gate-reports");
+  return path.resolve(repoRoot, ".teami", "gate-reports");
 }
 
 function writeGateRecord(filePath, record) {
@@ -248,7 +248,7 @@ function entryVersionMismatches(entry) {
 
 // Score means with the taste/structural separation intact: deterministic
 // CODE checks are never folded into the taste roll-up mean (a CODE row named
-// decomposition_quality is excluded from that mean by annotator kind).
+// quality is excluded from that mean by annotator kind).
 function meansEntries(entries) {
   return entries.map((entry) => ({
     evaluations: [...entry.llms, ...entry.codes]
@@ -1222,7 +1222,7 @@ function buildEvidenceLineage({
     code_labels: entry.codes.map((annotation) => annotation.label).filter(Boolean).sort(),
   }));
   return {
-    schema_version: "agentic-factory-evidence-lineage/v1",
+    schema_version: "teami-evidence-lineage/v1",
     run_window: {
       from: receipt?.launch?.launched_at ?? receipt?.created_at ?? null,
       to: generatedAt ?? null,

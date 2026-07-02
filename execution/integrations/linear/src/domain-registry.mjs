@@ -3,8 +3,12 @@ import path from "node:path";
 
 import { getResourceKind } from "../../../engine/resource-registry.mjs";
 
-export const DOMAIN_REGISTRY_SCHEMA_VERSION = "agentic-factory-domain-registry/v1";
-export const DOMAIN_REGISTRY_RELATIVE_PATH = path.join(".agentic-factory", "domains.json");
+export const DOMAIN_REGISTRY_SCHEMA_VERSION_V1 = "teami-domain-registry/v1";
+export const DOMAIN_REGISTRY_SCHEMA_VERSION = "teami-domain-registry/v2";
+export const DOMAIN_REGISTRY_SCHEMA_VERSIONS_SUPPORTED_FOR_MIGRATION = Object.freeze([
+  DOMAIN_REGISTRY_SCHEMA_VERSION_V1,
+]);
+export const DOMAIN_REGISTRY_RELATIVE_PATH = path.join(".teami", "domains.json");
 export const DOMAIN_LIFECYCLE_STATES = Object.freeze([
   "setup_incomplete",
   "active",
@@ -27,6 +31,7 @@ export const SETUP_INCOMPLETE_CAUSES = Object.freeze([
   "registry_write_failed",
 ]);
 
+// These strict key allow-lists are the extension point for future registry fields.
 const TOP_LEVEL_KEYS = new Set(["schema_version", "domains"]);
 const DOMAIN_KEYS = new Set([
   "id",
@@ -45,7 +50,7 @@ const LINEAR_KEYS = new Set([
   "team_key",
   "team_name",
   "team_name_last_seen_at",
-  "provisioned_by_agentic_factory",
+  "provisioned_by_teami",
   "webhook_id",
   "cache_path",
 ]);
@@ -57,7 +62,7 @@ export function domainRegistryPath(repoRoot = process.cwd()) {
 
 export function domainCacheRelativePath(domainId) {
   assertDomainId(domainId, "domain_id");
-  return path.join(".agentic-factory", "domains", domainId, "linear.json").replace(/\\/g, "/");
+  return path.join(".teami", "domains", domainId, "linear.json").replace(/\\/g, "/");
 }
 
 export function domainCachePath({ repoRoot = process.cwd(), domainId, cachePath = null } = {}) {
@@ -74,8 +79,18 @@ export function emptyDomainRegistry() {
 
 export function readDomainRegistry({ repoRoot = process.cwd(), registryPath = domainRegistryPath(repoRoot) } = {}) {
   if (!fs.existsSync(registryPath)) return null;
-  const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  const registry = migrateDomainRegistry(JSON.parse(fs.readFileSync(registryPath, "utf8")));
   validateDomainRegistry(registry);
+  return registry;
+}
+
+export function migrateDomainRegistry(registry) {
+  if (!registry || typeof registry !== "object" || Array.isArray(registry)) return registry;
+  if (registry.schema_version === DOMAIN_REGISTRY_SCHEMA_VERSION) return registry;
+  // Future structural registry transforms belong here so reads have one migration path.
+  if (DOMAIN_REGISTRY_SCHEMA_VERSIONS_SUPPORTED_FOR_MIGRATION.includes(registry.schema_version)) {
+    return { ...registry, schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION };
+  }
   return registry;
 }
 
@@ -101,7 +116,7 @@ export function writeDomainRegistry(
 
 export function removeDomainRegistryState({ repoRoot = process.cwd() } = {}) {
   const registryPath = domainRegistryPath(repoRoot);
-  const domainsDir = path.resolve(repoRoot, ".agentic-factory", "domains");
+  const domainsDir = path.resolve(repoRoot, ".teami", "domains");
   const removed = {
     registryPath,
     domainsDir,
@@ -168,7 +183,7 @@ export function makeDomainRecord({
       team_key: teamKey,
       team_name: teamName,
       team_name_last_seen_at: teamNameLastSeenAt,
-      provisioned_by_agentic_factory: provisionedByAgenticFactory,
+      provisioned_by_teami: provisionedByAgenticFactory,
       webhook_id: webhookId,
       cache_path: cachePath || domainCacheRelativePath(domainId),
     },
@@ -274,7 +289,7 @@ function validateLinearRecord(domain, label) {
     throw new Error(`Invalid domain registry: missing_linear:${domain.id}`);
   }
   assertAllowedKeys(linear, LINEAR_KEYS, `${label}.linear`);
-  if (typeof linear.provisioned_by_agentic_factory !== "boolean") {
+  if (typeof linear.provisioned_by_teami !== "boolean") {
     throw new Error(`Invalid domain registry: invalid_provisioned_flag:${domain.id}`);
   }
   if (!isNonEmptyString(linear.cache_path)) {
@@ -319,7 +334,7 @@ function validateResourcesRecord(resources, label) {
       throw new Error(`Invalid domain registry: resources_duplicate_id:${resource.id}`);
     }
     ids.add(resource.id);
-    if (kinds.has(resource.kind)) {
+    if (resource.kind !== "git_repo" && kinds.has(resource.kind)) {
       throw new Error(`Invalid domain registry: resources_duplicate_kind:${resource.kind}`);
     }
     kinds.add(resource.kind);

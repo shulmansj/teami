@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "decomposition-quality-judge-output/v1",
-  "title": "decomposition_quality judge output",
-  "description": "Structured-output generation schema for the decomposition_quality model judge. The label enum mirrors the canonical quality label set in execution/evals/decomposition/annotation.schema.json (pass | needs_revision | blocking_failure) and must not drift; decomposition-quality-judge.test.mjs pins the equivalence. The wrapper additionally validates failure_modes against the versioned failure taxonomy (unknown modes are judge_invalid), so this schema is the generation-time guardrail, not the contract of record.",
+  "title": "quality judge output",
+  "description": "Structured-output generation schema for the quality model judge. The label enum mirrors the canonical quality label set in execution/evals/decomposition/annotation.schema.json (pass | needs_revision | blocking_failure) and must not drift; decomposition-quality-judge.test.mjs pins the equivalence. The wrapper additionally validates failure_modes against the versioned failure taxonomy (unknown modes are judge_invalid) and derives the stored score from the label's namespace band, so this schema is the generation-time guardrail, not the contract of record.",
   "type": "object",
   "additionalProperties": false,
   "required": ["label", "score", "explanation", "failure_modes"],

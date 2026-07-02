@@ -43,6 +43,12 @@ export function ledgerEntry(candidate) {
     controller_terminal: candidate.controller_result?.terminal ?? null,
     evidence_repair: Boolean(candidate.controller_result?.evidence_repair),
     proposal_instance_id: candidate.controller_result?.proposal_instance_id ?? null,
+    normalized_envelope_hash: candidate.controller_result?.normalized_envelope_hash
+      ?? candidate.normalized_envelope_hash
+      ?? null,
+    opportunity_hash: candidate.controller_result?.opportunity_hash
+      ?? candidate.opportunity_hash
+      ?? null,
     pr_title: candidate.controller_result?.pr_title ?? candidate.controller_result?.pr?.title ?? null,
     pr: candidate.controller_result?.pr
       ? {
@@ -269,6 +275,10 @@ export function formatPromotionCandidateScanReport(result) {
     lines.push(promotionCandidateRowHeadline(candidate, result));
     if (candidate.pr?.url) lines.push(candidate.pr.url);
     lines.push(`  target: ${candidateDisplayTarget(candidate)}`);
+    if (candidate.status === "improvement_opportunity") {
+      const opportunityHash = candidate.opportunity_hash || candidate.normalized_envelope_hash;
+      if (opportunityHash) lines.push(`  next: npm run draft-improvement -- --opportunity ${opportunityHash}`);
+    }
     const internal = internalReasonForCandidate(candidate);
     if (internal) lines.push(`  internal: ${internal}`);
     const detail = candidate.controller_detail || candidate.detail || null;

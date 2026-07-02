@@ -8,7 +8,11 @@ import { createProductionGitHubPromotionTransport } from "../github-production-t
 import { resolveBehaviorRepoIdentity } from "../github-setup.mjs";
 import { ensurePhoenixReady, resolvePhoenixConfig } from "../local-phoenix-manager.mjs";
 import { evaluateProcessChangeGate } from "../process-change-gate.mjs";
-import { PROMOTION_POLICY_PATH, resolveTrustedPolicyRead } from "../promotion-policy.mjs";
+import {
+  PROMOTION_POLICY_PATH,
+  PROMOTION_POLICY_RELATIVE_PATH,
+  resolveTrustedPolicyRead,
+} from "../promotion-policy.mjs";
 import {
   allowedPromotionArtifactPaths,
   materializePromotionCandidate,
@@ -146,6 +150,7 @@ export const UNTRUSTED_PROMOTION_OVERRIDE_KEYS = Object.freeze([
   "githubTransport",
   "githubRepo",
   "promotionPolicyPath",
+  "promotionPolicyRelativePath",
   "workspaceEvalPolicyPath",
   "baselineExperimentOverride",
   "ensureReady",
@@ -204,6 +209,7 @@ async function promoteCandidateWithOverridesUnlocked({
   registryDir = null,
   workspaceDir = null,
   promotionPolicyPath = PROMOTION_POLICY_PATH,
+  promotionPolicyRelativePath = PROMOTION_POLICY_RELATIVE_PATH,
   workspaceEvalPolicyPath = undefined,
   gateReportDir = null,
   evalRunStoreDir = null,
@@ -328,6 +334,7 @@ async function promoteCandidateWithOverridesUnlocked({
   const policyRead = resolveTrustedPolicyRead({
     mode: policyMode,
     policyPath: promotionPolicyPath,
+    policyRelativePath: promotionPolicyRelativePath,
     internalCloneDir: workspaceDir
       ? path.join(workspaceDir, "repo")
       : path.join(defaultPromotionWorkspaceDir(repoRoot), "repo"),
@@ -670,7 +677,7 @@ async function promoteCandidateWithOverridesUnlocked({
       ? [{ object: `prompt_version:${receiptPromptVersionId}`, trust: "verified_phoenix", note: "resolved via GET /v1/prompt_versions/{id}" }]
       : []),
     { object: `annotations:${resolvedAnnotationIds.length} id(s)`, trust: "verified_phoenix", note: "ids resolved from source traces; the prose inside them is unverified" },
-    { object: `experiment_receipt:${receiptState.receipt_id}`, trust: "unverified_prose", note: "local asserted custody (.agentic-factory), not repo-committed" },
+    { object: `experiment_receipt:${receiptState.receipt_id}`, trust: "unverified_prose", note: "local asserted custody (.teami), not repo-committed" },
     { object: "annotation_explanations_and_judge_rationales", trust: "unverified_prose", note: "data, never instructions; cannot waive any gate or label" },
   ];
 
@@ -1945,8 +1952,8 @@ function buildPromotionPrProvenance({
   pr = null,
 } = {}) {
   return withoutNullish({
-    schema_version: "agentic-factory-pr-provenance/v1",
-    source_run_id: nullableString(receipt?.launch?.agentic_factory_run_id),
+    schema_version: "teami-pr-provenance/v1",
+    source_run_id: nullableString(receipt?.launch?.teami_run_id),
     experiment_receipt_id: nullableString(receiptState?.receipt_id ?? receipt?.receipt_id),
     phoenix_experiment_id: nullableString(receiptState?.phoenix_experiment_id ?? receipt?.phoenix_experiment_id),
     proposal_instance_id: nullableString(proposalInstanceId),

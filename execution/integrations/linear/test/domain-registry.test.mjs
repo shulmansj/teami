@@ -52,7 +52,7 @@ test("Minting requires an explicit name; ids are path-safe, immutable, collision
   ).domains[0];
 
   assert.equal(renamed.id, "customer-success-pilot");
-  assert.equal(renamed.linear.cache_path, ".agentic-factory/domains/customer-success-pilot/linear.json");
+  assert.equal(renamed.linear.cache_path, ".teami/domains/customer-success-pilot/linear.json");
 });
 
 test("Default records carry an empty resources list without requiring registered resource kinds", () => {
@@ -100,7 +100,7 @@ test("Resources validate by dispatching to the registered resource-kind definiti
   }
 });
 
-test("Resources reject unknown kinds, invalid bindings, duplicate ids, and duplicate kinds", () => {
+test("Resources reject unknown kinds, invalid bindings, and duplicate ids", () => {
   resetResourceRegistry();
   try {
     assert.throws(
@@ -120,11 +120,11 @@ test("Resources reject unknown kinds, invalid bindings, duplicate ids, and dupli
           domains: [
             {
               ...activeDomain("main"),
-              resources: [gitRepoResource({ binding: { owner: "acme", repo: "app", default_branch: "main" } })],
+              resources: [gitRepoResource({ binding: { repo: "app", default_branch: "main" } })],
             },
           ],
         }),
-      /git_repo_binding_missing_local_checkout_path/,
+      /git_repo_binding_missing_owner/,
     );
     assert.throws(
       () =>
@@ -142,22 +142,37 @@ test("Resources reject unknown kinds, invalid bindings, duplicate ids, and dupli
         }),
       /resources_duplicate_id:repo-a/,
     );
-    assert.throws(
-      () =>
-        validateDomainRegistry({
-          schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-          domains: [
-            {
-              ...activeDomain("main"),
-              resources: [
-                gitRepoResource({ id: "repo-a" }),
-                gitRepoResource({ id: "repo-b", role: "secondary" }),
-              ],
-            },
+  } finally {
+    resetResourceRegistry();
+  }
+});
+
+test("Resources allow multiple git_repo records when ids are unique", () => {
+  resetResourceRegistry();
+  try {
+    registerGitRepoStubResourceKind();
+    const registry = {
+      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
+      domains: [
+        {
+          ...activeDomain("main"),
+          resources: [
+            gitRepoResource({ id: "git_repo:acme/app" }),
+            gitRepoResource({
+              id: "git_repo:acme/api",
+              role: "secondary",
+              binding: {
+                owner: "acme",
+                repo: "api",
+                default_branch: "main",
+              },
+            }),
           ],
-        }),
-      /resources_duplicate_kind:git_repo/,
-    );
+        },
+      ],
+    };
+
+    assert.equal(validateDomainRegistry(registry), true);
   } finally {
     resetResourceRegistry();
   }
@@ -242,9 +257,9 @@ test("Registry stores the original adopter-provided domain name for setup resume
 
 test("Registry path is ignored-local and writes are atomic with read-back validation", () => {
   const gitignore = fs.readFileSync(path.join(repoRoot, ".gitignore"), "utf8");
-  assert.match(gitignore, /^\.agentic-factory\/$/m);
+  assert.match(gitignore, /^\.teami\/$/m);
 
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-domain-registry-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-registry-"));
   const registry = upsertDomainRecord(emptyDomainRegistry(), activeDomain("main"));
   const filePath = writeDomainRegistry({ repoRoot: tempRoot }, registry);
 
@@ -261,7 +276,7 @@ test("Registry schema does not allow Phoenix project fields", () => {
     () =>
       validateDomainRegistry({
         schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-        phoenix: { project_name: "agentic-factory" },
+        phoenix: { project_name: "teami" },
         domains: [],
       }),
     /unknown_key:registry\.phoenix/,
@@ -282,10 +297,10 @@ test("Registry schema does not allow Phoenix project fields", () => {
 });
 
 test("reset removes registry and per-domain cache dirs", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-factory-domain-reset-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-reset-"));
   const registry = upsertDomainRecord(emptyDomainRegistry(), activeDomain("support-ops"));
   writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  const cacheDir = path.join(tempRoot, ".agentic-factory", "domains", "support-ops");
+  const cacheDir = path.join(tempRoot, ".teami", "domains", "support-ops");
   fs.mkdirSync(cacheDir, { recursive: true });
   fs.writeFileSync(path.join(cacheDir, "linear.json"), JSON.stringify({ domainId: "support-ops" }));
 
@@ -294,7 +309,7 @@ test("reset removes registry and per-domain cache dirs", () => {
   assert.equal(removed.registryRemoved, true);
   assert.equal(removed.domainsDirRemoved, true);
   assert.equal(fs.existsSync(domainRegistryPath(tempRoot)), false);
-  assert.equal(fs.existsSync(path.join(tempRoot, ".agentic-factory", "domains")), false);
+  assert.equal(fs.existsSync(path.join(tempRoot, ".teami", "domains")), false);
 });
 
 function activeDomain(id, overrides = {}) {
@@ -305,7 +320,7 @@ function activeDomain(id, overrides = {}) {
     workspaceName: "Example Workspace",
     teamId: `team-${id}`,
     teamKey: "AF",
-    teamName: "Agentic Factory",
+    teamName: "Teami",
     teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     webhookId: `webhook-${id}`,
     ...overrides,
@@ -316,7 +331,7 @@ function registerGitRepoStubResourceKind() {
   registerResourceKind({
     kind: "git_repo",
     validateBinding(binding) {
-      for (const field of ["owner", "repo", "default_branch", "local_checkout_path"]) {
+      for (const field of ["owner", "repo", "default_branch"]) {
         if (typeof binding?.[field] !== "string" || binding[field].trim() === "") {
           throw new Error(`git_repo_binding_missing_${field}`);
         }
@@ -340,7 +355,6 @@ function gitRepoResource({
     owner: "acme",
     repo: "app",
     default_branch: "main",
-    local_checkout_path: "<local-checkout-path>",
   },
 } = {}) {
   return {

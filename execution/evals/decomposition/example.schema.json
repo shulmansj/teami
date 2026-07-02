@@ -14,8 +14,26 @@
     "input": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["source_type", "project", "run_envelope", "source_refs"],
+      "required": [
+        "gradeability",
+        "judge_fixture_input",
+        "maintainer_supplied_context",
+        "source_type",
+        "project",
+        "run_envelope",
+        "source_refs"
+      ],
       "properties": {
+        "gradeability": {
+          "description": "Whether this captured row has the complete Judge input needed for Judge tuning. Only full_input rows may be regraded or used to tune the Judge; detection_only rows are aggregate/drift evidence only.",
+          "enum": ["full_input", "detection_only"]
+        },
+        "judge_fixture_input": {
+          "$ref": "#/$defs/judge_fixture_input"
+        },
+        "maintainer_supplied_context": {
+          "$ref": "#/$defs/maintainer_supplied_context"
+        },
         "source_type": {
           "const": "linear_project_snapshot"
         },
@@ -143,6 +161,33 @@
             }
           }
         },
+        "human_annotation_ids": {
+          "description": "Phoenix ids of the HUMAN annotations resolved at save time.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_label": {
+          "description": "Save-time frozen human expectation for this fixture, resolved into the namespace label vocabulary. Present only for GOLD human-labeled fixtures.",
+          "$ref": "#/$defs/quality_label"
+        },
+        "expected_score": {
+          "description": "Optional save-time frozen human score. When present, D-capture checks it against the label's namespace score band before saving.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "provenance": {
+          "description": "Save-time fixture-label provenance. explicit_human/GOLD rows are eligible for Judge tuning; ambiguous/excluded rows are retained for audit but excluded from tuning datasets.",
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["label_source", "label_status", "labeled_at"],
+          "properties": {
+            "label_source": { "enum": ["explicit_human", "ambiguous"] },
+            "label_status": { "enum": ["GOLD", "excluded"] },
+            "labeled_at": { "type": "string", "minLength": 1 },
+            "annotator_id": { "type": "string", "minLength": 1 }
+          }
+        },
         "expected_properties": {
           "description": "Property-level expectations a judge can check without an exact golden issue split.",
           "type": "object",
@@ -157,7 +202,7 @@
       }
     },
     "metadata": {
-      "description": "Example metadata is Phoenix-bound: Agentic Factory workflow/queue state keys are banned (see $defs/no_workflow_state_keys and the wipe test in README.md); other extensibility stays open.",
+      "description": "Example metadata is Phoenix-bound: Teami workflow/queue state keys are banned (see $defs/no_workflow_state_keys and the wipe test in README.md); other extensibility stays open.",
       "type": "object",
       "additionalProperties": true,
       "allOf": [{ "$ref": "#/$defs/no_workflow_state_keys" }],
@@ -204,6 +249,16 @@
           "description": "Originating run id; null for synthetic or sanitized fixtures with no captured run.",
           "type": ["string", "null"]
         },
+        "source_target_ids": {
+          "description": "Save-time frozen produced target ids for outcome joins. Empty when the run produced no provider target identity.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "produced_identity_refs": {
+          "description": "Save-time frozen produced identity references. These are bounded references only, not provider payloads.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/produced_identity_ref" }
+        },
         "content_retention": {
           "enum": ["bounded", "rich_local", "sanitized_fixture"]
         }
@@ -212,7 +267,7 @@
   },
   "$defs": {
     "no_workflow_state_keys": {
-      "description": "Denylist for Phoenix-bound metadata: no Agentic Factory workflow/queue state may be stored in Phoenix (wipe test: losing Phoenix must never lose which behavior is accepted or what queue is pending). These known banned keys are schema-level rejections; other extensibility stays open.",
+      "description": "Denylist for Phoenix-bound metadata: no Teami workflow/queue state may be stored in Phoenix (wipe test: losing Phoenix must never lose which behavior is accepted or what queue is pending). These known banned keys are schema-level rejections; other extensibility stays open.",
       "properties": {
         "needs_relabel": false,
         "pending_promotion": false,
@@ -225,14 +280,74 @@
         "resolved": false
       }
     },
+    "judge_fixture_input": {
+      "description": "Verbatim captured evidence fields consumed by the decomposition Judge. This is the fixture input proper; maintainer-owned rubric/taxonomy/config is deliberately split out so stored fixtures do not pin stale maintainer context.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "project_intent",
+        "terminal_status",
+        "terminal_reason",
+        "final_issues",
+        "discovery_issues",
+        "dependency_relations",
+        "project_update_markdown",
+        "open_questions_markdown",
+        "phase_packet_summaries"
+      ],
+      "properties": {
+        "project_intent": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["id", "name", "content", "status"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "description": { "type": ["string", "null"] },
+            "content": { "type": "string" },
+            "status": { "type": "string", "minLength": 1 },
+            "labels": { "type": "array" },
+            "existing_issues": { "type": "array" }
+          }
+        },
+        "terminal_status": {
+          "enum": ["completed", "paused", "failed_closed", "ineligible"]
+        },
+        "terminal_reason": { "type": "string", "minLength": 1 },
+        "final_issues": { "type": "array" },
+        "discovery_issues": { "type": "array" },
+        "dependency_relations": { "type": "array" },
+        "project_update_markdown": { "type": ["string", "null"] },
+        "open_questions_markdown": { "type": ["string", "null"] },
+        "phase_packet_summaries": { "type": "array" }
+      }
+    },
+    "maintainer_supplied_context": {
+      "description": "Maintainer-owned Judge context supplied at grading time. Regrade may refresh this from the current eval namespace contract rather than treating stored fixture context as user evidence.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "rubric_version",
+        "failure_taxonomy_version",
+        "allowed_failure_modes"
+      ],
+      "properties": {
+        "rubric_version": { "type": "string", "minLength": 1 },
+        "failure_taxonomy_version": { "type": "string", "minLength": 1 },
+        "allowed_failure_modes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "quality_label": {
       "description": "Default-judge label set. This set must not drift.",
       "enum": ["pass", "needs_revision", "blocking_failure"]
     },
     "annotation_name": {
-      "description": "Canonical decomposition annotation names. decomposition_quality is the roll-up used for default gates; the narrower dimensions explain why the roll-up passed or failed; accepted_packet_sufficiency and pause_state_correctness are deterministic-check names.",
+      "description": "Canonical decomposition annotation names. quality is the roll-up used for default gates; the narrower dimensions explain why the roll-up passed or failed; accepted_packet_sufficiency and pause_state_correctness are deterministic-check names.",
       "enum": [
-        "decomposition_quality",
+        "quality",
         "project_intent_preservation",
         "issue_executability",
         "dependency_structure",
@@ -243,6 +358,20 @@
         "accepted_packet_sufficiency",
         "pause_state_correctness"
       ]
+    },
+    "produced_identity_ref": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["effect_id", "provider", "resource_kind", "target_ids"],
+      "properties": {
+        "effect_id": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "resource_kind": { "type": "string", "minLength": 1 },
+        "target_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
     }
   }
 }

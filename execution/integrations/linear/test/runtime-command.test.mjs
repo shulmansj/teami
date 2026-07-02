@@ -14,8 +14,8 @@ import {
 } from "../src/runtime-command.mjs";
 
 const EXPLICIT_WRITE_CREDENTIALS = [
-  "AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN",
-  "AGENTIC_FACTORY_INBOX_SETUP_GRANT",
+  "TEAMI_GITHUB_INSTALLATION_TOKEN",
+  "TEAMI_INBOX_SETUP_GRANT",
   "GH_TOKEN",
   "GITHUB_TOKEN",
   "GH_ENTERPRISE_TOKEN",
@@ -25,6 +25,7 @@ const EXPLICIT_WRITE_CREDENTIALS = [
   "GIT_ASKPASS",
   "GIT_SSH",
   "GIT_SSH_COMMAND",
+  "SSH_ASKPASS",
   "SSH_AUTH_SOCK",
 ];
 
@@ -43,8 +44,8 @@ test("scrubChildEnv strips write credentials and preserves runtime essentials", 
     CLAUDE_API_KEY: "claude-runtime-auth",
     CLAUDE_CONFIG_DIR: "claude-config",
     ANTHROPIC_API_KEY: "anthropic-runtime-auth",
-    AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN: "github-installation-token",
-    AGENTIC_FACTORY_INBOX_SETUP_GRANT: "setup-grant",
+    TEAMI_GITHUB_INSTALLATION_TOKEN: "github-installation-token",
+    TEAMI_INBOX_SETUP_GRANT: "setup-grant",
     GH_TOKEN: "gh-token",
     GITHUB_TOKEN: "github-token",
     GH_ENTERPRISE_TOKEN: "gh-enterprise-token",
@@ -54,6 +55,7 @@ test("scrubChildEnv strips write credentials and preserves runtime essentials", 
     GIT_ASKPASS: "askpass-helper",
     GIT_SSH: "ssh-helper",
     GIT_SSH_COMMAND: "ssh-command",
+    SSH_ASKPASS: "ssh-askpass-helper",
     SSH_AUTH_SOCK: "ssh-agent-sock",
     AF_LINEAR_ACCESS_TOKEN: "linear-access-token",
     AF_LINEAR_CREDENTIAL_TARGET: "linear-credential-target",
@@ -114,25 +116,25 @@ test("scrubChildEnv strips write credentials and preserves runtime essentials", 
 
 test("scrubChildEnv does not mutate process.env", () => {
   const names = [
-    "AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN",
+    "TEAMI_GITHUB_INSTALLATION_TOKEN",
     "AF_LINEAR_ENV_U1_TEST_TOKEN",
     "LINEAR_ENV_U1_TEST_TOKEN",
     "CODEX_ENV_U1_TEST_TOKEN",
   ];
   const previous = new Map(names.map((name) => [name, process.env[name]]));
   try {
-    process.env.AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN = "env-u1-github-token";
+    process.env.TEAMI_GITHUB_INSTALLATION_TOKEN = "env-u1-github-token";
     process.env.AF_LINEAR_ENV_U1_TEST_TOKEN = "env-u1-af-linear-token";
     process.env.LINEAR_ENV_U1_TEST_TOKEN = "env-u1-linear-token";
     process.env.CODEX_ENV_U1_TEST_TOKEN = "env-u1-codex-token";
 
     const scrubbed = scrubChildEnv(process.env);
 
-    assert.equal(process.env.AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN, "env-u1-github-token");
+    assert.equal(process.env.TEAMI_GITHUB_INSTALLATION_TOKEN, "env-u1-github-token");
     assert.equal(process.env.AF_LINEAR_ENV_U1_TEST_TOKEN, "env-u1-af-linear-token");
     assert.equal(process.env.LINEAR_ENV_U1_TEST_TOKEN, "env-u1-linear-token");
     assert.equal(process.env.CODEX_ENV_U1_TEST_TOKEN, "env-u1-codex-token");
-    assert.equal(Object.hasOwn(scrubbed, "AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN"), false);
+    assert.equal(Object.hasOwn(scrubbed, "TEAMI_GITHUB_INSTALLATION_TOKEN"), false);
     assert.equal(Object.hasOwn(scrubbed, "AF_LINEAR_ENV_U1_TEST_TOKEN"), false);
     assert.equal(Object.hasOwn(scrubbed, "LINEAR_ENV_U1_TEST_TOKEN"), false);
     assert.equal(scrubbed.CODEX_ENV_U1_TEST_TOKEN, "env-u1-codex-token");
@@ -148,8 +150,9 @@ test("scrubChildEnv does not mutate process.env", () => {
 test("runRuntimeCommand spawns with the scrubbed child environment and proof signal", async () => {
   const env = spawnBaseEnv({
     APPDATA: path.join(os.tmpdir(), "env-u1-appdata"),
-    AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN: "github-installation-token",
+    TEAMI_GITHUB_INSTALLATION_TOKEN: "github-installation-token",
     GITHUB_TOKEN: "github-token",
+    SSH_ASKPASS: "ssh-askpass-helper",
     SSH_AUTH_SOCK: "ssh-agent-sock",
     AF_LINEAR_ACCESS_TOKEN: "linear-access-token",
     LINEAR_ACCESS_TOKEN: "linear-access-token",
@@ -173,8 +176,9 @@ test("runRuntimeCommand spawns with the scrubbed child environment and proof sig
         stdout: ({ options }) => {
           const names = [
             "APPDATA",
-            "AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN",
+            "TEAMI_GITHUB_INSTALLATION_TOKEN",
             "GITHUB_TOKEN",
+            "SSH_ASKPASS",
             "SSH_AUTH_SOCK",
             "AF_LINEAR_ACCESS_TOKEN",
             "LINEAR_ACCESS_TOKEN",
@@ -197,8 +201,9 @@ test("runRuntimeCommand spawns with the scrubbed child environment and proof sig
   });
   assert.deepEqual(JSON.parse(result.output), {
     APPDATA: env.APPDATA,
-    AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN: null,
+    TEAMI_GITHUB_INSTALLATION_TOKEN: null,
     GITHUB_TOKEN: null,
+    SSH_ASKPASS: null,
     SSH_AUTH_SOCK: null,
     AF_LINEAR_ACCESS_TOKEN: null,
     LINEAR_ACCESS_TOKEN: null,
@@ -211,7 +216,7 @@ test("runRuntimeCommand spawns with the scrubbed child environment and proof sig
 
 test("runRuntimeCommand passes cwd through while preserving child env scrubbing", async () => {
   const env = spawnBaseEnv({
-    AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN: "github-installation-token",
+    TEAMI_GITHUB_INSTALLATION_TOKEN: "github-installation-token",
     GITHUB_TOKEN: "github-token",
     CODEX_ENV_U1_TEST_TOKEN: "codex-runtime-auth",
   });
@@ -235,7 +240,7 @@ test("runRuntimeCommand passes cwd through while preserving child env scrubbing"
         stdout: ({ options }) =>
           JSON.stringify({
             cwd: options.cwd ?? null,
-            githubInstallationToken: options.env.AGENTIC_FACTORY_GITHUB_INSTALLATION_TOKEN ?? null,
+            githubInstallationToken: options.env.TEAMI_GITHUB_INSTALLATION_TOKEN ?? null,
             githubToken: options.env.GITHUB_TOKEN ?? null,
             codexRuntimeToken: options.env.CODEX_ENV_U1_TEST_TOKEN ?? null,
           }),
@@ -438,7 +443,7 @@ test("runRuntimeCommand enriches timeout, max-output, and start failures", async
   await assert.rejects(
     () =>
       runRuntimeCommand(
-        { command: "definitely-not-a-runtime-command-for-agentic-factory", args: [] },
+        { command: "definitely-not-a-runtime-command-for-teami", args: [] },
         {
           timeoutMs: 5_000,
           spawnImpl: fakeSpawn({ error: new Error("not found") }),

@@ -1,0 +1,40 @@
+[
+  {
+    "decomposition_key": "webhook-inbox-core",
+    "title": "Build the hosted webhook inbox (authenticate, dedupe, normalize)",
+    "issue_body_markdown": "## Assignment\n\nBuild the hosted inbox.\n\n## Acceptance Criteria\n\n- Authenticates Linear + GitHub events.\n- Dedupes redelivery.\n- Normalizes to the internal wake envelope.",
+    "depends_on": [],
+    "assignment": "Build the hosted inbox: authenticate, dedupe, normalize events to the wake envelope.",
+    "output": "A hosted inbox that emits normalized wake envelopes.",
+    "acceptance_criteria": [
+      "Authenticates events",
+      "Dedupes redelivery",
+      "Normalizes to the wake envelope"
+    ]
+  },
+  {
+    "decomposition_key": "webhook-inbox-queue",
+    "title": "Add the durable wake queue the Workflow Runner drains",
+    "issue_body_markdown": "## Assignment\n\nAdd a durable queue.\n\n## Acceptance Criteria\n\n- Persists wake envelopes durably.\n- Drains in order.",
+    "depends_on": [],
+    "assignment": "Add a durable queue that persists wake envelopes for the Workflow Runner.",
+    "output": "A durable wake queue.",
+    "acceptance_criteria": [
+      "Persists wake envelopes durably",
+      "Drains in order"
+    ]
+  },
+  {
+    "decomposition_key": "webhook-inbox-status",
+    "title": "Expose operator-visible status for every event",
+    "issue_body_markdown": "## Assignment\n\nExpose per-event status.\n\n## Acceptance Criteria\n\n- Every event shows accepted / deduped / refused / enqueued.",
+    "depends_on": [
+      "webhook-inbox-core"
+    ],
+    "assignment": "Expose operator-visible per-event status across surfaces.",
+    "output": "Operator-visible event status.",
+    "acceptance_criteria": [
+      "Every event shows its disposition"
+    ]
+  }
+]

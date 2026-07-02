@@ -4,7 +4,7 @@ Provenance: hand-curated from current output.
 
 This is a local review artifact based on synthetic demo eval evidence. It has
 not been opened as a pull request, committed, merged, or applied to accepted
-Agentic Factory behavior.
+Teami behavior.
 
 ## Proposed Change
 
@@ -86,5 +86,5 @@ mapping.
 ## Current Boundary
 
 This artifact is a proposal-shaped demo output. It is not an accepted behavior
-change, not a repository diff, and not proof that Agentic Factory created or
+change, not a repository diff, and not proof that Teami created or
 updated a remote review surface.
