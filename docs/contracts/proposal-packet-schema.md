@@ -21,7 +21,7 @@ The packet exists so a product-savvy, technical-adjacent owner can approve or
 decline a behavior change by reading consequence, evidence, risk, authority,
 undo, and decline information in product language. The owner should not need to
 interpret Git mechanics, npm or Node failures, token lifetimes, branch names,
-raw diffs, check logs, broker design, Phoenix object ids, or local endpoint
+raw diffs, check logs, credential internals, Phoenix object ids, or local endpoint
 details in the primary path.
 
 Markdown is review copy. The packet-completeness guard must read the structured

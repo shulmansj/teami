@@ -12,12 +12,18 @@ npm run init
 teami domain grant main --repo owner/product-app
 ```
 
+The grant records scope only; product-repo execution is not shipped.
+
 `npm run init` authorizes Linear in the browser with the Teami OAuth
 app, then uses Linear GraphQL to provision the workspace: browser
 authorization, dedicated team, required labels, project status mappings,
 project template, local gateway state, managed or reused local Phoenix, and
-local cache. The public poll knob is `poll.interval_ms`. No Linear API key or
-Linear admin scope is required.
+local cache. The public poll knob is `poll.interval_ms`. No Linear API key is
+required. Teami does not require or retain Linear admin scope for ordinary
+operation, which uses the adopter's read/write grant. If `Principal Escalation`
+is missing, setup may request a
+separate one-time admin approval to create only that status; the grant stays in
+memory, is discarded after the attempt, and is never the runtime credential.
 
 Report setup bugs through the public repository issue templates after launch,
 without posting credentials, workspace data, repo contents, or local paths.
@@ -43,9 +49,10 @@ The behavior-repo GitHub path uses the adopter's own git/`gh` auth for setup
 transport and reviewable process-change proposal branches. It is distinct from
 product-repo binding. Product-repo binding is a local domain `git_repo`
 selection included by the landed domain resource-binding work. It binds one
-selected GitHub repo identity per domain; execution clones that repo fresh per
-run through ambient local GitHub authority, then strips the worker checkout. It
-must not be treated as proved by behavior-repo PR access.
+selected GitHub repo identity per domain. Product-repo write-capable execution
+is not shipped; source-visible execution or workflow modules must not be treated as
+permission to edit, commit, push, or open product-repo PRs, and behavior-repo PR
+access proves none of those effects.
 
 If Linear OAuth, local git, or `gh` authority is unavailable, setup, doctor,
 gateway, and proposal paths fail closed or report the local authorization
@@ -90,8 +97,8 @@ npm run uninstall
 npm run doctor:linear
 ```
 
-`npm run init` is the runnable setup path. The GitHub phase connects the Agentic
-Factory behavior repo: create or verify the dedicated behavior repo, preserve
+`npm run init` is the runnable setup path. The GitHub phase connects the Teami
+behavior repo: create or verify the dedicated behavior repo, preserve
 starter/upstream remotes only as template state, verify local git/`gh` access
 to the configured repo, and check PR-generation readiness. Init does not grant
 product repos through that behavior-repo connection.
@@ -106,8 +113,9 @@ does not prove local `git_repo` resource access.
 The current runnable workflow still uses foreground commands for smoke testing,
 repair, and manual runner operation. `npm run runner` is currently required
 whenever the adopter wants queued decomposition work to be claimed and
-processed. The mature local-supervisor target is owned in
-[../../../docs/self-improvement.md](../../../docs/self-improvement.md).
+processed. It is a foreground command, not an installed background service.
+When the command is stopped or the machine is off, Teami makes no external
+change; Linear remains the queue until the next local poll.
 
 Setup uses the adopter's read/write OAuth grant locally through GraphQL. The
 local gateway polls current project state and records local wake state; it does
@@ -144,8 +152,8 @@ evidence.
 `npm run trigger-status` is the secondary local/operator inspection command for
 queued and terminal wake-up state. When a local per-run trace receipt exists,
 the command combines local wake state with the local receipt result in its
-output. The current foreground command remains the operator view until the
-local supervisor can reconcile status back through existing user surfaces.
+output. The foreground command and existing user surfaces are the operator
+view; no always-on supervisor or hidden machine-off path is part of the product.
 Phoenix is the trace and self-improvement UI.
 
 `npm run uninstall` is the adopter cleanup path. It removes local gateway state,
@@ -167,7 +175,6 @@ Remote destructive cleanup is not part of the default command.
 Init creates or resolves:
 
 - the configured team, defaulting to `Teami` with key `AF`
-- project label `Has Open Questions`
 - issue labels `Discovery` and `Needs Principal`
 - project status mappings for `backlog`, `planned`, `in_progress`, and `completed`
 - project template `Teami Roadmap Item`
@@ -268,8 +275,8 @@ state:
   phoenix-service.json
 ```
 
-If a Phoenix service is already running on the loopback endpoint, Agentic
-Factory reuses it and records `managed=false`; it will not stop that external
+If a Phoenix service is already running on the loopback endpoint, Teami reuses
+it and records `managed=false`; it will not stop that external
 process. If the port is occupied by a non-Phoenix service, startup fails closed
 with a collision message.
 
@@ -356,17 +363,63 @@ promotion), derived at read time and never persisted to Phoenix.
 
 ## Live Linear Verification
 
-Keep `npm test` deterministic and credential-free. When Linear behavior is part
-of the claim, use the Teami OAuth credential and Linear GraphQL for
-live smoke checks against disposable projects or issues, then move test
-artifacts to a terminal state when the check is complete.
+Use `npm run verify` for the complete local verification path. Its static lane
+checks current JavaScript modules outside the tested import graph as well as
+runtime-loaded code; `npm test` remains deterministic and credential-free.
+When Linear behavior is part of the claim, use the Teami OAuth credential and
+Linear GraphQL for live smoke checks against disposable projects or issues,
+then move test artifacts to a terminal state when the check is complete.
 
-Project updates are required for decomposition. The deterministic path is the
-Teami OAuth plus GraphQL client, not API keys and not substitute
-project comments or documents. Live verification on 2026-06-07 confirmed that
-this path can create a Linear project update with exact authored Markdown, find
-it by `run_id`, and archive the test update afterward. The same live pass
-verified refresh-token exchange and GraphQL auth with the refreshed token.
+The independently gated setup contract canary is:
+
+```bash
+npm run canary:mcp-linear-setup -- \
+  --confirm-disposable-linear \
+  --confirm-one-shot-admin \
+  --home /absolute/temp/teami-linear-canary-<id> \
+  --domain "Teami Canary" \
+  --workspace "Disposable workspace" \
+  --github-owner <owner> \
+  --github-repo teami-contract-canary-<id>
+```
+
+It uses the real MCP stdio server, surfaces each standard or one-shot-admin
+authorization URL while its callback is pending, and refuses a nonempty or
+unprefixed home. The workspace and GitHub repo must be disposable, and the repo
+must be owned by the currently authenticated GitHub user so cleanup can
+distinguish verified absence from private-repository permission masking. The active
+GitHub CLI credential must also report the classic `repo` scope; fine-grained or
+reduced-scope credentials fail closed because their 404 responses are ambiguous. Once remote
+objects exist, the canary writes an exact `cleanup_required` receipt and never
+reports a pass yet. Run any follow-on status/comment UATs, manually delete the
+exact Linear team and GitHub repo named in that receipt, then finish with:
+
+```bash
+npm run canary:mcp-linear-setup -- \
+  --confirm-disposable-linear \
+  --home /absolute/temp/teami-linear-canary-<id> \
+  --verify-cleanup
+```
+
+That resumable terminal phase uses the still-local ordinary OAuth credential
+and ambient `gh` auth to verify both remote identities are absent, then removes
+the domain credential and the exact prefixed canary home. It reports success
+only after all four cleanup facts are true. The canary never runs inside
+`npm test` or `npm run verify`.
+
+After setup, run `npm run canary:linear-graphql -- --domain <canary-domain>`
+for live GraphQL auth, setup-shape, status-transition, and cleanup proof. Run
+`npm run uat:gateway -- --domain <canary-domain>` separately for live project
+update/comment shapes, foreground pickup, and replay. Neither command is part
+of the credential-free deterministic lane.
+
+Project updates are required for committed decomposition summaries and
+`failed_closed` safety stops. The deterministic path is the Teami OAuth plus
+GraphQL client, not API keys or documents. Live verification on 2026-06-07
+confirmed that this path can create a Linear project update with exact authored
+Markdown, find it by `run_id`, and archive the test update afterward. The same
+live pass verified refresh-token exchange and GraphQL auth with the refreshed
+token.
 
 Use `npm run uat:gateway` for the live poll/replay proof against disposable
 Linear artifacts when a change claims local gateway behavior. The harness moves
@@ -381,8 +434,8 @@ idempotently.
   mappings, and Linear project template when backed by a client that exposes
   those setup operations.
 - The doctor service validates the same substrate without mutating Linear.
-- The decomposition service gates on planned project status, open-question
-  labels, team membership, open discovery issues, and prior execution issues
+- The decomposition service gates on planned project status, team membership,
+  and prior execution issues
   before creating work.
 - The Workflow Runner validates accepted turn packets and assembles one terminal
   orchestrator output with `commit`, `pause`, or `failed_closed` before Linear
@@ -398,23 +451,19 @@ idempotently.
   different runtimes for product and engineering turns.
 - When the terminal orchestrator output pauses for product questions, the
   project pauses without creating partial execution work.
-- Pause, completion, and resume project updates use exact authored
+- Completion, resume, and `failed_closed` project updates use exact authored
   `project_update_markdown` and are idempotent by `run_id`.
-- Pause and resume replace the whole `Open Questions` section with exact
-  authored `open_questions_markdown`; typed blocker objects are not rendered
-  into project prose.
+- Non-`failed_closed` pause posts one app-authored project comment from exact
+  authored `open_questions_markdown` and moves the project to Principal
+  Escalation; typed blocker objects are not rendered into project prose.
 - Decomposition-created issues carry a stable decomposition key, and dependency
   relations are created idempotently.
 - Malformed final issue keys, duplicate decomposition keys, and dangling
   dependencies fail closed before any Linear issue is created.
 - Decomposition-created execution issues use the configured Todo issue status.
   They are created without assignees or agent-supplied labels.
-- Discovery issues carry a stable decomposition key so retry paths can
-  find-or-create the same scoped discovery work.
-- Discovery issue bodies are authored by Sr Eng and committed verbatim after a
-  runner-owned decomposition key line. Discovery evidence stays on the
-  Discovery issue and in an authored project update; the default flow does not
-  write generated findings into the project body.
+- Technical evidence questions that block decomposition are asked through the
+  same project-comment pause path as product questions.
 - Accepted turn packets, terminal orchestrator output, runtime metadata,
   role/runtime assignment, and final commit or pause artifacts are persisted to
   the ignored run store before Linear mutations, and commit retry replays that

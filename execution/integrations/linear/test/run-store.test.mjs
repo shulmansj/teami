@@ -62,7 +62,7 @@ test("writeRunArtifact fsyncs the temp file and returns opt-in durability result
       }).kind,
       "commit",
     );
-    assert.equal(fsyncCalls, process.platform === "win32" ? 1 : 2);
+    assert.equal(fsyncCalls, 2);
     assert.deepEqual(tmpFiles(runStoreDir), []);
   } finally {
     fs.fsyncSync = originalFsync;

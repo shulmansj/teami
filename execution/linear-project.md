@@ -15,12 +15,13 @@ Use native Linear fields for workflow state.
 | --- | --- |
 | Name | Human-readable product outcome or initiative name. Prefer the actual customer/user outcome over an internal task phrase. |
 | Team | The dedicated `Teami` Linear team. Projects inside this team are eligible for product manipulation when state gates pass. |
-| Status | Decomposition gate. `Planned` means eligible for decomposition; `Backlog` means not eligible; started-type status means execution work exists or is underway. |
-| Labels | `Has Open Questions` means unresolved blockers prevent decomposition. Do not require a general managed-by-this-workflow label in the default path. |
+| Status | Decomposition gate. `Planned` means eligible for decomposition; `Principal Escalation` means paused for a human decision; `Backlog` means not eligible; started-type status means execution work exists or is underway. |
+| Labels | Labels are not the pause primitive. Do not require a general managed-by-this-workflow project label in the default path. |
 | Members/lead | Accountable human or owner for product judgment and pilot validation routing. |
 
-`Backlog` plus `Has Open Questions` means decomposition is paused because Open
-Questions must be answered before the project can return to `Planned`.
+`Principal Escalation` means decomposition is paused because questions in the
+project comment thread must be answered before the project can return to
+`Planned`.
 
 Automation must use resolved Linear status IDs or native status types, not
 display-name matching.
@@ -34,17 +35,18 @@ GraphQL, and then apply the readiness gates below before mutating Linear.
 
 Use these sections in the Linear project description. The product-intent
 sections are the approved intent record, not the generated decomposition audit
-artifact. `Open Questions` is the workflow-owned section for current blockers.
+artifact.
 
 Decomposition should read the project description, but it should not rewrite
 approved product intent by default. If decomposition reveals that the body may
-need to change and that change blocks decomposition, route it as a human-facing
-Open Question. If it does not block decomposition, record it only as
+need to change and that change blocks decomposition, ask the human in the
+project comment thread. If it does not block decomposition, record it only as
 non-blocking context in the internal agent packet or trace.
 
 Do not create a `Recommendation` section, label, field, or artifact. Map
-decomposition output to existing surfaces: `Open Questions`, `Discovery` issues,
-project updates, project resources, execution issues, or internal trace.
+decomposition output to existing surfaces: project comments for pause
+questions, project updates for committed summaries and safety stops, project
+resources, execution issues, or internal trace.
 
 ### Problem Or Opportunity
 
@@ -102,48 +104,34 @@ Good content answers:
 - What prior decision should not be reopened silently?
 - What technical constraint changes issue boundaries or sequencing?
 
-### Open Questions
+Do not create a project-body `Discovery Findings` section in v1. If a human
+accepts a finding as approved product or technical context, promote it into the
+relevant existing human-owned section instead of adding a generated section.
 
-Include unresolved blockers that prevent decomposition or execution.
-
-When no questions are outstanding, leave this section blank. Do not write
-`None.` or another placeholder.
-
-Each question should explain:
-
-- the question
-- why it blocks decomposition
-- what changes depending on the answer
-- owner, if known
-
-This is a workflow-owned section, not a new planning primitive. Decomposition
-agents should not edit it directly. PM and Sr Eng return typed blockers, human
-questions, discovery requests, and exact authored `open_questions_markdown`;
-the Workflow Runner commits only that current blocker list into this section by
-replacing the whole section verbatim. It must not derive prose from typed
-blocker objects or rewrite surviving questions during resume.
-
-The authored project update should name the pause reason and next action.
-Fuller source and reasoning detail belongs in internal agent packets and trace,
-not another generated Linear document.
-
-Do not create a project-body `Discovery Findings` section in v1. Discovery
-findings produced by the workflow belong on the Discovery issue and in an
-agent-authored project update. If a human accepts a discovery finding as
-approved product or technical context, promote it into the relevant existing
-human-owned section instead of adding a generated section.
-
-## Project Updates And Resources
+## Project Updates, Comments, And Resources
 
 Use project-adjacent Linear surfaces for generated decomposition context.
+
+### Project Comments
+
+Use one app-authored project comment for a non-`failed_closed` pause. The
+comment body is authored from `open_questions_markdown`, includes the run marker,
+and tells the human to answer in the project comment thread before moving the
+project back to `Planned`.
+
+The Workflow Runner posts the comment and moves the project to
+`Principal Escalation`. It must not compose, summarize, dedupe, paraphrase, or
+improve the questions.
 
 ### Project Updates
 
 Use project updates for visible run-level summaries: decomposition completed,
-paused, resumed after discovery, or changed project health. A project update is
-the only generated narrative artifact on the project in v1. It should name the
-outcome, link to created issues or Discovery issues, and name the next action.
-Completion and pause updates should include a section headed exactly
+resumed after a prior pause, or a `failed_closed` safety stop. A project update
+is the generated narrative artifact on the project for those outcomes. It should
+name the outcome, link to created issues when applicable, and name the next
+action.
+
+Completion updates should include a section headed exactly
 `## What I did with each part of your project` so the human can see which
 project sections became issues, which parts are blocked, and which risks or
 source references remain.
@@ -170,22 +158,19 @@ A project is eligible for decomposition only when all of these are true:
 
 - project status is the configured planned-type status
 - project belongs to the configured `Teami` team
-- `Has Open Questions` label is absent
-- no open `Discovery` issue exists in the project
 - no non-discovery execution issue already exists from a prior run
 
 If any state is missing, duplicated, ambiguous, or contradictory, fail closed.
 Do not infer readiness from prose in the project body.
 
 A paused project returns to decomposition eligibility only after every blocking
-Open Question has an accepted answer recorded in the supported Linear surface,
-all related Discovery issues are closed, `Has Open Questions` is removed, and
-the project is moved back to the configured planned-type status.
+question has an accepted answer recorded in the project comment thread and the
+project is moved back to the configured planned-type status.
 
-Resume packets must include authored remaining `open_questions_markdown`. The
-Workflow Runner replaces the whole `Open Questions` section with that markdown
-and clears `Has Open Questions` only when the section is blank and all related
-Discovery issues are closed.
+Resume packets may include authored remaining `open_questions_markdown`. The
+Workflow Runner leaves the project body alone; if questions remain, the next
+human-facing surface is still the project comment thread plus the
+`Principal Escalation` status.
 
 ## How Agents Should Reason
 
@@ -202,8 +187,8 @@ PM agent:
 - surface product assumptions instead of silently resolving them
 - keep issues outcome-oriented
 - record material assumptions and source notes in agent packets, issue bodies,
-  Open Questions, project updates, or trace depending on whether they are
-  actionable or only audit context
+  project-comment questions, project updates, or trace depending on whether
+  they are actionable or only audit context
 
 Sr Eng agent:
 
@@ -217,14 +202,15 @@ Sr Eng agent:
 - report `status: blocked` with `reason: needs_constraint_decision` when a
   technical constraint may change product scope, trust, quality bar, or
   user-facing behavior
-- give any discovery issue a stable key for the specific technical question
-- record material constraints and source notes in agent packets, Discovery
-  issues, project updates, or trace depending on whether they are actionable or
-  only audit context
+- author the exact human question in `open_questions_markdown` when missing
+  evidence or a constraint decision blocks decomposition
+- record material constraints and source notes in agent packets, issue bodies,
+  project-comment questions, project updates, or trace depending on whether
+  they are actionable or only audit context
 
 Workflow Runner:
 
-- treat status, labels, and existing issues as deterministic gates
+- treat status and existing issues as deterministic gates
 - create the run envelope; do not decide what business or repo context is
   semantically relevant
 - validate accepted subagent turn packets using `continue/<finding>` or
@@ -240,11 +226,10 @@ Workflow Runner:
   turns
 - when the terminal orchestrator output returns `pause`, pause the project
   without creating partial execution work
-- commit the agent-authored current blockers to the project `Open Questions`
-  section when decomposition pauses
-- move paused projects to `Backlog` and apply `Has Open Questions`
-- post agent-authored project updates for decomposition completion, pause, and
-  resume
+- for non-`failed_closed` pauses, post one app-authored project comment from
+  `open_questions_markdown` and move the project to `Principal Escalation`
+- post agent-authored project updates for decomposition completion, resume, and
+  `failed_closed` safety stops
 - create issues only after the terminal orchestrator output passes structural
   quality, dependency, bounds, credential-scrub, and durability gates
 - treat final issue `assignment`, `output`, and `acceptance_criteria` as issue
@@ -253,11 +238,10 @@ Workflow Runner:
   available, leave them unassigned, and preserve dependency relations
 - pause the project instead of creating partial execution work when blockers
   remain
-- find-or-create execution and discovery issues by their stable keys
+- find-or-create execution issues by their stable keys
 - persist the accepted terminal artifact before mutating Linear and replay that
   artifact on commit retries rather than re-invoking agents
-- reject packets that need a Linear project update or `Open Questions` mutation
-  but omit the exact authored markdown for that surface
+- reject pause packets that omit exact authored `open_questions_markdown`
 - claim a local wake-up before mutation-capable triggered decomposition runs
   and carry `event_id`, `wake_id`, and `run_id` through traces and run state
 - treat a paused wake as terminal; a later human move back to `Planned` creates

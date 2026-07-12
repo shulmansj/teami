@@ -23,7 +23,9 @@ const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const contract = resolveEvalContract(decompositionDefinition, repoRoot);
 
 function tempRepoRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-d-export-${label}-`));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `teami-d-export-${label}-`));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function sampleRecord(overrides = {}) {
@@ -56,7 +58,6 @@ function sampleRecord(overrides = {}) {
           acceptance_criteria: ["Copy is approved"],
           depends_on: [],
         }],
-        discovery_issues: [],
         dependency_relations: [],
         project_update_markdown: "Decomposed the onboarding refresh into one executable issue.",
         open_questions_markdown: null,
@@ -303,7 +304,7 @@ test("D-export consent re-prompts on new fields, raw tiers, functions, or destin
   assert.equal(validateFixtureExportConsent({ grant: baseGrant, preview: functionPreview }).re_prompt_required, true);
 });
 
-test("D-export supervisor path reads latest rich-example dataset and writes JSONL plus manifest", async () => {
+test("D-export fixture path reads latest rich-example dataset and writes JSONL plus manifest", async () => {
   const tempRoot = tempRepoRoot("run");
   const writtenGrant = writeFixtureExportGrant({
     repoRoot: tempRoot,

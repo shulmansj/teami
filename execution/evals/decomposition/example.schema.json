@@ -49,6 +49,11 @@
               "minLength": 1
             },
             "name": { "type": "string", "minLength": 1 },
+            "comments": {
+              "description": "Newest-first Linear project comments visible to the decomposition agent.",
+              "type": "array",
+              "items": { "$ref": "#/$defs/project_comment" }
+            },
             "content": {
               "description": "Sanitized Linear project body. Subject to the field-level content allowlist/denylist; never token-shaped content.",
               "type": "string"
@@ -99,7 +104,6 @@
         "terminal_reason",
         "phase_packets",
         "final_issues",
-        "discovery_issues",
         "dependency_relations"
       ],
       "properties": {
@@ -109,10 +113,9 @@
         "terminal_reason": { "type": "string", "minLength": 1 },
         "phase_packets": { "type": "array" },
         "final_issues": { "type": "array" },
-        "discovery_issues": { "type": "array" },
         "dependency_relations": { "type": "array" },
         "project_update_markdown": {
-          "description": "Exact authored project update. Required when terminal_status is completed or paused.",
+          "description": "Exact authored project update. Required when terminal_status is completed or failed_closed.",
           "type": "string"
         },
         "open_questions_markdown": {
@@ -133,7 +136,14 @@
             "properties": { "terminal_status": { "const": "paused" } },
             "required": ["terminal_status"]
           },
-          "then": { "required": ["project_update_markdown", "open_questions_markdown"] }
+          "then": { "required": ["open_questions_markdown"] }
+        },
+        {
+          "if": {
+            "properties": { "terminal_status": { "const": "failed_closed" } },
+            "required": ["terminal_status"]
+          },
+          "then": { "required": ["project_update_markdown"] }
         }
       ]
     },
@@ -266,6 +276,16 @@
     }
   },
   "$defs": {
+    "project_comment": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["author_id", "body", "created_at"],
+      "properties": {
+        "author_id": { "type": ["string", "null"] },
+        "body": { "type": "string" },
+        "created_at": { "type": ["string", "null"] }
+      }
+    },
     "no_workflow_state_keys": {
       "description": "Denylist for Phoenix-bound metadata: no Teami workflow/queue state may be stored in Phoenix (wipe test: losing Phoenix must never lose which behavior is accepted or what queue is pending). These known banned keys are schema-level rejections; other extensibility stays open.",
       "properties": {
@@ -289,9 +309,7 @@
         "terminal_status",
         "terminal_reason",
         "final_issues",
-        "discovery_issues",
         "dependency_relations",
-        "project_update_markdown",
         "open_questions_markdown",
         "phase_packet_summaries"
       ],
@@ -304,6 +322,10 @@
             "id": { "type": "string", "minLength": 1 },
             "name": { "type": "string", "minLength": 1 },
             "description": { "type": ["string", "null"] },
+            "comments": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/project_comment" }
+            },
             "content": { "type": "string" },
             "status": { "type": "string", "minLength": 1 },
             "labels": { "type": "array" },
@@ -315,7 +337,6 @@
         },
         "terminal_reason": { "type": "string", "minLength": 1 },
         "final_issues": { "type": "array" },
-        "discovery_issues": { "type": "array" },
         "dependency_relations": { "type": "array" },
         "project_update_markdown": { "type": ["string", "null"] },
         "open_questions_markdown": { "type": ["string", "null"] },

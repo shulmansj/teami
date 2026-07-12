@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import { resolveTeamiHome } from "./app-home.mjs";
 import { ensurePhoenixReady } from "./local-phoenix-manager.mjs";
 import { promoteCandidate } from "./promote-candidate.mjs";
 import {
@@ -129,6 +130,7 @@ export function createPromotionCandidateScannerTestHarness(overrides = {}) {
 
 async function scanPromotionCandidatesWithOverrides({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   onProgress = () => {},
   ensureReady = ensurePhoenixReady,
   fetchImpl = globalThis.fetch,
@@ -146,7 +148,7 @@ async function scanPromotionCandidatesWithOverrides({
   const startedDate = now();
   const startedAt = startedDate.toISOString();
   const scanId = scanIdFromDate(startedDate);
-  const resolvedLedgerDir = ledgerDir || defaultPromotionCandidateLedgerDir(repoRoot);
+  const resolvedLedgerDir = ledgerDir || defaultPromotionCandidateLedgerDir(home);
   const lock = acquirePromotionCandidateScannerLock({
     ledgerDir: resolvedLedgerDir,
     now,
@@ -167,9 +169,9 @@ async function scanPromotionCandidatesWithOverrides({
   let releaseCalled = false;
   try {
     onProgress(`promotion scanner: acquired ledger lock ${lock.lock_path}`);
-    let internalCloneDir = path.join(defaultPromotionWorkspaceDir(repoRoot), "repo");
+    let internalCloneDir = path.join(defaultPromotionWorkspaceDir(home), "repo");
     if (policyReadMode === "unattended") {
-      const workspace = ensurePromotionWorkspace({ repoRoot });
+      const workspace = await ensurePromotionWorkspace({ repoRoot, home });
       if (!workspace.ok) {
         const finishedAt = now().toISOString();
         const candidates = [];
@@ -201,7 +203,7 @@ async function scanPromotionCandidatesWithOverrides({
       }
       internalCloneDir = workspace.cloneDir;
     }
-    const policyRead = resolveTrustedPolicyRead({
+    const policyRead = await resolveTrustedPolicyRead({
       mode: policyReadMode,
       policyPath,
       policyRelativePath,
@@ -237,7 +239,7 @@ async function scanPromotionCandidatesWithOverrides({
       };
     }
     const policy = policyRead.policy;
-    const receiptScan = loadReceiptCandidates({ repoRoot, receiptDir });
+    const receiptScan = loadReceiptCandidates({ repoRoot, home, receiptDir });
     const candidates = [...receiptScan.candidates];
     markAmbiguousReceiptJoins(candidates);
     const baselineResolutionCache = new Map();
@@ -254,14 +256,14 @@ async function scanPromotionCandidatesWithOverrides({
         baselineResolutionCache.set(
           key,
           policyReadMode === "unattended"
-            ? deriveLaunchBaselineFromTrustedClone({ internalCloneDir, candidateTargetKey: key })
+            ? { ok: false, reason: "trusted_baseline_not_preloaded", detail: key }
             : deriveLaunchBaselineFromActiveManifest({ repoRoot, candidateTargetKey: key }),
         );
       }
       return baselineResolutionCache.get(key);
     };
     const manifestResolution = policyReadMode === "unattended"
-      ? readPhoenixAssetsManifestFromTrustedClone({ internalCloneDir })
+      ? await readPhoenixAssetsManifestFromTrustedClone({ internalCloneDir })
       : readPhoenixAssetsManifestFromActiveCheckout({ repoRoot });
     const scannerAgentBehaviorTargets = manifestResolution.ok
       ? agentBehaviorTargetsFromManifest({
@@ -315,11 +317,20 @@ async function scanPromotionCandidatesWithOverrides({
       };
     }
 
-    candidates.push(...scanRepoCandidateArtifactStubs({
+    candidates.push(...await scanRepoCandidateArtifactStubs({
       repoRoot,
       policy,
       trustedClone: policyReadMode === "unattended" ? { internalCloneDir } : null,
     }));
+    if (policyReadMode === "unattended") {
+      const targetKeys = [...new Set(candidates.map((candidate) => candidate.candidate_target_key).filter(Boolean))];
+      for (const candidateTargetKey of targetKeys) {
+        baselineResolutionCache.set(
+          candidateTargetKey,
+          await deriveLaunchBaselineFromTrustedClone({ internalCloneDir, candidateTargetKey }),
+        );
+      }
+    }
     classifyReceiptCandidates({
       candidates,
       policy,
@@ -334,6 +345,7 @@ async function scanPromotionCandidatesWithOverrides({
 
     const repoMarkerState = await deriveScannerRepoMarkerState({
       repoRoot,
+      home,
       policy,
       githubTransport,
       now,
@@ -390,6 +402,7 @@ async function scanPromotionCandidatesWithOverrides({
       onProgress(`promotion scanner: calling controller for ${candidate.candidate_key}`);
       const controllerResult = await promoteCandidateFn({
         repoRoot,
+        home,
         request: candidate.controller_request,
         invocation: { transport: "promotion_candidate_scanner" },
         onProgress,

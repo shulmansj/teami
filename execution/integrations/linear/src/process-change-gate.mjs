@@ -32,6 +32,7 @@ import {
   WORKSPACE_EVAL_POLICY_PATH,
 } from "./workspace-eval-policy.mjs";
 import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
 // Step 9 (Track G): the process-change gate.
 //
@@ -89,8 +90,8 @@ const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 // local custody; atomic temp+rename+read-back like the sibling stores).
 // ---------------------------------------------------------------------------
 
-export function defaultGateReportDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "gate-reports");
+export function defaultGateReportDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "gate-reports");
 }
 
 function writeGateRecord(filePath, record) {
@@ -162,6 +163,7 @@ function readJsonTolerant(filePath) {
 
 export function computeTestSplitExposureHistory({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   candidateTargetKey,
   candidate = null,
   currentReceiptId = null,
@@ -169,7 +171,8 @@ export function computeTestSplitExposureHistory({
   evalRunStoreDir = null,
 } = {}) {
   const records = [];
-  const receiptsDir = receiptDir || defaultExperimentReceiptDir(repoRoot);
+  void repoRoot;
+  const receiptsDir = receiptDir || defaultExperimentReceiptDir(home);
   for (const file of listJsonFilesShallow(receiptsDir)) {
     const receipt = readJsonTolerant(file);
     if (!receipt?.launch || receipt.launch.candidate_target_key !== candidateTargetKey) continue;
@@ -185,7 +188,7 @@ export function computeTestSplitExposureHistory({
       test_split_exposed: requested !== "train",
     });
   }
-  const evalRunsDir = evalRunStoreDir || defaultEvalRunStoreDir(repoRoot);
+  const evalRunsDir = evalRunStoreDir || defaultEvalRunStoreDir(home);
   for (const file of listJsonFilesShallow(evalRunsDir)) {
     const record = readJsonTolerant(file);
     if (record?.schema_version !== EVAL_RUN_RECORD_SCHEMA_VERSION) continue;
@@ -511,6 +514,7 @@ async function phoenixGetJson({ appUrl, pathname, fetchImpl, timeoutMs = DEFAULT
 // write is the local gate-report record.
 export async function evaluateProcessChangeGate({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   receiptId,
   receiptDir = null,
   evalRunStoreDir = null,
@@ -525,7 +529,7 @@ export async function evaluateProcessChangeGate({
 } = {}) {
   const gateReportId = generateGateReportId(now());
   const recordPathFor = () =>
-    path.join(gateReportDir || defaultGateReportDir(repoRoot), `${gateReportId}.json`);
+    path.join(gateReportDir || defaultGateReportDir(home), `${gateReportId}.json`);
 
   const failClosed = (reason, extra = {}) => {
     const result = {
@@ -997,6 +1001,7 @@ export async function evaluateProcessChangeGate({
   };
   const exposure = computeTestSplitExposureHistory({
     repoRoot,
+    home,
     candidateTargetKey: receipt.launch.candidate_target_key,
     candidate: receipt.launch.candidate,
     currentReceiptId: receiptId,

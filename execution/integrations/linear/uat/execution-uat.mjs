@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -14,6 +14,7 @@ import {
   branchNameForIssue,
 } from "../../git/git-repo-commit-effect.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
+import { runBoundedGit, runBoundedSubprocess } from "../../git/bounded-subprocess.mjs";
 import { readLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import { readDomainRegistry } from "../src/domain-registry.mjs";
@@ -291,21 +292,21 @@ async function prepareLiveExecutionUatContext(options) {
   const inReviewTarget = await resolveInReviewIssueStatus(client, config, domain.linear.team_id);
   if (!inReviewTarget?.id) {
     throw new ExecutionUatUserError(
-      "Execution UAT requires config.linear.issue.statuses.in_review.name or labels.in_review to resolve.",
+      "Execution UAT requires config.linear.issue.statuses.in_review.name to resolve.",
       "in_review_status_missing",
     );
   }
   const completedStatus = await resolveCompletedIssueStatus(client, domain.linear.team_id);
 
   const repoIdentity = resourcesToRepoIdentity(domainContext, { resourceId: options.resourceId });
-  assertUatRepoBinding({
+  await assertUatRepoBinding({
     repoRoot,
     repoIdentity,
     expectedRepoName: options.expectedRepoName,
   });
 
-  assertGhAuthStatus({ repoRoot });
-  const githubToken = resolveGhToken({ repoRoot });
+  await assertGhAuthStatus({ repoRoot });
+  const githubToken = await resolveGhToken({ repoRoot });
   log(`Execution UAT using ${repoIdentity.owner}/${repoIdentity.repo} with ambient gh auth`);
 
   const pollIntervalMs = options.pollIntervalMs || config.poll?.interval_ms || 10_000;
@@ -618,7 +619,7 @@ function deterministicExecutionOrchestrator(context) {
 function deterministicWorkerRuntimeExecutor(context) {
   return {
     async executeSubagent(input = {}) {
-      const proof = writeWorkerChangeAndContainmentProof(input);
+      const proof = await writeWorkerChangeAndContainmentProof(input);
       context.workerProofs.set(input.runId, proof);
       const packet = {
         schema_version: SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION,
@@ -653,7 +654,7 @@ function deterministicWorkerRuntimeExecutor(context) {
   };
 }
 
-function writeWorkerChangeAndContainmentProof(input = {}) {
+async function writeWorkerChangeAndContainmentProof(input = {}) {
   const cwd = input.cwd ? path.resolve(input.cwd) : null;
   if (!cwd || !fs.existsSync(cwd)) {
     throw new Error("execution_uat_worker_cwd_missing");
@@ -667,14 +668,26 @@ function writeWorkerChangeAndContainmentProof(input = {}) {
     throw new Error(`execution_uat_worker_credentials_present:${authEnvNamesPresent.join(",") || "agent_write_credential"}`);
   }
 
-  const remotes = runGit(["remote"], { cwd, env: workerEnv });
+  const remotes = await runGit(["remote"], {
+    cwd,
+    env: workerEnv,
+    exactEnv: true,
+    operation: "git_read",
+  });
   if (!remotes.ok) throw new Error(`execution_uat_worker_git_remote_failed:${safeCommandDetail(remotes)}`);
   const remoteNames = remotes.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (remoteNames.length !== 0) {
     throw new Error(`execution_uat_worker_remote_present:${remoteNames.join(",")}`);
   }
-  const push = runGit(["push", "--dry-run", "origin", "HEAD"], { cwd, env: workerEnv });
+  const push = await runGit(["push", "--dry-run", "origin", "HEAD"], {
+    cwd,
+    env: workerEnv,
+    exactEnv: true,
+  });
   if (push.ok) throw new Error("execution_uat_worker_push_unexpectedly_succeeded");
+  if (push.reconciliationRequired) {
+    throw new Error("execution_uat_worker_push_result_ambiguous");
+  }
 
   const relativeFile = path.join("execution", "integrations", "linear", "uat", "live-execution-runs", `${safePathSegment(input.runId)}.md`);
   const absoluteFile = path.join(cwd, relativeFile);
@@ -810,7 +823,7 @@ function latestExecutionRunForIssue(context, issueId) {
 }
 
 function executionRunsForIssue(context, issueId) {
-  const state = readLocalTriggerState(localTriggerStorePath(context.repoRoot));
+  const state = readLocalTriggerState(localTriggerStorePath());
   return state.runs
     .filter((run) => run.object_id === issueId && run.workflow_type === "execution")
     .sort((a, b) => String(a.started_at || "").localeCompare(String(b.started_at || "")));
@@ -1100,7 +1113,7 @@ async function resolveCompletedIssueStatus(client, teamId) {
   return completed.find((state) => /^done$/i.test(state.name || "")) || completed[0];
 }
 
-function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
+async function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
   const expectedName = String(expectedRepoName || "").trim();
   if (expectedName && repoIdentity.repo !== expectedName) {
     throw new ExecutionUatUserError(
@@ -1112,7 +1125,10 @@ function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
     throw new ExecutionUatUserError("Execution UAT requires git_repo.default_branch.", "git_repo_binding");
   }
 
-  const remote = runGit(["remote", "get-url", "origin"], { cwd: repoRoot });
+  const remote = await runGit(["remote", "get-url", "origin"], {
+    cwd: repoRoot,
+    operation: "git_read",
+  });
   if (!remote.ok || !remote.stdout.trim()) {
     throw new ExecutionUatUserError("Execution UAT requires an origin remote in the bound checkout.", "origin_missing");
   }
@@ -1125,32 +1141,36 @@ function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
   }
 }
 
-function assertGhAuthStatus({ repoRoot }) {
-  const result = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], {
+async function assertGhAuthStatus({ repoRoot }) {
+  const result = await runBoundedSubprocess({
+    command: "gh",
+    args: ["auth", "status", "--hostname", "github.com"],
+    operation: "gh_auth_read",
     cwd: repoRoot,
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
   });
-  if (result.status !== 0) {
+  if (!result.ok) {
     throw new ExecutionUatUserError(
-      `GitHub CLI is not logged in for github.com: ${redactGitHubSecrets(result.stderr || result.stdout || "gh auth status failed")}`,
+      result.timedOut
+        ? "GitHub CLI login verification timed out. Retry after confirming gh auth status in another terminal."
+        : "GitHub CLI is not logged in for github.com. Run gh auth login and retry.",
       "github_auth_status_failed",
     );
   }
 }
 
-function resolveGhToken({ repoRoot }) {
-  const result = spawnSync("gh", ["auth", "token"], {
+async function resolveGhToken({ repoRoot }) {
+  const result = await runBoundedSubprocess({
+    command: "gh",
+    args: ["auth", "token"],
+    operation: "gh_auth_read",
     cwd: repoRoot,
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
   });
   const token = result.stdout?.trim();
-  if (result.status !== 0 || !token) {
+  if (!result.ok || !token) {
     throw new ExecutionUatUserError(
-      `GitHub CLI token is unavailable: ${redactGitHubSecrets(result.stderr || result.stdout || "gh auth token failed")}`,
+      result.timedOut
+        ? "GitHub CLI token lookup timed out. Retry after confirming gh auth status in another terminal."
+        : "GitHub CLI token is unavailable. Run gh auth login and retry.",
       "github_auth_token_failed",
     );
   }
@@ -1283,20 +1303,13 @@ function sleep(ms) {
   });
 }
 
-function runGit(args, { cwd, env } = {}) {
-  const result = spawnSync("git", args, {
+function runGit(args, { cwd, env, exactEnv = false, operation = null } = {}) {
+  return runBoundedGit(args, {
     cwd,
-    env: env ? normalizeEnv(env) : process.env,
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
+    env: env ? normalizeEnv(env) : undefined,
+    exactEnv,
+    ...(operation ? { operation } : {}),
   });
-  return {
-    ok: result.status === 0,
-    status: result.status,
-    stdout: result.stdout || "",
-    stderr: result.stderr || result.error?.message || "",
-  };
 }
 
 function isCredentialEnvNameForWorkerProof(name) {

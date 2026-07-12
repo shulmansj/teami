@@ -22,9 +22,17 @@ export function assembleCommitPayload(produced) {
       authored.headSha,
     ),
   };
-  if (Object.hasOwn(authored, "comments")) {
+  // Strict generation schemas emit unused optionals as explicit null (never
+  // omitted) — null means ABSENT here, exactly like the other null-unions.
+  if (Object.hasOwn(authored, "comments") && authored.comments !== null) {
     payload.comments = normalizeCommentsForOrchestrator(authored.comments);
   }
+  const humanBriefing = authoredString(
+    authored.human_briefing ??
+    authored.humanBriefing ??
+    authored.briefing,
+  );
+  if (humanBriefing) payload.human_briefing = humanBriefing;
   return payload;
 }
 

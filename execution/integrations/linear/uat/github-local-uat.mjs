@@ -1,10 +1,10 @@
-import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { writeRunArtifact } from "../../../engine/run-store.mjs";
+import { runBoundedGit, runBoundedSubprocess } from "../../git/bounded-subprocess.mjs";
 import { createGitHubPromotionClient } from "../src/github-promotion-client.mjs";
 import { createProductionGitHubPromotionTransport } from "../src/github-production-transport.mjs";
 import {
@@ -17,9 +17,7 @@ import {
   scrubGitHubAuthEnv,
 } from "../src/github-secret-hygiene.mjs";
 import {
-  defaultRunGit,
   PROMOTION_BRANCH_NAMESPACE,
-  pushPromotionBranchWithAmbientAuth,
   validatePromotionBranchRef,
 } from "../src/promotion-workspace.mjs";
 import {
@@ -106,7 +104,7 @@ export async function runGitHubLocalUat({
   keepArtifacts = false,
   env = process.env,
   now = () => new Date(),
-  runGit = defaultRunGit,
+  runGit = runBoundedGit,
   runCommand = defaultRunCommand,
   onLog = () => {},
 } = {}) {
@@ -137,7 +135,7 @@ export async function runGitHubLocalUat({
     resolveBehaviorRepoIdentity({ repoRoot: resolvedRepoRoot }),
     { repoRoot: resolvedRepoRoot },
   );
-  assertGhAuthStatusResult(runCommandRecording("gh", ["auth", "status", "--hostname", "github.com"], {
+  assertGhAuthStatusResult(await runCommandRecording("gh", ["auth", "status", "--hostname", "github.com"], {
     cwd: resolvedRepoRoot,
     env: ghCommandEnv({ env, pushAuth: repoIdentity.push_auth }),
   }));
@@ -166,7 +164,7 @@ export async function runGitHubLocalUat({
   // Live reachability and auth check before creating any branch or PR.
   await github.listOpenPullRequests();
 
-  const workspace = ensureGitHubLocalUatWorkspace({
+  const workspace = await ensureGitHubLocalUatWorkspace({
     repoRoot: resolvedRepoRoot,
     workspaceDir,
     selection,
@@ -200,7 +198,7 @@ export async function runGitHubLocalUat({
     branch,
     prBody,
   });
-  const commitSha = commitGitHubLocalUatProposal({
+  const commitSha = await commitGitHubLocalUatProposal({
     cloneDir: workspace.cloneDir,
     proposalPath,
     runId,
@@ -208,7 +206,7 @@ export async function runGitHubLocalUat({
   });
   log(`Committed disposable self-improvement proposal ${commitSha}`);
 
-  const push = pushPromotionBranchWithAmbientAuth({
+  const push = await pushGitHubLocalUatBranch({
     cloneDir: workspace.cloneDir,
     owner: selection.owner,
     repo: selection.repo,
@@ -503,7 +501,7 @@ export function buildGitHubLocalUatPrBody({
   return body;
 }
 
-function ensureGitHubLocalUatWorkspace({
+async function ensureGitHubLocalUatWorkspace({
   repoRoot,
   workspaceDir,
   selection,
@@ -512,19 +510,19 @@ function ensureGitHubLocalUatWorkspace({
 } = {}) {
   const dir = path.resolve(workspaceDir || path.join(repoRoot, ".teami", "github-local-uat"));
   const cloneDir = path.join(dir, "repo");
-  const cloneUrl = resolveCloneUrl({ selection, runGit });
+  const cloneUrl = await resolveCloneUrl({ selection, runGit });
   fs.mkdirSync(dir, { recursive: true });
   if (!fs.existsSync(path.join(cloneDir, ".git"))) {
-    const clone = runGit(["clone", "--no-tags", cloneUrl, cloneDir], { cwd: dir });
+    const clone = await runGit(["clone", "--no-tags", cloneUrl, cloneDir], { cwd: dir });
     if (!clone.ok) {
       throw new Error(`github_local_uat_clone_failed:${redactGitHubSecrets(clone.stderr.trim() || clone.stdout.trim())}`);
     }
   }
-  const fetch = runGit(["fetch", "origin", "--prune"], { cwd: cloneDir });
+  const fetch = await runGit(["fetch", "origin", "--prune"], { cwd: cloneDir });
   if (!fetch.ok) {
     throw new Error(`github_local_uat_fetch_failed:${redactGitHubSecrets(fetch.stderr.trim() || fetch.stdout.trim())}`);
   }
-  const status = runGit(["status", "--porcelain"], { cwd: cloneDir });
+  const status = await runGit(["status", "--porcelain"], { cwd: cloneDir });
   if (!status.ok) {
     throw new Error(`github_local_uat_status_failed:${status.stderr.trim() || status.stdout.trim()}`);
   }
@@ -532,16 +530,19 @@ function ensureGitHubLocalUatWorkspace({
     throw new Error(`github_local_uat_workspace_dirty:${cloneDir}`);
   }
   const base = `origin/${selection.defaultBranch}`;
-  const checkout = runGit(["checkout", "-B", branch, base], { cwd: cloneDir });
+  const checkout = await runGit(["checkout", "-B", branch, base], { cwd: cloneDir });
   if (!checkout.ok) {
     throw new Error(`github_local_uat_checkout_failed:${redactGitHubSecrets(checkout.stderr.trim() || checkout.stdout.trim())}`);
   }
   return { workspaceDir: dir, cloneDir, cloneUrl };
 }
 
-function resolveCloneUrl({ selection, runGit } = {}) {
+async function resolveCloneUrl({ selection, runGit } = {}) {
   if (selection.checkoutPath) {
-    const remote = runGit(["remote", "get-url", "origin"], { cwd: selection.checkoutPath });
+    const remote = await runGit(["remote", "get-url", "origin"], {
+      cwd: selection.checkoutPath,
+      operation: "git_read",
+    });
     const url = remote.ok ? remote.stdout.trim() : "";
     if (url) {
       const parsed = parseGitHubRemoteUrl(url);
@@ -581,10 +582,10 @@ function writeGitHubLocalUatProposal({ cloneDir, runId, branch, prBody }) {
   return relativePath;
 }
 
-function commitGitHubLocalUatProposal({ cloneDir, proposalPath, runId, runGit }) {
-  const add = runGit(["add", "--", proposalPath], { cwd: cloneDir });
+async function commitGitHubLocalUatProposal({ cloneDir, proposalPath, runId, runGit }) {
+  const add = await runGit(["add", "--", proposalPath], { cwd: cloneDir });
   if (!add.ok) throw new Error(`github_local_uat_git_add_failed:${add.stderr.trim() || add.stdout.trim()}`);
-  const commit = runGit(
+  const commit = await runGit(
     [
       "-c",
       "user.name=teami[bot] (uat)",
@@ -597,9 +598,77 @@ function commitGitHubLocalUatProposal({ cloneDir, proposalPath, runId, runGit })
     { cwd: cloneDir },
   );
   if (!commit.ok) throw new Error(`github_local_uat_git_commit_failed:${commit.stderr.trim() || commit.stdout.trim()}`);
-  const sha = runGit(["rev-parse", "HEAD"], { cwd: cloneDir });
+  const sha = await runGit(["rev-parse", "HEAD"], { cwd: cloneDir });
   if (!sha.ok || !sha.stdout.trim()) throw new Error("github_local_uat_commit_sha_missing");
   return sha.stdout.trim();
+}
+
+async function pushGitHubLocalUatBranch({
+  cloneDir,
+  owner,
+  repo,
+  branch,
+  checkoutPath = null,
+  pushAuth = "https",
+  env = process.env,
+  runGit,
+} = {}) {
+  if (!cloneDir) return { ok: false, reason: "promotion_workspace_required" };
+  const ref = validatePromotionBranchRef(branch);
+  if (!ref.ok) return { ok: false, reason: ref.reason };
+
+  const normalizedPushAuth = pushAuth === "ssh" ? "ssh" : "https";
+  let pushUrl = null;
+  let remoteSource = null;
+  if (checkoutPath) {
+    const remote = await runGit(["remote", "get-url", "--push", "origin"], {
+      cwd: checkoutPath,
+      operation: "git_read",
+    });
+    pushUrl = remote.ok ? remote.stdout.trim() : null;
+    if (pushUrl) remoteSource = "origin_push_remote";
+  }
+  if (!pushUrl && normalizedPushAuth === "ssh") {
+    return {
+      ok: false,
+      reason: "github_push_url_required",
+      detail: "SSH push mode requires a configured origin push remote in the adopter checkout.",
+    };
+  }
+  if (!pushUrl) {
+    if (!owner || !repo) return { ok: false, reason: "github_push_identity_required" };
+    pushUrl = `https://github.com/${owner}/${repo}.git`;
+    remoteSource = "github_https_fallback";
+  }
+
+  const result = await runGit(
+    ["push", pushUrl, `${ref.full_ref}:${ref.full_ref}`],
+    {
+      cwd: cloneDir,
+      env: scrubGitHubAuthEnv(env, { pushAuth: normalizedPushAuth }),
+      exactEnv: true,
+    },
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: result.reconciliationRequired
+        ? "github_promotion_branch_push_reconciliation_required"
+        : "github_promotion_branch_push_failed",
+      detail: result.stderr.trim() || "Git push failed; captured output was redacted.",
+      reconciliation_required: result.reconciliationRequired === true,
+    };
+  }
+  return {
+    ok: true,
+    pushed: true,
+    dry_run: false,
+    branch,
+    ref: ref.full_ref,
+    remote: pushUrl,
+    remote_source: remoteSource,
+    push_auth: normalizedPushAuth,
+  };
 }
 
 async function cleanupGitHubLocalUatArtifacts({
@@ -616,7 +685,7 @@ async function cleanupGitHubLocalUatArtifacts({
   if (keepArtifacts) {
     return { skipped: true, reason: "keep_artifacts", prNumber, branch };
   }
-  const closed = runGhApi({
+  const closed = await runGhApi({
     cwd,
     env,
     pushAuth,
@@ -631,7 +700,7 @@ async function cleanupGitHubLocalUatArtifacts({
     input: JSON.stringify({ state: "closed" }),
     parseJson: true,
   });
-  const deleted = runGhApi({
+  const deleted = await runGhApi({
     cwd,
     env,
     pushAuth,
@@ -653,7 +722,7 @@ async function cleanupGitHubLocalUatArtifacts({
   };
 }
 
-function runGhApi({
+async function runGhApi({
   cwd,
   env,
   pushAuth,
@@ -662,7 +731,7 @@ function runGhApi({
   input = null,
   parseJson = true,
 } = {}) {
-  const result = runCommand("gh", [
+  const result = await runCommand("gh", [
     "api",
     "--hostname",
     "github.com",
@@ -674,7 +743,14 @@ function runGhApi({
     input,
   });
   if (!result.ok) {
-    throw new Error(redactGitHubSecrets(result.stderr.trim() || result.stdout.trim() || `gh api ${args.join(" ")} failed`));
+    const error = new Error(
+      result.reconciliationRequired
+        ? "github_local_uat_mutation_reconciliation_required"
+        : redactGitHubSecrets(result.stderr.trim() || result.stdout.trim() || "GitHub API command failed"),
+    );
+    error.outcome = result.outcome || "failed";
+    error.reconciliation_required = result.reconciliationRequired === true;
+    throw error;
   }
   return {
     ok: true,
@@ -808,8 +884,8 @@ function safeGitHubSelection(selection = {}) {
 }
 
 function createRecordingRunGit({ runGit, records }) {
-  return (args, options = {}) => {
-    const result = runGit(args, options);
+  return async (args, options = {}) => {
+    const result = await runGit(args, options);
     records.push({
       tool: "git",
       args: args.map(String),
@@ -825,8 +901,8 @@ function createRecordingRunGit({ runGit, records }) {
 }
 
 function createRecordingRunCommand({ runCommand, records }) {
-  return (command, args, options = {}) => {
-    const result = runCommand(command, args, options);
+  return async (command, args, options = {}) => {
+    const result = await runCommand(command, args, options);
     records.push({
       tool: command,
       args: args.map(String),
@@ -856,20 +932,22 @@ function summarizeChildEnv(env = null) {
 }
 
 function defaultRunCommand(command, args, { cwd, env, input = null } = {}) {
-  const result = spawnSync(command, args, {
+  if (command !== "gh") throw new Error(`github_local_uat_command_not_allowed:${command}`);
+  return runBoundedSubprocess({
+    command,
+    args,
+    operation: githubOperationForArgs(args),
     cwd,
     env,
-    ...(input === null ? {} : { input }),
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
+    input,
   });
-  return {
-    ok: result.status === 0,
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+}
+
+function githubOperationForArgs(args = []) {
+  if (args[0] === "auth") return "gh_auth_read";
+  const methodIndex = args.indexOf("--method");
+  const method = methodIndex >= 0 ? String(args[methodIndex + 1] || "GET").toUpperCase() : "GET";
+  return ["GET", "HEAD"].includes(method) ? "gh_api_read" : "gh_api_mutation";
 }
 
 function ghCommandEnv({ env = process.env, pushAuth } = {}) {

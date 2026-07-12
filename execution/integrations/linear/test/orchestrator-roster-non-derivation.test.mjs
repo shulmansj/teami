@@ -8,6 +8,8 @@ import {
   createOrchestratorRoster,
   ORCHESTRATOR_GOVERNING_TARGET_KEY,
 } from "../src/orchestrator-roster.mjs";
+import { loadLinearConfig } from "../src/config.mjs";
+import { resolveInvocableRuntimeRoles } from "../src/runtime-adapters.mjs";
 import { decompositionDefinition } from "../src/workflows/decomposition/definition.mjs";
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -84,18 +86,22 @@ test("decomposition roster stays prompt target_key-derived, not runtime-role-der
     "decomposition has no drafter library prompt",
   );
 
+  const invocableRoles = resolveInvocableRuntimeRoles(
+    loadLinearConfig({ repoRoot: REPO_ROOT }),
+    decompositionDefinition,
+  );
   assert.deepEqual(
-    sorted(decompositionDefinition.invocable_runtime_roles),
+    sorted(invocableRoles),
     ["drafter", "judge", "pm", "sr_eng"],
-    "the runtime-role axis remains the invocable one-off role list",
+    "the runtime-role axis remains the config-derived invocable one-off role set",
   );
   assert.notDeepEqual(
     sorted(selectableTargets),
-    sorted(decompositionDefinition.invocable_runtime_roles),
+    sorted(invocableRoles),
     "selectable library targets are prompt target_keys, not invocable runtime roles",
   );
   assert.equal(
-    decompositionDefinition.invocable_runtime_roles.includes("drafter"),
+    invocableRoles.includes("drafter"),
     true,
     "a role-derived roster would incorrectly invent a drafter selectable target",
   );

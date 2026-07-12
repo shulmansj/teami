@@ -1,8 +1,16 @@
 import { createHash, randomBytes } from "node:crypto";
 
+export const DECOMPOSITION_TRIGGER_RUNNER_TRACE_KIND = "decomposition.trigger_runner.v1";
+export const PLANNING_SESSION_TRACE_KIND = "planning.session.v1";
+
 export const BASE_RUNNER_CAPABILITIES = Object.freeze([
   "linear.project.planned",
-  "decomposition.trigger_runner.v1",
+  DECOMPOSITION_TRIGGER_RUNNER_TRACE_KIND,
+]);
+
+export const TRACE_KINDS = Object.freeze([
+  DECOMPOSITION_TRIGGER_RUNNER_TRACE_KIND,
+  PLANNING_SESSION_TRACE_KIND,
 ]);
 
 export const LOCAL_TRACE_STATUSES = Object.freeze([
@@ -40,6 +48,9 @@ export const LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS = Object.freeze({
 const SECRET_KEY_PATTERN = /(^|[_\-.])(token|secret|api[_\-.]?key|authorization|password|credential|private[_\-.]?key)($|[_\-.])/i;
 const SECRET_VALUE_PATTERN = new RegExp([
   "Bearer\\s+[A-Za-z0-9._~+/=-]{12,}",
+  // Basic credentials are base64-wrapped token material; 24-char floor so
+  // prose like "Basic authentication" does not trip.
+  "Basic\\s+[A-Za-z0-9+/=]{24,}",
   "sk-" + "[A-Za-z0-9_-]{16,}",
   // Classic GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_) AND the fine-grained PAT
   // (github_pat_…); the classic pattern's `gh[pousr]_` does NOT match

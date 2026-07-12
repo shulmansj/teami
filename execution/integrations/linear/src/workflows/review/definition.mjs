@@ -2,6 +2,7 @@ import { commitPayload } from "./commit-payload.mjs";
 import {
   GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+  LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
 } from "./effect-ids.mjs";
 import {
   REVIEW_FUNCTION_VERSION,
@@ -10,6 +11,7 @@ import {
 import {
   githubAfReviewStatusEffectDescriptor,
   githubPrReviewCommentEffectDescriptor,
+  linearHumanReviewBriefingEffectDescriptor,
 } from "../../review/teami-review-effects.mjs";
 import {
   ISSUE_NEEDS_PRINCIPAL_EFFECT_ID,
@@ -19,6 +21,10 @@ import {
   LINEAR_ISSUE_READY_EFFECT_ID,
   issueReadyEffectDescriptor,
 } from "../../linear/issue-ready-effect.mjs";
+import {
+  LINEAR_ISSUE_DONE_EFFECT_ID,
+  issueDoneEffectDescriptor,
+} from "../../linear/issue-done-effect.mjs";
 import {
   ENGINE_VERSION,
   RUN_ARTIFACT_SCHEMA_VERSION,
@@ -63,8 +69,10 @@ async function runTriggeredReviewFromDefinition(options) {
 export const REVIEW_COMMIT_EFFECTS = Object.freeze([
   githubPrReviewCommentEffectDescriptor({ id: GITHUB_PR_REVIEW_COMMENT_EFFECT_ID }),
   githubAfReviewStatusEffectDescriptor({ id: GITHUB_AF_REVIEW_STATUS_EFFECT_ID }),
+  linearHumanReviewBriefingEffectDescriptor({ id: LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID }),
   issueReadyEffectDescriptor({ id: LINEAR_ISSUE_READY_EFFECT_ID }),
   issueNeedsPrincipalEscalationEffectDescriptor({ id: ISSUE_NEEDS_PRINCIPAL_EFFECT_ID }),
+  issueDoneEffectDescriptor({ id: LINEAR_ISSUE_DONE_EFFECT_ID }),
 ]);
 
 export const reviewDefinition = Object.freeze({
@@ -109,7 +117,6 @@ export const reviewDefinition = Object.freeze({
   roles: REVIEW_ROLES,
   driver: "orchestrator",
   driver_governing_target_key: "prompt/review/orchestrator_governing",
-  invocable_runtime_roles: Object.freeze(["reviewer"]),
   runtime_assignment_roles: REVIEW_ROLES,
   engine_owned_evaluator_roles: REVIEW_ENGINE_OWNED_EVALUATOR_ROLES,
   role_capabilities: null,

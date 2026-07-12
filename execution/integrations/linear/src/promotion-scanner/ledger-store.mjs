@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { renameWithRetry } from "../../../../engine/run-store.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "../app-home.mjs";
 
 export const PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION =
   "teami-promotion-scanner-ledger/v2";
@@ -26,8 +27,8 @@ const VERIFIED_REPO_STATE_BLOCK_REASONS = new Set([
   "promotion_marker_unreadable",
 ]);
 
-export function defaultPromotionCandidateLedgerDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "promotion-candidates");
+export function defaultPromotionCandidateLedgerDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "promotion-candidates");
 }
 
 export function promotionScannerLedgerPath(ledgerDir) {

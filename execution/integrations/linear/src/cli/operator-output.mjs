@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 function agenticFactoryHeading(output, readableCommand) {
   output.heading(`Teami ${output.symbols.separator} ${readableCommand}`);
 }
@@ -29,22 +31,96 @@ function yesNo(value) {
   return value ? "yes" : "no";
 }
 
+function isInstalledPackageModulePath(modulePath) {
+  return String(modulePath || "").split(/[\\/]+/).includes("node_modules");
+}
+
+const INSTALLED_PACKAGE_CONTEXT = isInstalledPackageModulePath(fileURLToPath(import.meta.url));
+
+function formatCommandForContext(subcommand = "", {
+  installedPackageContext = INSTALLED_PACKAGE_CONTEXT,
+  platform = process.platform,
+} = {}) {
+  if (installedPackageContext) {
+    return subcommand ? `npx @shulmansj/teami@release ${subcommand}` : "npx @shulmansj/teami@release";
+  }
+
+  const launcher = platform === "win32" ? ".\\teami.cmd" : "./teami";
+  return subcommand ? `${launcher} ${subcommand}` : launcher;
+}
+
 // The repo-local launcher is invoked differently per OS: PowerShell and cmd.exe need the
 // `.\teami.cmd` form (PowerShell will not run a current-dir command by bare name, and
-// `.\teami.cmd` works in both Windows shells), while POSIX shells use `./teami`. Every
-// adopter-facing next-step / fix / help / home line renders through this helper so no stream
-// hands back a command the user's own shell rejects. Bare launcher when no subcommand is given.
+// `.\teami.cmd` works in both Windows shells), while POSIX shells use `./teami`. When this
+// CLI is running from an installed package, adopter-facing commands use the package launcher
+// instead. Bare launcher when no subcommand is given.
 function formatCommand(subcommand = "") {
-  const launcher = process.platform === "win32" ? ".\\teami.cmd" : "./teami";
-  return subcommand ? `${launcher} ${subcommand}` : launcher;
+  return formatCommandForContext(subcommand);
+}
+
+const COMPLETE_DOMAIN_TEAM_MISSING_PATTERN =
+  /^complete_domain_team_missing: domain (.+?) records Linear team (.+?), but that team was not found in workspace (.+?)\.$/;
+
+function completeDomainTeamMissingDiagnostic({ domainId, teamId, workspace } = {}) {
+  return `complete_domain_team_missing: domain ${domainId || "unknown"} records Linear team ${teamId || "unknown"}, but that team was not found in workspace ${workspace || "unknown"}.`;
+}
+
+function completeDomainTeamMissingFix(domainId) {
+  const domainArg = domainId || "<id>";
+  return (
+    `Run ${formatCommand(`uninstall --domain ${domainArg}`)}, then ` +
+    `${formatCommand(`init --domain ${domainArg}`)} to start this domain fresh, or restore the team in Linear ` +
+    `and re-run ${formatCommand(`init --domain ${domainArg}`)}.`
+  );
+}
+
+function completeDomainTeamMissingRecovery({ domainId, teamId, workspace, diagnostic = null } = {}) {
+  const renderedDiagnostic = diagnostic || completeDomainTeamMissingDiagnostic({ domainId, teamId, workspace });
+  return {
+    code: "complete_domain_team_missing",
+    domainId: domainId || "unknown",
+    teamId: teamId || "unknown",
+    workspace: workspace || "unknown",
+    diagnostic: renderedDiagnostic,
+    what:
+      `The Linear team saved for domain "${domainId || "unknown"}" no longer exists in workspace ${workspace || "unknown"}. ` +
+      renderedDiagnostic,
+    why: `Teami resolves this domain by its saved team id ${teamId || "unknown"} and will not guess by name or silently recreate it.`,
+    fix: completeDomainTeamMissingFix(domainId),
+  };
+}
+
+function completeDomainTeamMissingRecoveryFromError(error) {
+  const message = String(error?.message || error || "");
+  const match = message.match(COMPLETE_DOMAIN_TEAM_MISSING_PATTERN);
+  if (!match) return null;
+  const [, domainId, teamId, workspace] = match;
+  return completeDomainTeamMissingRecovery({
+    domainId,
+    teamId,
+    workspace,
+    diagnostic: message,
+  });
+}
+
+function completeDomainTeamMissingRecoveryForDomain(domain = {}) {
+  return completeDomainTeamMissingRecovery({
+    domainId: domain?.id || "unknown",
+    teamId: domain?.linear?.team_id || "unknown",
+    workspace: domain?.linear?.workspace_name || domain?.linear?.workspace_id || "unknown",
+  });
 }
 
 export {
   agenticFactoryHeading,
   compactPairs,
+  completeDomainTeamMissingRecoveryForDomain,
+  completeDomainTeamMissingRecoveryFromError,
   formatCommand,
+  formatCommandForContext,
   humanizeInterval,
   humanizeToken,
+  isInstalledPackageModulePath,
   printVerboseHint,
   yesNo,
 };

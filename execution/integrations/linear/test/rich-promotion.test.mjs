@@ -58,7 +58,9 @@ const TERMINAL_AUDIT_FIELDS = Object.freeze({
 });
 
 function tempRepoRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-rich-promotion-${label}-`));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `teami-rich-promotion-${label}-`));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function commitArtifact(runId, overrides = {}) {
@@ -113,7 +115,6 @@ function commitArtifact(runId, overrides = {}) {
 }
 
 function pauseArtifact(runId) {
-  const projectUpdate = `run_id: ${runId}\nPaused on open product questions.`;
   const openQuestions = "- Which provider tier should we keep?";
   const pausePacket = {
     schema_version: ORCHESTRATOR_OUTPUT_SCHEMA_VERSION,
@@ -123,7 +124,6 @@ function pauseArtifact(runId) {
     reason: "product_questions",
     ...TERMINAL_AUDIT_FIELDS,
     open_questions_markdown: openQuestions,
-    project_update_markdown: projectUpdate,
   };
   return {
     schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
@@ -147,7 +147,6 @@ function pauseArtifact(runId) {
     },
     runtime_metadata: { pm: {}, sr_eng: {} },
     pause_packet: pausePacket,
-    discovery_issues: [],
   };
 }
 
@@ -175,6 +174,7 @@ function sampleProject() {
 }
 
 function setUpPromotableRun({ repoRoot, runId, artifact = null, project = sampleProject() }) {
+  const runArtifact = artifact || commitArtifact(runId);
   recordTestTraceStatus({
     repoRoot,
     runId,
@@ -184,9 +184,10 @@ function setUpPromotableRun({ repoRoot, runId, artifact = null, project = sample
     status: "trace_exported",
     observedAt: "2026-06-10T00:00:00.000Z",
   });
-  writeRunArtifact({ runId, repoRoot }, artifact || commitArtifact(runId));
+  writeRunArtifact({ runId, repoRoot }, runArtifact);
   captureProjectSnapshot({
     runId,
+    domainId: runArtifact.domain_id,
     project,
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T00:00:01.000Z",
@@ -342,6 +343,9 @@ test("content gate refuses token-shaped content (mandatory but not sufficient)",
   assert.equal(keyResult.reason, "token_or_secret_like");
 
   assert.ok(findTokenShapedContent({ note: `uses ${fakePat}` }).length > 0);
+  const fakeBasic = ["Basic ", Buffer.from("x-access-token:fake-token-value", "utf8").toString("base64")].join("");
+  assert.ok(findTokenShapedContent({ note: `authorization: ${fakeBasic}` }).length > 0);
+  assert.equal(findTokenShapedContent({ note: "Basic authentication remains prose" }).length, 0);
 });
 
 test("content gate rejects unknown fields into needs_sanitization, never silently passes them", () => {
@@ -360,6 +364,29 @@ test("content gate rejects unknown fields into needs_sanitization, never silentl
   assert.equal(result.state, "needs_sanitization");
   assert.equal(result.reason, "unclassified_content");
   assert.ok(result.unclassified_paths.some((entry) => entry.includes("$.input.project.mystery_payload")));
+});
+
+test("content gate preserves project comments for eval and judge inputs", () => {
+  const comment = {
+    author_id: "user-founder-1",
+    body: "Answer: launch concierge onboarding before self-serve billing.",
+    created_at: "2026-06-29T10:02:00.000Z",
+  };
+  const result = sanitizeAndClassifyContent({
+    value: {
+      input: {
+        project: { id: "proj-1", comments: [comment] },
+        judge_fixture_input: {
+          project_intent: { id: "proj-1", comments: [comment] },
+        },
+      },
+    },
+    policy: RICH_EXAMPLE_CONTENT_POLICY,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value.input.project.comments, [comment]);
+  assert.deepEqual(result.value.input.judge_fixture_input.project_intent.comments, [comment]);
 });
 
 test("content gate removes denylisted content classes and reports every removal and transform", () => {
@@ -505,6 +532,36 @@ test("rich promotion rejects a short Judge-input capture before upload", () => {
   assert.ok(result.failures.includes("missing:project_update_markdown"));
 });
 
+test("rich promotion preserves project comments in eval and judge inputs", () => {
+  const runId = "run-rich-comments-1";
+  const comment = {
+    author_id: "user-founder-1",
+    body: "Answer: launch concierge onboarding before self-serve billing.",
+    created_at: "2026-06-29T10:02:00.000Z",
+  };
+  const result = buildRichDecompositionExample({
+    receipt: { run_id: runId, trace_id: TRACE_ID },
+    artifact: commitArtifact(runId),
+    snapshot: {
+      project: {
+        id: "proj-1",
+        name: "Onboarding email refresh",
+        description: "Refresh onboarding.",
+        comments: [comment],
+        content: "## Goal\nHelp users reach the first useful action.",
+        status: "Planned",
+        labels: [],
+        existing_issues: [],
+      },
+    },
+    policy,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.example.input.project.comments, [comment]);
+  assert.deepEqual(result.example.input.judge_fixture_input.project_intent.comments, [comment]);
+});
+
 test("rich promotion assembles a schema-valid example field-for-field, uploads with native splits, and records the receipt", async () => {
   const repoRoot = tempRepoRoot("happy");
   const runId = "run-rich-commit-1";
@@ -631,7 +688,6 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
       terminal_status: "completed",
       terminal_reason: "synthesis_complete",
       final_issues: expectedFinalIssues,
-      discovery_issues: [],
       dependency_relations: [{ blocking: "area/copy", blocked: "area/wire" }],
       project_update_markdown: `run_id: ${runId}\nDecomposed the refresh into two sequenced issues.`,
       open_questions_markdown: null,
@@ -665,7 +721,6 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
     terminal_reason: "synthesis_complete",
     phase_packets: [terminalOutputSummary()],
     final_issues: expectedFinalIssues,
-    discovery_issues: [],
     dependency_relations: [{ blocking: "area/copy", blocked: "area/wire" }],
     project_update_markdown: `run_id: ${runId}\nDecomposed the refresh into two sequenced issues.`,
   });
@@ -736,7 +791,7 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
   }
 
   // Local promotion receipt: dataset + version + split + content hash + report.
-  const receiptFile = promotionReceiptPath({ runId, repoRoot });
+  const receiptFile = promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId });
   assert.equal(result.receipt_path, receiptFile);
   const promotionReceipt = JSON.parse(fs.readFileSync(receiptFile, "utf8"));
   assert.equal(promotionReceipt.schema_version, "linear-decomposition-promotion-receipt/v1");
@@ -756,7 +811,7 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
   assert.ok(event.sanitizer_report.removed.length > 0, "receipt stores the sanitizer report locally");
 });
 
-test("paused runs promote with open questions and authored pause update", async () => {
+test("paused runs promote with open questions and no project update", async () => {
   const repoRoot = tempRepoRoot("paused");
   const runId = "run-rich-pause-1";
   setUpPromotableRun({ repoRoot, runId, artifact: pauseArtifact(runId) });
@@ -773,7 +828,7 @@ test("paused runs promote with open questions and authored pause update", async 
   assert.equal(upload.body.outputs[0].terminal_status, "paused");
   assert.equal(upload.body.outputs[0].terminal_reason, "product_questions");
   assert.equal(upload.body.outputs[0].open_questions_markdown, "- Which provider tier should we keep?");
-  assert.match(upload.body.outputs[0].project_update_markdown, /Paused on open product questions/);
+  assert.equal(Object.hasOwn(upload.body.outputs[0], "project_update_markdown"), false);
   assert.deepEqual(upload.body.outputs[0].final_issues, []);
 });
 
@@ -812,7 +867,10 @@ test("re-promotion with identical content is idempotent and never re-uploads", a
   assert.equal(secondCalls.length, 0);
 
   // The receipt still records exactly one promotion event.
-  const promotionReceipt = JSON.parse(fs.readFileSync(promotionReceiptPath({ runId, repoRoot }), "utf8"));
+  const promotionReceipt = JSON.parse(fs.readFileSync(
+    promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId }),
+    "utf8",
+  ));
   assert.equal(promotionReceipt.datasets[0].promotions.length, 1);
 });
 
@@ -860,7 +918,10 @@ test("changed content without --force-new-version is an explicit duplicate repor
   assert.equal(forced.ok, true);
   assert.equal(forced.action, "append");
   assert.notEqual(forced.example_content_hash, first.example_content_hash);
-  const promotionReceipt = JSON.parse(fs.readFileSync(promotionReceiptPath({ runId, repoRoot }), "utf8"));
+  const promotionReceipt = JSON.parse(fs.readFileSync(
+    promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId }),
+    "utf8",
+  ));
   assert.equal(promotionReceipt.datasets[0].promotions.length, 2, "promotion events are append-only");
   assert.equal(promotionReceipt.datasets[0].promotions.at(-1).forced_new_version, true);
 });
@@ -891,7 +952,10 @@ test("native split write failure falls back to metadata.dataset_split and disclo
   assert.equal(uploads[1].body.splits, undefined, "fallback upload must not claim native splits");
   assert.ok(uploads[1].body.metadata[0].dataset_split, "metadata mirror still carries the split");
 
-  const promotionReceipt = JSON.parse(fs.readFileSync(promotionReceiptPath({ runId, repoRoot }), "utf8"));
+  const promotionReceipt = JSON.parse(fs.readFileSync(
+    promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId }),
+    "utf8",
+  ));
   const event = promotionReceipt.datasets[0].promotions[0];
   assert.equal(event.split_assignment, "metadata_fallback");
   assert.match(event.split_assignment_note, /pending|assign the native split/i);
@@ -923,7 +987,10 @@ test("token-shaped content in run output fails rich promotion closed before any 
   assert.equal(result.state, "cannot_promote");
   assert.equal(result.reason, "token_or_secret_like");
   assert.ok(result.secret_paths.some((entry) => entry.includes("project_update_markdown")));
-  assert.equal(fs.existsSync(promotionReceiptPath({ runId, repoRoot })), false);
+  assert.equal(
+    fs.existsSync(promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId })),
+    false,
+  );
 });
 
 test("unclassifiable rich content rejects into needs_sanitization before any upload", async () => {
@@ -948,7 +1015,10 @@ test("unclassifiable rich content rejects into needs_sanitization before any upl
   assert.equal(result.reason, "unclassified_content");
   assert.ok(result.unclassified_paths.some((entry) =>
     entry.includes("$.output.final_issues[0].vendor_payload")));
-  assert.equal(fs.existsSync(promotionReceiptPath({ runId, repoRoot })), false);
+  assert.equal(
+    fs.existsSync(promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId })),
+    false,
+  );
 });
 
 test("banned workflow-state keys cannot enter Phoenix-bound example metadata", () => {

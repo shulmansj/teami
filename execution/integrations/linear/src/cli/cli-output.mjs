@@ -119,11 +119,16 @@ function createCliOutput({
   const errRed = createStyler(useErrColor, ANSI_CODES.red);
   const errCyan = createStyler(useErrColor, ANSI_CODES.cyan);
 
-  const writeLine = (target, line = "") => {
+  const activeProgressFinalizers = new Set();
+  const clearActiveProgress = () => {
+    for (const finalizeProgress of [...activeProgressFinalizers]) finalizeProgress();
+  };
+  const writeLine = (target, line = "", { clearProgress = true } = {}) => {
+    if (clearProgress) clearActiveProgress();
     target.write(`${line}\n`);
   };
-  const writeBody = (target, text, decorate = (value) => value) => {
-    for (const line of splitLines(text)) writeLine(target, `  ${decorate(line)}`);
+  const writeBody = (target, text, decorate = (value) => value, options = {}) => {
+    for (const line of splitLines(text)) writeLine(target, `  ${decorate(line)}`, options);
   };
 
   const output = {
@@ -205,6 +210,7 @@ function createCliOutput({
       writeLine(stream, green(`${symbols.success} ${text}`));
     },
     raw(text) {
+      clearActiveProgress();
       stream.write(String(text));
     },
     // A live "still working" signal for long waits. On an animated target (TTY + color + not
@@ -228,7 +234,7 @@ function createCliOutput({
         stream.write(`\r  ${cyan(frame)} ${currentLabel}${CLEAR_TO_EOL}`);
       };
       const emitDurable = (text) => {
-        writeLine(stream, `  ${symbols.step} ${text}`);
+        writeLine(stream, `  ${symbols.step} ${text}`, { clearProgress: false });
       };
       const finalize = () => {
         if (done) return;
@@ -241,8 +247,12 @@ function createCliOutput({
           process.removeListener("exit", exitHandler);
           exitHandler = null;
         }
+        activeProgressFinalizers.delete(finalize);
         if (animated) stream.write(`\r${CLEAR_TO_EOL}`);
       };
+
+      clearActiveProgress();
+      activeProgressFinalizers.add(finalize);
 
       if (animated) {
         drawFrame();

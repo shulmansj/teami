@@ -105,8 +105,8 @@ recover, retry, dedupe, and explain degraded state without asking the user to
 understand Phoenix processes, runner leases, scanner schedules, or local
 listeners. What should not be hidden are product and trust decisions: whether a
 change is worth accepting, whether evidence is ambiguous, whether a permission
-is being granted, whether a persistent local supervisor is being enabled, or
-whether accepted behavior will change.
+is being granted, whether local automation is being asked to change behavior,
+or whether accepted behavior will change.
 
 Phoenix is the visual eval workspace for traces, annotations, datasets,
 prompts, experiments, and evaluator results. Phoenix-native agent surfaces such
@@ -139,34 +139,22 @@ can direct experimentation before that point and review the proposed repo change
 before it affects accepted behavior. Linear remains the live work-state surface,
 and the repo remains the reviewable process-change record.
 
-This requires one durable local process boundary. Phoenix can be restarted
-opportunistically because Teami commands already probe and start the
-loopback service when needed. The Workflow Runner and self-improvement scanner
-need a local Teami supervisor so the loop does not depend on a human
-remembering to restart foreground runner or scanner commands after a machine
-reboot. The supervisor should be installed or registered only after one
-explicit init-time trust grant. After that grant, the supervisor may run
-Teami functionality for the workspace within repo-owned policy:
-runner work, scanner work, evidence resolution, HITL proposal drafting, and
-opening GitHub PRs only after the proposal write and packet gates are
-fail-closed. Until then, unattended supervisor PR work stays report-only or
-disabled. It does not authorize automatic merging, auto-acceptance, Linear
-writes while the machine is off, or bypassing repo policy gates. The supervisor
-should start at login with OS keep-alive/backoff, verify local workspace
-credentials, lazily start Phoenix for trace/eval work, and run the same
-runner/scanner codepath available in foreground commands.
-Uninstall must deregister the supervisor and remove its local authority,
-including login registration, runner credentials, and any standing repo
-authority used for proposal drafting.
+This requires a clear local process boundary. Phoenix can be restarted
+opportunistically because Teami commands already probe and start the loopback
+service when needed. The Workflow Runner does live Linear work only while the
+local gateway is running, and self-improvement scanner/proposal commands run
+when the adopter or agent invokes them. The product promise is explicit local
+operation, not a hidden login service.
 
-This is local-machine automation: it improves restart recovery and unattended
-cadence while the workspace machine can run the user's login services. While
-the machine is off, nothing local can notify the user and nothing should update
-Linear until the local supervisor resumes. Linear still holds projects in the
-trigger state, and the gateway reconciles them on the next local poll. At the
-next login, the supervisor must reconcile what happened while the machine was
-away and report expired, stale, resumed, still-waiting, or repair-needed work
-through existing surfaces.
+No hosted inbox, GitHub App, token broker, or retained administrator grant sits
+behind this loop. Behavior-repo effects use the adopter's ambient local
+git/`gh` authority, and Linear uses the adopter-approved local OAuth grant.
+
+This is local-machine automation: it can recover and reconcile when a
+foreground command runs, but it should not imply machine-off writes or
+out-of-band notifications. While the machine is off, nothing local can notify
+the user and nothing should update Linear. Linear still holds projects in the
+trigger state, and the gateway reconciles them on the next local poll.
 
 Local Phoenix is also local custody. If the adopter loses local Phoenix state,
 the loop may lose human annotations, calibration examples, and test-split
@@ -176,8 +164,8 @@ future scope, not an implicit promise.
 
 No third eval UI also means no new PM dashboard or native desktop notification
 channel in MVP. Use existing surfaces instead: Phoenix for eval evidence,
-Linear for live work state once the local runner/supervisor is available to
-write, GitHub/PRs for repo proposals, and agent sessions or doctor commands for
+Linear for live work state once the foreground runner is available to write,
+GitHub/PRs for repo proposals, and agent sessions or doctor commands for
 on-demand repair detail. Local status commands remain operator surfaces unless
 a later product decision deliberately adds a separate status UI.
 
@@ -195,13 +183,12 @@ provisional routing vocabulary, not settled product copy:
 | --- | --- | --- |
 | Working | Linear project, Phoenix trace, or run summary | Local trigger/run state plus local runner receipts |
 | Needs your decision | Phoenix annotation view, setup/reauth flow, PR evidence summary, or Linear project update | Phoenix annotations, local credentials, repo proposal, or Linear state |
-| Blocked but safe | Linear project update when safe, agent/doctor detail on request, or PR body/status update when proposal-related | Local gateway state, supervisor health, local ledger |
+| Blocked but safe | Linear project update when safe, agent/doctor detail on request, or PR body/status update when proposal-related | Local gateway state, local health, local ledger |
 | Proposal ready | GitHub PR with product-readable evidence summary and Phoenix links | Repo/GitHub proposal artifact |
 
-`Linear update when safe` means the local supervisor or foreground runner is
-online, Linear auth is valid, the live project still matches the expected
-workspace/status, and the update is idempotent and rate-limited. It does not
-mean machine-off writes.
+`Linear update when safe` means the foreground runner is online, Linear auth is
+valid, the live project still matches the expected workspace/status, and the
+update is idempotent and rate-limited. It does not mean machine-off writes.
 
 The value receipt is an event in the proposal lifecycle, not a separate steady
 state by default. In MVP, the PR should pre-stage the claimed target
@@ -227,8 +214,8 @@ all-repo, or maintainer-operated access.
 Repo creation is an init-only setup capability, not a standing runtime
 permission. It may require the user's existing `gh` session to have repo
 creation or administration capability during setup. Proposal writing uses the
-adopter's local git/`gh` auth against the configured behavior repo, and Agentic
-Factory stores no GitHub secret. It is not a normal product-repo access path or
+adopter's local git/`gh` auth against the configured behavior repo, and Teami
+stores no GitHub secret. It is not a normal product-repo access path or
 all-repositories grant.
 
 The controller should open regular PRs only after evidence is packaged and the
@@ -315,17 +302,16 @@ trace status.
 
 The runner exports existing Teami `trace.mjs` spans to local Phoenix.
 It first tries Phoenix's OTLP HTTP trace endpoint and falls back to Phoenix's
-REST spans endpoint when the local Phoenix version rejects OTLP JSON. `npm run
+REST spans endpoint when the local Phoenix version rejects OTLP JSON. `teami
 init` installs or reuses Phoenix, starts a managed loopback service when needed,
 runs a synthetic trace preflight, and prints the Phoenix UI URL. If Phoenix is
 unavailable, the runner records a local trace status and continues real
 Linear/GitHub work.
 
-Phoenix should not be treated as an always-on daemon the user must babysit.
-Trace, annotation, dataset, experiment, and promotion commands should call the
-same local readiness path and either reuse a running loopback Phoenix or start
-the managed service. The local supervisor owns the always-on responsibility for
-the runner and scanner; Phoenix remains a lazy dependency of those actions.
+Phoenix should not be treated as a daemon the user must babysit. Trace,
+annotation, dataset, experiment, and promotion commands should call the same
+local readiness path and either reuse a running loopback Phoenix or start the
+managed service. Phoenix remains a lazy dependency of those actions.
 
 Phoenix owns high-volume or time-series learning data:
 
@@ -443,9 +429,9 @@ actions:
   graphQL_writes: []
 outputs:
   project_update_ids: []
+  project_comment_ids: []
   created_issue_ids: []
   reused_issue_ids: []
-  discovery_issue_ids: []
 eval:
   annotations: []
   failure_tags: []
@@ -585,7 +571,7 @@ has stable commands.
 
 Initial metrics:
 
-- Time To Workspace: clone to verified `Teami` Linear team, statuses,
+- Time To Workspace: install to verified `Teami` Linear team, statuses,
   labels, and project template.
 - Time To First Roadmap Project: verified workspace setup to first disposable
   Linear project with a non-empty body.

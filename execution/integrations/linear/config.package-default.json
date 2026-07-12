@@ -1,0 +1,159 @@
+{
+  "linear": {
+    "cache_path": ".teami/linear.json",
+    "oauth": {
+      "client_id": "00117f8c7dba0a3adf8d2a7398f5f64f",
+      "redirect_uri": "http://127.0.0.1:8723/linear/oauth/callback",
+      "scopes": ["read", "write"],
+      "actor": "app",
+      "credential_storage": "os"
+    },
+    "team": {
+      "key": "TEAM",
+      "name": "Teami",
+      "description": "Linear team for agent-executed work from Linear projects."
+    },
+    "project": {
+      "statuses": {
+        "backlog": {
+          "name": "Backlog",
+          "type": "backlog"
+        },
+        "planned": {
+          "name": "Planned",
+          "type": "planned"
+        },
+        "in_progress": {
+          "name": "In Progress",
+          "type": "started"
+        },
+        "completed": {
+          "name": "Completed",
+          "type": "completed"
+        },
+        "needs_principal": {
+          "name": "Principal Escalation",
+          "type": "planned"
+        }
+      },
+      "template_name": "Teami Roadmap Item"
+    },
+    "issue": {
+      "labels": {
+        "discovery": "Discovery",
+        "human_review": "human-review",
+        "work_type_code": "Code",
+        "work_type_non_code": "Non-code"
+      },
+      "statuses": {
+        "backlog": {
+          "name": "Backlog",
+          "type": "backlog"
+        },
+        "todo": {
+          "name": "Todo",
+          "type": "unstarted"
+        },
+        "in_progress": {
+          "name": "In Progress",
+          "type": "started"
+        },
+        "in_review": {
+          "name": "In Review",
+          "type": "started"
+        },
+        "human_review": {
+          "name": "Principal Review",
+          "type": "started"
+        },
+        "needs_principal": {
+          "name": "Principal Escalation",
+          "type": "started"
+        },
+        "done": {
+          "name": "Done",
+          "type": "completed"
+        }
+      }
+    }
+  },
+  "poll": {
+    "interval_ms": 10000
+  },
+  "runtime": {
+    "default_invocation": "session_start",
+    "adapters": {
+      "codex": {
+        "command": "codex",
+        "cli_args_prefix": ["-c", "service_tier=\"fast\""],
+        "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+        "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.strict-generation.schema.json",
+        "tool_policy": {
+          "linear_write": false
+        }
+      },
+      "claude": {
+        "command": "claude",
+        "schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+        "generation_schema_path": "execution/integrations/linear/schemas/subagent-turn.schema.json",
+        "tool_policy": {
+          "linear_write": false
+        }
+      }
+    }
+  },
+  "workflows": {
+    "decomposition": {
+      "roles": {
+        "pm": {
+          "runtime": "claude",
+          "model": "claude-opus-4-8"
+        },
+        "sr_eng": {
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        "judge": {
+          "runtime": "claude",
+          "model": "claude-opus-4-8"
+        },
+        "drafter": {
+          "runtime": "claude",
+          "model": "claude-opus-4-8"
+        },
+        "orchestrator": {
+          "runtime": "claude",
+          "model": "claude-opus-4-8"
+        }
+      }
+    },
+    "execution": {
+      "roles": {
+        "worker": {
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        "execution_quality_judge": {
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        "orchestrator": {
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        }
+      }
+    },
+    "review": {
+      "roles": {
+        "reviewer": {
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        "orchestrator": {
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        }
+      }
+    }
+  }
+}

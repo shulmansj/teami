@@ -48,7 +48,16 @@ test("the gateway loop heartbeat emits durable, animation-free lines when non-TT
   // Inject a fake loop that emits one activity event, then stops (as Ctrl-C would).
   const fakeLoop = async ({ onStatus }) => {
     onStatus({ state: "working", projectId: "P1", runId: "R1" });
-    return { ok: true, status: "stopped", statuses: [], iterations: [] };
+    return {
+      ok: true,
+      status: "stopped",
+      statuses: [{ state: "working" }],
+      iterations: [{ domains: [] }, { domains: [] }],
+      retention: {
+        statuses: { total: 7, retained: 1, dropped: 6, limit: 1 },
+        iterations: { total: 2, retained: 2, dropped: 0, limit: null },
+      },
+    };
   };
 
   try {
@@ -70,5 +79,7 @@ test("the gateway loop heartbeat emits durable, animation-free lines when non-TT
   assert.match(out, /still watching/, "a durable heartbeat line is emitted");
   assert.match(out, /working/, "activity events still render");
   assert.match(out, /Gateway stopped/, "completion renders after the loop");
+  assert.match(out, /Iterations:\s+2 total; all retained/, "finite loop counts say that all records were retained");
+  assert.match(out, /Events:\s+7 total; 1 recent retained; 6 older dropped/, "live loop counts disclose bounded retention");
   assert.doesNotMatch(out, /10000ms/, "the machine-speak interval is gone");
 });

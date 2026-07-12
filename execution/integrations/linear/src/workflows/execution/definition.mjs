@@ -14,6 +14,7 @@ import {
   RUN_ARTIFACT_SCHEMA_VERSION,
 } from "../../../../../engine/engine-contract-constants.mjs";
 import { RUN_ARTIFACT_KINDS } from "../../../../../engine/run-store.mjs";
+import { shippedExecutionTriggers } from "../../execution-readiness-gate.mjs";
 
 export const EXECUTION_WORKFLOW_TYPE = "execution";
 export const EXECUTION_WAKE_KEY_TEMPLATE = "linear:issue:{issue_id}:execution";
@@ -112,14 +113,13 @@ export const executionDefinition = Object.freeze({
       "github.pull_request_number",
     ]),
   }),
-  triggers: Object.freeze([EXECUTION_TRIGGER]),
+  triggers: Object.freeze(shippedExecutionTriggers([EXECUTION_TRIGGER])),
   input_status: "Ready",
   output_status: "In Review",
   required_capabilities: EXECUTION_REQUIRED_CAPABILITIES,
   roles: EXECUTION_ROLES,
   driver: "orchestrator",
   driver_governing_target_key: "prompt/execution/orchestrator_governing",
-  invocable_runtime_roles: Object.freeze(["worker"]),
   runtime_assignment_roles: EXECUTION_ROLES,
   engine_owned_evaluator_roles: EXECUTION_ENGINE_OWNED_EVALUATOR_ROLES,
   role_capabilities: null,
@@ -246,7 +246,3 @@ function stringIds(values) {
     .filter(Boolean);
   return [...new Set(ids)];
 }
-
-import { registerWorkflow } from "../../../../../engine/workflow-registry.mjs";
-
-registerWorkflow(executionDefinition);

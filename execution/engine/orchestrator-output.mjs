@@ -20,7 +20,12 @@ export const ORCHESTRATOR_OUTCOME_REASONS = GENERIC_CORE_OUTCOME_REASONS;
 const COMMON_PACKET_ARRAY_FIELDS = ["source_refs", "assumptions", "constraints", "risks"];
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-export function validateOrchestratorOutput(runResult, commitPayload = null) {
+export function validateOrchestratorOutput(runResult, commitPayload = null, {
+  // The '## What I did with each part of your project' section is DECOMPOSITION
+  // vocabulary (its project update accounts for the project's parts). Other
+  // functions' pauses carry a project update + run_id line but not that heading.
+  requireAccountabilitySection = true,
+} = {}) {
   const failureReasons = [];
 
   if (!isRecord(runResult)) {
@@ -30,7 +35,9 @@ export function validateOrchestratorOutput(runResult, commitPayload = null) {
   if (!isRecord(runResult.terminal_output)) {
     failureReasons.push("missing_terminal_output");
   } else {
-    validateTerminalOutput(runResult.terminal_output, failureReasons, commitPayload);
+    validateTerminalOutput(runResult.terminal_output, failureReasons, commitPayload, {
+      requireAccountabilitySection,
+    });
   }
 
   validateBounds(runResult.bounds, failureReasons);
@@ -39,7 +46,9 @@ export function validateOrchestratorOutput(runResult, commitPayload = null) {
   return { ok: failureReasons.length === 0, failureReasons: [...new Set(failureReasons)] };
 }
 
-function validateTerminalOutput(terminalOutput, failureReasons, commitPayload) {
+function validateTerminalOutput(terminalOutput, failureReasons, commitPayload, {
+  requireAccountabilitySection = true,
+} = {}) {
   if (terminalOutput.schema_version !== ORCHESTRATOR_OUTPUT_SCHEMA_VERSION) {
     failureReasons.push("invalid_orchestrator_output_schema_version");
   }
@@ -53,7 +62,9 @@ function validateTerminalOutput(terminalOutput, failureReasons, commitPayload) {
   validateRunId(terminalOutput, failureReasons);
   validateOutcomeReason(terminalOutput, failureReasons);
   validateAuditFields(terminalOutput, failureReasons);
-  validateOutcomeRequiredFields(terminalOutput, failureReasons, commitPayload);
+  validateOutcomeRequiredFields(terminalOutput, failureReasons, commitPayload, {
+    requireAccountabilitySection,
+  });
 }
 
 function validateRunId(terminalOutput, failureReasons) {
@@ -96,14 +107,22 @@ function validateAuditFields(terminalOutput, failureReasons) {
   }
 }
 
-function validateOutcomeRequiredFields(terminalOutput, failureReasons, commitPayload) {
+function validateOutcomeRequiredFields(terminalOutput, failureReasons, commitPayload, {
+  requireAccountabilitySection = true,
+} = {}) {
   if (terminalOutput.outcome === "commit") {
     validateInjectedCommitPayload(terminalOutput, failureReasons, commitPayload);
   }
 
-  if (terminalOutput.outcome === "pause" || terminalOutput.outcome === "failed_closed") {
+  if (terminalOutput.outcome === "pause") {
+    requireAuthoredMarkdown(terminalOutput, "open_questions_markdown", failureReasons, {
+      allowBlank: false,
+    });
+  }
+
+  if (terminalOutput.outcome === "failed_closed") {
     requireProjectUpdateWithRunId(terminalOutput, failureReasons, {
-      requireAccountabilitySection: true,
+      requireAccountabilitySection,
     });
     requireAuthoredMarkdown(terminalOutput, "open_questions_markdown", failureReasons, {
       allowBlank: false,

@@ -20,7 +20,7 @@ import {
   deriveExperimentReceiptState,
   selectDatasetExamples,
 } from "./phoenix-experiment.mjs";
-import { defaultRunStoreDir } from "../../../engine/run-store.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 import {
   isInvalidTraceReceiptResult,
   readTraceReceipt,
@@ -226,6 +226,20 @@ function readJsonTolerant(filePath) {
   } catch {
     return null;
   }
+}
+
+function judgeReceiptReadPath({ home, runId, runStoreDir = null }) {
+  if (runStoreDir) return path.join(runStoreDir, `${runId}.judge.json`);
+  const homeRoot = teamiHomePaths({ home }).home;
+  const direct = path.join(homeRoot, "runs", `${runId}.judge.json`);
+  if (fs.existsSync(direct)) return direct;
+  const domainsDir = path.join(homeRoot, "domains");
+  if (!fs.existsSync(domainsDir)) return direct;
+  for (const domainId of fs.readdirSync(domainsDir)) {
+    const candidate = path.join(domainsDir, domainId, "runs", `${runId}.judge.json`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return direct;
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +544,7 @@ function worklistItemsFromStatus({ refId, status, judgeErrors = [], judgeAttempt
 // experiment id). Derived states only; nothing is written anywhere.
 export async function collectDisagreementReport({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runId = null,
   experimentRef = null,
   receiptDir = null,
@@ -587,9 +602,7 @@ export async function collectDisagreementReport({
     }));
     const status = deriveRunEvalStatus({ annotations });
     const bandMismatches = detectBandMismatchedAnnotations(annotations);
-    const judgeReceipt = readJsonTolerant(
-      path.join(runStoreDir || defaultRunStoreDir(repoRoot), `${runId}.judge.json`),
-    );
+    const judgeReceipt = readJsonTolerant(judgeReceiptReadPath({ home, runId, runStoreDir }));
     const judgeAttempt = Array.isArray(judgeReceipt?.attempts) ? judgeReceipt.attempts.at(-1) : null;
     const worklist = worklistItemsFromStatus({ refId: runId, status, judgeAttempt });
     let projectGlobalId = null;
@@ -637,7 +650,7 @@ export async function collectDisagreementReport({
   let receiptState = null;
   let experimentId = experimentRef;
   if (SAFE_RECEIPT_ID_PATTERN.test(experimentRef)) {
-    const read = readExperimentReceipt({ receiptId: experimentRef, repoRoot, receiptDir });
+    const read = readExperimentReceipt({ receiptId: experimentRef, repoRoot, home, receiptDir });
     if (!read.ok) return { ok: false, status: "not_run", reason: read.reason, path: read.path };
     if (read.exists) {
       receipt = read.receipt;

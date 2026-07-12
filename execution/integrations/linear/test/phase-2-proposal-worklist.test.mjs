@@ -27,11 +27,13 @@ const NOW = new Date("2026-06-17T12:00:00.000Z");
 const TARGET = "prompt/decomposition/decomposition_quality_judge";
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-phase-2-worklist-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phase-2-worklist-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function writeVerifiedGitHubState(root) {
-  const filePath = path.join(root, ".teami", "github-connection.json");
+  const filePath = path.join(root, "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -113,7 +115,7 @@ function pr({
 }
 
 function writeRegistryRecord(root, overrides = {}) {
-  const dir = path.join(root, ".teami", "promotion-candidates");
+  const dir = path.join(root, "promotion-candidates");
   const envelopeHash = overrides.normalized_envelope_hash || hex(overrides.proposal_instance_id || "registry");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, `${envelopeHash}.json`), `${JSON.stringify({
@@ -146,7 +148,7 @@ function writeRegistryRecord(root, overrides = {}) {
 }
 
 function writeScannerFiles(root) {
-  const dir = path.join(root, ".teami", "promotion-candidates");
+  const dir = path.join(root, "promotion-candidates");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "scanner-ledger.json"), `${JSON.stringify({
     schema_version: PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION,
@@ -192,7 +194,7 @@ function writeScannerFiles(root) {
 }
 
 function writeScannerFixture(root, entries) {
-  const dir = path.join(root, ".teami", "promotion-candidates");
+  const dir = path.join(root, "promotion-candidates");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "scanner-ledger.json"), `${JSON.stringify({
     schema_version: PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION,
@@ -293,14 +295,14 @@ test("Phase 2 proposal worklist derives every contract state from existing facts
       }),
     ],
   });
-  const beforeFiles = fs.readdirSync(path.join(root, ".teami", "promotion-candidates")).sort();
+  const beforeFiles = fs.readdirSync(path.join(root, "promotion-candidates")).sort();
 
   const report = await collectPhase2ProposalWorklist({
     repoRoot: root,
     githubTransport: transport,
     now: () => NOW,
   });
-  const afterFiles = fs.readdirSync(path.join(root, ".teami", "promotion-candidates")).sort();
+  const afterFiles = fs.readdirSync(path.join(root, "promotion-candidates")).sort();
 
   assert.deepEqual(afterFiles, beforeFiles, "read model must not write a worklist or mutate scanner/registry files");
   assert.deepEqual(PHASE_2_PROPOSAL_STATE_NAME_LIST, [

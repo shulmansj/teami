@@ -3,6 +3,7 @@ import {
   createLocalAmbientGitHubSetupTransport,
   readGitHubConnectionState,
 } from "../github-setup.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 function configWithGithubFlags(config, flags = {}) {
   const github = { ...(config.github || {}) };
   if (flags["github-starter-remote-url"]) {
@@ -23,8 +24,8 @@ async function githubSetupTransportFromFlags({
   return createLocalAmbientGitHubSetupTransport({ repoRoot });
 }
 
-function githubDoctorTransportFromConnection({ config, repoRoot }) {
-  const read = readGitHubConnectionState({ repoRoot });
+function githubDoctorTransportFromConnection({ config, repoRoot, home = resolveTeamiHome() }) {
+  const read = readGitHubConnectionState({ repoRoot, home });
   if (!read.ok || read.connection?.connection_mode !== "real") return null;
   return createLocalAmbientGitHubSetupTransport({ repoRoot });
 }

@@ -33,7 +33,6 @@ const manifest = JSON.parse(
 const EXPECTED_BASELINE_ID = manifest.prompts[0].accepted_prompt_version_id
   || `sha256:${manifest.prompts[0].snapshot_sha256}`;
 const RUNTIME_ROLE_TARGET_KEY = "rule/decomposition/runtime_role_assignments";
-const ACCEPTED_RUNTIME_ROLES_PATH = "execution/evals/decomposition/accepted-runtime-roles.json";
 const POLICY_SHA256 = createHash("sha256")
   .update(fs.readFileSync(
     path.join(repoCheckout, "execution", "evals", "decomposition", "workspace-eval-policy.json"),
@@ -47,7 +46,9 @@ const T3 = "d".repeat(31) + "3";
 const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" });
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-gate-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-gate-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function writeManifestFixture(root, mutateManifest = () => {}) {
@@ -256,7 +257,7 @@ function writeReceiptFixture(root, {
   launchedAt = "2026-06-10T01:00:00.000Z",
   amendments = [],
 } = {}) {
-  const dir = path.join(root, ".teami", "experiments");
+  const dir = path.join(root, "experiments");
   fs.mkdirSync(dir, { recursive: true });
   const receipt = {
     schema_version: "teami-managed-experiment-receipt/v1",
@@ -1019,7 +1020,7 @@ test("prior test-split exposure on the same target lineage is disclosed machine-
     selection: "native_split_filter",
     launchedAt: "2026-06-09T01:00:00.000Z",
   });
-  const evalRunsDir = path.join(root, ".teami", "eval-runs");
+  const evalRunsDir = path.join(root, "eval-runs");
   fs.mkdirSync(evalRunsDir, { recursive: true });
   fs.writeFileSync(path.join(evalRunsDir, "eval-1.json"), JSON.stringify({
     schema_version: "linear-decomposition-eval-run/v1",
@@ -1066,7 +1067,7 @@ test("computeTestSplitExposureHistory classifies none/possible/definite conserva
 
   // A dataset-mode eval run with unknown split is POSSIBLE exposure (when
   // unsure -> high risk downstream).
-  const evalRunsDir = path.join(root, ".teami", "eval-runs");
+  const evalRunsDir = path.join(root, "eval-runs");
   fs.mkdirSync(evalRunsDir, { recursive: true });
   fs.writeFileSync(path.join(evalRunsDir, "eval-2.json"), JSON.stringify({
     schema_version: "linear-decomposition-eval-run/v1",

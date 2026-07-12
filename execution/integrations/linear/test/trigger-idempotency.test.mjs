@@ -13,6 +13,7 @@ import {
   computeTriggerFingerprint,
   clearMutationIntent,
   listReplayPending,
+  readMutationIntent,
   readReplayPending,
   readSuppression,
   TRIGGER_FINGERPRINT_FIELD,
@@ -33,6 +34,17 @@ test("computeTriggerFingerprint reuses the project snapshot projection and flips
 
   assert.equal(computeTriggerFingerprint(project), expected);
   assert.equal(computeTriggerFingerprint(structuredClone(project)), expected);
+  assert.equal(
+    computeTriggerFingerprint({
+      ...project,
+      comments: [{
+        author_id: "user-founder-1",
+        body: "Answer: launch concierge onboarding first.",
+        created_at: "2026-06-29T10:02:00.000Z",
+      }],
+    }),
+    expected,
+  );
 
   const changed = {
     ...project,
@@ -137,6 +149,41 @@ test("replay pending scan excludes resume mutation intents", () => {
   assert.deepEqual(listReplayPending({ domainId: "support-ops", runStoreDir }), []);
   assert.equal(readReplayPending({ domainId: "support-ops", projectId: "project-1", runStoreDir }), null);
 });
+
+for (const boundary of [
+  "before_temp_write",
+  "after_temp_fsync",
+  "after_temp_validation",
+  "after_rename",
+  "after_directory_fsync",
+  "after_committed_validation",
+]) {
+  test(`mutation intent recovery is deterministic at ${boundary}`, () => {
+    const runStoreDir = tempRunStore();
+    assert.throws(() => writeMutationIntent({
+      domainId: "support-ops",
+      projectId: "project-1",
+      runId: "run-intent-boundary",
+      artifactKind: "commit",
+      wakeId: "wake-intent-boundary",
+      startedAt: "2026-07-11T12:00:00.000Z",
+      runStoreDir,
+      onBoundary(name) {
+        if (name === boundary) throw new Error(`fault:${boundary}`);
+      },
+    }), new RegExp(`fault:${boundary}`));
+    const committed = [
+      "after_rename",
+      "after_directory_fsync",
+      "after_committed_validation",
+    ].includes(boundary);
+    assert.equal(Boolean(readMutationIntent({
+      domainId: "support-ops",
+      runId: "run-intent-boundary",
+      runStoreDir,
+    })), committed);
+  });
+}
 
 test("suppression write/read returns only the matching project fingerprint", () => {
   const runStoreDir = tempRunStore();

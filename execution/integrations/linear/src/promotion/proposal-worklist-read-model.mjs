@@ -4,6 +4,7 @@ import path from "node:path";
 import { createGitHubPromotionClient } from "../github-promotion-client.mjs";
 import { createProductionGitHubPromotionTransport } from "../github-production-transport.mjs";
 import { resolveBehaviorRepoIdentity } from "../github-setup.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "../app-home.mjs";
 import { resolveAcceptedRefForTarget } from "../../../../engine/run-accepted-refs.mjs";
 import { resolveAcceptedBaseline } from "../promotion-scanner/accepted-baseline.mjs";
 import {
@@ -12,7 +13,7 @@ import {
   promotionScannerLedgerPath,
 } from "../promotion-scanner/ledger-store.mjs";
 import { controllerNamespacePr } from "../promotion-workspace.mjs";
-import { defaultRunStoreDir, validateRunArtifact } from "../../../../engine/run-store.mjs";
+import { validateRunArtifact } from "../../../../engine/run-store.mjs";
 import { decompositionDefinition } from "../workflows/decomposition/definition.mjs";
 import { readPromotionMarker } from "./pr-marker.mjs";
 import {
@@ -121,15 +122,16 @@ function emptyProposalWorklist({ now, registryDir, ledgerDir }) {
 
 export async function collectPhase2ProposalWorklist({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   registryDir = null,
   ledgerDir = null,
   runStoreDir = null,
   githubTransport = null,
   now = () => new Date(),
 } = {}) {
-  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(repoRoot);
-  const resolvedLedgerDir = ledgerDir || defaultPromotionCandidateLedgerDir(repoRoot);
-  const resolvedRunStoreDir = runStoreDir || defaultRunStoreDir(repoRoot);
+  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(home);
+  const resolvedLedgerDir = ledgerDir || defaultPromotionCandidateLedgerDir(home);
+  const resolvedRunStoreDirs = runStoreDir ? [runStoreDir] : domainRunStoreDirs(home);
   const report = emptyProposalWorklist({
     now,
     registryDir: resolvedRegistryDir,
@@ -139,11 +141,11 @@ export async function collectPhase2ProposalWorklist({
   // The run-version records (B-REFS / S-REFS) the read-time undo answer joins
   // against. Loaded ONCE here and threaded into the merged-PR branch so a
   // worklist read does a single pass over the run store.
-  const runVersionRecords = loadRunVersionRecords(resolvedRunStoreDir);
+  const runVersionRecords = resolvedRunStoreDirs.flatMap((dir) => loadRunVersionRecords(dir));
 
   collectRegistryFacts({ registryDir: resolvedRegistryDir, builder });
   collectScannerFacts({ ledgerDir: resolvedLedgerDir, builder });
-  await collectGitHubMarkerFacts({ repoRoot, githubTransport, now, builder, runVersionRecords });
+  await collectGitHubMarkerFacts({ repoRoot, home, githubTransport, now, builder, runVersionRecords });
 
   finalizeReport(report);
   return report;
@@ -523,8 +525,8 @@ function collectScannerFacts({ ledgerDir, builder }) {
   }
 }
 
-async function collectGitHubMarkerFacts({ repoRoot, githubTransport, now, builder, runVersionRecords = [] }) {
-  const identity = resolveBehaviorRepoIdentity({ repoRoot });
+async function collectGitHubMarkerFacts({ repoRoot, home, githubTransport, now, builder, runVersionRecords = [] }) {
+  const identity = resolveBehaviorRepoIdentity({ repoRoot, home });
   if (!identity.ok) {
     markConnectionRepair({ builder, reason: identity.reason, detail: null });
     return;
@@ -873,6 +875,18 @@ function computeConsumedDownstream({ marker, runVersionRecords }) {
 // holds mixed kinds (checkpoint/pause/commit/resume); only terminal runs are a
 // completed decomposition that could have consumed an accepted version, and a
 // malformed artifact is skipped rather than trusted.
+function domainRunStoreDirs(home) {
+  const domainsDir = path.join(teamiHomePaths({ home }).home, "domains");
+  if (!fs.existsSync(domainsDir)) return [];
+  try {
+    return fs.readdirSync(domainsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(domainsDir, entry.name, "runs"));
+  } catch {
+    return [];
+  }
+}
+
 function loadRunVersionRecords(runStoreDir) {
   if (!runStoreDir || !fs.existsSync(runStoreDir)) return [];
   let names;

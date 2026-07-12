@@ -84,6 +84,8 @@ test("public config loads with local-only trigger and GitHub setup surfaces", ()
   assert.equal(Object.hasOwn(loaded.github, "app_slug"), false);
   assert.equal(Object.hasOwn(loaded.github, "app_id"), false);
   assert.equal(Object.hasOwn(loaded.github, ["token", "broker"].join("_")), false);
+  assert.equal(Object.hasOwn(loaded.linear.project, "labels"), false);
+  assert.equal(Object.hasOwn(loaded.linear.issue.labels, "needs_principal"), false);
   assert.equal(loaded.poll.interval_ms, DEFAULT_POLL_INTERVAL_MS);
 });
 
@@ -119,7 +121,7 @@ test("poll interval config defaults and validates the single public knob", () =>
 });
 
 test("issue lifecycle statuses required for execution and review setup", () => {
-  for (const statusKey of ["todo", "in_review", "blocked"]) {
+  for (const statusKey of ["todo", "in_review", "human_review", "needs_principal"]) {
     const config = readJson(configExamplePath);
     delete config.linear.issue.statuses[statusKey];
     assert.throws(
@@ -127,6 +129,16 @@ test("issue lifecycle statuses required for execution and review setup", () => {
       new RegExp(`linear\\.issue\\.statuses\\.${statusKey} must be an object`),
     );
   }
+});
+
+test("human-review issue label is required for the review gate", () => {
+  const config = readJson(configExamplePath);
+  delete config.linear.issue.labels.human_review;
+
+  assert.throws(
+    () => validateLinearConfig(config, "test-config", { repoRoot }),
+    /linear\.issue\.labels\.human_review/,
+  );
 });
 
 test("public config separates behavior-repo GitHub setup from domain git repo binding", () => {

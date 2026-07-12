@@ -11,12 +11,20 @@ import {
 } from "../src/execution-pr-adapter.mjs";
 import {
   AF_REVIEW_COMMIT_EFFECTS,
+  applyLinearHumanReviewBriefingEffect,
   githubAfReviewStatusEffect,
   githubPrReviewCommentEffect,
+  linearHumanReviewBriefingEffect,
 } from "../src/review/teami-review-effects.mjs";
+import {
+  mergePrEffectDescriptor,
+  probeMergePrEffect,
+  readMergeGateSnapshot,
+} from "../src/linear/merge-pr-effect.mjs";
 import {
   GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+  LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
   REVIEW_COMMIT_EFFECT_IDS,
 } from "../src/workflows/review/effect-ids.mjs";
 
@@ -29,6 +37,24 @@ const REVIEW = Object.freeze({
   body: "Review passed.",
 });
 const NEXT_HEAD_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+const MERGE_ISSUE_ID = "issue-merge-1";
+const MERGE_PR_NUMBER = 17;
+const MERGE_HEAD_SHA = "1111111111111111111111111111111111111111";
+const MERGE_NEXT_HEAD_SHA = "2222222222222222222222222222222222222222";
+const HUMAN_REVIEW_LABEL_ID = "label-human-review";
+const MERGE_WAKE_ID = "wake-merge-1";
+const MERGE_RUN_ID = "run-merge-1";
+const MERGE_SHAPE = Object.freeze({
+  issueStatuses: Object.freeze({
+    todo: Object.freeze({ id: "state-todo" }),
+    in_review: Object.freeze({ id: "state-in-review" }),
+    human_review: Object.freeze({ id: "state-human-review" }),
+    done: Object.freeze({ id: "state-done" }),
+  }),
+  issueLabels: Object.freeze({
+    human_review: Object.freeze({ id: HUMAN_REVIEW_LABEL_ID }),
+  }),
+});
 
 test("review effect ids are leaf constants and descriptors are ordered comment before status", () => {
   assert.deepEqual(REVIEW_COMMIT_EFFECT_IDS, [
@@ -264,6 +290,365 @@ test("review effects fail closed before mutation when the PR is gone or the head
   assert.equal(movedAdapter.events.some((event) => event.method === "setCommitStatus"), false);
 });
 
+test("human review briefing effect posts pure prose and records the machine side in the store", async () => {
+  const client = createHumanReviewBriefingClient();
+  const store = createBriefingRecordStore();
+  const effects = [linearHumanReviewBriefingEffect];
+
+  const first = await applyCommitEffects({
+    effects,
+    ctx: humanReviewBriefingCtx({ client, store }),
+  });
+  const second = await applyCommitEffects({
+    effects,
+    ctx: humanReviewBriefingCtx({ client, store }),
+  });
+
+  assert.equal(first.outcome, "ok");
+  assert.equal(second.outcome, "ok");
+  assert.equal(client.comments.length, 1);
+  assert.equal(client.events.filter((event) => event.method === "createIssueComment").length, 1);
+  // The human surface stays purely human: the comment is the briefing text,
+  // nothing else.
+  assert.equal(client.comments[0].body, "Check the user-visible workflow before accepting.");
+  assert.deepEqual(store.briefingRecords({ issueId: "issue-review-1" }), {
+    issue_id: "issue-review-1",
+    head_sha: REVIEW.head_sha,
+    run_id: "run-review-1",
+    comment_id: "comment-1",
+    posted_at: "2026-06-28T00:00:00.000Z",
+  });
+  assert.deepEqual(first.applied, [{
+    id: LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+    identity: {
+      issue_id: "issue-review-1",
+      head_sha: REVIEW.head_sha,
+      comment_id: "comment-1",
+    },
+  }]);
+  assert.deepEqual(first.produced_identities, [{
+    effect_id: LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+    provider: "linear",
+    resource_kind: "linear_issue_comment",
+    target_ids: [
+      "comment-1",
+      `issue-review-1@${REVIEW.head_sha}:human_review_briefing`,
+    ],
+    identity: {
+      issue_id: "issue-review-1",
+      head_sha: REVIEW.head_sha,
+      comment_id: "comment-1",
+    },
+  }]);
+
+  const nextHead = await applyCommitEffects({
+    effects,
+    ctx: humanReviewBriefingCtx({
+      client,
+      store,
+      review: { ...REVIEW, head_sha: NEXT_HEAD_SHA },
+      runId: "run-review-2",
+    }),
+  });
+
+  assert.equal(nextHead.outcome, "ok");
+  assert.equal(client.comments.length, 2);
+  assert.equal(store.briefingRecords({ issueId: "issue-review-1" }).head_sha, NEXT_HEAD_SHA);
+});
+
+test("a briefing record whose comment was deleted does not satisfy the effect", async () => {
+  const client = createHumanReviewBriefingClient();
+  const store = createBriefingRecordStore();
+  store.upsertBriefingRecord({
+    issue_id: "issue-review-1",
+    head_sha: REVIEW.head_sha,
+    run_id: "run-review-0",
+    comment_id: "comment-gone",
+    posted_at: "2026-06-27T00:00:00.000Z",
+  });
+
+  const result = await applyCommitEffects({
+    effects: [linearHumanReviewBriefingEffect],
+    ctx: humanReviewBriefingCtx({ client, store }),
+  });
+
+  assert.equal(result.outcome, "ok");
+  assert.equal(client.comments.length, 1, "briefing must be re-posted when the recorded comment is gone");
+  assert.equal(store.briefingRecords({ issueId: "issue-review-1" }).comment_id, "comment-1");
+});
+
+test("human review briefing effect is advisory when posting fails, text is absent, or the store is absent", async () => {
+  const postFailure = await applyLinearHumanReviewBriefingEffect(humanReviewBriefingCtx({
+    client: createHumanReviewBriefingClient({
+      createError: new Error("linear unavailable"),
+    }),
+    store: createBriefingRecordStore(),
+  }));
+  assert.deepEqual(postFailure, {
+    ok: true,
+    briefing_posted: false,
+    reason: "linear_human_review_briefing_post_failed:linear_unavailable",
+  });
+
+  const missingText = await applyLinearHumanReviewBriefingEffect(humanReviewBriefingCtx({
+    client: createHumanReviewBriefingClient(),
+    store: createBriefingRecordStore(),
+    review: { ...REVIEW, human_briefing: "" },
+  }));
+  assert.deepEqual(missingText, {
+    ok: true,
+    briefing_posted: false,
+    reason: "linear_human_review_briefing_missing",
+  });
+
+  const missingStore = await applyLinearHumanReviewBriefingEffect(humanReviewBriefingCtx({
+    client: createHumanReviewBriefingClient(),
+    store: null,
+  }));
+  assert.deepEqual(missingStore, {
+    ok: true,
+    briefing_posted: false,
+    reason: "linear_human_review_briefing_store_missing",
+  });
+});
+
+test("readMergeGateSnapshot returns the seven-field decision input from fresh reads", async () => {
+  const ctx = mergeCtx({
+    client: createMergeIssueClient(mergeIssue({ statusRole: "done", labelIds: [HUMAN_REVIEW_LABEL_ID] })),
+    store: createMergeStore({
+      parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }),
+    }),
+    prAdapter: createMergePrAdapter({
+      pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "open" }),
+      statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+    }),
+  });
+
+  const snapshot = await readMergeGateSnapshot(ctx);
+
+  assert.deepEqual(Object.keys(snapshot), [
+    "issueStatusRole",
+    "gateLabelPresent",
+    "parkRecord",
+    "currentHeadSha",
+    "checkState",
+    "checkHeadSha",
+    "prState",
+  ]);
+  assert.deepEqual(snapshot, {
+    issueStatusRole: "done",
+    gateLabelPresent: true,
+    parkRecord: { parked_head_sha: MERGE_HEAD_SHA, pr_number: MERGE_PR_NUMBER },
+    currentHeadSha: MERGE_HEAD_SHA,
+    checkState: "green",
+    checkHeadSha: MERGE_HEAD_SHA,
+    prState: "open",
+  });
+});
+
+test("merge_pr merges only after the final fresh snapshot still says merge, then records and cleans up", async () => {
+  const client = createMergeIssueClient(mergeIssue({ statusRole: "done", labelIds: [HUMAN_REVIEW_LABEL_ID] }));
+  const store = createMergeStore({ parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }) });
+  const prAdapter = createMergePrAdapter({
+    pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "open" }),
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+  });
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx: mergeCtx({ client, store, prAdapter }),
+  });
+
+  assert.equal(result.outcome, "ok");
+  assert.deepEqual(prAdapter.mergeCalls, [{
+    number: MERGE_PR_NUMBER,
+    expectedHeadSha: MERGE_HEAD_SHA,
+  }]);
+  assert.deepEqual(client.updateCalls, []);
+  assert.deepEqual(store.deletedIssueIds, [MERGE_ISSUE_ID]);
+  assert.equal(store.parkRecords({ issueId: MERGE_ISSUE_ID }), null);
+  assert.equal(store.outcomes.length, 1);
+  assert.deepEqual(store.outcomes[0], {
+    wakeId: MERGE_WAKE_ID,
+    runId: MERGE_RUN_ID,
+    merge_outcome: {
+      issue_id: MERGE_ISSUE_ID,
+      pr_number: MERGE_PR_NUMBER,
+      head_sha: MERGE_HEAD_SHA,
+      outcome: "merged",
+      reason: "parked head merged",
+      observed_at: "2026-06-29T12:00:00.000Z",
+    },
+  });
+});
+
+test("merge_pr aborts without a merge call when the final fresh read no longer answers merge", async () => {
+  const client = createMergeIssueClient(mergeIssue({ statusRole: "done", labelIds: [HUMAN_REVIEW_LABEL_ID] }));
+  const store = createMergeStore({ parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }) });
+  const prAdapter = createMergePrAdapter({
+    pullRequests: [
+      mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "open" }),
+      mergePullRequest({ headSha: MERGE_NEXT_HEAD_SHA, state: "open" }),
+    ],
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]], [MERGE_NEXT_HEAD_SHA, []]]),
+  });
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx: mergeCtx({ client, store, prAdapter }),
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.equal(result.pending_effect_id, "merge_pr");
+  assert.match(result.reason, /merge_pr_not_allowed: bounce/);
+  assert.deepEqual(prAdapter.mergeCalls, []);
+  assert.deepEqual(store.deletedIssueIds, []);
+  assert.deepEqual(store.outcomes, []);
+});
+
+test("merge_pr final-read aborts when a human-review label is added to an ungated In Review merge", async () => {
+  const client = createMergeIssueClient([
+    mergeIssue({ statusRole: "in_review", labelIds: [] }),
+    mergeIssue({ statusRole: "in_review", labelIds: [HUMAN_REVIEW_LABEL_ID] }),
+  ]);
+  const store = createMergeStore();
+  const prAdapter = createMergePrAdapter({
+    pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "open" }),
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+  });
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx: mergeCtx({ client, store, prAdapter }),
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.equal(result.pending_effect_id, "merge_pr");
+  assert.match(result.reason, /merge_pr_not_allowed: park/);
+  assert.deepEqual(prAdapter.mergeCalls, []);
+  assert.deepEqual(store.deletedIssueIds, []);
+  assert.deepEqual(store.outcomes, []);
+});
+
+test("merge_pr final-read ignores label changes after Done acceptance of the parked head", async () => {
+  const client = createMergeIssueClient([
+    mergeIssue({ statusRole: "done", labelIds: [HUMAN_REVIEW_LABEL_ID] }),
+    mergeIssue({ statusRole: "done", labelIds: [] }),
+  ]);
+  const store = createMergeStore({ parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }) });
+  const prAdapter = createMergePrAdapter({
+    pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "open" }),
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+  });
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx: mergeCtx({ client, store, prAdapter }),
+  });
+
+  assert.equal(result.outcome, "ok");
+  assert.deepEqual(prAdapter.mergeCalls, [{
+    number: MERGE_PR_NUMBER,
+    expectedHeadSha: MERGE_HEAD_SHA,
+  }]);
+  assert.deepEqual(store.deletedIssueIds, [MERGE_ISSUE_ID]);
+  assert.equal(store.outcomes[0].merge_outcome.outcome, "merged");
+});
+
+test("merge_pr cleans up an already-landed parked head without a GitHub merge call", async () => {
+  const client = createMergeIssueClient(mergeIssue({ statusRole: "done", labelIds: [HUMAN_REVIEW_LABEL_ID] }));
+  const store = createMergeStore({ parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }) });
+  const prAdapter = createMergePrAdapter({
+    pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "closed", merged: true }),
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+  });
+  const ctx = mergeCtx({ client, store, prAdapter });
+
+  const probe = await probeMergePrEffect(ctx);
+  assert.equal(probe.satisfied, false);
+  assert.deepEqual(prAdapter.mergeCalls, []);
+  assert.deepEqual(store.deletedIssueIds, []);
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx,
+  });
+
+  assert.equal(result.outcome, "ok");
+  assert.deepEqual(prAdapter.mergeCalls, []);
+  assert.deepEqual(store.deletedIssueIds, [MERGE_ISSUE_ID]);
+  assert.equal(store.outcomes.length, 1);
+  assert.equal(store.outcomes[0].merge_outcome.outcome, "merged");
+  assert.equal(store.outcomes[0].merge_outcome.head_sha, MERGE_HEAD_SHA);
+});
+
+test("merge_pr final-read refuses landed bookkeeping when the parked PR closed without merging", async () => {
+  const client = createMergeIssueClient(mergeIssue({ statusRole: "in_review", labelIds: [] }));
+  const store = createMergeStore({ parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }) });
+  const prAdapter = createMergePrAdapter({
+    pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "closed", merged: false }),
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+  });
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx: mergeCtx({ client, store, prAdapter }),
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.match(result.reason, /merge_pr_not_allowed/);
+  assert.match(result.reason, /closed without merging/);
+  assert.deepEqual(prAdapter.mergeCalls, []);
+  assert.deepEqual(store.deletedIssueIds, []);
+  assert.deepEqual(store.outcomes, []);
+  assert.equal(store.parkRecords({ issueId: MERGE_ISSUE_ID }).parked_head_sha, MERGE_HEAD_SHA);
+});
+
+test("merge_pr records a terminal failure for GitHub head-sha mismatch and keeps the park record", async () => {
+  const client = createMergeIssueClient(mergeIssue({ statusRole: "done", labelIds: [HUMAN_REVIEW_LABEL_ID] }));
+  const store = createMergeStore({ parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }) });
+  const prAdapter = createMergePrAdapter({
+    pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "open" }),
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+    mergeError: Object.assign(new Error("status_409"), { status: 409 }),
+  });
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx: mergeCtx({ client, store, prAdapter }),
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.match(result.reason, /expected head sha/);
+  assert.deepEqual(store.deletedIssueIds, []);
+  assert.equal(store.parkRecords({ issueId: MERGE_ISSUE_ID }).parked_head_sha, MERGE_HEAD_SHA);
+  assert.equal(store.outcomes.length, 1);
+  assert.equal(store.outcomes[0].merge_outcome.outcome, "failed");
+  assert.match(store.outcomes[0].merge_outcome.reason, /expected head sha/);
+});
+
+test("merge_pr records a terminal failure for GitHub merged:false and keeps the park record", async () => {
+  const client = createMergeIssueClient(mergeIssue({ statusRole: "done", labelIds: [HUMAN_REVIEW_LABEL_ID] }));
+  const store = createMergeStore({ parkRecord: mergeParkRecord({ headSha: MERGE_HEAD_SHA }) });
+  const prAdapter = createMergePrAdapter({
+    pullRequest: mergePullRequest({ headSha: MERGE_HEAD_SHA, state: "open" }),
+    statusesBySha: new Map([[MERGE_HEAD_SHA, [mergeAfReviewStatus("success")]]]),
+    mergeResult: { merged: false, message: "merge conflict" },
+  });
+
+  const result = await applyCommitEffects({
+    effects: [mergePrEffectDescriptor()],
+    ctx: mergeCtx({ client, store, prAdapter }),
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.match(result.reason, /merged:false/);
+  assert.deepEqual(store.deletedIssueIds, []);
+  assert.equal(store.outcomes.length, 1);
+  assert.equal(store.outcomes[0].merge_outcome.outcome, "failed");
+  assert.match(store.outcomes[0].merge_outcome.reason, /merge conflict/);
+});
+
 function reviewCtx({
   prAdapter,
   review = REVIEW,
@@ -273,6 +658,73 @@ function reviewCtx({
     runId,
     review,
     prAdapter,
+  };
+}
+
+function humanReviewBriefingCtx({
+  client,
+  store,
+  review = REVIEW,
+  runId = "run-review-1",
+} = {}) {
+  const humanBriefing = Object.hasOwn(review, "human_briefing")
+    ? review.human_briefing
+    : "Check the user-visible workflow before accepting.";
+  return {
+    client,
+    store,
+    issueId: "issue-review-1",
+    runId,
+    review: {
+      ...review,
+      human_briefing: humanBriefing,
+      run_id: runId,
+    },
+  };
+}
+
+function createHumanReviewBriefingClient({ createError = null } = {}) {
+  const events = [];
+  const comments = [];
+  return {
+    events,
+    comments,
+    async listIssueComments(issueId) {
+      events.push({ method: "listIssueComments", issueId });
+      assert.equal(issueId, "issue-review-1");
+      return comments.map((comment) => ({ ...comment }));
+    },
+    async createIssueComment(issueId, body) {
+      events.push({ method: "createIssueComment", issueId, body });
+      assert.equal(issueId, "issue-review-1");
+      if (createError) throw createError;
+      const comment = {
+        id: `comment-${comments.length + 1}`,
+        body,
+        createdAt: "2026-06-28T00:00:00.000Z",
+        updatedAt: "2026-06-28T00:00:00.000Z",
+        user: { id: "app-viewer-1", name: "Teami App" },
+      };
+      comments.push(comment);
+      return { ...comment };
+    },
+  };
+}
+
+function createBriefingRecordStore() {
+  const rows = new Map();
+  return {
+    upsertBriefingRecord(record) {
+      rows.set(record.issue_id, { ...record });
+      return { ...record };
+    },
+    briefingRecords(input = {}) {
+      if (input && typeof input === "object" && Object.hasOwn(input, "issueId")) {
+        const record = rows.get(input.issueId);
+        return record ? { ...record } : null;
+      }
+      return [...rows.values()].map((record) => ({ ...record }));
+    },
   };
 }
 
@@ -372,4 +824,145 @@ function markerBody() {
     head_sha: REVIEW.head_sha,
     run_id: "run-review-1",
   });
+}
+
+function mergeCtx({ client, store, prAdapter }) {
+  return {
+    client,
+    store,
+    prAdapter,
+    shape: MERGE_SHAPE,
+    issueId: MERGE_ISSUE_ID,
+    prNumber: MERGE_PR_NUMBER,
+    wake: { id: MERGE_WAKE_ID },
+    runId: MERGE_RUN_ID,
+    now: () => new Date("2026-06-29T12:00:00.000Z"),
+  };
+}
+
+function createMergeIssueClient(issueOrIssues) {
+  const issues = Array.isArray(issueOrIssues) ? issueOrIssues.map(clone) : null;
+  const singleIssue = issues ? null : clone(issueOrIssues);
+  const readCalls = [];
+  const updateCalls = [];
+  return {
+    readCalls,
+    updateCalls,
+    async getIssue(issueId) {
+      readCalls.push(issueId);
+      if (issues) return clone(issues[Math.min(readCalls.length - 1, issues.length - 1)]);
+      return clone(singleIssue);
+    },
+    async updateIssue(issueId, input) {
+      updateCalls.push({ issueId, input });
+      throw new Error("merge_pr_must_not_move_linear_issues");
+    },
+  };
+}
+
+function createMergeStore({ parkRecord: initialParkRecord = null } = {}) {
+  let storedParkRecord = initialParkRecord ? clone(initialParkRecord) : null;
+  const outcomes = [];
+  const deletedIssueIds = [];
+  return {
+    outcomes,
+    deletedIssueIds,
+    parkRecords(input = {}) {
+      if (input.issueId) {
+        return storedParkRecord?.issue_id === input.issueId ? clone(storedParkRecord) : null;
+      }
+      return storedParkRecord ? [clone(storedParkRecord)] : [];
+    },
+    deleteParkRecord(issueId) {
+      deletedIssueIds.push(issueId);
+      if (storedParkRecord?.issue_id === issueId) storedParkRecord = null;
+      return { ok: true };
+    },
+    recordMergeOutcome(input) {
+      outcomes.push(clone(input));
+      return { ok: true };
+    },
+  };
+}
+
+function createMergePrAdapter({
+  pullRequest: singlePullRequest = null,
+  pullRequests = null,
+  statusesBySha = new Map(),
+  mergeError = null,
+  mergeResult = null,
+} = {}) {
+  const prQueue = pullRequests ? pullRequests.map(clone) : null;
+  let currentPullRequest = clone(singlePullRequest || prQueue?.[0]);
+  let getPullRequestCount = 0;
+  const mergeCalls = [];
+  return {
+    mergeCalls,
+    async getPullRequest(number) {
+      assert.equal(number, MERGE_PR_NUMBER);
+      if (prQueue) {
+        currentPullRequest = clone(prQueue[Math.min(getPullRequestCount, prQueue.length - 1)]);
+        getPullRequestCount += 1;
+      }
+      return clone(currentPullRequest);
+    },
+    async getCommitStatuses(headSha) {
+      return clone(statusesBySha.get(headSha) || []);
+    },
+    async mergePullRequest(input) {
+      mergeCalls.push({ ...input });
+      if (mergeError) throw mergeError;
+      if (mergeResult) return clone(mergeResult);
+      currentPullRequest = {
+        ...currentPullRequest,
+        state: "closed",
+        merged: true,
+        merged_at: "2026-06-29T12:00:00.000Z",
+      };
+      return { merged: true, sha: input.expectedHeadSha };
+    },
+  };
+}
+
+function mergeIssue({ statusRole, labelIds = [] }) {
+  return {
+    id: MERGE_ISSUE_ID,
+    identifier: "LIN-1",
+    state: {
+      id: `state-${statusRole.replaceAll("_", "-")}`,
+      name: statusRole,
+    },
+    labels: labelIds.map((id) => ({ id })),
+  };
+}
+
+function mergeParkRecord({ headSha }) {
+  return {
+    issue_id: MERGE_ISSUE_ID,
+    pr_number: MERGE_PR_NUMBER,
+    parked_head_sha: headSha,
+    parked_at: "2026-06-29T11:00:00.000Z",
+  };
+}
+
+function mergePullRequest({ headSha, state = "open", merged = false } = {}) {
+  return {
+    number: MERGE_PR_NUMBER,
+    state,
+    merged,
+    ...(merged ? { merged_at: "2026-06-29T11:30:00.000Z" } : {}),
+    head: { sha: headSha },
+  };
+}
+
+function mergeAfReviewStatus(state, createdAt = "2026-06-29T11:30:00.000Z") {
+  return {
+    context: AF_REVIEW_STATUS_CONTEXT,
+    state,
+    created_at: createdAt,
+  };
+}
+
+function clone(value) {
+  return value === undefined ? undefined : structuredClone(value);
 }

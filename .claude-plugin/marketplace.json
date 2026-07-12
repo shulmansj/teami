@@ -1,0 +1,14 @@
+{
+  "name": "teami",
+  "owner": {
+    "name": "Teami"
+  },
+  "description": "Install Teami's local-first planning companion for Claude Code.",
+  "plugins": [
+    {
+      "name": "teami",
+      "source": "./",
+      "description": "Teami planning adapter for Claude Code."
+    }
+  ]
+}

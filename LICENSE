@@ -1,0 +1,11 @@
+Source-visible, not-for-reuse license
+
+Copyright (c) Teami contributors. All rights reserved.
+
+This source code is published for inspection, evaluation, and local adoption of
+Teami by authorized recipients. No permission is granted to copy, modify,
+redistribute, sublicense, sell, host, or provide the software as a service
+except under a separate written agreement with the copyright holder.
+
+The package metadata intentionally uses SPDX license value UNLICENSED. Nothing
+in this notice grants an open source license.

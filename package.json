@@ -1,5 +1,5 @@
 {
-  "name": "teami",
+  "name": "@shulmansj/teami",
   "version": "0.3.20",
   "description": "Control plane for orchestrating, evaluating, and improving agent work across a company",
   "keywords": [
@@ -20,8 +20,23 @@
     "url": "git+https://github.com/shulmansj/teami.git"
   },
   "license": "UNLICENSED",
-  "private": true,
+  "private": false,
   "type": "module",
+  "bin": {
+    "teami": "execution/integrations/linear/cli.mjs"
+  },
+  "files": [
+    "LICENSE",
+    "execution/engine/**/*.mjs",
+    "execution/evals/**",
+    "execution/integrations/git/**/*.mjs",
+    "execution/integrations/linear/cli.mjs",
+    "execution/integrations/linear/config.package-default.json",
+    "execution/integrations/linear/mcp-server.mjs",
+    "execution/integrations/linear/schemas/**",
+    "execution/integrations/linear/src/**/*.mjs",
+    "execution/integrations/linear/src/**/*.json"
+  ],
   "scripts": {
     "init": "node execution/integrations/linear/cli.mjs init",
     "domain:add": "node execution/integrations/linear/cli.mjs domain:add",
@@ -50,17 +65,14 @@
     "security:secrets": "node scripts/security-scan.mjs tree",
     "security:secrets:history": "node scripts/security-scan.mjs history",
     "security:secrets:seed": "node scripts/security-scan.mjs seed",
+    "canary:claude-plugin": "node scripts/canary-claude-plugin.mjs",
+    "canary:linear-graphql": "node execution/integrations/linear/uat/status-model-e2e-uat.mjs",
+    "canary:mcp-linear-setup": "node scripts/canary-mcp-linear-setup.mjs",
+    "quality:static": "eslint . --max-warnings=0",
+    "verify": "npm run quality:static && npm test && npm run security:secrets",
     "promotion:scan": "node execution/integrations/linear/cli.mjs promotion:scan",
     "gateway": "node execution/integrations/linear/cli.mjs gateway",
     "runner": "node execution/integrations/linear/cli.mjs gateway",
-    "supervisor": "node execution/integrations/linear/cli.mjs supervisor:run",
-    "supervisor:run": "node execution/integrations/linear/cli.mjs supervisor:run",
-    "supervisor:status": "node execution/integrations/linear/cli.mjs supervisor:status",
-    "supervisor:reconcile": "node execution/integrations/linear/cli.mjs supervisor:reconcile",
-    "supervisor:register": "node execution/integrations/linear/cli.mjs supervisor:register",
-    "supervisor:disable": "node execution/integrations/linear/cli.mjs supervisor:disable",
-    "supervisor:enable": "node execution/integrations/linear/cli.mjs supervisor:enable",
-    "supervisor:unregister": "node execution/integrations/linear/cli.mjs supervisor:unregister",
     "runtime-smoke": "node execution/integrations/linear/cli.mjs runtime-smoke",
     "uat:execution": "node execution/integrations/linear/uat/execution-uat.mjs",
     "uat:gateway": "node execution/integrations/linear/uat/gateway-uat.mjs",
@@ -80,5 +92,15 @@
   },
   "engines": {
     "node": ">=20.11"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "eslint-plugin-import": "^2.32.0",
+    "globals": "^17.7.0"
   }
 }

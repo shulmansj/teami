@@ -5,6 +5,10 @@ import {
 } from "../../../../../engine/engine-markdown.mjs";
 import { STABLE_KEY_PATTERN } from "../../../../../engine/stable-key-pattern.mjs";
 import { evaluateDecompositionQualityOffline } from "../../quality.mjs";
+import {
+  PROJECT_PLANNING_SLOTS,
+  renderPlanningBody,
+} from "../../project-planning-body.mjs";
 import { WORK_TYPES } from "../execution/work-type.mjs";
 
 const COMMIT_PROJECT_UPDATE_SUMMARY =
@@ -19,10 +23,13 @@ const FINAL_ISSUE_REQUIRED_AGENT_READY_FIELDS = ["assignment", "output"];
 
 export function assembleCommitPayload(produced, ctx = {}) {
   const authored = isRecord(produced) ? produced : {};
-  return {
+  const payload = {
     project_update_fallback_body: commitProjectUpdateFallbackBody(ctx),
     final_issues: normalizeFinalIssuesForOrchestrator(authored.final_issues || []),
   };
+  const projectBodyUpdate = projectBodyUpdateFromAuthoredOutput(authored);
+  if (projectBodyUpdate) payload.project_body_update = projectBodyUpdate;
+  return payload;
 }
 
 export function validateCommitPayload(terminalOutput) {
@@ -50,6 +57,22 @@ export const commitPayload = Object.freeze({
   qualityGateInput,
 });
 
+export function projectBodyUpdateFromAuthoredOutput(authored) {
+  if (!isRecord(authored)) return null;
+  if (isRecord(authored.project_body_update)) {
+    return normalizeProjectBodyUpdate(authored.project_body_update);
+  }
+  if (isRecord(authored.project_body_slots)) {
+    const slots = planningSlotsFromAuthoredSlots(authored.project_body_slots);
+    return {
+      content: renderPlanningBody(slots),
+      slots,
+      source: "project_body_slots",
+    };
+  }
+  return null;
+}
+
 function commitProjectUpdateFallbackBody(ctx) {
   if (typeof ctx?.projectUpdateFallbackBody === "function") {
     return ctx.projectUpdateFallbackBody(COMMIT_PROJECT_UPDATE_SUMMARY);
@@ -59,8 +82,29 @@ function commitProjectUpdateFallbackBody(ctx) {
     "",
     PROJECT_UPDATE_ACCOUNTABILITY_HEADING,
     "- The run stopped before a fully authored project-section accounting was available.",
-    "- Review the open questions, risks, and source refs before retrying decomposition.",
+    "- Review the human-facing questions, risks, and source refs before retrying decomposition.",
   ].join("\n");
+}
+
+function normalizeProjectBodyUpdate(update) {
+  if (!isRecord(update)) return null;
+  if (typeof update.content !== "string" || update.content.trim() === "") return null;
+  return {
+    content: update.content,
+    ...(isRecord(update.slots) ? { slots: planningSlotsFromAuthoredSlots(update.slots) } : {}),
+    ...(typeof update.source === "string" && update.source.trim() !== ""
+      ? { source: update.source.trim() }
+      : {}),
+  };
+}
+
+function planningSlotsFromAuthoredSlots(authoredSlots) {
+  const slots = {};
+  for (const slot of PROJECT_PLANNING_SLOTS) {
+    const value = authoredSlots[slot.key];
+    slots[slot.key] = typeof value === "string" ? value : "";
+  }
+  return slots;
 }
 
 function requireProjectUpdateWithRunId(terminalOutput, failureReasons) {
@@ -130,11 +174,18 @@ export function validateFinalIssues(finalIssues, failureReasons) {
       failureReasons.push("missing_final_issue_acceptance_criteria");
     }
 
-    if (Object.hasOwn(issue, "work_type") && !WORK_TYPES.includes(issue.work_type)) {
+    if (hasAuthoredValue(issue, "work_type") && !WORK_TYPES.includes(issue.work_type)) {
       failureReasons.push("invalid_final_issue_work_type");
     }
 
-    if (Object.hasOwn(issue, "resource_target") && !validResourceTarget(issue.resource_target)) {
+    if (
+      hasAuthoredValue(issue, "requires_human_review") &&
+      typeof issue.requires_human_review !== "boolean"
+    ) {
+      failureReasons.push("invalid_final_issue_requires_human_review");
+    }
+
+    if (hasAuthoredValue(issue, "resource_target") && !validResourceTarget(issue.resource_target)) {
       failureReasons.push("invalid_final_issue_resource_target");
     }
   }
@@ -208,14 +259,19 @@ export function normalizeFinalIssuesForOrchestrator(finalIssues) {
     assignAuthoredField(normalized, "output", source.output);
     const acceptanceCriteria = source.acceptance_criteria ?? source.acceptanceCriteria;
     if (acceptanceCriteria !== undefined) normalized.acceptance_criteria = acceptanceCriteria;
-    if (Object.hasOwn(source, "work_type") || Object.hasOwn(source, "workType")) {
-      normalized.work_type = source.work_type ?? source.workType;
-    }
-    if (Object.hasOwn(source, "resource_target") || Object.hasOwn(source, "resourceTarget")) {
-      normalized.resource_target = normalizeResourceTargetForOrchestrator(
-        source.resource_target ?? source.resourceTarget,
-      );
-    }
+    assignPresentField(normalized, "work_type", firstPresentValue(source, ["work_type", "workType"]));
+    assignPresentField(
+      normalized,
+      "requires_human_review",
+      firstPresentValue(source, ["requires_human_review", "requiresHumanReview"]),
+    );
+    assignPresentField(
+      normalized,
+      "resource_target",
+      normalizeResourceTargetForOrchestrator(
+        firstPresentValue(source, ["resource_target", "resourceTarget"]),
+      ),
+    );
     return normalized;
   });
 }
@@ -225,7 +281,7 @@ function normalizeResourceTargetForOrchestrator(resourceTarget) {
   const normalized = {};
   if (Object.hasOwn(resourceTarget, "kind")) normalized.kind = resourceTarget.kind;
   if (Object.hasOwn(resourceTarget, "id")) normalized.id = resourceTarget.id;
-  if (Object.hasOwn(resourceTarget, "repo_scope")) normalized.repo_scope = resourceTarget.repo_scope;
+  assignPresentField(normalized, "repo_scope", resourceTarget.repo_scope);
   return normalized;
 }
 
@@ -233,6 +289,25 @@ function assignAuthoredField(target, key, value) {
   if (typeof value === "string" && value.trim() !== "") {
     target[key] = value;
   }
+}
+
+function assignPresentField(target, key, value) {
+  if (value !== null && value !== undefined) {
+    target[key] = value;
+  }
+}
+
+function firstPresentValue(source, keys) {
+  for (const key of keys) {
+    if (Object.hasOwn(source, key) && source[key] !== null && source[key] !== undefined) {
+      return source[key];
+    }
+  }
+  return undefined;
+}
+
+function hasAuthoredValue(source, key) {
+  return Object.hasOwn(source, key) && source[key] !== null && source[key] !== undefined;
 }
 
 function dependencyGraphHasCycle(graph) {
@@ -270,6 +345,6 @@ function validResourceTarget(value) {
   const allowedKeys = new Set(["kind", "id", "repo_scope"]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) return false;
   if (!nonEmptyString(value.kind) || !nonEmptyString(value.id)) return false;
-  if (Object.hasOwn(value, "repo_scope") && !nonEmptyString(value.repo_scope)) return false;
+  if (hasAuthoredValue(value, "repo_scope") && !nonEmptyString(value.repo_scope)) return false;
   return true;
 }

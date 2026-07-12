@@ -188,6 +188,8 @@ function setupDomainRegistry(t, { resources = [] } = {}) {
   resetResourceRegistry();
   registerGitRepoResourceKind();
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-setup-repos-"));
+  // Engine state (domain registry) now lives under the per-user home; isolate it here.
+  process.env.TEAMI_HOME = repoRoot;
   const registry = upsertDomainRecord(
     emptyDomainRegistry(),
     makeDomainRecord({

@@ -53,7 +53,9 @@ const PROMOTION_SCANNER_LEDGER_SCHEMA_VERSION_V1 =
   "teami-promotion-scanner-ledger/v1";
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-scanner-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-scanner-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function runGitOrThrow(args, cwd) {
@@ -313,7 +315,7 @@ function phasePromptFixture(root, {
 }
 
 function writeVerifiedGitHubState(root, overrides = {}) {
-  const filePath = path.join(root, ".teami", "github-connection.json");
+  const filePath = path.join(root, "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const state = {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -406,7 +408,7 @@ function writeReceipt(root, {
     events: [{ type: "launched", at: launchedAt }],
     amendments,
   };
-  const dir = path.join(root, ".teami", "experiments");
+  const dir = path.join(root, "experiments");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, `${receiptId}.json`), `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
   return receipt;
@@ -569,7 +571,7 @@ test("scanner ledger rows derive outcome statuses and evidence display classes",
   const repoStateRoot = tempRoot();
   writePolicy(repoStateRoot);
   writeReceipt(repoStateRoot);
-  const statePath = path.join(repoStateRoot, ".teami", "github-connection.json");
+  const statePath = path.join(repoStateRoot, "github-connection.json");
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -1338,7 +1340,7 @@ test("scanner uses only verified resolveBehaviorRepoIdentity state for repo mark
   const root = tempRoot();
   writePolicy(root);
   writeReceipt(root);
-  const statePath = path.join(root, ".teami", "github-connection.json");
+  const statePath = path.join(root, "github-connection.json");
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,

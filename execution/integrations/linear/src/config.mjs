@@ -14,15 +14,38 @@ import {
 } from "../../../engine/run-accepted-refs.mjs";
 import { resolveAcceptedBaseline } from "./promotion-scanner/accepted-baseline.mjs";
 import { DECOMPOSITION_EVAL_PATHS } from "./workflows/decomposition/eval-paths.mjs";
+import { resolvePackagedDefault, resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
+import {
+  BEHAVIOR_CONFIG_OVERRIDES_RELATIVE_PATH,
+  readCachedBehaviorConfigOverrides,
+  syncBehaviorConfigOverrides,
+} from "./behavior-config-pull.mjs";
 
 export { resolveWorkflowRuntime } from "./workflow-runtime-config.mjs";
+export { BEHAVIOR_CONFIG_OVERRIDES_RELATIVE_PATH } from "./behavior-config-pull.mjs";
 
-export const DEFAULT_CONFIG_PATH = path.join(
+export const DEFAULT_CONFIG_PACKAGE_RELATIVE_PATH = path.posix.join(
+  "execution",
+  "integrations",
+  "linear",
+  "config.package-default.json",
+);
+const DEV_CONFIG_PACKAGE_RELATIVE_PATH = path.posix.join(
   "execution",
   "integrations",
   "linear",
   "config.example.json",
 );
+// Prefer the identity-bearing dev/example config when it exists in the source tree (dev + tests);
+// fall back to the identity-clean packaged default that ships in the npm tarball. config.example.json
+// is deliberately excluded from the package `files` allowlist (F1), so it is absent for a repo-less
+// adopter — there the packaged default (no client_id/github identity) is used.
+export const DEFAULT_CONFIG_PATH = resolveDefaultConfigPath();
+function resolveDefaultConfigPath() {
+  const devDefault = resolvePackagedDefault(DEV_CONFIG_PACKAGE_RELATIVE_PATH);
+  if (fs.existsSync(devDefault)) return devDefault;
+  return resolvePackagedDefault(DEFAULT_CONFIG_PACKAGE_RELATIVE_PATH);
+}
 export const ACCEPTED_RUNTIME_ROLES_RELATIVE_PATH = DECOMPOSITION_EVAL_PATHS.accepted_runtime;
 
 const MODULE_REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
@@ -31,27 +54,79 @@ const DECOMPOSITION_WORKFLOW_TYPE = "decomposition";
 const CONFIG_SHAPE_OUTDATED_MESSAGE =
   "config_shape_outdated: move decomposition.runtime.adapters to runtime.adapters, decomposition.runtime.default_invocation to runtime.default_invocation, and decomposition.runtime.roles to workflows.decomposition.roles (see docs/contracts/workflow-definition.md).";
 const REQUIRED_LINEAR_OAUTH_SCOPES = Object.freeze(["read", "write"]);
+export const LINEAR_OAUTH_CALLBACK = Object.freeze({
+  host: "127.0.0.1",
+  pathname: "/linear/oauth/callback",
+  // The public Linear OAuth application registers this exact redirect URI. Do not silently
+  // fall back to an unregistered port: Linear rejects it before the local callback can run.
+  portRange: Object.freeze({ start: 8723, end: 8723 }),
+});
 const RUNTIME_ROLE_FIELDS = Object.freeze(["runtime", "model"]);
 const RUNTIME_ROLE_SOURCE_ADOPTER_CONFIG = "adopter_config";
 const RUNTIME_ROLE_SOURCE_ACCEPTED_DEFAULTS = "accepted_defaults";
-const PROJECT_STATUS_ROLES = Object.freeze(["backlog", "planned", "in_progress", "completed"]);
-const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "blocked", "done"]);
+const PROJECT_STATUS_ROLES = Object.freeze(["backlog", "planned", "in_progress", "completed", "needs_principal"]);
+const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "human_review", "needs_principal", "done"]);
+export const BEHAVIOR_CONFIG_COMMIT_FIELD = "behavior_config_commit";
 export const DEFAULT_POLL_INTERVAL_MS = 10_000;
 export const MIN_POLL_INTERVAL_MS = 2_000;
 export const UNPINNED_RUNTIME_DEV_FLAG = "TEAMI_ALLOW_UNPINNED_RUNTIME";
 
 export function loadLinearConfig({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   configPath = process.env.TEAMI_LINEAR_CONFIG,
+  behaviorConfig = true,
+  behaviorConfigPuller = readCachedBehaviorConfigOverrides,
 } = {}) {
-  const resolvedPath = path.resolve(repoRoot, configPath || DEFAULT_CONFIG_PATH);
+  const resolvedPath = resolveLinearConfigPath({ repoRoot, configPath });
   if (!fs.existsSync(resolvedPath)) {
     throw new Error(`Linear config not found: ${resolvedPath}`);
   }
 
-  const parsed = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
-  validateLinearConfig(parsed, resolvedPath, { repoRoot });
+  const defaults = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
+  const behavior = resolveBehaviorConfigForLoad({
+    behaviorConfig,
+    behaviorConfigPuller,
+    home,
+    repoRoot,
+  });
+  let parsed = defaults;
+  let behaviorRuntimeRoleOverrides = null;
+  if (behavior.overrides) {
+    validateBehaviorOverrides(
+      behavior.overrides,
+      behavior.overridesPath || BEHAVIOR_CONFIG_OVERRIDES_RELATIVE_PATH,
+      { defaults },
+    );
+    behaviorRuntimeRoleOverrides = collectBehaviorRuntimeRoleOverrides(behavior.overrides);
+    parsed = mergeLinearConfigDefaults(defaults, behavior.overrides);
+  }
+  validateLinearConfig(parsed, resolvedPath, { repoRoot, behaviorRuntimeRoleOverrides });
+  if (behavior.commit) {
+    Object.defineProperty(parsed, BEHAVIOR_CONFIG_COMMIT_FIELD, {
+      value: behavior.commit,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
   return parsed;
+}
+
+export async function loadLinearConfigAsync(options = {}) {
+  const behaviorConfig = options.behaviorConfig ?? true;
+  if (behaviorConfig === false || behaviorConfig === null) return loadLinearConfig(options);
+  const behaviorConfigPuller = options.behaviorConfigPuller || syncBehaviorConfigOverrides;
+  const pulled = await behaviorConfigPuller({
+    ...normalizeBehaviorConfigOptions(behaviorConfig),
+    home: options.home || resolveTeamiHome(),
+    repoRoot: options.repoRoot || process.cwd(),
+  });
+  return loadLinearConfig({
+    ...options,
+    behaviorConfig,
+    behaviorConfigPuller: () => pulled,
+  });
 }
 
 export function validateLinearConfig(
@@ -62,6 +137,7 @@ export function validateLinearConfig(
     acceptedRuntimeRolesPath = null,
     moduleRootFallback = true,
     env = process.env,
+    behaviorRuntimeRoleOverrides = null,
   } = {},
 ) {
   assertCurrentConfigShape(config);
@@ -70,7 +146,12 @@ export function validateLinearConfig(
   const oauth = linear?.oauth;
   const missing = [];
 
-  if (!oauth?.client_id) missing.push("linear.oauth.client_id");
+  // client_id is the single OAuth field the identity-clean packaged default legitimately omits: a
+  // repo-less adopter has not registered/authorized the Linear app yet (see the DEFAULT_CONFIG_PATH
+  // comment above). Treat its absence as an unconfigured — but valid — fresh-install state rather
+  // than a fatal config-load error, so `teami doctor`/first-run report "not set up" instead of
+  // crashing. The sign-in path (requiredOAuthConfig in linear-oauth.mjs) still enforces client_id at
+  // OAuth time with a clear message. All other OAuth fields below ship in the packaged default.
   if (!oauth?.redirect_uri) missing.push("linear.oauth.redirect_uri");
   if (!Array.isArray(oauth?.scopes) || oauth.scopes.length === 0) {
     missing.push("linear.oauth.scopes");
@@ -79,11 +160,8 @@ export function validateLinearConfig(
   if (!oauth?.credential_storage) missing.push("linear.oauth.credential_storage");
   if (!linear?.team?.key) missing.push("linear.team.key");
   if (!linear?.team?.name) missing.push("linear.team.name");
-  if (!linear?.project?.labels?.has_open_questions) {
-    missing.push("linear.project.labels.has_open_questions");
-  }
   if (!linear?.issue?.labels?.discovery) missing.push("linear.issue.labels.discovery");
-  if (!linear?.issue?.labels?.needs_principal) missing.push("linear.issue.labels.needs_principal");
+  if (!linear?.issue?.labels?.human_review) missing.push("linear.issue.labels.human_review");
   collectStatusConfigMissingFields(linear?.project?.statuses, "linear.project.statuses", PROJECT_STATUS_ROLES, missing);
   if (!linear?.project?.template_name) {
     missing.push("linear.project.template_name");
@@ -94,6 +172,7 @@ export function validateLinearConfig(
       repoRoot,
       moduleRootFallback,
       env,
+      behaviorRuntimeRoleOverrides,
       workflowType,
       acceptedRuntimeRolesPath: acceptedRuntimeRolesPathForWorkflow(
         workflowType,
@@ -110,7 +189,6 @@ export function validateLinearConfig(
 
   validateOAuthConfig(oauth, source);
   validatePollConfig(config.poll, source);
-  validateReviewWorkflowConfig(config.workflows?.review, source);
   validateIssueTargetConfig(linear.issue, source);
 
   for (const validation of workflowRuntimeRoleValidations) {
@@ -129,6 +207,7 @@ function validateWorkflowRuntimeRoles(
     moduleRootFallback,
     env,
     workflowType,
+    behaviorRuntimeRoleOverrides,
   },
 ) {
   const runtime = resolveWorkflowRuntime(config, workflowType);
@@ -168,6 +247,7 @@ function validateWorkflowRuntimeRoles(
         workflowType,
         workflowRoleNames,
         allowUnpinnedRuntimeOverrides: unpinnedRuntimeDevFlagEnabled(env),
+        behaviorRuntimeRoleOverrides,
       });
 
       for (const role of workflowRoleNames) {
@@ -278,8 +358,13 @@ export function formatRuntimeRoleAssignmentsSection(config) {
   return lines;
 }
 
-export function cachePathForConfig(config, repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, config.linear.cache_path || ".teami/linear.json");
+export function cachePathForConfig(config, home = resolveTeamiHome()) {
+  const configuredPath = config?.linear?.cache_path || ".teami/linear.json";
+  if (path.isAbsolute(configuredPath)) return path.normalize(configuredPath);
+  return path.resolve(
+    teamiHomePaths({ home }).home,
+    stripLegacyTeamiPrefix(configuredPath),
+  );
 }
 
 export function unpinnedRuntimeTraceAttributes(config, workflowType = DECOMPOSITION_WORKFLOW_TYPE) {
@@ -289,6 +374,38 @@ export function unpinnedRuntimeTraceAttributes(config, workflowType = DECOMPOSIT
   return {
     "teami.unpinned_runtime": stableJsonValue(unpinnedRuntime),
   };
+}
+
+export function mergeLinearConfigDefaults(defaults, overrides) {
+  if (overrides === null || overrides === undefined) return cloneEnumerableJsonValue(defaults);
+  return mergeEnumerableJsonObjects(defaults, overrides);
+}
+
+export function validateBehaviorOverrides(
+  overrides,
+  source = BEHAVIOR_CONFIG_OVERRIDES_RELATIVE_PATH,
+  { defaults = null } = {},
+) {
+  const failures = [];
+  if (!isPlainObject(overrides)) {
+    throw new Error(`${source} must be a JSON object.`);
+  }
+  const topLevelKeys = Object.keys(overrides);
+  for (const key of topLevelKeys) {
+    if (key !== "workflows") failures.push(`${source}.${key}`);
+  }
+  if (Object.hasOwn(overrides, "workflows")) {
+    validateBehaviorOverrideWorkflows(
+      overrides.workflows,
+      `${source}.workflows`,
+      failures,
+      isPlainObject(defaults?.workflows) ? defaults.workflows : null,
+    );
+  }
+  if (failures.length > 0) {
+    throw new Error(`behavior_config_overrides_invalid: ${failures.join(", ")}`);
+  }
+  return true;
 }
 
 function resolveRuntimeRoleFields(
@@ -301,6 +418,7 @@ function resolveRuntimeRoleFields(
     workflowType = DECOMPOSITION_WORKFLOW_TYPE,
     workflowRoleNames = roleNamesForWorkflow(workflowType),
     allowUnpinnedRuntimeOverrides = false,
+    behaviorRuntimeRoleOverrides = null,
   } = {},
 ) {
   const workflow = config?.workflows?.[workflowType];
@@ -310,7 +428,6 @@ function resolveRuntimeRoleFields(
   if (!workflow.roles || typeof workflow.roles !== "object" || Array.isArray(workflow.roles)) {
     workflow.roles = {};
   }
-  const runtime = resolveWorkflowRuntime(config, workflowType);
   const roles = workflow.roles;
   const engineOwnedEvaluatorRoles = engineOwnedEvaluatorRoleSet(workflowType, workflowRoleNames);
 
@@ -344,7 +461,7 @@ function resolveRuntimeRoleFields(
       }
 
       if (
-        allowUnpinnedRuntimeOverrides
+        (allowUnpinnedRuntimeOverrides || behaviorRoleFieldOverridden(behaviorRuntimeRoleOverrides, workflowType, role, field))
         && !engineOwnedEvaluatorRoles.has(role)
         && hasNonEmptyString(roles[role][field])
       ) {
@@ -401,6 +518,156 @@ function resolveRuntimeRoleFields(
     configurable: true,
     writable: true,
   });
+}
+
+function resolveBehaviorConfigForLoad({
+  behaviorConfig,
+  behaviorConfigPuller,
+  home,
+  repoRoot,
+}) {
+  const options = normalizeBehaviorConfigOptions(behaviorConfig);
+  if (!options) return { overrides: null, commit: null, overridesPath: null };
+  if (typeof behaviorConfigPuller !== "function") {
+    throw new Error("behavior_config_puller_required");
+  }
+  const result = behaviorConfigPuller({
+    ...options,
+    home,
+    repoRoot,
+  });
+  if (!result || result.ok === false) {
+    const reason = result?.reason || "behavior_config_unavailable";
+    if (!options.required && optionalBehaviorConfigSkipReason(reason)) {
+      return { overrides: null, commit: null, overridesPath: null };
+    }
+    throw new Error(`behavior_config_pull_failed:${reason}`);
+  }
+  return {
+    overrides: result.overrides || null,
+    commit: typeof result.commit === "string" && result.commit.trim() ? result.commit.trim() : null,
+    overridesPath: result.overridesPath || null,
+  };
+}
+
+function normalizeBehaviorConfigOptions(behaviorConfig) {
+  if (behaviorConfig === false || behaviorConfig === null) return null;
+  if (behaviorConfig === true || behaviorConfig === undefined) return {};
+  if (isPlainObject(behaviorConfig)) return behaviorConfig;
+  throw new Error("behavior_config_options_invalid");
+}
+
+function optionalBehaviorConfigSkipReason(reason) {
+  return [
+    "missing_github_connection_state",
+    "github_connection_not_verified",
+    "github_connection_not_real",
+    "behavior_config_cache_missing",
+  ].includes(reason);
+}
+
+function validateBehaviorOverrideWorkflows(workflows, label, failures, defaultWorkflows = null) {
+  if (!isPlainObject(workflows)) {
+    failures.push(label);
+    return;
+  }
+  for (const [workflowType, workflow] of Object.entries(workflows)) {
+    const workflowLabel = `${label}.${workflowType}`;
+    const defaultWorkflow = defaultWorkflows?.[workflowType];
+    if (defaultWorkflows && !isPlainObject(defaultWorkflow)) {
+      failures.push(workflowLabel);
+      continue;
+    }
+    if (!isPlainObject(workflow)) {
+      failures.push(workflowLabel);
+      continue;
+    }
+    const keys = Object.keys(workflow);
+    for (const key of keys) {
+      if (key !== "roles") failures.push(`${workflowLabel}.${key}`);
+    }
+    if (Object.hasOwn(workflow, "roles")) {
+      validateBehaviorOverrideRoles(
+        workflow.roles,
+        `${workflowLabel}.roles`,
+        failures,
+        isPlainObject(defaultWorkflow?.roles) ? defaultWorkflow.roles : null,
+      );
+    }
+  }
+}
+
+function validateBehaviorOverrideRoles(roles, label, failures, defaultRoles = null) {
+  if (!isPlainObject(roles)) {
+    failures.push(label);
+    return;
+  }
+  for (const [role, fields] of Object.entries(roles)) {
+    const roleLabel = `${label}.${role}`;
+    if (defaultRoles && !Object.hasOwn(defaultRoles, role)) {
+      failures.push(roleLabel);
+      continue;
+    }
+    if (!isPlainObject(fields)) {
+      failures.push(roleLabel);
+      continue;
+    }
+    for (const [field, value] of Object.entries(fields)) {
+      if (!RUNTIME_ROLE_FIELDS.includes(field)) {
+        failures.push(`${roleLabel}.${field}`);
+      } else if (!hasNonEmptyString(value)) {
+        failures.push(`${roleLabel}.${field}`);
+      }
+    }
+  }
+}
+
+function collectBehaviorRuntimeRoleOverrides(overrides) {
+  const workflows = overrides?.workflows;
+  if (!isPlainObject(workflows)) return null;
+  const collected = {};
+  for (const [workflowType, workflow] of Object.entries(workflows)) {
+    const roles = workflow?.roles;
+    if (!isPlainObject(roles)) continue;
+    for (const [role, fields] of Object.entries(roles)) {
+      if (!isPlainObject(fields)) continue;
+      for (const field of RUNTIME_ROLE_FIELDS) {
+        if (!hasNonEmptyString(fields[field])) continue;
+        collected[workflowType] ||= {};
+        collected[workflowType][role] ||= {};
+        collected[workflowType][role][field] = true;
+      }
+    }
+  }
+  return Object.keys(collected).length > 0 ? collected : null;
+}
+
+function behaviorRoleFieldOverridden(overrides, workflowType, role, field) {
+  return overrides?.[workflowType]?.[role]?.[field] === true;
+}
+
+function mergeEnumerableJsonObjects(defaults, overrides) {
+  if (isPlainObject(defaults) && isPlainObject(overrides)) {
+    const merged = {};
+    for (const key of Object.keys(defaults)) {
+      merged[key] = cloneEnumerableJsonValue(defaults[key]);
+    }
+    for (const key of Object.keys(overrides)) {
+      merged[key] = mergeEnumerableJsonObjects(merged[key], overrides[key]);
+    }
+    return merged;
+  }
+  return cloneEnumerableJsonValue(overrides);
+}
+
+function cloneEnumerableJsonValue(value) {
+  if (Array.isArray(value)) return value.map(cloneEnumerableJsonValue);
+  if (isPlainObject(value)) {
+    return Object.fromEntries(
+      Object.keys(value).map((key) => [key, cloneEnumerableJsonValue(value[key])]),
+    );
+  }
+  return value;
 }
 
 function assertCurrentConfigShape(config) {
@@ -531,6 +798,12 @@ function hasNonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 function stableJsonValue(value) {
   if (Array.isArray(value)) return value.map(stableJsonValue);
   if (!value || typeof value !== "object") return value;
@@ -543,12 +816,15 @@ function stableJsonValue(value) {
 
 function validateOAuthConfig(oauth, source) {
   const redirect = parseRedirectUri(oauth.redirect_uri);
-  if (redirect.protocol !== "http:" || redirect.hostname !== "127.0.0.1") {
-    throw new Error(`${source} must use a loopback Linear OAuth redirect on http://127.0.0.1.`);
+  if (redirect.protocol !== "http:" || redirect.hostname !== LINEAR_OAUTH_CALLBACK.host) {
+    throw new Error(`${source} must use a loopback Linear OAuth redirect on http://${LINEAR_OAUTH_CALLBACK.host}.`);
   }
-  if (redirect.port !== "8723" || redirect.pathname !== "/linear/oauth/callback") {
+  if (
+    redirect.pathname !== LINEAR_OAUTH_CALLBACK.pathname ||
+    !isLinearOAuthCallbackPort(redirect.port)
+  ) {
     throw new Error(
-      `${source} must use Linear OAuth redirect_uri=http://127.0.0.1:8723/linear/oauth/callback.`,
+      `${source} must use Linear OAuth redirect_uri=http://${LINEAR_OAUTH_CALLBACK.host}:<port>${LINEAR_OAUTH_CALLBACK.pathname} with port ${linearOAuthCallbackPortRangeLabel()}.`,
     );
   }
 
@@ -564,8 +840,8 @@ function validateOAuthConfig(oauth, source) {
     }
   }
 
-  if (oauth.actor !== "user") {
-    throw new Error(`${source} must use Linear OAuth actor=user for local setup.`);
+  if (oauth.actor !== "app") {
+    throw new Error(`${source} must use Linear OAuth actor=app; re-run \`npm run init\` to re-authorize as the app.`);
   }
 
   if (!["os", "file"].includes(oauth.credential_storage)) {
@@ -601,30 +877,19 @@ function validatePollConfig(poll, source) {
   }
 }
 
-function validateReviewWorkflowConfig(review, source) {
-  const maxRounds = review?.max_autonomous_fix_rounds;
-  if (maxRounds === undefined) return;
-  if (!Number.isInteger(maxRounds) || maxRounds < 0) {
-    throw new Error(`${source} workflows.review.max_autonomous_fix_rounds must be a non-negative integer.`);
-  }
-}
-
 function validateIssueTargetConfig(issue, source) {
   for (const statusKey of ISSUE_STATUS_ROLES) {
     validateRequiredIssueStatus(issue, source, statusKey);
   }
 
-  if (Object.hasOwn(issue?.labels || {}, "needs_principal") && !hasNonEmptyString(issue.labels.needs_principal)) {
-    throw new Error(`${source} linear.issue.labels.needs_principal must be a non-empty string.`);
-  }
   if (Object.hasOwn(issue?.labels || {}, "work_type_code") && !hasNonEmptyString(issue.labels.work_type_code)) {
     throw new Error(`${source} linear.issue.labels.work_type_code must be a non-empty string.`);
   }
   if (Object.hasOwn(issue?.labels || {}, "work_type_non_code") && !hasNonEmptyString(issue.labels.work_type_non_code)) {
     throw new Error(`${source} linear.issue.labels.work_type_non_code must be a non-empty string.`);
   }
-  if (Object.hasOwn(issue?.labels || {}, "in_review") && !hasNonEmptyString(issue.labels.in_review)) {
-    throw new Error(`${source} linear.issue.labels.in_review must be a non-empty string.`);
+  if (Object.hasOwn(issue?.labels || {}, "human_review") && !hasNonEmptyString(issue.labels.human_review)) {
+    throw new Error(`${source} linear.issue.labels.human_review must be a non-empty string.`);
   }
 }
 
@@ -660,4 +925,32 @@ function parseRedirectUri(redirectUri) {
   } catch {
     throw new Error("Linear OAuth redirect_uri must be a valid URL.");
   }
+}
+
+export function isLinearOAuthCallbackPort(port) {
+  const value = Number(port);
+  return Number.isInteger(value) &&
+    value >= LINEAR_OAUTH_CALLBACK.portRange.start &&
+    value <= LINEAR_OAUTH_CALLBACK.portRange.end;
+}
+
+function linearOAuthCallbackPortRangeLabel() {
+  const { start, end } = LINEAR_OAUTH_CALLBACK.portRange;
+  return start === end ? String(start) : `${start}-${end}`;
+}
+
+function resolveLinearConfigPath({ repoRoot, configPath }) {
+  if (configPath && String(configPath).trim() !== "") {
+    return path.resolve(repoRoot || process.cwd(), configPath);
+  }
+  return DEFAULT_CONFIG_PATH;
+}
+
+function stripLegacyTeamiPrefix(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/");
+  return normalized === ".teami"
+    ? "."
+    : normalized.startsWith(".teami/")
+      ? normalized.slice(".teami/".length)
+      : normalized;
 }

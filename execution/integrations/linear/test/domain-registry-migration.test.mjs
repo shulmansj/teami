@@ -26,14 +26,14 @@ test("readDomainRegistry migrates raw v1 JSON to v2 and round-trips as v2", () =
     fs.mkdirSync(path.dirname(registryPath), { recursive: true });
     fs.writeFileSync(registryPath, `${JSON.stringify(legacyRegistry, null, 2)}\n`, "utf8");
 
-    const migrated = readDomainRegistry({ repoRoot: tempRoot });
+    const migrated = readDomainRegistry({ home: tempRoot });
 
     assert.equal(migrated.schema_version, DOMAIN_REGISTRY_SCHEMA_VERSION);
     assert.deepEqual(migrated.domains, legacyRegistry.domains);
     assert.equal(validateDomainRegistry(migrated), true);
 
-    writeDomainRegistry({ repoRoot: tempRoot }, migrated);
-    assert.deepEqual(readDomainRegistry({ repoRoot: tempRoot }), migrated);
+    writeDomainRegistry({ home: tempRoot }, migrated);
+    assert.deepEqual(readDomainRegistry({ home: tempRoot }), migrated);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -45,7 +45,7 @@ test("migrateDomainRegistry leaves current v2 registries unchanged", () => {
     domains: [validDomain("sales-ops")],
   };
 
-  assert.equal(migrateDomainRegistry(registry), registry);
+  assert.deepEqual(migrateDomainRegistry(registry), registry);
   assert.equal(validateDomainRegistry(registry), true);
 });
 

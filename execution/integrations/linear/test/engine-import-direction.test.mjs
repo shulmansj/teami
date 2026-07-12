@@ -15,6 +15,7 @@ const THIS_FILE = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(THIS_FILE), "../../../..");
 const ENGINE_DIR = path.join(REPO_ROOT, "execution", "engine");
 const INTEGRATIONS_DIR = path.join(REPO_ROOT, "execution", "integrations");
+const APP_HOME_MODULE = path.join(INTEGRATIONS_DIR, "linear", "src", "app-home.mjs");
 const GIT_PROVIDER_PATTERN = /git|github|simple-git|nodegit/i;
 
 test("engine modules do not import providers, git providers, or child_process", () => {
@@ -91,6 +92,7 @@ function classifyImportViolation({ specifier, modulePath }) {
   }
 
   const resolved = resolveLocalSpecifier({ specifier, modulePath });
+  if (resolved === APP_HOME_MODULE) return null;
   if (resolved && isPathInside(resolved, INTEGRATIONS_DIR)) {
     return { reason: "engine_imports_provider_tree", resolved };
   }

@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
+import { ensureCarriedRuntime } from "./runtime/carried-runtime.mjs";
 
 export const DEFAULT_PHOENIX_APP_URL = "http://127.0.0.1:6006";
 export const DEFAULT_PHOENIX_PROJECT = "teami";
@@ -10,20 +12,26 @@ export const DEFAULT_PHOENIX_PACKAGE = "arize-phoenix==14.13.0";
 const DEFAULT_START_TIMEOUT_MS = 90_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_RUNTIME_MANIFEST_PATH = path.join(import.meta.dirname, "runtime", "runtime-manifest.json");
 
-export function phoenixPaths(repoRoot = process.cwd()) {
-  const root = path.resolve(repoRoot, ".agent-shell");
+export function phoenixPaths(home = undefined) {
+  const root = teamiHomePaths({ home }).phoenixDataDir;
   return {
     root,
     venvDir: path.join(root, "phoenix-venv"),
-    dataDir: path.join(root, "phoenix-data"),
+    dataDir: root,
     logsDir: path.join(root, "logs"),
     serviceFile: path.join(root, "phoenix-service.json"),
     telemetryDir: path.join(root, "telemetry"),
   };
 }
 
+export function runtimeFetchDegradationNotice() {
+  return "Teami could not prepare its local trace runtime, so product work can continue without Phoenix traces. Retry when network access to GitHub Releases is available.";
+}
+
 export function resolvePhoenixConfig({
+  home,
   repoRoot = process.cwd(),
   env = process.env,
   appUrl = env.TEAMI_PHOENIX_URL || DEFAULT_PHOENIX_APP_URL,
@@ -31,7 +39,8 @@ export function resolvePhoenixConfig({
 } = {}) {
   const normalizedAppUrl = normalizeLocalPhoenixAppUrl(appUrl);
   const url = new URL(normalizedAppUrl);
-  const paths = phoenixPaths(repoRoot);
+  const phoenixHome = resolvePhoenixHome({ home, repoRoot, env });
+  const paths = phoenixPaths(phoenixHome);
   return {
     appUrl: normalizedAppUrl,
     collectorUrl: phoenixCollectorUrl(normalizedAppUrl),
@@ -39,8 +48,21 @@ export function resolvePhoenixConfig({
     port: Number(url.port || 80),
     projectName,
     packageSpec: env.TEAMI_PHOENIX_PACKAGE || DEFAULT_PHOENIX_PACKAGE,
+    runtimeDir: teamiHomePaths({ home: phoenixHome }).runtimeDir,
     ...paths,
   };
+}
+
+function resolvePhoenixHome({ home, repoRoot, env }) {
+  if (home !== undefined) return home;
+  if (hasTeamiHomeOverride(env) || path.resolve(repoRoot) === path.resolve(process.cwd())) {
+    return resolveTeamiHome({ env });
+  }
+  return repoRoot;
+}
+
+function hasTeamiHomeOverride(env) {
+  return typeof env?.TEAMI_HOME === "string" && env.TEAMI_HOME.trim() !== "";
 }
 
 export function normalizeLocalPhoenixAppUrl(value = DEFAULT_PHOENIX_APP_URL) {
@@ -76,6 +98,8 @@ export async function ensurePhoenixReady({
   now = () => new Date(),
   startTimeoutMs = DEFAULT_START_TIMEOUT_MS,
   commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
+  runtimeManifestPath = DEFAULT_RUNTIME_MANIFEST_PATH,
+  platformKey = `${process.platform}-${process.arch}`,
   onProgress = () => {},
 } = {}) {
   const config = resolvePhoenixConfig({ repoRoot, env });
@@ -111,7 +135,28 @@ export async function ensurePhoenixReady({
   }
 
   recoverStaleServiceMetadata(config);
-  await ensurePhoenixInstalled({ config, runCommand, env, onProgress, commandTimeoutMs });
+  const installed = await ensurePhoenixInstalled({
+    config,
+    fetchImpl,
+    runCommand,
+    env,
+    onProgress,
+    commandTimeoutMs,
+    manifestPath: runtimeManifestPath,
+    platformKey,
+  });
+  if (!installed.ok) {
+    const metadata = serviceMetadata({
+      config,
+      managed: false,
+      pid: null,
+      status: "runtime_fetch_failed",
+      lastErrorReason: installed.reason || "runtime_fetch_failed",
+      repairHint: installed.repairHint || runtimeFetchDegradationNotice(),
+    });
+    writeServiceMetadata(config.serviceFile, metadata);
+    return { ok: false, reason: "runtime_fetch_failed", repairHint: metadata.repair_hint, ...config, metadata };
+  }
   const child = startProcess({ config, spawnImpl, env });
   const metadata = serviceMetadata({
     config,
@@ -241,17 +286,32 @@ export function recoverStaleServiceMetadata(config) {
   return true;
 }
 
-async function ensurePhoenixInstalled({ config, runCommand, env, onProgress, commandTimeoutMs }) {
-  if (env.TEAMI_PHOENIX_SKIP_INSTALL === "1") return;
-  if (!fs.existsSync(config.venvDir)) {
-    onProgress("Creating local Phoenix Python environment...");
-    await runCommand("python", ["-m", "venv", config.venvDir], { env, timeoutMs: commandTimeoutMs });
-  }
-  onProgress(`Installing ${config.packageSpec}...`);
-  await runCommand(phoenixPythonPath(config), ["-m", "pip", "install", "--upgrade", "pip", config.packageSpec], {
+async function ensurePhoenixInstalled({
+  config,
+  fetchImpl,
+  runCommand,
+  env,
+  onProgress,
+  commandTimeoutMs,
+  manifestPath,
+  platformKey,
+}) {
+  if (env.TEAMI_PHOENIX_SKIP_INSTALL === "1") return { ok: true, skipped: true };
+  onProgress("Preparing the local trace engine...");
+  const runtime = await ensureCarriedRuntime({
+    runtimeDir: config.runtimeDir,
+    manifestPath,
+    platformKey,
+    fetchImpl,
+    onProgress,
+  });
+  if (!runtime.ok) return runtime;
+  onProgress(`Checking carried Phoenix runtime (${config.packageSpec})...`);
+  await runCommand(phoenixPythonPath(config), ["-c", "import phoenix"], {
     env,
     timeoutMs: commandTimeoutMs,
   });
+  return { ok: true, manifestEntry: runtime.manifestEntry };
 }
 
 function startPhoenixProcess({ config, spawnImpl, env }) {
@@ -359,16 +419,18 @@ function serviceMetadata({
   };
 }
 
-function phoenixPythonPath(config) {
+export function phoenixPythonPath(config) {
+  const runtimeRoot = path.join(config.runtimeDir, "current");
   return process.platform === "win32"
-    ? path.join(config.venvDir, "Scripts", "python.exe")
-    : path.join(config.venvDir, "bin", "python");
+    ? path.join(runtimeRoot, "Scripts", "python.exe")
+    : path.join(runtimeRoot, "bin", "python");
 }
 
-function phoenixExecutablePath(config) {
+export function phoenixExecutablePath(config) {
+  const runtimeRoot = path.join(config.runtimeDir, "current");
   return process.platform === "win32"
-    ? path.join(config.venvDir, "Scripts", "phoenix.exe")
-    : path.join(config.venvDir, "bin", "phoenix");
+    ? path.join(runtimeRoot, "Scripts", "phoenix.exe")
+    : path.join(runtimeRoot, "bin", "phoenix");
 }
 
 function isLoopbackHostname(hostname) {

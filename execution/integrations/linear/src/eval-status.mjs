@@ -7,7 +7,7 @@ import {
 import { detectLowConfidenceReasons as detectLowConfidenceReasonsCore } from "../../../engine/eval-low-confidence.mjs";
 import { resolvePhoenixConfig } from "./local-phoenix-manager.mjs";
 import { normalizeFailureMode } from "./quality.mjs";
-import { defaultRunStoreDir } from "../../../engine/run-store.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 import { traceTelemetryPaths } from "./trace-status-store.mjs";
 
 // Derived eval status + agent-session judgment worklist.
@@ -60,9 +60,10 @@ export function isHighRiskRunArtifact(artifact) {
 // Reads the local, gitignored run evidence (receipts + artifacts + sibling
 // snapshot/promotion files). Tolerant of unparseable files: a corrupt local
 // file is skipped, never fatal for a status report.
-export function readLocalEvalInputs({ repoRoot = process.cwd(), runStoreDir = null } = {}) {
+export function readLocalEvalInputs({ repoRoot = process.cwd(), home = resolveTeamiHome(), runStoreDir = null } = {}) {
   const receiptsDir = traceTelemetryPaths(repoRoot).runsDir;
-  const artifactsDir = runStoreDir || defaultRunStoreDir(repoRoot);
+  const artifactsDirs = runStoreDir ? [runStoreDir] : domainRunStoreDirs(home);
+  const artifactsDir = artifactsDirs[0] || null;
   const runs = new Map();
   const ensureRun = (runId) => {
     if (!runs.has(runId)) {
@@ -95,23 +96,26 @@ export function readLocalEvalInputs({ repoRoot = process.cwd(), runStoreDir = nu
     run.trace_status = receipt.trace_status || null;
   }
 
-  for (const file of listJsonFilesShallow(artifactsDir)) {
-    const base = path.basename(file);
-    // Sibling local files share the run store directory but are not run artifacts.
-    if (base.endsWith(".snapshot.json") || base.endsWith(".promotion.json") || base.endsWith(".judge.json")) continue;
-    const artifact = readJsonTolerant(file);
-    if (!artifact?.run_id) continue;
-    const run = ensureRun(String(artifact.run_id));
-    run.artifact_kind = artifact.kind || null;
-    run.high_risk = isHighRiskRunArtifact(artifact);
-    if (!run.project_id) run.project_id = artifact.project_id || artifact.object_id || null;
+  for (const currentArtifactsDir of artifactsDirs) {
+    for (const file of listJsonFilesShallow(currentArtifactsDir)) {
+      const base = path.basename(file);
+      // Sibling local files share the run store directory but are not run artifacts.
+      if (base.endsWith(".snapshot.json") || base.endsWith(".promotion.json") || base.endsWith(".judge.json")) continue;
+      const artifact = readJsonTolerant(file);
+      if (!artifact?.run_id) continue;
+      const run = ensureRun(String(artifact.run_id));
+      run.artifact_kind = artifact.kind || null;
+      run.high_risk = isHighRiskRunArtifact(artifact);
+      if (!run.project_id) run.project_id = artifact.project_id || artifact.object_id || null;
+    }
   }
 
   for (const run of runs.values()) {
-    run.snapshot_present = fs.existsSync(path.join(artifactsDir, `${run.run_id}.snapshot.json`));
+    run.snapshot_present = artifactsDirs.some((dir) =>
+      fs.existsSync(path.join(dir, `${run.run_id}.snapshot.json`)));
     // Local dataset-membership receipt (written by promotion steps when they
     // exist; read-only here). Tolerated shape: { datasets: [{ name, ... }] }.
-    const membership = readJsonTolerant(path.join(artifactsDir, `${run.run_id}.promotion.json`));
+    const membership = readRunSidecarJson(artifactsDirs, run.run_id, ".promotion.json");
     const datasets = Array.isArray(membership?.datasets) ? membership.datasets : [];
     run.promoted_to_dataset = datasets.length > 0;
     run.promoted_datasets = datasets.map((dataset) => dataset?.name).filter(Boolean);
@@ -119,7 +123,7 @@ export function readLocalEvalInputs({ repoRoot = process.cwd(), runStoreDir = nu
     // here). The latest attempt makes judge_missing / judge_invalid visible
     // to the derived worklist even when no annotation could be written —
     // still a read-time view, never Phoenix state.
-    const judgeReceipt = readJsonTolerant(path.join(artifactsDir, `${run.run_id}.judge.json`));
+    const judgeReceipt = readRunSidecarJson(artifactsDirs, run.run_id, ".judge.json");
     const attempts = Array.isArray(judgeReceipt?.attempts) ? judgeReceipt.attempts : [];
     const latestAttempt = attempts.at(-1) || null;
     run.judge_attempt = latestAttempt
@@ -138,8 +142,29 @@ export function readLocalEvalInputs({ repoRoot = process.cwd(), runStoreDir = nu
   return {
     receiptsDir,
     artifactsDir,
+    artifactsDirs,
     runs: [...runs.values()].sort((a, b) => a.run_id.localeCompare(b.run_id)),
   };
+}
+
+function domainRunStoreDirs(home) {
+  const domainsDir = path.join(teamiHomePaths({ home }).home, "domains");
+  if (!fs.existsSync(domainsDir)) return [];
+  try {
+    return fs.readdirSync(domainsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(domainsDir, entry.name, "runs"));
+  } catch {
+    return [];
+  }
+}
+
+function readRunSidecarJson(dirs, runId, suffix) {
+  for (const dir of dirs) {
+    const parsed = readJsonTolerant(path.join(dir, `${runId}${suffix}`));
+    if (parsed) return parsed;
+  }
+  return null;
 }
 
 // Verified REST GET path (PHOENIX-CAPABILITIES annotations CRUD):

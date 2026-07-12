@@ -139,15 +139,14 @@ test("example schema encodes the dataset example contract enums exactly", () => 
     "labels",
     "existing_issues",
   ]);
+  assert.equal(input.project.properties.comments.items.$ref, "#/$defs/project_comment");
   assert.deepEqual(input.run_envelope.properties.runtime_assignments.required, ["pm", "sr_eng"]);
   assert.deepEqual(exampleSchema.$defs.judge_fixture_input.required, [
     "project_intent",
     "terminal_status",
     "terminal_reason",
     "final_issues",
-    "discovery_issues",
     "dependency_relations",
-    "project_update_markdown",
     "open_questions_markdown",
     "phase_packet_summaries",
   ]);
@@ -156,6 +155,10 @@ test("example schema encodes the dataset example contract enums exactly", () => 
     "failure_taxonomy_version",
     "allowed_failure_modes",
   ]);
+  assert.equal(
+    exampleSchema.$defs.judge_fixture_input.properties.project_intent.properties.comments.items.$ref,
+    "#/$defs/project_comment",
+  );
   const reference = exampleSchema.properties.reference.properties;
   assert.equal(reference.expected_label.$ref, "#/$defs/quality_label");
   assert.equal(reference.expected_score.minimum, 0);
@@ -253,9 +256,7 @@ test("resolveEvalContract returns the full decomposition quality contract", () =
     "terminal_status",
     "terminal_reason",
     "final_issues",
-    "discovery_issues",
     "dependency_relations",
-    "project_update_markdown",
     "open_questions_markdown",
     "phase_packet_summaries",
   ]);
@@ -764,12 +765,14 @@ test("deterministic CODE evaluators emit annotations compatible with the shared 
   const failingSufficiency = evaluateAcceptedPacketSufficiencyOffline({ terminalOutput: null });
   const pauseState = evaluatePauseState({
     project: {
-      labels: [{ id: "label-open-questions" }],
-      status: { id: "status-backlog", type: "backlog" },
-      content: "## Open Questions\n- Which provider tier?",
+      status: { id: "status-principal-escalation", type: "planned" },
+      comments: [
+        { author_id: "user-founder-1", body: "Answer: use current provider." },
+        { author_id: "app-viewer-1", body: "- Which provider tier?" },
+      ],
     },
-    hasOpenQuestionsLabelId: "label-open-questions",
-    backlogStatusId: "status-backlog",
+    attentionStatusId: "status-principal-escalation",
+    appIdentityId: "app-viewer-1",
   });
 
   // Parameterized diagnostics normalize to taxonomy base ids; the raw
@@ -802,22 +805,17 @@ test("deterministic CODE evaluators emit annotations compatible with the shared 
       assumptions: [],
       constraints: [],
       risks: [],
-      discovery_issues: [{ title: "Find source" }],
     },
   });
   assert.deepEqual(terminalOutputSufficiency.metadata.failure_modes, [
     "missing_context_digest",
     "missing_source_refs",
     "missing_pause_open_questions",
-    "missing_project_update",
-    "missing_discovery_issue_body",
   ]);
   assert.deepEqual(terminalOutputSufficiency.metadata.failure_mode_details, [
     "missing_context_digest:orchestrator_output",
     "missing_source_refs:orchestrator_output",
     "missing_pause_open_questions:orchestrator_output",
-    "missing_project_update:orchestrator_output",
-    "missing_discovery_issue_body:orchestrator_output",
   ]);
   assert.equal(
     normalizeFailureMode("missing_context_digest:orchestrator_output"),
@@ -1085,7 +1083,7 @@ test("rubric, judge prompt, and proposal template carry versions and required se
   for (const requiredInput of [
     "project intent",
     "terminal status",
-    "Open Questions",
+    "open_questions_markdown",
     "phase-packet",
     "rubric_version",
     "failure_taxonomy_version",
