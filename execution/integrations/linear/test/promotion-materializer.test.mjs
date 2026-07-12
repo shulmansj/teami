@@ -39,7 +39,7 @@ const reviewFailureTaxonomy = JSON.parse(
   ),
 );
 
-test("trusted promotion artifact reads fail closed on rule snapshot drift", () => {
+test("trusted promotion artifact reads fail closed on rule snapshot drift", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-trusted-artifacts-"));
   const manifestPath = path.join(root, phoenixAssetsPath);
   const taxonomyPath = path.join(root, "execution", "evals", "decomposition", "failure-taxonomy.json");
@@ -50,7 +50,7 @@ test("trusted promotion artifact reads fail closed on rule snapshot drift", () =
   fs.writeFileSync(taxonomyPath, `${JSON.stringify(failureTaxonomy, null, 2)}\n`, "utf8");
   fs.writeFileSync(runtimeRolesPath, "{\"drifted\":true}\n", "utf8");
 
-  const result = resolveTrustedPromotionArtifacts({
+  const result = await resolveTrustedPromotionArtifacts({
     mode: "user_invoked",
     repoRoot: root,
     candidateTargetKey: "rule/decomposition/runtime_role_assignments",

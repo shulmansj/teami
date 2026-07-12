@@ -48,6 +48,7 @@ import {
   decompositionEvalNamespacePath,
   resolveDecompositionEvalPath,
 } from "./workflows/decomposition/eval-paths.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
 // Track E: the non-mutating decomposition eval-mode CLI task
 // (`npm run eval:decomposition`). It WRAPS the existing
@@ -119,19 +120,20 @@ const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
 // wake-run custody under .teami/runs/.
 // ---------------------------------------------------------------------------
 
-export function defaultEvalRunStoreDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "eval-runs");
+export function defaultEvalRunStoreDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "eval-runs");
 }
 
-export function evalRunRecordPath({ evalRunId, repoRoot = process.cwd(), evalRunStoreDir = null } = {}) {
+export function evalRunRecordPath({ evalRunId, repoRoot = null, home = resolveTeamiHome(), evalRunStoreDir = null } = {}) {
+  void repoRoot;
   if (!evalRunId || typeof evalRunId !== "string" || !SAFE_RUN_ID_PATTERN.test(evalRunId)) {
     throw new Error(`Invalid eval_run_id for the local eval-run record store: ${evalRunId}`);
   }
-  return path.join(evalRunStoreDir || defaultEvalRunStoreDir(repoRoot), `${evalRunId}.json`);
+  return path.join(evalRunStoreDir || defaultEvalRunStoreDir(home), `${evalRunId}.json`);
 }
 
-export function writeEvalRunRecord({ evalRunId, repoRoot = process.cwd(), evalRunStoreDir = null } = {}, record) {
-  const filePath = evalRunRecordPath({ evalRunId, repoRoot, evalRunStoreDir });
+export function writeEvalRunRecord({ evalRunId, repoRoot = null, home = resolveTeamiHome(), evalRunStoreDir = null } = {}, record) {
+  const filePath = evalRunRecordPath({ evalRunId, repoRoot, home, evalRunStoreDir });
   if (record?.schema_version !== EVAL_RUN_RECORD_SCHEMA_VERSION) {
     throw new Error("eval-run record must carry the eval-run record schema version.");
   }
@@ -484,11 +486,20 @@ function normalizeExampleProject(project) {
     id: project.id,
     name: project.name,
     description: typeof project.description === "string" ? project.description : null,
+    comments: agentVisibleProjectComments(project.comments),
     content: project.content,
     status: project.status,
     labels: Array.isArray(project.labels) ? project.labels : [],
     existing_issues: Array.isArray(project.existing_issues) ? project.existing_issues : [],
   };
+}
+
+function agentVisibleProjectComments(comments) {
+  return (Array.isArray(comments) ? comments : []).map((comment) => ({
+    author_id: comment?.author_id ?? comment?.user?.id ?? null,
+    body: typeof comment?.body === "string" ? comment.body : "",
+    created_at: comment?.created_at ?? comment?.createdAt ?? null,
+  }));
 }
 
 function reconstructExampleFromDatasetRecord(record) {
@@ -681,7 +692,9 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
     type: status.type,
   }));
   const issueStatuses = Object.entries(config.linear.issue.statuses)
-    .filter(([semantic]) => ["backlog", "todo", "in_progress", "in_review", "blocked", "done"].includes(semantic))
+    .filter(([semantic]) =>
+      ["backlog", "todo", "in_progress", "in_review", "human_review", "needs_principal", "done"].includes(semantic)
+    )
     .map(([semantic, status]) => ({
       id: `eval-issue-status-${semantic}`,
       role: semantic,
@@ -695,15 +708,6 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
       || statuses.find((status) => status.type === normalized)
       || statuses.find((status) => status.name.trim().toLowerCase().replace(/\s+/g, "_") === normalized)
       || { id: "eval-status-unmapped", name: String(semantic), type: String(semantic) };
-  };
-
-  const openQuestionsLabelName = config.linear.project.labels.has_open_questions;
-  const snapshotOpenLabel = (project.labels || []).find(
-    (label) => label?.name === openQuestionsLabelName,
-  );
-  const hasOpenQuestionsLabel = {
-    id: snapshotOpenLabel?.id || "eval-plabel-open-questions",
-    name: openQuestionsLabelName,
   };
 
   const discoveryLabelName = config.linear.issue.labels.discovery;
@@ -720,10 +724,10 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
     name: discoveryLabelName,
     teamId,
   };
-  const needsPrincipalLabelName = config.linear.issue.labels.needs_principal;
-  const needsPrincipalLabel = {
-    id: "eval-ilabel-needs-principal",
-    name: needsPrincipalLabelName,
+  const humanReviewLabelName = config.linear.issue.labels.human_review;
+  const humanReviewLabel = {
+    id: "eval-ilabel-human-review",
+    name: humanReviewLabelName,
     teamId,
   };
   const template = {
@@ -737,6 +741,7 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
     id: project.id,
     name: project.name,
     description: project.description ?? null,
+    comments: agentVisibleProjectComments(project.comments),
     content: project.content,
     teamIds: [teamId],
     status: statusFor(project.status),
@@ -768,10 +773,10 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
       return issueStatuses;
     },
     async findProjectLabelsByName(name) {
-      return name === hasOpenQuestionsLabel.name ? [hasOpenQuestionsLabel] : [];
+      return (project.labels || []).filter((label) => !name || label?.name === name);
     },
     async findIssueLabelsByName(name, forTeamId) {
-      return [discoveryLabel, needsPrincipalLabel]
+      return [discoveryLabel, humanReviewLabel]
         .filter((label) => label.name === name && forTeamId === teamId);
     },
     async findTemplatesByName(name, type, forTeamId) {
@@ -793,10 +798,9 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
     projectStatuses: Object.fromEntries(statuses.map((status) => [status.role, status.id])),
     projectStatusTypes: Object.fromEntries(statuses.map((status) => [status.role, status.type])),
     issueStatuses: Object.fromEntries(issueStatuses.map((status) => [status.role, status.id])),
-    projectLabels: { [hasOpenQuestionsLabel.name]: hasOpenQuestionsLabel.id },
     issueLabels: {
       [discoveryLabel.name]: discoveryLabel.id,
-      [needsPrincipalLabel.name]: needsPrincipalLabel.id,
+      [humanReviewLabel.name]: humanReviewLabel.id,
     },
   };
 
@@ -805,9 +809,9 @@ export function createSnapshotEvalLinearClient({ config, project } = {}) {
     cache,
     shape: {
       teamId,
-      hasOpenQuestionsLabelId: hasOpenQuestionsLabel.id,
       discoveryLabelId: discoveryLabel.id,
       statusIds: cache.projectStatuses,
+      attentionStatusId: cache.projectStatuses.needs_principal,
       projectContext: { ...projectContext, issues },
     },
   };
@@ -858,8 +862,8 @@ function generateEvalRunId(date = new Date()) {
   return `eval-${stamp}-${randomBytes(3).toString("hex")}`;
 }
 
-export function createDefaultEvalRuntimeExecutor({ config, repoRoot = process.cwd() } = {}) {
-  const smokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
+export function createDefaultEvalRuntimeExecutor({ config, repoRoot = process.cwd(), home = resolveTeamiHome() } = {}) {
+  const smokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
   return createProcessRuntimeExecutor({
     smokeTests: smokeTestsFromRuntimeSmokeCache(smokeCache),
     repoRoot,
@@ -880,6 +884,7 @@ export function createDefaultEvalRuntimeExecutor({ config, repoRoot = process.cw
 
 export async function runDecompositionEvalTask({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   config,
   runId = null,
   examplePath = null,
@@ -952,7 +957,7 @@ export async function runDecompositionEvalTask({
   if (!SAFE_RUN_ID_PATTERN.test(resolvedEvalRunId)) {
     return { ok: false, status: "not_run", reason: "invalid_eval_run_id", eval_run_id: resolvedEvalRunId };
   }
-  const evalStoreDir = evalRunStoreDir || defaultEvalRunStoreDir(repoRoot);
+  const evalStoreDir = evalRunStoreDir || defaultEvalRunStoreDir(home);
   const evalArtifactDir = path.join(evalStoreDir, "runs");
 
   const runEnvelope = buildEvalRunEnvelope({ config: evalConfig });
@@ -966,7 +971,7 @@ export async function runDecompositionEvalTask({
   // mutation surface; the eval-mode guard inside runDecompositionEvalMode is
   // the second wall.
   const snapshotClient = createSnapshotEvalLinearClient({ config: evalConfig, project: input.project });
-  const executor = runtimeExecutor || createDefaultEvalRuntimeExecutor({ config: evalConfig, repoRoot });
+  const executor = runtimeExecutor || createDefaultEvalRuntimeExecutor({ config: evalConfig, repoRoot, home });
 
   // 4. Trace export through the EXISTING trace sink, Phoenix kept lazy: the
   // default readiness probe never boots Phoenix; degraded mode records local
@@ -1015,6 +1020,7 @@ export async function runDecompositionEvalTask({
         roster: evalRoster,
         runId: resolvedEvalRunId,
         repoRoot,
+        home,
         runStoreDir: evalArtifactDir,
         traceId: session?.traceId || null,
         domainContext,
@@ -1044,7 +1050,7 @@ export async function runDecompositionEvalTask({
     ? result.orchestratorOutput.evidence.perspectives_run
     : [];
   const artifactPath = artifact
-    ? runArtifactPath({ runId: resolvedEvalRunId, repoRoot, runStoreDir: evalArtifactDir })
+    ? runArtifactPath({ runId: resolvedEvalRunId, repoRoot, home, runStoreDir: evalArtifactDir })
     : null;
 
   // The supplied memory snapshot IS the capture (capture_source records that
@@ -1057,7 +1063,6 @@ export async function runDecompositionEvalTask({
   });
 
   let terminal = null;
-  let judgeInputs = null;
   if (artifact && (artifact.kind === "commit" || artifact.kind === "pause")) {
     const built = buildJudgeInputs({
       artifact,
@@ -1065,7 +1070,6 @@ export async function runDecompositionEvalTask({
       allowedFailureModes: judgeAllowedFailureModes(),
     });
     if (built.ok) {
-      judgeInputs = built.inputs;
       terminal = {
         status: built.inputs.terminal_status,
         reason: built.inputs.terminal_reason,
@@ -1181,7 +1185,7 @@ export async function runDecompositionEvalTask({
     judge: judgeResult,
   };
   const recordPath = writeEvalRunRecord(
-    { evalRunId: resolvedEvalRunId, repoRoot, evalRunStoreDir: evalStoreDir },
+    { evalRunId: resolvedEvalRunId, repoRoot, home, evalRunStoreDir: evalStoreDir },
     record,
   );
 
@@ -1339,7 +1343,7 @@ export function formatEvalRunReport(result) {
   );
   if (result.terminal) {
     lines.push(
-      `  terminal: ${result.terminal.status} (${result.terminal.reason}) final_issues=${result.terminal.final_issues.length} discovery_issues=${result.terminal.discovery_issues.length} dependency_relations=${result.terminal.dependency_relations.length}`,
+      `  terminal: ${result.terminal.status} (${result.terminal.reason}) final_issues=${result.terminal.final_issues.length} dependency_relations=${result.terminal.dependency_relations.length}`,
     );
     lines.push(
       `  authored: project_update=${result.terminal.project_update_markdown ? "present" : "absent"} open_questions=${result.terminal.open_questions_markdown ? "present" : "absent"}`,

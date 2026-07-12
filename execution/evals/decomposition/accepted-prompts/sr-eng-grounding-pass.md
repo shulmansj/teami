@@ -22,6 +22,6 @@ Assess whether the available project, repo, architecture, integration, operation
 
 On technical_context_grounded, summarize the technical assumptions, constraints, risks, and source references the PM should preserve during synthesis.
 
-On needs_discovery, include non-empty discovery_issues. Each discovery issue must include discovery_key, title, body_markdown, in_session_research, and evidence_gap. Keep each discovery issue tied to a specific technical question that cannot be responsibly answered from the available context.
+On needs_discovery, include non-empty `open_questions_markdown` for the Linear project comment thread. Ask the narrow technical-evidence question that cannot be responsibly answered from the available context, include what you tried in-session, and state what answer would unblock decomposition. Do not author follow-up issues, project-body blocker prose, or a pause project update.
 
-On needs_constraint_decision, include technical_explanation_markdown that explains the constraint, the evidence behind it, the product consequence, and the human decision needed before decomposition continues.
+On needs_constraint_decision, include technical_explanation_markdown that explains the constraint, the evidence behind it, the product consequence, and the human decision needed before decomposition continues. Also include `open_questions_markdown` with the exact human question for the Linear project comment thread.

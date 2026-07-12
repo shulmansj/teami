@@ -228,7 +228,7 @@ function configWithAcceptedDefaultsFor(role) {
 }
 
 function configWithPinnedRuntimeRoles(rolePins) {
-  const config = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, DEFAULT_CONFIG_PATH), "utf8"));
+  const config = JSON.parse(fs.readFileSync(DEFAULT_CONFIG_PATH, "utf8"));
   for (const [role, fields] of Object.entries(rolePins)) {
     config.workflows.decomposition.roles[role] ??= {};
     Object.assign(config.workflows.decomposition.roles[role], fields);
@@ -405,7 +405,7 @@ test("ledger coverage: the JUDGE accepted ref is appended to the artifact when q
     id: "project-1",
     name: "Eval Project",
     description: null,
-    content: "## Goal\n\nShip it.\n\n## Open Questions\n",
+    content: "## Goal\n\nShip it.\n",
     status: "planned",
     labels: [],
     existing_issues: [],
@@ -489,7 +489,7 @@ test("ledger coverage: when the judge RAN but its contract ref cannot be resolve
     id: "project-1",
     name: "Eval Project",
     description: null,
-    content: "## Goal\n\nShip it.\n\n## Open Questions\n",
+    content: "## Goal\n\nShip it.\n",
     status: "planned",
     labels: [],
     existing_issues: [],
@@ -578,7 +578,7 @@ test("ledger coverage: the captured judge ref provably matches what the judge IT
     id: "project-1",
     name: "Eval Project",
     description: null,
-    content: "## Goal\n\nShip it.\n\n## Open Questions\n",
+    content: "## Goal\n\nShip it.\n",
     status: "planned",
     labels: [],
     existing_issues: [],
@@ -764,7 +764,7 @@ const NON_RUN_SITES = [
   // (trusted-clone + active-checkout). Two resolve sites; each with its bytes read.
   "execution/integrations/linear/src/promotion-scanner/baseline-resolver.mjs ::: const resolution = resolveAcceptedBaseline({",
   "execution/integrations/linear/src/promotion-scanner/baseline-resolver.mjs ::: const resolution = resolveAcceptedBaseline({",
-  "execution/integrations/linear/src/promotion-scanner/baseline-resolver.mjs ::: readArtifactBytes: (relativePath) => gitShowText({",
+  "execution/integrations/linear/src/promotion-scanner/baseline-resolver.mjs ::: readArtifactBytes: (relativePath) => relativePath === referencedPath",
   "execution/integrations/linear/src/promotion-scanner/baseline-resolver.mjs ::: readArtifactBytes: (relativePath) => {",
   // promotion/proposal-worklist-read-model.mjs: B-READ read-model — the READER
   // that asks "is this proposal superseded?", not a consuming run.

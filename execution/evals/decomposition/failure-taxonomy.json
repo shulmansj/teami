@@ -19,11 +19,8 @@
       "missing_risks",
       "missing_pause_open_questions",
       "missing_project_update",
-      "missing_discovery_issue_body",
-      "missing_has_open_questions_label",
-      "pause_project_not_backlog",
-      "missing_open_questions_section",
-      "incomplete_pause_artifact"
+      "missing_pause_comment_content",
+      "pause_project_not_attention_status"
     ]
   },
   "workflows": {

@@ -1,22 +1,16 @@
 import { addAnnotation, recordSpan } from "../../trace.mjs";
-import { renderAuthoredIssueBody } from "../../issue-body.mjs";
-import { setOpenQuestionsMarkdown } from "../../project-body.mjs";
 import { evaluatePauseState } from "../../quality.mjs";
 import { applyCommitEffects } from "../../../../../engine/commit-effects.mjs";
+import { normalizeMarkdown } from "../../project-body.mjs";
 import {
-  discoveryIssuesForProject,
-  isIssueOpen,
-  issueHasLabel,
   issueDependencies,
   issueKey,
 } from "../../linear/matching-utils.mjs";
+import { applyProjectNeedsPrincipalComment } from "../../linear/project-needs-principal-comment.mjs";
 import { resolveIssueStatuses } from "../../linear/shape-resolver.mjs";
 import {
-  createOrReuseDiscoveryIssues,
   findProjectUpdateByBodyRunId,
   postAuthoredProjectUpdate,
-  verifyOpenQuestionsAndPauseState,
-  verifyOpenQuestionsMarkdown,
 } from "./discovery-commit.mjs";
 import {
   createOrReuseExecutionIssues,
@@ -54,6 +48,7 @@ export async function applyPersistedArtifact({
   trace,
   repoRoot,
   runStoreDir,
+  cache = null,
   replayed = false,
   domainContext = null,
   onBeforeLinearMutation = null,
@@ -73,6 +68,7 @@ export async function applyPersistedArtifact({
       client,
       project,
       shape,
+      cache,
       artifact,
       trace,
       repoRoot,
@@ -97,9 +93,6 @@ export async function applyPersistedArtifact({
       durable_record,
       commitEffects,
     });
-  }
-  if (artifact.kind === "resume") {
-    return resumeFromArtifact({ client, project, shape, artifact, trace, replayed, onBeforeLinearMutation });
   }
   throw new Error(`Unknown persisted artifact kind: ${artifact.kind}`);
 }
@@ -151,7 +144,6 @@ async function applyCommitArtifactEffects({
     environment,
     durable_record,
     artifactSetLineage: artifact?.artifact_set_lineage,
-    linearIssuesAppliedIdentity: null,
   };
   const applyResult = await applyCommitEffects({ effects: commitEffects, ctx, trace });
   if (applyResult.outcome !== "ok") {
@@ -213,68 +205,56 @@ export function validateReplayArtifactProject({ artifact, projectId, replayed = 
   }
 }
 
-export async function pauseProjectFromArtifact({ client, project, shape, artifact, trace, replayed, onBeforeLinearMutation }) {
+export async function pauseProjectFromArtifact({ client, project, shape, cache, artifact, trace, replayed, onBeforeLinearMutation }) {
   const packet = artifact.pause_packet;
-  const content = setOpenQuestionsMarkdown(project.content || "", packet.open_questions_markdown);
-  const labelIds = new Set((project.labels || []).map((label) => label.id));
-  labelIds.add(shape.projectLabels.hasOpenQuestions.id);
+  const isFailedClosed = artifact.source === "failed_closed";
+  // A product-question pause and a safety `failed_closed` stop present to the human IDENTICALLY:
+  // one app-authored comment on the project + a move to Principal Escalation — no project-body edit,
+  // no Discovery issues, no project update. (Design ruling 2026-07-07: the two kinds of stop must
+  // not feel different to the user; both are simply "a project that needs your attention".) The only
+  // difference is the comment's content: a pause carries its open questions; a failed_closed stop
+  // carries its authored "why I stopped" summary (falling back to its open questions).
+  const commentMarkdown = isFailedClosed
+    ? (packet.project_update_markdown || packet.open_questions_markdown)
+    : packet.open_questions_markdown;
 
   await onBeforeLinearMutation?.({ artifactKind: artifact.kind, runId: artifact.run_id, trace });
-  await client.updateProject(project.id, {
-    content,
-    labelIds: [...labelIds],
-    statusId: shape.projectStatuses.backlog.id,
-  });
-
-  const discoveryResult = await createOrReuseDiscoveryIssues({
-    client,
-    project,
-    shape,
-    discoveryIssues: artifact.discovery_issues || [],
-  });
-  const verifiedProject = await verifyOpenQuestionsAndPauseState({
-    client,
-    projectId: project.id,
-    shape,
-    openQuestionsMarkdown: packet.open_questions_markdown,
-  });
-  const updateResult = await postAuthoredProjectUpdate({
+  const escalationResult = await applyProjectNeedsPrincipalComment({
     client,
     projectId: project.id,
     runId: artifact.run_id,
-    projectUpdateMarkdown: packet.project_update_markdown,
+    questionsMarkdown: commentMarkdown,
+    statusId: shape.projectStatuses.needs_principal.id,
+    cache: cache || shape.cache || null,
   });
+  if (escalationResult.outcome !== "ok") {
+    throw new Error(`Linear project pause comment/status mutation failed: ${escalationResult.reason || "unknown_reason"}`);
+  }
 
+  const verifiedProject = await client.getProjectContext(project.id);
+  if (verifiedProject?.status?.id !== shape.projectStatuses.needs_principal.id) {
+    throw new Error("Linear project pause status verification failed.");
+  }
+  addAnnotation(
+    trace,
+    evaluatePauseState({
+      project: verifiedProject,
+      attentionStatusId: shape.projectStatuses.needs_principal.id,
+      appIdentityId: (cache || shape.cache || {}).app_identity_id,
+    }),
+  );
   recordSpan(trace, "create_linear_issues_or_pause_project", {
     action: "pause_project",
     phase: packet.phase,
     reason: packet.reason,
     replayed,
-    discovery_issue_created_count: discoveryResult.created.length,
-    discovery_issue_reused_count: discoveryResult.reused.length,
-    open_questions_replaced_from_authored_markdown: true,
+    source: artifact.source,
   });
-  recordSpan(trace, "post_project_update", {
-    action: updateResult.created ? "created" : "reused",
-    run_id: artifact.run_id,
-    exact_authored_markdown: true,
-  });
-  addAnnotation(
-    trace,
-    evaluatePauseState({
-      project: verifiedProject,
-      hasOpenQuestionsLabelId: shape.projectLabels.hasOpenQuestions.id,
-      backlogStatusId: shape.projectStatuses.backlog.id,
-    }),
-  );
 
   return {
     status: "paused",
     reason: packet.reason,
-    discoveryIssues: discoveryResult.issues,
-    discoveryIssuesCreated: discoveryResult.created,
-    discoveryIssuesReused: discoveryResult.reused,
-    projectUpdate: updateResult.update,
+    comment: escalationResult.comment,
     trace,
   };
 }
@@ -283,6 +263,12 @@ export async function commitIssuesFromArtifact({ client, config, project, shape,
   const issueStatuses = shape.issueStatuses ||
     await resolveIssueStatuses(client, config, shape.team.id, shape.cache, { failClosed: true });
   await onBeforeLinearMutation?.({ artifactKind: artifact.kind, runId: artifact.run_id, trace });
+  const projectBodyContent = projectBodyUpdateContent(artifact);
+  if (projectBodyContent !== null) {
+    await client.updateProject(project.id, {
+      content: projectBodyContent,
+    });
+  }
   const creation = await createOrReuseExecutionIssues({
     client,
     config,
@@ -298,14 +284,19 @@ export async function commitIssuesFromArtifact({ client, config, project, shape,
     statusId: shape.projectStatuses.in_progress.id,
   });
 
+  const flaggedHumanReviewIssues = humanReviewFlaggedFinalIssues(artifact.final_issues);
   recordSpan(trace, "create_linear_issues_or_pause_project", {
     action: "create_or_reuse_execution_issues",
     replayed,
     issues_created: creation.created.length,
     issues_reused: creation.reused.length,
+    final_issue_count: Array.isArray(artifact.final_issues) ? artifact.final_issues.length : 0,
+    human_review_flagged_count: flaggedHumanReviewIssues.length,
+    human_review_flagged_issue_keys: flaggedHumanReviewIssues.map(issueKey),
     dependency_relations_created: creation.relationsCreated.length,
     dependency_relations_reused: creation.relationsReused.length,
     idempotent: creation.created.length === 0 && creation.relationsCreated.length === 0,
+    ...(projectBodyContent !== null ? { project_body_updated: true } : {}),
     moved_project_to_status_id: shape.projectStatuses.in_progress.id,
   });
 
@@ -345,14 +336,10 @@ async function applyLinearIssuesEffect(ctx) {
     return { ok: false, reason: "linear_issues_apply_not_completed" };
   }
   const identity = linearIssuesIdentityFromResult(result);
-  ctx.linearIssuesAppliedIdentity = identity;
   return { ok: true, identity };
 }
 
 async function verifyLinearIssuesEffect(ctx) {
-  if (ctx.linearIssuesAppliedIdentity?.result?.status === "completed") {
-    return { ok: true, identity: ctx.linearIssuesAppliedIdentity };
-  }
   try {
     const checked = await readLinearIssuesEffectState(ctx);
     if (!checked.ok) return { ok: false, reason: checked.reason };
@@ -387,6 +374,13 @@ async function readLinearIssuesEffectState(ctx) {
   const expectedStatusId = ctx.shape.projectStatuses.in_progress.id;
   if (project.status?.id !== expectedStatusId) {
     return { ok: false, reason: "linear_project_status_not_started" };
+  }
+  const expectedProjectBodyContent = projectBodyUpdateContent(ctx.artifact);
+  if (
+    expectedProjectBodyContent !== null &&
+    !sameMarkdown(project.content, expectedProjectBodyContent)
+  ) {
+    return { ok: false, reason: "linear_project_body_update_missing" };
   }
 
   const runId = ctx.runId || ctx.artifact?.run_id;
@@ -428,6 +422,25 @@ async function readLinearIssuesEffectState(ctx) {
 
 function finalIssuesForEffect(ctx) {
   return ctx.artifact?.final_issues || ctx.payload?.final_issues || ctx.artifact?.payload?.final_issues;
+}
+
+function humanReviewFlaggedFinalIssues(finalIssues) {
+  if (!Array.isArray(finalIssues)) return [];
+  return finalIssues.filter((issue) => issue?.requires_human_review === true);
+}
+
+function projectBodyUpdateContent(artifact) {
+  const update = artifact?.project_body_update ?? artifact?.payload?.project_body_update ?? null;
+  if (update === null || update === undefined) return null;
+  if (typeof update === "string") return normalizeMarkdown(update);
+  if (typeof update?.content === "string" && update.content.trim() !== "") {
+    return normalizeMarkdown(update.content);
+  }
+  throw new Error("project_body_update.content is required when project_body_update is present.");
+}
+
+function sameMarkdown(actual, expected) {
+  return normalizeMarkdown(actual || "") === normalizeMarkdown(expected || "");
 }
 
 async function findAuthoredProjectUpdate({ client, projectId, runId }) {
@@ -516,80 +529,4 @@ function linearIssuesProducedIdentity(identity) {
 function stringIds(values) {
   if (!Array.isArray(values)) return [];
   return values.map((value) => String(value || "")).filter(Boolean);
-}
-
-export async function resumeFromArtifact({ client, project, shape, artifact, trace, replayed, onBeforeLinearMutation }) {
-  const packet = artifact.packet;
-
-  await onBeforeLinearMutation?.({ artifactKind: artifact.kind, runId: artifact.run_id, trace });
-  for (const update of packet?.discovery_issue_updates || []) {
-    if (!client.updateIssue) {
-      throw new Error("Linear client cannot update Discovery issue evidence.");
-    }
-    const discoveryKey = update.discovery_key || update.decompositionKey;
-    const expectedIssue = await findIssueByDecompositionKey(client, project.id, discoveryKey);
-    if (!expectedIssue || expectedIssue.id !== (update.issue_id || update.issueId)) {
-      throw new Error("Discovery issue update does not match the current project and discovery key.");
-    }
-    if (!issueHasLabel(expectedIssue, shape.issueLabels.discovery.id)) {
-      throw new Error("Discovery issue update target is missing the Discovery label.");
-    }
-    await client.updateIssue(expectedIssue.id, {
-      description: renderAuthoredIssueBody({
-        decompositionKey: discoveryKey,
-        issueBodyMarkdown: update.body_markdown,
-      }),
-      stateId: update.state_id || update.stateId,
-    });
-  }
-
-  const refreshedBeforeGate = await client.getProjectContext(project.id);
-  const content = setOpenQuestionsMarkdown(
-    refreshedBeforeGate.content || "",
-    packet.open_questions_markdown,
-  );
-  const discoveryIssues = discoveryIssuesForProject(refreshedBeforeGate, shape);
-  const openDiscoveryIssueCount = discoveryIssues.filter(isIssueOpen).length;
-  const hasRemainingOpenQuestions = packet.open_questions_markdown.trim() !== "";
-  const canReturnToPlanned = !hasRemainingOpenQuestions && openDiscoveryIssueCount === 0;
-  const labelIds = new Set((refreshedBeforeGate.labels || []).map((label) => label.id));
-  if (canReturnToPlanned) labelIds.delete(shape.projectLabels.hasOpenQuestions.id);
-  else labelIds.add(shape.projectLabels.hasOpenQuestions.id);
-
-  await client.updateProject(project.id, {
-    content,
-    labelIds: [...labelIds],
-    statusId: canReturnToPlanned ? shape.projectStatuses.planned.id : shape.projectStatuses.backlog.id,
-  });
-
-  const verifiedProject = await client.getProjectContext(project.id);
-  verifyOpenQuestionsMarkdown(verifiedProject, packet.open_questions_markdown);
-  const updateResult = await postAuthoredProjectUpdate({
-    client,
-    projectId: project.id,
-    runId: artifact.run_id,
-    projectUpdateMarkdown: packet.project_update_markdown,
-  });
-
-  recordSpan(trace, "create_linear_issues_or_pause_project", {
-    action: "resume_project",
-    replayed,
-    returned_to_planned: canReturnToPlanned,
-    open_discovery_issue_count: openDiscoveryIssueCount,
-    has_remaining_open_questions: hasRemainingOpenQuestions,
-  });
-  recordSpan(trace, "post_project_update", {
-    action: updateResult.created ? "created" : "reused",
-    run_id: artifact.run_id,
-    exact_authored_markdown: true,
-  });
-
-  return {
-    status: canReturnToPlanned ? "resumed" : "still_paused",
-    project: verifiedProject,
-    projectUpdate: updateResult.update,
-    openDiscoveryIssueCount,
-    hasRemainingOpenQuestions,
-    trace,
-  };
 }

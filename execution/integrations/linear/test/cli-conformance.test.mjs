@@ -25,6 +25,7 @@ const exampleConfigPath = path.join(realRepoRoot, "execution", "integrations", "
 
 function makeActiveRepo() {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "af-conf-active-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "af-conf-home-state-"));
   const target = path.join(repoRoot, "execution", "integrations", "linear", "config.example.json");
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(exampleConfigPath, target);
@@ -41,8 +42,8 @@ function makeActiveRepo() {
       teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ repoRoot }, registry);
-  return repoRoot;
+  writeDomainRegistry({ home }, registry);
+  return { repoRoot, home, configPath: target };
 }
 
 // Render every adopter-facing surface (home, curated help, doctor, gateway status, init's
@@ -67,17 +68,23 @@ async function renderAllAdopterSurfaces({ color, unicode }) {
     output,
   );
 
-  const activeRepo = makeActiveRepo();
-  const config = loadLinearConfig({ repoRoot: activeRepo });
+  const active = makeActiveRepo();
+  const config = loadLinearConfig({ repoRoot: active.repoRoot, configPath: active.configPath });
   const savedExit = process.exitCode;
-  await runGatewayCommand({ context: { config, repoRoot: activeRepo, output }, command: "gateway", args: ["status"] });
+  await runGatewayCommand({
+    context: { config, repoRoot: active.repoRoot, home: active.home, output },
+    command: "gateway",
+    args: ["status"],
+  });
   process.exitCode = savedExit;
-  fs.rmSync(activeRepo, { recursive: true, force: true });
+  fs.rmSync(active.repoRoot, { recursive: true, force: true });
+  fs.rmSync(active.home, { recursive: true, force: true });
 
   const savedExit2 = process.exitCode;
   await runFinalGate({
     config: {},
     repoRoot: process.cwd(),
+    home: fs.mkdtempSync(path.join(os.tmpdir(), "af-conf-final-home-")),
     cachePath: "linear-cache.json",
     domainId: "domain-one",
     output,

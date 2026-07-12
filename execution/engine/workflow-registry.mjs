@@ -7,7 +7,6 @@ const WORKFLOW_DEFINITIONS_BY_TYPE = new Map();
 const REQUIRED_DEFINITION_ARRAY_FIELDS = Object.freeze([
   "triggers",
   "roles",
-  "invocable_runtime_roles",
   "runtime_assignment_roles",
   "commit_effects",
 ]);

@@ -1,5 +1,4 @@
 import "./workflows/decomposition/definition.mjs";
-import "./workflows/execution/definition.mjs";
 import "./workflows/review/definition.mjs";
 import { getWorkflowDefinition, registeredWorkflowTypes } from "../../../engine/workflow-registry.mjs";
 

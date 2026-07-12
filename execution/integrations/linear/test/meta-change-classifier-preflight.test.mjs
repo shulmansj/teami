@@ -229,17 +229,6 @@ const FIXTURES = [
     surfaceIncludes: ["github_secret_hygiene"],
   },
   {
-    id: "supervisor_write_path_edit",
-    changes: [edit(
-      "execution/integrations/linear/src/local-supervisor.mjs",
-      "await githubTransport.createPullRequest({ title: 'production proposal from supervisor' });",
-    )],
-    expectedClass: "authority_change",
-    expectedMixed: ["meta_change", "authority_change"],
-    protectedIncludes: ["execution/integrations/linear/src/local-supervisor.mjs"],
-    surfaceIncludes: ["supervisor", "repo_write_authority"],
-  },
-  {
     id: "direct_production_transport_import",
     changes: [edit(
       "execution/integrations/linear/src/runtime-command.mjs",
@@ -496,10 +485,10 @@ test("unified diff parser preserves path and binary facts for fail-closed routin
 
 test("non-empty diff text that cannot be parsed fails closed", () => {
   const result = classifyUnifiedDiff([
-    "--- execution/integrations/linear/src/local-supervisor.mjs",
-    "+++ execution/integrations/linear/src/local-supervisor.mjs",
+    "--- execution/integrations/linear/src/foreground-runner.mjs",
+    "+++ execution/integrations/linear/src/foreground-runner.mjs",
     "@@",
-    "+await githubTransport.createPullRequest({ title: 'production proposal from supervisor' });",
+    "+await githubTransport.createPullRequest({ title: 'production proposal from runner' });",
   ].join("\n"));
   assert.equal(result.class, "unknown_sensitive");
   assert.equal(result.fail_closed, true);

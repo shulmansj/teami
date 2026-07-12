@@ -7,6 +7,7 @@ import {
   upsertDomainRecord,
   writeDomainRegistry,
 } from "../domain-registry.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 import {
   gitRepoResourceId,
   registerGitRepoResourceKind,
@@ -30,7 +31,7 @@ export async function runDomainCommand({
   args = [],
   runCommand = context?.runCommand ?? context?.githubDiscoveryRunCommand ?? defaultRunCommand,
 } = {}) {
-  const { output, repoRoot } = context;
+  const { output, repoRoot, home = resolveTeamiHome() } = context;
   const verb = commandVerb(command);
   agenticFactoryHeading(output, `domain ${verb}`);
 
@@ -39,7 +40,7 @@ export async function runDomainCommand({
       const parsed = parseDomainShowArgs(args);
       if (!parsed) return usageError(output, command);
       renderDomainGrantSet(
-        readDomainGrantSet({ repoRoot, domainId: parsed.domainId }),
+        readDomainGrantSet({ repoRoot, home, domainId: parsed.domainId }),
         output,
       );
       process.exitCode = 0;
@@ -51,6 +52,7 @@ export async function runDomainCommand({
       if (!parsed) return usageError(output, command);
       const result = await grantDomainGitRepoResource({
         repoRoot,
+        home,
         domainId: parsed.domainId,
         repoSlug: parsed.repoSlug,
         runCommand,
@@ -65,6 +67,7 @@ export async function runDomainCommand({
       if (!parsed) return usageError(output, command);
       const result = revokeDomainGitRepoResource({
         repoRoot,
+        home,
         domainId: parsed.domainId,
         repoSlug: parsed.repoSlug,
       });
@@ -87,10 +90,11 @@ export async function runDomainCommand({
 
 export function readDomainGrantSet({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   domainId,
 } = {}) {
   registerGitRepoResourceKind();
-  const { domain } = requireDomain({ repoRoot, domainId });
+  const { domain } = requireDomain({ repoRoot, home, domainId });
   return {
     domain,
     resources: gitRepoResources(domain),
@@ -99,16 +103,17 @@ export function readDomainGrantSet({
 
 export async function grantDomainGitRepoResource({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   domainId,
   repoSlug,
   runCommand = defaultRunCommand,
   registry = null,
-  writeRegistry = (nextRegistry) => writeDomainRegistry({ repoRoot }, nextRegistry),
+  writeRegistry = (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
 } = {}) {
   registerGitRepoResourceKind();
   const requested = parseGitHubRepoSlug(repoSlug);
   const requestedId = gitRepoResourceId(requested);
-  const currentRegistry = registry || readDomainRegistry({ repoRoot });
+  const currentRegistry = registry || readDomainRegistry({ home });
   if (!currentRegistry) throw new Error("domain_registry_missing");
   const domain = currentRegistry.domains.find((candidate) => candidate.id === domainId);
   if (!domain) throw new Error(`domain_unknown:${domainId}`);
@@ -144,7 +149,7 @@ export async function grantDomainGitRepoResource({
     }
   }
 
-  const resource = gitRepoResourceFromBinding(resolveGitHubRepoBinding({
+  const resource = gitRepoResourceFromBinding(await resolveGitHubRepoBinding({
     repoSlug: requested,
     runCommand,
   }));
@@ -164,15 +169,16 @@ export async function grantDomainGitRepoResource({
 
 export function revokeDomainGitRepoResource({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   domainId,
   repoSlug,
   registry = null,
-  writeRegistry = (nextRegistry) => writeDomainRegistry({ repoRoot }, nextRegistry),
+  writeRegistry = (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
 } = {}) {
   registerGitRepoResourceKind();
   const requested = parseGitHubRepoSlug(repoSlug);
   const requestedId = gitRepoResourceId(requested);
-  const currentRegistry = registry || readDomainRegistry({ repoRoot });
+  const currentRegistry = registry || readDomainRegistry({ home });
   if (!currentRegistry) throw new Error("domain_registry_missing");
   const domain = currentRegistry.domains.find((candidate) => candidate.id === domainId);
   if (!domain) throw new Error(`domain_unknown:${domainId}`);
@@ -205,12 +211,12 @@ export function revokeDomainGitRepoResource({
   });
 }
 
-export function resolveGitHubRepoBinding({
+export async function resolveGitHubRepoBinding({
   repoSlug,
   runCommand = defaultRunCommand,
 } = {}) {
   const requested = typeof repoSlug === "string" ? parseGitHubRepoSlug(repoSlug) : repoSlug;
-  const data = ghJsonWithAmbientAuth({
+  const data = await ghJsonWithAmbientAuth({
     runCommand,
     args: [
       "repo",
@@ -298,10 +304,12 @@ function renderRevokeResult(result, output) {
 
 function requireDomain({
   repoRoot,
+  home = resolveTeamiHome(),
   domainId,
 } = {}) {
+  void repoRoot;
   if (!nonEmptyString(domainId)) throw new Error("domain_missing");
-  const registry = readDomainRegistry({ repoRoot });
+  const registry = readDomainRegistry({ home });
   if (!registry) throw new Error("domain_registry_missing");
   const domain = registry.domains.find((candidate) => candidate.id === domainId);
   if (!domain) throw new Error(`domain_unknown:${domainId}`);

@@ -2,6 +2,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  writeAtomicFile,
+  writeFileAndFsync,
+} from "./atomic-file.mjs";
+export {
+  fsyncDirectoryAfterRename,
+  renameWithRetry,
+  writeFileAndFsync,
+} from "./atomic-file.mjs";
+
+import { resolveTeamiHome, teamiHomePaths } from "../integrations/linear/src/app-home.mjs";
+import {
   ENGINE_VERSION,
   LEGACY_RUN_ARTIFACT_SCHEMA_VERSION,
   RUN_ARTIFACT_SCHEMA_VERSION,
@@ -38,22 +49,30 @@ export const RUN_ARTIFACT_COMPATIBILITY = Object.freeze({
 export const RUN_ARTIFACT_KINDS = Object.freeze(["checkpoint", "pause", "commit", "resume"]);
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-export function defaultRunStoreDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "runs");
+export function defaultRunStoreDir({ home = resolveTeamiHome(), domainId } = {}) {
+  if (!domainId) throw new Error("domain_id is required for the local run artifact store.");
+  return path.join(teamiHomePaths({ home, domainId }).domainDir, "runs");
 }
 
-export function runArtifactPath({ runId, repoRoot = process.cwd(), runStoreDir } = {}) {
+export function runArtifactPath({
+  runId,
+  repoRoot = null,
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir,
+} = {}) {
+  void repoRoot;
   if (!runId || typeof runId !== "string") {
     throw new Error("run_id is required for the local run artifact store.");
   }
   if (!SAFE_RUN_ID_PATTERN.test(runId)) {
     throw new Error(`Invalid run_id for local run artifact store: ${runId}`);
   }
-  return path.join(runStoreDir || defaultRunStoreDir(repoRoot), `${runId}.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.json`);
 }
 
 export function readRunArtifact(options = {}) {
-  const filePath = runArtifactPath(options);
+  const filePath = resolveReadableRunArtifactPath(options);
   if (!fs.existsSync(filePath)) return null;
   const artifact = JSON.parse(fs.readFileSync(filePath, "utf8"));
   validateRunArtifact(artifact, options);
@@ -63,25 +82,20 @@ export function readRunArtifact(options = {}) {
 }
 
 export function writeRunArtifact(options = {}, artifact) {
-  const filePath = runArtifactPath(options);
+  const filePath = runArtifactPath({
+    ...options,
+    domainId: options.domainId || artifact?.domain_id || null,
+  });
   const normalized = normalizeRunArtifact(artifact, options);
   validateRunArtifact(normalized, options);
 
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const dirPath = path.dirname(filePath);
-  const tempPath = path.join(
-    dirPath,
-    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`,
-  );
-  try {
-    writeFileAndFsync(tempPath, `${JSON.stringify(normalized, null, 2)}\n`);
-    validateRunArtifact(JSON.parse(fs.readFileSync(tempPath, "utf8")), options);
-    renameWithRetry(tempPath, filePath);
-    fsyncDirectoryAfterRename(dirPath);
-  } catch (error) {
-    if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
-    throw error;
-  }
+  writeAtomicFile({
+    filePath,
+    contents: `${JSON.stringify(normalized, null, 2)}\n`,
+    validateTemp: (candidatePath) => {
+      validateRunArtifact(JSON.parse(fs.readFileSync(candidatePath, "utf8")), options);
+    },
+  });
 
   const readBack = readRunArtifact(options);
   if (JSON.stringify(readBack) !== JSON.stringify(normalized)) {
@@ -96,8 +110,14 @@ export function writeRunArtifact(options = {}, artifact) {
   return options.returnDurabilityResult ? result : filePath;
 }
 
-export function assertRunStoreWritable({ repoRoot = process.cwd(), runStoreDir } = {}) {
-  const dirPath = runStoreDir || defaultRunStoreDir(repoRoot);
+export function assertRunStoreWritable({
+  repoRoot = null,
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir,
+} = {}) {
+  void repoRoot;
+  const dirPath = runStoreDir || defaultRunStoreDir({ home, domainId });
   fs.mkdirSync(dirPath, { recursive: true });
   const probePath = path.join(
     dirPath,
@@ -273,48 +293,6 @@ function migrateLegacyRunArtifactForRead(artifact, options = {}) {
   return migrated;
 }
 
-export function writeFileAndFsync(filePath, contents, { flag = "w" } = {}) {
-  let fd = null;
-  let pendingError = null;
-  try {
-    fd = fs.openSync(filePath, flag);
-    fs.writeFileSync(fd, contents, "utf8");
-    fs.fsyncSync(fd);
-  } catch (error) {
-    pendingError = error;
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch (error) {
-        if (!pendingError) pendingError = error;
-      }
-    }
-  }
-  if (pendingError) throw pendingError;
-}
-
-export function fsyncDirectoryAfterRename(dirPath) {
-  if (process.platform === "win32") return false;
-  let fd = null;
-  let pendingError = null;
-  try {
-    fd = fs.openSync(dirPath, "r");
-    fs.fsyncSync(fd);
-  } catch (error) {
-    pendingError = error;
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch (error) {
-        if (!pendingError) pendingError = error;
-      }
-    }
-  }
-  if (pendingError) throw pendingError;
-  return true;
-}
 
 function isTerminalRunArtifactKind(kind) {
   return kind === "commit" || kind === "pause";
@@ -473,20 +451,16 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-export function renameWithRetry(tempPath, filePath) {
-  const retryable = new Set(["EPERM", "EACCES"]);
-  let lastError = null;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    try {
-      fs.renameSync(tempPath, filePath);
-      return;
-    } catch (error) {
-      lastError = error;
-      if (!retryable.has(error.code)) break;
-    }
+function resolveReadableRunArtifactPath(options = {}) {
+  if (options.runStoreDir || options.domainId) return runArtifactPath(options);
+  const direct = path.join(teamiHomePaths({ home: options.home || resolveTeamiHome() }).home, "runs", `${options.runId}.json`);
+  if (fs.existsSync(direct)) return direct;
+  const home = teamiHomePaths({ home: options.home || resolveTeamiHome() }).home;
+  const domainsDir = path.join(home, "domains");
+  if (!fs.existsSync(domainsDir)) return direct;
+  for (const domainId of fs.readdirSync(domainsDir)) {
+    const candidate = runArtifactPath({ ...options, home, domainId });
+    if (fs.existsSync(candidate)) return candidate;
   }
-  if (fs.existsSync(tempPath)) {
-    fs.rmSync(tempPath, { force: true });
-  }
-  throw lastError;
+  return direct;
 }

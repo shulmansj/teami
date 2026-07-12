@@ -7,7 +7,10 @@ import test from "node:test";
 
 import { getWorkflowDefinition } from "../../../engine/workflow-registry.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
-import { runTriggeredExecution } from "../src/trigger-runner.mjs";
+import {
+  registerExecutionWorkflowForTest,
+  runTriggeredExecutionForTest as runTriggeredExecution,
+} from "../src/trigger-runner.mjs";
 import { DOMAIN_REGISTRY_SCHEMA_VERSION } from "../src/domain-registry.mjs";
 import {
   parseRemediationMarker,
@@ -19,9 +22,17 @@ import {
   LINEAR_ISSUE_IN_REVIEW_EFFECT_ID,
 } from "../src/workflows/execution/effect-ids.mjs";
 
+registerExecutionWorkflowForTest();
+
+function tempExecutionRoot(prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  process.env.TEAMI_HOME = root;
+  return root;
+}
+
 test("runTriggeredExecution materializes, runs the loop, and reaches the generic commit applier", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-entry-"));
+  const tempRoot = tempExecutionRoot("teami-exec-entry-");
   const promptRoot = writeExecutionAcceptedPromptFixture(tempRoot);
   const store = createFakeStore();
   const runDeps = createRunDeps({ tempRoot, store });
@@ -58,9 +69,85 @@ test("runTriggeredExecution materializes, runs the loop, and reaches the generic
   assert.equal(promptRoot.endsWith(path.join("execution", "evals", "execution")), true);
 });
 
-test("execution definition run late-binds to runTriggeredExecution", async () => {
+test("runTriggeredExecution surfaces an execution pause as a Principal escalation pair", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-definition-run-"));
+  const tempRoot = tempExecutionRoot("teami-exec-pause-pair-");
+  writeExecutionAcceptedPromptFixture(tempRoot);
+  const store = createFakeStore();
+  const linearClient = capturingExecutionLinearClient(defaultIssueContext());
+
+  const result = await runPauseExecution({ tempRoot, store, linearClient });
+
+  assert.equal(result.status, "paused");
+  assert.equal(result.result.status, "paused");
+  assert.equal(result.result.reason, "product_questions");
+  assert.deepEqual(result.result.applied.map((effect) => effect.id), [ISSUE_NEEDS_PRINCIPAL_EFFECT_ID]);
+  assert.equal(linearClient.comments.length, 1);
+  assert.equal(linearClient.issueUpdates.length, 1);
+  assert.deepEqual(linearClient.issueUpdates[0].input, { stateId: "state-needs-principal" });
+  assert.equal(Object.hasOwn(linearClient.issueUpdates[0].input, "labelIds"), false);
+  assertCommentBeforeStatus(linearClient);
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
+  assert.equal(result.result.needs_principal_pair.outcome, "ok");
+  assert.equal(result.result.needs_principal_pair.comment.already_present, false);
+
+  const body = linearClient.comments[0].body;
+  assert.match(body, /Pause reason: product_questions\./);
+  assert.match(body, /Which launch segment should the implementation prioritize\?/);
+  assert.match(body, /Should beta-only behavior ship first\?/);
+  assert.match(body, /\(code: `product_questions`\)/);
+  assert.match(body, /move this issue back to Todo/);
+  assert.equal(result.result.artifact.pause_packet.open_questions_markdown, pauseProducedContent().open_questions_markdown);
+});
+
+test("runTriggeredExecution surfaces pending pause escalation and replays without duplicate comments", async () => {
+  registerGitRepoResourceKind();
+  const tempRoot = tempExecutionRoot("teami-exec-pause-pending-");
+  writeExecutionAcceptedPromptFixture(tempRoot);
+  const store = createFakeStore();
+  const linearClient = capturingExecutionLinearClient(defaultIssueContext());
+  linearClient.failNextUpdate = true;
+
+  const first = await runPauseExecution({ tempRoot, store, linearClient });
+
+  assert.equal(first.result.status, "pending");
+  assert.equal(first.status, "dead_letter");
+  assert.equal(first.result.reason, "simulated_status_failure");
+  assert.notEqual(first.result.status, "paused");
+  assert.equal(linearClient.comments.length, 1);
+  assert.equal(linearClient.issueStateName("issue-1"), "Ready");
+
+  const replay = await runPauseExecution({ tempRoot, store, linearClient });
+
+  assert.equal(replay.status, "paused");
+  assert.equal(replay.result.status, "paused");
+  assert.equal(linearClient.comments.length, 1);
+  assert.equal(replay.result.needs_principal_pair.comment.already_present, true);
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
+});
+
+test("runTriggeredExecution surfaces failed-closed pause escalation at runner and wake layers", async () => {
+  registerGitRepoResourceKind();
+  const tempRoot = tempExecutionRoot("teami-exec-pause-failed-");
+  writeExecutionAcceptedPromptFixture(tempRoot);
+  const store = createFakeStore();
+  const linearClient = capturingExecutionLinearClient(defaultIssueContext());
+  linearClient.updateIssue = undefined;
+
+  const result = await runPauseExecution({ tempRoot, store, linearClient });
+
+  assert.equal(result.result.status, "failed_closed");
+  assert.equal(result.status, "rejected");
+  assert.equal(result.result.reason, "linear_update_issue_unavailable");
+  assert.deepEqual(result.result.failureReasons, ["linear_update_issue_unavailable"]);
+  assert.notEqual(result.result.status, "paused");
+  assert.equal(linearClient.comments.length, 1);
+  assert.equal(linearClient.issueUpdates.length, 0);
+});
+
+test("execution definition run late-binds to the production readiness gate", async () => {
+  registerGitRepoResourceKind();
+  const tempRoot = tempExecutionRoot("teami-exec-definition-run-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const store = createFakeStore();
   const runDeps = createRunDeps({ tempRoot, store });
@@ -68,14 +155,15 @@ test("execution definition run late-binds to runTriggeredExecution", async () =>
 
   const result = await definition.run(runOptions({ repoRoot: tempRoot, store, runDeps }));
 
-  assert.equal(result.status, "completed");
-  assert.equal(result.result.status, "completed");
-  assert.equal(result.result.applied[0].id, GIT_REPO_COMMIT_EFFECT_ID);
+  assert.deepEqual(result, {
+    status: "failed_closed",
+    reason: "product_repo_execution_not_released",
+  });
 });
 
 test("runTriggeredExecution materializes only the resource_target selected repo", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-selected-"));
+  const tempRoot = tempExecutionRoot("teami-exec-selected-");
   const repoOne = path.join(tempRoot, "repo-one");
   const repoTwo = path.join(tempRoot, "repo-two");
   fs.mkdirSync(repoOne, { recursive: true });
@@ -131,7 +219,7 @@ test("runTriggeredExecution materializes only the resource_target selected repo"
 
 test("runTriggeredExecution files a remediation blocker on a red execution profile preflight", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-preflight-red-"));
+  const tempRoot = tempExecutionRoot("teami-exec-preflight-red-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const store = createFakeStore();
   const originalIssue = defaultIssueContext({
@@ -178,7 +266,7 @@ test("runTriggeredExecution files a remediation blocker on a red execution profi
   assert.equal(linearClient.createdIssues.length, 1);
   assert.equal(linearClient.issueUpdates.length, 0);
   assert.equal(originalIssue.state.id, "state-ready");
-  assert.notEqual(originalIssue.state.id, "state-blocked");
+  assert.notEqual(originalIssue.state.id, "state-needs-principal");
 
   const remediation = linearClient.createdIssues[0];
   assert.equal(remediation.teamId, "team-1");
@@ -228,7 +316,7 @@ test("runTriggeredExecution files a remediation blocker on a red execution profi
 
 test("runTriggeredExecution dedups open remediation blockers by marker", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-remediation-dedup-"));
+  const tempRoot = tempExecutionRoot("teami-exec-remediation-dedup-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const linearClient = capturingExecutionLinearClient([
     defaultIssueContext({ id: "issue-1", identifier: "AF-1" }),
@@ -273,7 +361,7 @@ test("runTriggeredExecution dedups open remediation blockers by marker", async (
 
 test("runTriggeredExecution caps remediation retry from durable blocker relations", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-remediation-cap-"));
+  const tempRoot = tempExecutionRoot("teami-exec-remediation-cap-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const previousMarker = {
     v: 1,
@@ -305,7 +393,11 @@ test("runTriggeredExecution caps remediation retry from durable blocker relation
   assert.deepEqual(result.result.applied.map((effect) => effect.id), [ISSUE_NEEDS_PRINCIPAL_EFFECT_ID]);
   assert.equal(linearClient.createdIssues.length, 0);
   assert.equal(linearClient.issueUpdates.length, 1);
-  assert.equal(linearClient.issueStateName("issue-1"), "Blocked");
+  assert.equal(linearClient.comments.length, 1);
+  assert.match(linearClient.comments[0].body, /remediation_retry_cap_exceeded/);
+  assert.match(linearClient.comments[0].body, /Prior remediation issue: AF-R1 \/ repair-previous/);
+  assert.match(linearClient.comments[0].body, /Resource: repo-1/);
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
   assert.deepEqual(lifecycleAttributes(result.result.trace), {
     original_issue_id: "issue-1",
     remediation_issue_id: "repair-previous",
@@ -318,7 +410,7 @@ test("runTriggeredExecution caps remediation retry from durable blocker relation
 
 test("runTriggeredExecution counts cancelled remediation blockers toward the cap", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-remediation-cancelled-cap-"));
+  const tempRoot = tempExecutionRoot("teami-exec-remediation-cancelled-cap-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const cancelledRemediation = remediationIssueContext({
     id: "repair-cancelled",
@@ -346,17 +438,17 @@ test("runTriggeredExecution counts cancelled remediation blockers toward the cap
 
   assert.equal(result.result.reason, "remediation_retry_cap_exceeded");
   assert.equal(linearClient.createdIssues.length, 0);
-  assert.equal(linearClient.issueStateName("issue-1"), "Blocked");
+  assert.equal(linearClient.comments.length, 1);
+  assert.match(linearClient.comments[0].body, /repair-cancelled/);
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
   assert.equal(lifecycleAttributes(result.result.trace).retry_cycle, 2);
 });
 
-test("runTriggeredExecution escalates instead of filing when merge-to-Done automation is missing", async () => {
+test("runTriggeredExecution files remediation without external merge-to-Done automation", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-remediation-merge-gate-"));
+  const tempRoot = tempExecutionRoot("teami-exec-remediation-merge-gate-");
   writeExecutionAcceptedPromptFixture(tempRoot);
-  const linearClient = capturingExecutionLinearClient(defaultIssueContext(), {
-    mergeDoneOk: false,
-  });
+  const linearClient = capturingExecutionLinearClient(defaultIssueContext());
 
   const result = await runRedPreflight({
     tempRoot,
@@ -365,24 +457,23 @@ test("runTriggeredExecution escalates instead of filing when merge-to-Done autom
     verdict: redPreflightVerdict(),
   });
 
-  assert.equal(result.result.status, "completed");
-  assert.equal(result.result.reason, "merge_done_automation_missing");
-  assert.deepEqual(result.result.applied.map((effect) => effect.id), [ISSUE_NEEDS_PRINCIPAL_EFFECT_ID]);
-  assert.equal(linearClient.createdIssues.length, 0);
-  assert.equal(linearClient.issueStateName("issue-1"), "Blocked");
+  assert.equal(result.result.status, "waiting");
+  assert.equal(result.result.reason, "dependency_blocked");
+  assert.equal(linearClient.createdIssues.length, 1);
+  assert.equal(linearClient.createdIssues[0].title, "Repair execution readiness for AF-1");
   assert.deepEqual(lifecycleAttributes(result.result.trace), {
     original_issue_id: "issue-1",
-    remediation_issue_id: null,
+    remediation_issue_id: linearClient.createdIssues[0].id,
     resource_id: "repo-1",
     failure_signature: result.result.remediation.marker.failure_signature,
     retry_cycle: 1,
-    outcome: "merge_done_automation_missing",
+    outcome: "filed",
   });
 });
 
 test("runTriggeredExecution emits filing and retry outcome lifecycle trace attributes", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-remediation-trace-"));
+  const tempRoot = tempExecutionRoot("teami-exec-remediation-trace-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const linearClient = capturingExecutionLinearClient(defaultIssueContext());
   const filing = await runRedPreflight({
@@ -431,7 +522,7 @@ test("runTriggeredExecution emits filing and retry outcome lifecycle trace attri
 
 test("runTriggeredExecution uses readiness repair preflight profile for marker-bearing issues", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-repair-profile-"));
+  const tempRoot = tempExecutionRoot("teami-exec-repair-profile-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const store = createFakeStore();
   const preflightCalls = [];
@@ -470,6 +561,50 @@ test("runTriggeredExecution uses readiness repair preflight profile for marker-b
   assert.equal(preflightCalls[0].skipReadiness, true);
 });
 
+test("runTriggeredExecution passes only the run's engine-owned temp env to the readiness preflight", async () => {
+  registerGitRepoResourceKind();
+  const tempRoot = tempExecutionRoot("teami-exec-preflight-temp-env-");
+  writeExecutionAcceptedPromptFixture(tempRoot);
+  const store = createFakeStore();
+  const preflightCalls = [];
+  const runTempDir = path.join(tempRoot, "run-tmp");
+  const runDeps = createRunDeps({
+    tempRoot,
+    store,
+    handleEnvAugment: {
+      HOME: path.join(tempRoot, "contained-home"),
+      TMPDIR: runTempDir,
+      TMP: runTempDir,
+      TEMP: runTempDir,
+    },
+  });
+  runDeps.executionProfilePreflight = async (input) => {
+    preflightCalls.push(input);
+    return {
+      ok: true,
+      resource_id: input.resourceId,
+      strict_baseline_green: false,
+    };
+  };
+
+  const result = await runTriggeredExecution(runOptions({
+    repoRoot: tempRoot,
+    store,
+    runDeps,
+  }));
+
+  assert.equal(result.status, "completed");
+  assert.equal(preflightCalls.length, 1);
+  // The readiness commands see the worker's per-run temp; the rest of the
+  // contained worker env (HOME etc.) stays off the preflight, whose authority
+  // probes prove ambient host authority.
+  assert.deepEqual(preflightCalls[0].envAugment, {
+    TMPDIR: runTempDir,
+    TMP: runTempDir,
+    TEMP: runTempDir,
+  });
+});
+
 test("runTriggeredExecution rejects multi-repo missing or invalid resource_target before materialization", async () => {
   registerGitRepoResourceKind();
   const cases = [
@@ -486,7 +621,7 @@ test("runTriggeredExecution rejects multi-repo missing or invalid resource_targe
   ];
 
   for (const fixture of cases) {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), `teami-exec-${fixture.name}-target-`));
+    const tempRoot = tempExecutionRoot(`teami-exec-${fixture.name}-target-`);
     writeExecutionAcceptedPromptFixture(tempRoot);
     const store = createFakeStore();
     const runDeps = createRunDeps({ tempRoot, store });
@@ -524,6 +659,7 @@ function runOptions({
   orchestratorTurnExecutor = null,
 } = {}) {
   return {
+    executionReadiness: () => ({ ok: true }),
     issueId,
     domainContext: selectedDomainContext,
     registry,
@@ -566,8 +702,9 @@ function runOptions({
     cache: {
       workspaceId: "workspace-1",
       teamId: "team-1",
+      app_identity_id: "app-viewer-1",
       issueStatuses: {
-        blocked: "state-blocked",
+        needs_principal: "state-needs-principal",
         todo: "state-ready",
       },
       issueLabels: {
@@ -578,7 +715,8 @@ function runOptions({
       },
     },
     repoRoot,
-    runStoreDir: path.join(repoRoot, ".teami", "runs"),
+    home: repoRoot,
+    runStoreDir: path.join(repoRoot, "domains", "domain-1", "runs"),
     runtimeExecutor: {
       async executeSubagent() {
         throw new Error("subagent executor should not be called by this one-turn fixture");
@@ -600,6 +738,46 @@ function runOptions({
     })),
     runDeps,
   };
+}
+
+async function runPauseExecution({ tempRoot, store, linearClient, issueId = "issue-1" }) {
+  const runDeps = createRunDeps({ tempRoot, store });
+  return runTriggeredExecution(runOptions({
+    repoRoot: tempRoot,
+    store,
+    runDeps,
+    issueId,
+    linearClient,
+    orchestratorTurnExecutor: async () => ({
+      controlAction: { action: "terminate", outcome: "pause", reason: "product_questions" },
+      producedContent: pauseProducedContent(),
+      evidence: null,
+      sessionHandle: null,
+    }),
+  }));
+}
+
+function pauseProducedContent() {
+  return {
+    context_digest: "The agent cannot choose a launch segment without a Principal decision.",
+    source_refs: [{ kind: "linear_issue", id: "issue-1" }],
+    assumptions: ["The implementation depends on the selected launch segment."],
+    constraints: ["Do not choose a segment without Principal approval."],
+    risks: ["Choosing the wrong segment would change the implementation path."],
+    project_update_markdown: "Paused while the Principal answers the launch-segment question.",
+    open_questions_markdown: [
+      "- Which launch segment should the implementation prioritize?",
+      "- Should beta-only behavior ship first?",
+    ].join("\n"),
+  };
+}
+
+function assertCommentBeforeStatus(linearClient) {
+  const commentIndex = linearClient.events.findIndex((event) => event.method === "createIssueComment");
+  const statusIndex = linearClient.events.findIndex((event) => event.method === "updateIssue");
+  assert.ok(commentIndex >= 0, "expected a Linear comment write");
+  assert.ok(statusIndex >= 0, "expected a Linear status write");
+  assert.ok(commentIndex < statusIndex, "pause escalation must comment before moving status");
 }
 
 function defaultIssueContext(overrides = {}) {
@@ -696,13 +874,16 @@ function blocksRelation({ blocker, dependent }) {
   };
 }
 
-function capturingExecutionLinearClient(issueContexts, { mergeDoneOk = true } = {}) {
+function capturingExecutionLinearClient(issueContexts) {
   const createdIssues = [];
   const relations = [];
   const issueUpdates = [];
+  const comments = [];
+  const events = [];
   const states = new Map([
     ["state-ready", { id: "state-ready", name: "Ready", type: "unstarted", teamId: "team-1" }],
-    ["state-blocked", { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" }],
+    ["state-needs-principal", { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" }],
+    ["state-needs-principal", { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" }],
     ["state-in-review", { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" }],
     ["state-done", { id: "state-done", name: "Done", type: "completed", teamId: "team-1" }],
     ["state-canceled", { id: "state-canceled", name: "Won't Fix", type: "canceled", teamId: "team-1" }],
@@ -724,10 +905,15 @@ function capturingExecutionLinearClient(issueContexts, { mergeDoneOk = true } = 
     createdIssues,
     relations,
     issueUpdates,
+    comments,
+    events,
+    failNextUpdate: false,
     async getIssueContext(issueId) {
+      events.push({ method: "getIssueContext", issueId });
       return issueView(issueId);
     },
     async getIssue(issueId) {
+      events.push({ method: "getIssue", issueId });
       return issueView(issueId);
     },
     async listIssues({ teamId = null, projectId = null, query = null, stateId = null, labelId = null } = {}) {
@@ -784,14 +970,38 @@ function capturingExecutionLinearClient(issueContexts, { mergeDoneOk = true } = 
       };
     },
     async updateIssue(issueId, input) {
+      events.push({ method: "updateIssue", issueId, input });
       issueUpdates.push({ issueId, input });
       const issue = issues.get(issueId);
       if (!issue) throw new Error(`unknown issue: ${issueId}`);
+      if (this.failNextUpdate) {
+        this.failNextUpdate = false;
+        throw new Error("simulated_status_failure");
+      }
       if (input.stateId) issue.state = states.get(input.stateId) || { id: input.stateId };
       if (Array.isArray(input.labelIds)) {
         issue.labels = input.labelIds.map((labelId) => labels.get(labelId) || { id: labelId });
       }
       return issueView(issueId);
+    },
+    async listIssueComments(issueId) {
+      events.push({ method: "listIssueComments", issueId });
+      if (!issues.has(issueId)) throw new Error(`unknown issue: ${issueId}`);
+      return comments
+        .filter((comment) => comment.issueId === issueId)
+        .map((comment) => ({ ...comment, user: { ...comment.user } }));
+    },
+    async createIssueComment(issueId, body) {
+      events.push({ method: "createIssueComment", issueId, body });
+      if (!issues.has(issueId)) throw new Error(`unknown issue: ${issueId}`);
+      const comment = {
+        id: `linear-comment-${comments.length + 1}`,
+        issueId,
+        body,
+        user: { id: "app-viewer-1", name: "Teami App" },
+      };
+      comments.push(comment);
+      return { ...comment };
     },
     async findIssueLabelsByName(name, teamId) {
       return [...labels.values()]
@@ -799,14 +1009,11 @@ function capturingExecutionLinearClient(issueContexts, { mergeDoneOk = true } = 
         .filter((label) => !name || label.name === name);
     },
     async listWorkflowStates(teamId) {
+      events.push({ method: "listWorkflowStates", teamId });
       return [...states.values()].filter((state) => !teamId || state.teamId === teamId);
     },
     async getTeamGitAutomationSettings(teamId) {
-      assert.equal(teamId, "team-1");
-      return {
-        mergeWorkflowState: mergeDoneOk ? states.get("state-done") : states.get("state-in-review"),
-        gitAutomationStates: [],
-      };
+      throw new Error("execution remediation should not inspect external merge-to-Done automation");
     },
     setIssueState(issueId, stateId) {
       const issue = issues.get(issueId);
@@ -881,7 +1088,7 @@ function capturingExecutionLinearClient(issueContexts, { mergeDoneOk = true } = 
   }
 }
 
-function createRunDeps({ tempRoot, store, workingDirsByResourceId = {} }) {
+function createRunDeps({ tempRoot, store, workingDirsByResourceId = {}, handleEnvAugment = null }) {
   const calls = [];
   const runDeps = {
     materializeCalls: [],
@@ -904,6 +1111,7 @@ function createRunDeps({ tempRoot, store, workingDirsByResourceId = {} }) {
           owner: selected?.binding?.owner || "acme",
           repo: selected?.binding?.repo || "product",
           default_branch: selected?.binding?.default_branch || "main",
+          ...(handleEnvAugment ? { envAugment: handleEnvAugment } : {}),
         },
       };
       return {
@@ -980,7 +1188,7 @@ function fakeEffect(effectId, calls, identity) {
       return { ok: true, identity };
     },
     async verify() {
-      return { ok: true };
+      return { ok: true, identity };
     },
   };
 }
@@ -1107,7 +1315,7 @@ function domainRegistry({ resources = [gitRepoResource()] } = {}) {
         team_name_last_seen_at: "2026-06-26T00:00:00.000Z",
         provisioned_by_teami: true,
         webhook_id: "webhook-1",
-        cache_path: ".teami/domains/domain-1/linear.json",
+        cache_path: "domains/domain-1/linear.json",
       },
       resources,
       policy_profile: "default",
@@ -1162,7 +1370,7 @@ function executionConfig() {
       },
       issue: {
         statuses: {
-          blocked: { name: "Blocked", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
         },
         labels: {
           work_type_code: "Code",

@@ -39,16 +39,43 @@ const ISSUE_LABEL_FIELDS = `
   }
 `;
 
+// Label CRUD paths (find/create/update) read the metadata fields so setup can
+// reconcile description and group membership. Issue/project queries embed the
+// lean shapes above instead: every label of every issue would otherwise pay
+// the extra query complexity for fields only provisioning consumes.
+const PROJECT_LABEL_DETAIL_FIELDS = `
+  ${PROJECT_LABEL_FIELDS}
+  description
+  color
+  isGroup
+  parent {
+    id
+  }
+`;
+
+const ISSUE_LABEL_DETAIL_FIELDS = `
+  ${ISSUE_LABEL_FIELDS}
+  description
+  color
+  isGroup
+  parent {
+    id
+  }
+`;
+
 const PROJECT_STATUS_FIELDS = `
   id
   name
   type
+  position
 `;
 
 const WORKFLOW_STATE_FIELDS = `
   id
   name
   type
+  description
+  position
   team {
     id
   }
@@ -143,6 +170,18 @@ const ISSUE_WITH_RELATIONS_FIELDS = `
     nodes {
       ${ISSUE_RELATION_FIELDS}
     }
+  }
+`;
+
+const ISSUE_COMMENT_FIELDS = `
+  id
+  body
+  createdAt
+  updatedAt
+  user {
+    id
+    name
+    displayName
   }
 `;
 
@@ -302,11 +341,12 @@ export function createLinearGraphqlClient({
         query VerifyLinearAuth {
           viewer {
             id
+            name
           }
         }
       `);
     if (!data.viewer?.id) throw new Error("Linear GraphQL auth verification failed.");
-    return { ok: true, viewerId: data.viewer.id };
+    return { ok: true, viewerId: data.viewer.id, viewerName: data.viewer.name || null };
   }
 
   async function getOrganization() {
@@ -377,7 +417,7 @@ export function createLinearGraphqlClient({
         query ProjectLabels($after: String, $first: Int!, $filter: ProjectLabelFilter) {
           projectLabels(first: $first, after: $after, includeArchived: false, filter: $filter) {
             nodes {
-              ${PROJECT_LABEL_FIELDS}
+              ${PROJECT_LABEL_DETAIL_FIELDS}
             }
             pageInfo {
               hasNextPage
@@ -399,7 +439,7 @@ export function createLinearGraphqlClient({
           projectLabelCreate(input: $input) {
             success
             projectLabel {
-              ${PROJECT_LABEL_FIELDS}
+              ${PROJECT_LABEL_DETAIL_FIELDS}
             }
           }
         }
@@ -414,6 +454,35 @@ export function createLinearGraphqlClient({
     );
   }
 
+  async function updateProjectLabel(id, input = {}) {
+    const data = await request(
+      `
+        mutation UpdateProjectLabel($id: String!, $input: ProjectLabelUpdateInput!) {
+          projectLabelUpdate(id: $id, input: $input) {
+            success
+            projectLabel {
+              ${PROJECT_LABEL_DETAIL_FIELDS}
+            }
+          }
+        }
+      `,
+      {
+        id,
+        input: pickDefined({
+          name: input.name,
+          description: input.description,
+          color: input.color,
+        }),
+      },
+    );
+    return requirePayload(
+      data.projectLabelUpdate,
+      "projectLabel",
+      normalizeProjectLabel,
+      "Linear project label update",
+    );
+  }
+
   async function findIssueLabelsByName(name, teamId) {
     const filter = pickDefined({
       ...(name ? { name: { eq: name } } : {}),
@@ -424,7 +493,7 @@ export function createLinearGraphqlClient({
         query IssueLabels($after: String, $first: Int!, $filter: IssueLabelFilter) {
           issueLabels(first: $first, after: $after, includeArchived: false, filter: $filter) {
             nodes {
-              ${ISSUE_LABEL_FIELDS}
+              ${ISSUE_LABEL_DETAIL_FIELDS}
             }
             pageInfo {
               hasNextPage
@@ -446,7 +515,7 @@ export function createLinearGraphqlClient({
           issueLabelCreate(input: $input) {
             success
             issueLabel {
-              ${ISSUE_LABEL_FIELDS}
+              ${ISSUE_LABEL_DETAIL_FIELDS}
             }
           }
         }
@@ -457,6 +526,8 @@ export function createLinearGraphqlClient({
           teamId: input.teamId,
           description: input.description,
           color: input.color,
+          parentId: input.parentId,
+          isGroup: input.isGroup,
         }),
       },
     );
@@ -466,6 +537,52 @@ export function createLinearGraphqlClient({
       normalizeIssueLabel,
       "Linear issue label creation",
     );
+  }
+
+  async function updateIssueLabel(id, input = {}) {
+    const data = await request(
+      `
+        mutation UpdateIssueLabel($id: String!, $input: IssueLabelUpdateInput!) {
+          issueLabelUpdate(id: $id, input: $input) {
+            success
+            issueLabel {
+              ${ISSUE_LABEL_DETAIL_FIELDS}
+            }
+          }
+        }
+      `,
+      {
+        id,
+        input: pickDefined({
+          name: input.name,
+          description: input.description,
+          color: input.color,
+          parentId: input.parentId,
+          isGroup: input.isGroup,
+        }),
+      },
+    );
+    return requirePayload(
+      data.issueLabelUpdate,
+      "issueLabel",
+      normalizeIssueLabel,
+      "Linear issue label update",
+    );
+  }
+
+  async function archiveIssueLabel(id) {
+    const data = await request(
+      `
+        mutation ArchiveIssueLabel($id: String!) {
+          issueLabelRetire(id: $id) {
+            success
+          }
+        }
+      `,
+      { id },
+    );
+    if (data.issueLabelRetire?.success !== true) throw new Error("Linear issue label archive failed.");
+    return { ok: true };
   }
 
   async function createWorkflowState(input = {}) {
@@ -487,6 +604,7 @@ export function createLinearGraphqlClient({
           teamId: input.teamId,
           color: input.color,
           description: input.description,
+          position: input.position,
         }),
       },
     );
@@ -496,6 +614,51 @@ export function createLinearGraphqlClient({
       normalizeWorkflowState,
       "Linear workflow state creation",
     );
+  }
+
+  async function updateWorkflowState(id, input = {}) {
+    const data = await request(
+      `
+        mutation UpdateWorkflowState($id: String!, $input: WorkflowStateUpdateInput!) {
+          workflowStateUpdate(id: $id, input: $input) {
+            success
+            workflowState {
+              ${WORKFLOW_STATE_FIELDS}
+            }
+          }
+        }
+      `,
+      {
+        id,
+        input: pickDefined({
+          name: input.name,
+          description: input.description,
+          color: input.color,
+          position: input.position,
+        }),
+      },
+    );
+    return requirePayload(
+      data.workflowStateUpdate,
+      "workflowState",
+      normalizeWorkflowState,
+      "Linear workflow state update",
+    );
+  }
+
+  async function archiveWorkflowState(id) {
+    const data = await request(
+      `
+        mutation ArchiveWorkflowState($id: String!) {
+          workflowStateArchive(id: $id) {
+            success
+          }
+        }
+      `,
+      { id },
+    );
+    if (data.workflowStateArchive?.success !== true) throw new Error("Linear workflow state archive failed.");
+    return { ok: true };
   }
 
   async function listProjectStatuses() {
@@ -516,6 +679,38 @@ export function createLinearGraphqlClient({
       getConnection: (data) => data.projectStatuses,
       normalize: normalizeProjectStatus,
     });
+  }
+
+  async function createProjectStatus(input = {}) {
+    const data = await request(
+      `
+        mutation CreateProjectStatus($input: ProjectStatusCreateInput!) {
+          projectStatusCreate(input: $input) {
+            success
+            status {
+              ${PROJECT_STATUS_FIELDS}
+            }
+          }
+        }
+      `,
+      {
+        input: pickDefined({
+          name: input.name,
+          color: input.color,
+          position: input.position,
+          type: input.type,
+          description: input.description,
+          id: input.id,
+          indefinite: input.indefinite,
+        }),
+      },
+    );
+    return requirePayload(
+      data.projectStatusCreate,
+      "status",
+      normalizeProjectStatus,
+      "Linear project status creation",
+    );
   }
 
   async function listWebhooks({ teamId = null } = {}) {
@@ -813,6 +1008,24 @@ export function createLinearGraphqlClient({
     );
   }
 
+  async function getProject(id) {
+    if (typeof id !== "string" || id.trim() === "") {
+      throw new Error("projectId is required to load a Linear project.");
+    }
+    const data = await request(
+      `
+        query ProjectById($projectId: String!) {
+          project(id: $projectId) {
+            ${PROJECT_FIELDS}
+          }
+        }
+      `,
+      { projectId: id },
+    );
+    if (!data.project?.id) throw new Error(`Linear project ${id} was not found.`);
+    return normalizeProjectBase(data.project);
+  }
+
   async function archiveProject(projectId) {
     const data = await request(
       `
@@ -1009,7 +1222,8 @@ export function createLinearGraphqlClient({
       after = nextCursor(data.project.issues, "project issues");
     } while (after);
 
-    return { ...project, issues };
+    const comments = (await listComments({ projectId })).map(agentVisibleProjectComment);
+    return { ...project, comments, issues };
   }
 
   async function listProjectIssues(projectId) {
@@ -1032,6 +1246,110 @@ export function createLinearGraphqlClient({
     );
     if (!data.issue?.id) throw new Error(`Linear issue ${issueId} was not found.`);
     return normalizeIssue(data.issue);
+  }
+
+  async function listComments(target = {}) {
+    const commentTarget = resolveCommentTarget(target, "list");
+    // Project comments are NOT exposed on `project.comments` — that connection does not
+    // surface directly-attached project comments (grounded live: introspection + create/read
+    // against the Linear API, 2026-07-07). They are read via the top-level `comments`
+    // connection filtered by project. Issue comments still use `issue(id).comments`.
+    if (commentTarget.root === "project") {
+      return listProjectComments(commentTarget.id);
+    }
+    const comments = [];
+    let after = null;
+    do {
+      const data = await request(
+        `
+          query ${commentTarget.queryName}($${commentTarget.key}: String!, $after: String, $first: Int!) {
+            ${commentTarget.root}(id: $${commentTarget.key}) {
+              id
+              comments(first: $first, after: $after) {
+                nodes {
+                  ${ISSUE_COMMENT_FIELDS}
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }
+        `,
+        { [commentTarget.key]: commentTarget.id, after, first: PAGE_SIZE },
+      );
+      if (!data[commentTarget.root]?.id) {
+        throw new Error(`Linear ${commentTarget.label} ${commentTarget.id} was not found.`);
+      }
+      const connection = data[commentTarget.root].comments;
+      if (!connection) {
+        throw new Error(`Linear ${commentTarget.label} comment list did not return a comment connection.`);
+      }
+      comments.push(...connection.nodes.map(normalizeComment));
+      after = nextCursor(connection, `${commentTarget.label} comments`);
+    } while (after);
+    return comments.reverse();
+  }
+
+  async function listProjectComments(projectId) {
+    const comments = [];
+    let after = null;
+    do {
+      const data = await request(
+        `
+          query ProjectComments($projectId: ID!, $after: String, $first: Int!) {
+            comments(filter: { project: { id: { eq: $projectId } } }, first: $first, after: $after) {
+              nodes {
+                ${ISSUE_COMMENT_FIELDS}
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        `,
+        { projectId, after, first: PAGE_SIZE },
+      );
+      const connection = data.comments;
+      if (!connection) {
+        throw new Error("Linear project comment list did not return a comment connection.");
+      }
+      comments.push(...connection.nodes.map(normalizeComment));
+      after = nextCursor(connection, "project comments");
+    } while (after);
+    // Newest-first, deterministic (the top-level comments connection order is not guaranteed).
+    return comments.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  }
+
+  async function listIssueComments(issueId) {
+    return listComments({ issueId });
+  }
+
+  async function createComment(target = {}, body) {
+    const commentTarget = resolveCommentTarget(target, "create");
+    if (typeof body !== "string" || body.trim() === "") {
+      throw new Error("body is required to create a Linear comment.");
+    }
+    const data = await request(
+      `
+        mutation CreateIssueComment($input: CommentCreateInput!) {
+          commentCreate(input: $input) {
+            success
+            comment {
+              ${ISSUE_COMMENT_FIELDS}
+            }
+          }
+        }
+      `,
+      { input: { [commentTarget.key]: commentTarget.id, body } },
+    );
+    return requirePayload(data.commentCreate, "comment", normalizeComment, "Linear comment creation");
+  }
+
+  async function createIssueComment(issueId, body) {
+    return createComment({ issueId }, body);
   }
 
   async function listIssues({
@@ -1289,10 +1607,16 @@ export function createLinearGraphqlClient({
     createTeam,
     findProjectLabelsByName,
     createProjectLabel,
+    updateProjectLabel,
     findIssueLabelsByName,
     createIssueLabel,
+    updateIssueLabel,
+    archiveIssueLabel,
     createWorkflowState,
+    updateWorkflowState,
+    archiveWorkflowState,
     listProjectStatuses,
+    createProjectStatus,
     listWebhooks,
     createWebhook,
     updateWebhook,
@@ -1304,6 +1628,7 @@ export function createLinearGraphqlClient({
     updateTemplate,
     createProject,
     updateProject,
+    getProject,
     archiveProject,
     listPlannedProjectCandidates,
     listReadyIssueCandidates,
@@ -1312,6 +1637,10 @@ export function createLinearGraphqlClient({
     listProjectIssues,
     getIssueContext,
     getIssue: getIssueContext,
+    listComments,
+    listIssueComments,
+    createComment,
+    createIssueComment,
     listIssues,
     searchIssues,
     createIssue,
@@ -1335,6 +1664,14 @@ export function createLinearGraphqlClient({
     } while (after);
     return results;
   }
+}
+
+export function createLinearProjectStatusAdminClient(options = {}) {
+  const client = createLinearGraphqlClient(options);
+  return {
+    getOrganization: client.getOrganization,
+    createProjectStatus: client.createProjectStatus,
+  };
 }
 
 function issueFilter({ teamId, projectId, searchText, stateId, labelId }) {
@@ -1371,6 +1708,29 @@ function nextCursor(connection, label) {
   return connection.pageInfo.endCursor;
 }
 
+function resolveCommentTarget(target, action) {
+  const issueId = typeof target?.issueId === "string" ? target.issueId.trim() : "";
+  const projectId = typeof target?.projectId === "string" ? target.projectId.trim() : "";
+  if (issueId && projectId) {
+    throw new Error(`issueId or projectId, not both, is required to ${action} Linear comments.`);
+  }
+  if (issueId) {
+    return { key: "issueId", id: issueId, root: "issue", label: "issue", queryName: "IssueComments" };
+  }
+  if (projectId) {
+    return { key: "projectId", id: projectId, root: "project", label: "project", queryName: "ProjectComments" };
+  }
+  throw new Error(`issueId or projectId is required to ${action} Linear comments.`);
+}
+
+function agentVisibleProjectComment(comment) {
+  return {
+    author_id: comment?.user?.id ?? null,
+    body: typeof comment?.body === "string" ? comment.body : "",
+    created_at: comment?.createdAt || null,
+  };
+}
+
 function pickDefined(input) {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
 }
@@ -1384,10 +1744,15 @@ function normalizeTeam(team) {
   };
 }
 
+// The metadata fields only exist on label CRUD reads (the *_DETAIL_FIELDS
+// shapes). Labels embedded in issue/project queries are read lean, and a lean
+// read must not claim description/parent are null when Linear simply wasn't
+// asked — so the fields are included only when the payload carried them.
 function normalizeProjectLabel(label) {
   return {
     id: label.id,
     name: label.name,
+    ...labelMetadataFields(label),
   };
 }
 
@@ -1397,6 +1762,16 @@ function normalizeIssueLabel(label) {
     name: label.name,
     teamId: label.team?.id || null,
     team: label.team ? { id: label.team.id } : null,
+    ...labelMetadataFields(label),
+  };
+}
+
+function labelMetadataFields(label) {
+  return {
+    ...("description" in label ? { description: label.description ?? null } : {}),
+    ...("color" in label ? { color: label.color ?? null } : {}),
+    ...("isGroup" in label ? { isGroup: label.isGroup ?? false } : {}),
+    ...("parent" in label ? { parentId: label.parent?.id || null } : {}),
   };
 }
 
@@ -1405,6 +1780,7 @@ function normalizeProjectStatus(status) {
     id: status.id,
     name: status.name,
     type: status.type,
+    ...("position" in status ? { position: status.position } : {}),
   };
 }
 
@@ -1427,6 +1803,8 @@ function normalizeWorkflowState(state) {
     name: state.name,
     type: state.type,
     teamId: state.team?.id || null,
+    ...("description" in state ? { description: state.description ?? null } : {}),
+    ...("position" in state ? { position: state.position ?? null } : {}),
   };
 }
 
@@ -1600,6 +1978,22 @@ function normalizeIssue(issue) {
       ].filter((relation) => relation.id),
     ),
     ...(resourceTarget ? { resource_target: resourceTarget } : {}),
+  };
+}
+
+export function normalizeComment(comment) {
+  return {
+    id: comment.id,
+    body: comment.body || "",
+    createdAt: comment.createdAt || null,
+    updatedAt: comment.updatedAt || null,
+    user: comment.user
+      ? {
+          id: comment.user.id || null,
+          name: comment.user.name || null,
+          displayName: comment.user.displayName || null,
+        }
+      : null,
   };
 }
 

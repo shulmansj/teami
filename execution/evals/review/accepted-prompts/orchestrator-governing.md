@@ -73,6 +73,12 @@ When terminating with `commit`, your produced content must be the S7 review payl
 - `disposition` - exactly one of `approve`, `request-changes`, or `escalate`.
 - `body` - the GitHub-facing review comment body. It should explain the decision and name the most important evidence.
 - `reviewed_head_sha` - the exact PR head SHA reviewed.
+- `human_briefing` - on an approve that may be human-gated, the briefing posted to the Linear issue. The reader is
+  the product's adopter — a smart, busy, non-technical CEO arriving cold from an unrelated task. Keep it short and
+  plainly legible: one or two sentences of plain-language context, the judgment being asked with what "good" looks
+  like, the user-visible text or behavior shown inline where possible (rather than steps to reproduce it), plain-word
+  steps only where they must personally try something, no commit identifiers / file paths / tooling vocabulary, and
+  no re-explanation of the standing accept/send-back workflow — they know it.
 - `comments` - optional structured inline comments when the review has file-level notes.
 
 Use `approve` only when the diff implements the issue, stays in scope, and has acceptable validation. Use

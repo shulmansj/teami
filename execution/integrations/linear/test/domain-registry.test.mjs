@@ -52,7 +52,7 @@ test("Minting requires an explicit name; ids are path-safe, immutable, collision
   ).domains[0];
 
   assert.equal(renamed.id, "customer-success-pilot");
-  assert.equal(renamed.linear.cache_path, ".teami/domains/customer-success-pilot/linear.json");
+  assert.equal(renamed.linear.cache_path, "domains/customer-success-pilot/linear.json");
 });
 
 test("Default records carry an empty resources list without requiring registered resource kinds", () => {
@@ -259,12 +259,12 @@ test("Registry path is ignored-local and writes are atomic with read-back valida
   const gitignore = fs.readFileSync(path.join(repoRoot, ".gitignore"), "utf8");
   assert.match(gitignore, /^\.teami\/$/m);
 
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-registry-"));
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-registry-home-"));
   const registry = upsertDomainRecord(emptyDomainRegistry(), activeDomain("main"));
-  const filePath = writeDomainRegistry({ repoRoot: tempRoot }, registry);
+  const filePath = writeDomainRegistry({ home: tempHome }, registry);
 
-  assert.equal(filePath, domainRegistryPath(tempRoot));
-  assert.deepEqual(readDomainRegistry({ repoRoot: tempRoot }), registry);
+  assert.equal(filePath, domainRegistryPath(tempHome));
+  assert.deepEqual(readDomainRegistry({ home: tempHome }), registry);
   assert.deepEqual(
     fs.readdirSync(path.dirname(filePath)).filter((file) => file.endsWith(".tmp")),
     [],
@@ -297,19 +297,19 @@ test("Registry schema does not allow Phoenix project fields", () => {
 });
 
 test("reset removes registry and per-domain cache dirs", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-reset-"));
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-reset-home-"));
   const registry = upsertDomainRecord(emptyDomainRegistry(), activeDomain("support-ops"));
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  const cacheDir = path.join(tempRoot, ".teami", "domains", "support-ops");
+  writeDomainRegistry({ home: tempHome }, registry);
+  const cacheDir = path.join(tempHome, "domains", "support-ops");
   fs.mkdirSync(cacheDir, { recursive: true });
   fs.writeFileSync(path.join(cacheDir, "linear.json"), JSON.stringify({ domainId: "support-ops" }));
 
-  const removed = removeDomainRegistryState({ repoRoot: tempRoot });
+  const removed = removeDomainRegistryState({ home: tempHome });
 
   assert.equal(removed.registryRemoved, true);
   assert.equal(removed.domainsDirRemoved, true);
-  assert.equal(fs.existsSync(domainRegistryPath(tempRoot)), false);
-  assert.equal(fs.existsSync(path.join(tempRoot, ".teami", "domains")), false);
+  assert.equal(fs.existsSync(domainRegistryPath(tempHome)), false);
+  assert.equal(fs.existsSync(path.join(tempHome, "domains")), false);
 });
 
 function activeDomain(id, overrides = {}) {

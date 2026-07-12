@@ -46,6 +46,7 @@ const IMPORT_GRAPH_HELPER_FILE = path.resolve(import.meta.dirname, "import-graph
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
 const ENGINE_DIR = path.join(REPO_ROOT, "execution", "engine");
 const INTEGRATIONS_DIR = path.join(REPO_ROOT, "execution", "integrations");
+const APP_HOME_FILE = path.join(INTEGRATIONS_DIR, "linear", "src", "app-home.mjs");
 const LINEAR_SRC_DIR = path.resolve(import.meta.dirname, "..", "src");
 const PROBE_NAMESPACE = "test/fixtures/probe";
 const PROBE_FUNCTION_VERSION = "0.0.1";
@@ -59,6 +60,19 @@ const PROBE_DATASET_NAME = "teami-probe-examples";
 const PROBE_CANDIDATE_PROMPT_VERSION_ID = "PV-PROBE-DRAFT";
 const PROBE_CANDIDATE_PROMPT_ID = "P-PROBE-WORKER";
 const GIT_PROVIDER_PATTERN = /git|github|simple-git|nodegit/i;
+
+function runtimePromptFromCommand(command) {
+  if (typeof command.stdinInput === "string") return command.stdinInput;
+  const index = command.args.indexOf("-p");
+  if (index >= 0) {
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg;
+  }
+  return command.args.at(-1);
+}
 
 test("synthetic second function inherits in-loop tracing, lineage, produced identities, and outcomes by declaration", async (t) => {
   const previousDefinitions = registeredWorkflowTypes()
@@ -543,6 +557,7 @@ test("synthetic second function inherits in-loop tracing, lineage, produced iden
 test("standalone A2 agent trace exports a non-decomposition non-Linear resource trace", async (t) => {
   const { startAgentTrace } = await importLinearSrcModule("agent-trace.mjs");
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-probe-standalone-"));
+  process.env.TEAMI_HOME = repoRoot;
   t.after(() => {
     fs.rmSync(repoRoot, { recursive: true, force: true });
   });
@@ -766,7 +781,7 @@ test("synthetic probe Judge prompt, runtime, and annotation write are definition
     },
   });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.judge_state, "judged");
   assert.equal(result.storage, "phoenix_native");
   assert.deepEqual(result.annotation_ids, ["probe-anno-1"]);
@@ -774,7 +789,7 @@ test("synthetic probe Judge prompt, runtime, and annotation write are definition
   assert.equal(result.eval_namespace, PROBE_NAMESPACE);
   assert.equal(invocations.length, 1);
   assert.equal(invocations[0][0].runtime, "codex");
-  assert.ok(invocations[0][0].args.at(-1).includes("Accepted Probe Judge Prompt"));
+  assert.ok(runtimePromptFromCommand(invocations[0][0]).includes("Accepted Probe Judge Prompt"));
   assert.equal(posts.length, 1);
   const wire = posts[0].data[0];
   assert.equal(wire.name, "quality");
@@ -802,8 +817,9 @@ test("synthetic probe drafter runs one definition-threaded candidate experiment 
     .map((workflowType) => getWorkflowDefinition(workflowType));
   const synthetic = buildSyntheticDefinition({ effectCalls: [] });
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-probe-loop-"));
-  const draftDir = path.join(repoRoot, ".teami", "drafts");
-  const registryDir = path.join(repoRoot, ".teami", "promotion-candidates");
+  process.env.TEAMI_HOME = repoRoot;
+  const draftDir = path.join(repoRoot, "drafts");
+  const registryDir = path.join(repoRoot, "promotion-candidates");
   t.after(() => {
     restoreRegistry(previousDefinitions);
     fs.rmSync(repoRoot, { recursive: true, force: true });
@@ -844,7 +860,7 @@ test("synthetic probe drafter runs one definition-threaded candidate experiment 
     }),
     runCommand: async (command) => {
       drafterCommands.push(command);
-      const prompt = command.args[command.args.indexOf("-p") + 1];
+      const prompt = runtimePromptFromCommand(command);
       assert.match(prompt, new RegExp(PROBE_WORKER_TARGET_KEY.replaceAll("/", "\\/")));
       assert.match(prompt, /probe_missing_artifact/);
       return JSON.stringify({
@@ -868,7 +884,7 @@ test("synthetic probe drafter runs one definition-threaded candidate experiment 
         prompt_name: "probe_worker",
         prompt_id: PROBE_CANDIDATE_PROMPT_ID,
         prompt_version_id: PROBE_CANDIDATE_PROMPT_VERSION_ID,
-        receipt_path: path.join(repoRoot, ".teami", "phoenix-prompt-registrations.json"),
+        receipt_path: path.join(repoRoot, "phoenix-prompt-registrations.json"),
         manifest_mutated: false,
       };
     },
@@ -907,7 +923,7 @@ test("synthetic probe drafter runs one definition-threaded candidate experiment 
     datasetName: PROBE_DATASET_NAME,
   });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.chain_state, "tagged");
   assert.equal(result.target_key, PROBE_WORKER_TARGET_KEY);
   assert.equal(result.phoenix_prompt_version_id, PROBE_CANDIDATE_PROMPT_VERSION_ID);
@@ -1092,7 +1108,14 @@ function buildSyntheticDefinition({ effectCalls }) {
         },
         verify(ctx) {
           effectCalls.push({ stage: "verify", ctx });
-          return { ok: true };
+          return {
+            ok: true,
+            identity: {
+              artifact_ids: ["probe-artifact-1"],
+              artifact_set_id: "probe-set-1",
+              status: "settled",
+            },
+          };
         },
       },
     ],
@@ -1759,6 +1782,7 @@ function classifyGraphEdgeViolation(edge) {
 
   if (edge.resolved) {
     if (edge.resolved === IMPORT_GRAPH_HELPER_FILE) return [];
+    if (edge.resolved === APP_HOME_FILE) return [];
     if (isPathInside(edge.resolved, INTEGRATIONS_DIR)) {
       return [{ ...edge, reason: "provider_tree_import" }];
     }

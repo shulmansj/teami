@@ -16,6 +16,7 @@ test("run records expose session handle pointers derived from runtime metadata",
   const repoRoot = tempRepo();
   const store = createLocalTriggerStore({
     repoRoot,
+    home: repoRoot,
     idGenerator: sequenceIds(),
     now: sequenceNow([
       "2026-06-25T10:00:00.000Z",
@@ -45,7 +46,7 @@ test("run records expose session handle pointers derived from runtime metadata",
     runnerId: "runner-1",
     leaseToken: withHandle.leaseToken,
     status: "paused",
-    artifactPointer: { artifact_path: ".teami/runs/run-with-handle.json" },
+    artifactPointer: { artifact_path: path.join(repoRoot, "domains", "support-ops", "runs", "run-with-handle.json") },
     artifact: {
       run_id: "run-with-handle",
       runtime_metadata: {
@@ -99,7 +100,7 @@ test("run records expose session handle pointers derived from runtime metadata",
     runtime_metadata_paths: [["runtime_metadata", "pm", "session_handle"]],
   });
   assert.deepEqual(runWithHandle.artifact_pointer, {
-    artifact_path: ".teami/runs/run-with-handle.json",
+    artifact_path: path.join(repoRoot, "domains", "support-ops", "runs", "run-with-handle.json"),
   });
   assert.equal(runIsResumable(runWithHandle), true);
   assert.equal(runIsResumable(runWithoutHandle), false);
@@ -136,7 +137,9 @@ test("session handle pointer derivation is presence based", () => {
 });
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-session-handle-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-session-handle-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function sequenceIds() {

@@ -27,6 +27,9 @@ import {
   runIsResumable,
 } from "../src/local-trigger-store.mjs";
 import { executionDefinition } from "../src/workflows/execution/definition.mjs";
+import { registerExecutionWorkflowForTest } from "../src/trigger-runner.mjs";
+
+registerExecutionWorkflowForTest();
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
@@ -101,6 +104,10 @@ test("runOrchestratorLoop passes firstTurnWarmStart once and returns the driver 
 
 test("default orchestrator runtime uses warm_required only for firstTurnWarmStart", async () => {
   const config = loadLinearConfig({ repoRoot });
+  config.workflows.execution.roles.orchestrator.warm_continuation = {
+    enabled: true,
+    required: true,
+  };
   const assignment = resolveRoleRuntimeAssignments(config, "execution").orchestrator;
   assert.deepEqual(assignment.warm_continuation, { enabled: true, required: true });
   const runtimeVersion = "0.130.0";
@@ -267,9 +274,10 @@ test("runOrchestratorLoop converts warm_continuation_unavailable into failed_clo
 
 test("driver handle metadata persists through run records and resolves from the artifact pointer", async () => {
   const temp = tempRepo();
-  const runStoreDir = path.join(temp, ".teami", "runs");
+  const runStoreDir = path.join(temp, "domains", "support-ops", "runs");
   const store = createLocalTriggerStore({
     repoRoot: temp,
+    home: temp,
     idGenerator: sequenceIds(),
     now: () => new Date("2026-06-28T10:00:00.000Z"),
     writeMutationIntent: async () => {},
@@ -454,7 +462,9 @@ function checkpointArtifact({ runId, runtimeAssignments, runtimeMetadata }) {
 }
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-xwarm-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-xwarm-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function sequenceIds() {

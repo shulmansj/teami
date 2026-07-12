@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "phoenix_package": "arize-phoenix==14.13.0",
+  "python_tag": "cpython-3.12.13+20260623",
+  "platforms": {
+    "darwin-arm64": {
+      "asset_url": "https://github.com/shulmansj/teami/releases/download/runtime-cpython-3.12.13+20260623/cpython-3.12.13+20260623-aarch64-apple-darwin-install_only.tar.gz",
+      "size_bytes": 25159977,
+      "sha256": "3724aa4dafb5f7b6c2cf98e89914e4248dc6bd2fe40407df4a2d73de99615f16",
+      "source_commit": "20260623"
+    },
+    "darwin-x64": {
+      "asset_url": "https://github.com/shulmansj/teami/releases/download/runtime-cpython-3.12.13+20260623/cpython-3.12.13+20260623-x86_64-apple-darwin-install_only.tar.gz",
+      "size_bytes": 24829196,
+      "sha256": "7c57fdd1fa675190093700eb0d8e7117e1f9eae7c30a46dea5f8d5266bcfc791",
+      "source_commit": "20260623"
+    },
+    "win32-x64": {
+      "asset_url": "https://github.com/shulmansj/teami/releases/download/runtime-cpython-3.12.13+20260623/cpython-3.12.13+20260623-x86_64-pc-windows-msvc-install_only.tar.gz",
+      "size_bytes": 46013305,
+      "sha256": "c6af85bb83d5158c9ff71f50dfad467853d1cd236f932b144e87e26e2ea2a83e",
+      "source_commit": "20260623"
+    }
+  }
+}

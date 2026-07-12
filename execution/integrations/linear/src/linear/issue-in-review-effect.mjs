@@ -1,5 +1,4 @@
 import { LINEAR_ISSUE_IN_REVIEW_EFFECT_ID } from "../workflows/execution/effect-ids.mjs";
-import { issueHasLabel } from "./matching-utils.mjs";
 import { resolveInReviewIssueStatus } from "./shape-resolver.mjs";
 
 export const ISSUE_IN_REVIEW_OP = "move_issue_in_review";
@@ -61,7 +60,7 @@ export async function applyIssueInReviewEffect(ctx = {}) {
   }
 
   const target = resolved.target;
-  const input = await issueInReviewUpdateInput({ ctx, target });
+  const input = await issueInReviewUpdateInput({ target });
   await ctx.onBeforeLinearMutation?.({
     artifactKind: ctx.artifact?.kind || null,
     runId: ctx.runId || ctx.artifact?.run_id || null,
@@ -106,13 +105,7 @@ export async function verifyIssueInReviewEffect(ctx = {}) {
 export function issueMatchesInReviewTarget(issue, target) {
   const normalizedTarget = normalizeInReviewIssueTarget(target);
   if (!issue || !normalizedTarget) return false;
-  if (normalizedTarget.targetType === "status") {
-    return issue.state?.id === normalizedTarget.id;
-  }
-  if (normalizedTarget.targetType === "label") {
-    return issueHasLabel(issue, normalizedTarget.id);
-  }
-  return false;
+  return issue.state?.id === normalizedTarget.id;
 }
 
 export function issueIdFromExecutionContext(ctx = {}) {
@@ -138,26 +131,16 @@ export function normalizeInReviewIssueTarget(target) {
   const targetType =
     target.targetType ||
     target.target_type ||
-    (target.type ? "status" : "label");
-  if (!["status", "label"].includes(targetType)) return null;
+    (target.type ? "status" : null);
+  if (targetType !== "status") return null;
   return {
     ...target,
-    targetType,
+    targetType: "status",
   };
 }
 
-async function issueInReviewUpdateInput({ ctx, target }) {
-  if (target.targetType === "status") {
-    return { stateId: target.id };
-  }
-
-  const issue = await readIssueFromContext(ctx);
-  if (!issue) {
-    throw new Error("linear_issue_missing");
-  }
-  const labelIds = new Set((issue.labels || []).map((label) => label.id).filter(Boolean));
-  labelIds.add(target.id);
-  return { labelIds: [...labelIds] };
+async function issueInReviewUpdateInput({ target }) {
+  return { stateId: target.id };
 }
 
 async function readIssueFromContext(ctx = {}) {
@@ -208,9 +191,7 @@ function teamIdFromContext(ctx = {}) {
 
 function issueInReviewIdentity({ issue, issueId, target }) {
   const normalizedTarget = normalizeInReviewIssueTarget(target);
-  const stateId = normalizedTarget?.targetType === "status"
-    ? normalizedTarget.id
-    : issue?.state?.id || null;
+  const stateId = normalizedTarget?.id || issue?.state?.id || null;
   return {
     linear_issue_id: issue?.id || issueId,
     issue_id: issue?.id || issueId,
@@ -220,7 +201,6 @@ function issueInReviewIdentity({ issue, issueId, target }) {
     status: firstNonEmptyString([normalizedTarget?.name, issue?.state?.name, "In Review"]),
     status_id: stateId,
     state_id: stateId,
-    label_id: normalizedTarget?.targetType === "label" ? normalizedTarget.id : null,
   };
 }
 

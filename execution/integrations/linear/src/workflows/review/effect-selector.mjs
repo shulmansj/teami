@@ -1,12 +1,13 @@
 import {
   githubAfReviewStatusEffectDescriptor,
   githubPrReviewCommentEffectDescriptor,
+  linearHumanReviewBriefingEffectDescriptor,
 } from "../../review/teami-review-effects.mjs";
-import { issueNeedsPrincipalEscalationEffectDescriptor } from "../../linear/issue-needs-principal-effect.mjs";
 import { issueReadyEffectDescriptor } from "../../linear/issue-ready-effect.mjs";
 import {
   GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+  LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
 } from "./effect-ids.mjs";
 
 export const REVIEW_DISPOSITIONS = Object.freeze([
@@ -19,22 +20,27 @@ const GITHUB_REVIEW_EFFECTS = Object.freeze([
   githubPrReviewCommentEffectDescriptor({ id: GITHUB_PR_REVIEW_COMMENT_EFFECT_ID }),
   githubAfReviewStatusEffectDescriptor({ id: GITHUB_AF_REVIEW_STATUS_EFFECT_ID }),
 ]);
+const HUMAN_REVIEW_BRIEFING_EFFECT = linearHumanReviewBriefingEffectDescriptor({
+  id: LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+});
 const ISSUE_READY_EFFECT = issueReadyEffectDescriptor();
-const ISSUE_NEEDS_PRINCIPAL_EFFECT = issueNeedsPrincipalEscalationEffectDescriptor();
 
-export function selectEffectsForDisposition(disposition, hasPr = true) {
+export function selectEffectsForDisposition(disposition, hasPr = true, gateLabelFresh = false) {
   const route = reviewDispositionRoute(disposition);
   const githubEffects = githubReviewEffectsForRoute({ disposition, route });
   if (route === "approve") {
-    return Object.freeze([...githubEffects]);
+    return Object.freeze([
+      ...githubEffects,
+      ...(gateLabelFresh === true ? [HUMAN_REVIEW_BRIEFING_EFFECT] : []),
+    ]);
   }
   if (route === "request-changes") {
     return Object.freeze([...githubEffects, ISSUE_READY_EFFECT]);
   }
   if (hasPr === false) {
-    return Object.freeze([ISSUE_NEEDS_PRINCIPAL_EFFECT]);
+    return Object.freeze([]);
   }
-  return Object.freeze([...githubEffects, ISSUE_NEEDS_PRINCIPAL_EFFECT]);
+  return Object.freeze([...githubEffects]);
 }
 
 export function reviewDispositionRoute(disposition) {

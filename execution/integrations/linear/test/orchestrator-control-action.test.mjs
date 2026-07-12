@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import {
   CONTROL_ACTION_KINDS,
   CONTROL_ACTION_SCHEMA_VERSION,
-  ONE_OFF_RUNTIME_ROLES,
   TERMINATE_OUTCOMES,
   TERMINATE_OUTCOME_REASONS,
   parseControlAction,
@@ -16,7 +16,17 @@ import {
   GENERIC_CORE_OUTCOME_REASONS,
   deriveAgentChoosableOutcomeReasons,
 } from "../../../engine/orchestrator-terminal-vocabulary.mjs";
+import { loadLinearConfig } from "../src/config.mjs";
+import { resolveInvocableRuntimeRoles } from "../src/runtime-adapters.mjs";
 import { decompositionDefinition } from "../src/workflows/decomposition/definition.mjs";
+
+const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
+// The invocable one-off seats are CONFIG-derived (configured runtime
+// assignments minus the driver); there is no code-owned role list.
+const INVOCABLE_ROLES = resolveInvocableRuntimeRoles(
+  loadLinearConfig({ repoRoot: REPO_ROOT }),
+  decompositionDefinition,
+);
 
 test("the schema is versioned and exposes exactly three action kinds", () => {
   assert.equal(
@@ -39,18 +49,46 @@ test("control-action generation schema id matches the runtime schema version", (
   assert.equal(schema.$id, CONTROL_ACTION_SCHEMA_VERSION);
 });
 
-test("the one-off runtime_role whitelist mirrors definition.invocable_runtime_roles (no orchestrator)", () => {
-  // Plan-exact literal stamp: pm|sr_eng|judge|drafter. The orchestrator's OWN
-  // runtime is the driver's runtime, never a one-off target, so it must be absent.
-  assert.deepEqual(ONE_OFF_RUNTIME_ROLES, decompositionDefinition.invocable_runtime_roles);
-  assert.deepEqual(ONE_OFF_RUNTIME_ROLES, ["pm", "sr_eng", "judge", "drafter"]);
-  assert.deepEqual(decompositionDefinition.invocable_runtime_roles, ["pm", "sr_eng", "judge", "drafter"]);
-  assert.ok(!ONE_OFF_RUNTIME_ROLES.includes("orchestrator"));
+test("the one-off seats derive from config and exclude the driver", () => {
+  // The orchestrator's OWN runtime is the driver's runtime, never a one-off
+  // target, so it must be absent from the config-derived set.
+  assert.deepEqual([...INVOCABLE_ROLES].sort(), ["drafter", "judge", "pm", "sr_eng"]);
+  assert.ok(!INVOCABLE_ROLES.includes("orchestrator"));
+});
+
+test("a config-declared role becomes seatable with no code change", () => {
+  const config = structuredClone(loadLinearConfig({ repoRoot: REPO_ROOT }));
+  config.workflows.decomposition.roles.researcher = { runtime: "codex", model: "gpt-5.5" };
+  const widened = resolveInvocableRuntimeRoles(config, decompositionDefinition);
+  assert.ok(widened.includes("researcher"));
+  const result = parseControlAction(
+    {
+      action: "invoke_one_off",
+      role_label: "Security researcher",
+      task: "Assess the threat model",
+      prompt: "Assess the threat model of the proposed change.",
+      runtime_role: "researcher",
+    },
+    { invocableRoles: widened },
+  );
+  assert.equal(result.ok, true);
+});
+
+test("one-offs fail closed when no invocable role set is supplied", () => {
+  const result = parseControlAction({
+    action: "invoke_one_off",
+    role_label: "Security researcher",
+    task: "Assess the threat model",
+    prompt: "Assess the threat model of the proposed change.",
+    runtime_role: "sr_eng",
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.reasons.includes("invoke_one_off_invocable_roles_unavailable"));
 });
 
 test("the driver is never an invocable one-off target", () => {
   assert.equal(decompositionDefinition.driver, "orchestrator");
-  assert.ok(!decompositionDefinition.invocable_runtime_roles.includes(decompositionDefinition.driver));
+  assert.ok(!INVOCABLE_ROLES.includes(decompositionDefinition.driver));
 
   const result = parseControlAction(
     {
@@ -60,7 +98,7 @@ test("the driver is never an invocable one-off target", () => {
       prompt: "Check only the driver path.",
       runtime_role: decompositionDefinition.driver,
     },
-    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+    { invocableRoles: INVOCABLE_ROLES },
   );
   assert.equal(result.ok, false);
   assert.deepEqual(result.reasons, [
@@ -117,7 +155,7 @@ test("invoke_library rejects a missing target_key", () => {
 });
 
 test("invoke_one_off parses all required fields and a whitelisted runtime_role", () => {
-  for (const runtime_role of decompositionDefinition.invocable_runtime_roles) {
+  for (const runtime_role of INVOCABLE_ROLES) {
     const result = parseControlAction(
       {
         action: "invoke_one_off",
@@ -126,7 +164,7 @@ test("invoke_one_off parses all required fields and a whitelisted runtime_role",
         prompt: "You are a compliance reviewer...",
         runtime_role,
       },
-      { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+      { invocableRoles: INVOCABLE_ROLES },
     );
     assert.equal(result.ok, true, runtime_role);
     assert.equal(result.action.action, "invoke_one_off");
@@ -145,7 +183,7 @@ test("invoke_one_off parses optional instance_id and still accepts role-only def
       runtime_role: "pm",
       instance_id: "pm#parallel_a",
     },
-    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+    { invocableRoles: INVOCABLE_ROLES },
   );
   assert.equal(withInstance.ok, true);
   assert.equal(withInstance.action.instance_id, "pm#parallel_a");
@@ -158,7 +196,7 @@ test("invoke_one_off parses optional instance_id and still accepts role-only def
       prompt: "You are a compliance reviewer...",
       runtime_role: "pm",
     },
-    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+    { invocableRoles: INVOCABLE_ROLES },
   );
   assert.equal(roleOnly.ok, true);
   assert.equal(Object.hasOwn(roleOnly.action, "instance_id"), false);
@@ -174,7 +212,7 @@ test("invoke_one_off rejects unsafe or role-mismatched instance_id values", () =
       runtime_role: "pm",
       instance_id: "bad/path",
     },
-    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+    { invocableRoles: INVOCABLE_ROLES },
   );
   assert.equal(invalid.ok, false);
   assert.deepEqual(invalid.reasons, ["invoke_one_off_invalid_instance_id"]);
@@ -188,7 +226,7 @@ test("invoke_one_off rejects unsafe or role-mismatched instance_id values", () =
       runtime_role: "pm",
       instance_id: "sr_eng#parallel_a",
     },
-    { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+    { invocableRoles: INVOCABLE_ROLES },
   );
   assert.equal(mismatched.ok, false);
   assert.deepEqual(mismatched.reasons, [
@@ -206,7 +244,7 @@ test("invoke_one_off rejects a runtime_role outside the whitelist (incl. orchest
         prompt: "p",
         runtime_role: bad,
       },
-      { invocableRoles: decompositionDefinition.invocable_runtime_roles },
+      { invocableRoles: INVOCABLE_ROLES },
     );
     assert.equal(result.ok, false, bad);
     assert.ok(
@@ -218,7 +256,7 @@ test("invoke_one_off rejects a runtime_role outside the whitelist (incl. orchest
 });
 
 test("parseControlAction binds one-off runtime_role validation to injected invocable role data", () => {
-  const widenedInvocableRoles = [...decompositionDefinition.invocable_runtime_roles];
+  const widenedInvocableRoles = [...INVOCABLE_ROLES];
   widenedInvocableRoles.push("orchestrator");
   const widened = parseControlAction(
     {
@@ -233,7 +271,7 @@ test("parseControlAction binds one-off runtime_role validation to injected invoc
   assert.equal(widened.ok, true);
   assert.equal(widened.action.runtime_role, "orchestrator");
 
-  const narrowedInvocableRoles = decompositionDefinition.invocable_runtime_roles
+  const narrowedInvocableRoles = INVOCABLE_ROLES
     .filter((role) => role !== "pm");
   const narrowed = parseControlAction(
     {
@@ -250,10 +288,13 @@ test("parseControlAction binds one-off runtime_role validation to injected invoc
 });
 
 test("invoke_one_off rejects missing required fields", () => {
-  const result = parseControlAction({
-    action: "invoke_one_off",
-    runtime_role: "pm",
-  });
+  const result = parseControlAction(
+    {
+      action: "invoke_one_off",
+      runtime_role: "pm",
+    },
+    { invocableRoles: INVOCABLE_ROLES },
+  );
   assert.equal(result.ok, false);
   assert.deepEqual(result.reasons.sort(), [
     "invoke_one_off_missing_prompt",

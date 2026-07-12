@@ -93,6 +93,31 @@ test("git_repo commit effect returns failed_closed for an empty staged diff and 
   assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
 });
 
+test("staged credential content blocks commit, intent, push, and pull request", async () => {
+  const fixture = createGitFixture("staged-secret");
+  const runId = "run_staged_secret";
+  const worker = createWorkerCheckout(fixture, runId);
+  fs.writeFileSync(
+    path.join(worker, ".env"),
+    `GITHUB_TOKEN=${["github", "_pat_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"].join("")}\n`,
+    "utf8",
+  );
+  const runStoreDir = tempRunStore();
+  const prAdapter = createFakePrAdapter();
+  const store = createIntentStore({ runStoreDir });
+  const result = await applyCommitEffects({
+    effects: [gitRepoCommitEffectDescriptor({ id: GIT_REPO_COMMIT_EFFECT_ID })],
+    ctx: effectContext({ fixture, worker, runId, runStoreDir, prAdapter, store }),
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.equal(result.reason, "git_repo_staged_content_guard_failed");
+  assert.equal(prAdapter.created.length, 0);
+  assert.equal(remoteHead(fixture.remote, branchNameForIssue("AF-1")), "");
+  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+  assert.equal(git(["rev-parse", "HEAD"], worker).stdout.trim(), fixture.baseSha);
+});
+
 test("git_repo commit effect returns failed_closed when the staged diff exceeds the circuit breaker", async () => {
   const fixture = createGitFixture("over-budget");
   const runId = "run_over_budget";
@@ -233,6 +258,7 @@ test("git_repo replay resolves gitRepoResourceId-keyed remote override when the 
   const result = await applyCommitEffects({
     effects: [gitRepoCommitEffectDescriptor({ id: GIT_REPO_COMMIT_EFFECT_ID })],
     ctx: {
+      executionReadiness: () => ({ ok: true }),
       runId,
       runStoreDir: tempRunStore(),
       domainContext: { domainId: "domain-1" },
@@ -309,6 +335,104 @@ test("git_repo replay resolves gitRepoResourceId-keyed remote override when the 
   );
 });
 
+test("git_repo remote commands against GitHub carry in-memory Basic auth and keep the token off the command line", async () => {
+  const runId = "run_github_auth_env";
+  const branch = branchNameForIssue("AF-1");
+  const baseSha = "a".repeat(40);
+  const headSha = "b".repeat(40);
+  const treeSha = "c".repeat(40);
+  const githubRemote = "https://github.com/acme/product.git";
+  const calls = [];
+  const runGit = fakeReplayRunGit({ calls, injectedRemote: githubRemote, branch, headSha, treeSha });
+  const prAdapter = createFakePrAdapter();
+  const store = {
+    async markMutationStarted() {
+      return { ok: true };
+    },
+  };
+  const selectedResource = {
+    id: "repo-1",
+    kind: "git_repo",
+    role: "primary",
+    binding: { owner: "acme", repo: "product", default_branch: "main" },
+    handle: {
+      baseSha,
+      owner: "acme",
+      repo: "product",
+      default_branch: "main",
+      remoteUrl: githubRemote,
+    },
+  };
+
+  const result = await applyCommitEffects({
+    effects: [gitRepoCommitEffectDescriptor({ id: GIT_REPO_COMMIT_EFFECT_ID })],
+    ctx: {
+      executionReadiness: () => ({ ok: true }),
+      runId,
+      runStoreDir: tempRunStore(),
+      domainContext: { domainId: "domain-1" },
+      issueId: "issue-1",
+      issue: { id: "issue-1", identifier: "AF-1", title: "Implement AF-1" },
+      artifact: {
+        kind: "commit",
+        run_id: runId,
+        domain_id: "domain-1",
+        linear_issue_id: "issue-1",
+        payload: payload(),
+      },
+      payload: payload(),
+      pendingGitIntent: {
+        runId,
+        artifactKind: "commit",
+        git: {
+          owner: "acme",
+          repo: "product",
+          resource_id: "repo-1",
+          branch,
+          base_sha: baseSha,
+        },
+      },
+      runGit,
+      githubToken: "fixture-token",
+      runContext: {
+        selectedResourceId: "repo-1",
+        selectedResource,
+        resources: { "repo-1": selectedResource },
+        resourceManifest: [{ kind: "git_repo", id: "repo-1", role: "primary", label: "acme/product" }],
+      },
+      store,
+      wake: {
+        id: "wake-1",
+        domain_id: "domain-1",
+        object_type: "issue",
+        object_id: "issue-1",
+        workflow_type: "execution",
+        trigger_type: "linear.issue.ready",
+      },
+      runnerId: "runner-1",
+      leaseToken: "lease-1",
+      prAdapter,
+    },
+  });
+
+  assert.equal(result.outcome, "ok");
+  const expectedHeader = `Authorization: Basic ${Buffer.from("x-access-token:fixture-token", "utf8").toString("base64")}`;
+  const remoteCalls = calls.filter((call) => call.args[0] === "ls-remote" || call.args[0] === "fetch");
+  assert.ok(remoteCalls.length > 0, "expected remote-facing git calls");
+  for (const call of remoteCalls) {
+    assert.equal(call.env.GIT_CONFIG_COUNT, "1");
+    assert.equal(call.env.GIT_CONFIG_KEY_0, "http.extraHeader");
+    assert.equal(call.env.GIT_CONFIG_VALUE_0, expectedHeader);
+  }
+  for (const call of calls) {
+    assert.equal(
+      call.args.some((arg) => String(arg).includes("fixture-token") || String(arg).includes("Basic")),
+      false,
+      "token material must never appear on a git command line",
+    );
+  }
+});
+
 test("git_repo pre-push branch ownership failure leaves no replay marker", async () => {
   const fixture = createGitFixture("pre-push");
   const runId = "run_pre_push";
@@ -332,6 +456,185 @@ test("git_repo pre-push branch ownership failure leaves no replay marker", async
   assert.equal(result.outcome, "failed_closed");
   assert.equal(result.reason, "git_repo_remote_branch_not_owned");
   assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+});
+
+test("git_repo pre-push ownership accepts a remote head that descends from the recorded head", async () => {
+  const fixture = createGitFixture("descent");
+  const runId = "run_descent_resume";
+  const branch = branchNameForIssue("AF-1");
+
+  const factory = path.join(fixture.root, "factory");
+  git(["clone", "--branch", "main", fixture.remote, factory]);
+  git(["config", "user.name", "Factory"], factory);
+  git(["config", "user.email", "factory@example.invalid"], factory);
+  git(["checkout", "-b", branch], factory);
+  fs.writeFileSync(path.join(factory, "feature.txt"), "factory work\n", "utf8");
+  git(["add", "feature.txt"], factory);
+  git(["commit", "-m", "factory execution"], factory);
+  git(["push", "origin", `HEAD:refs/heads/${branch}`], factory);
+  const factoryHead = git(["rev-parse", "HEAD"], factory).stdout.trim();
+  const factoryTree = git(["rev-parse", "HEAD^{tree}"], factory).stdout.trim();
+
+  fs.writeFileSync(path.join(factory, "cleanup.txt"), "principal cleanup\n", "utf8");
+  git(["add", "cleanup.txt"], factory);
+  git(["commit", "-m", "principal cleanup"], factory);
+  git(["push", "origin", `HEAD:refs/heads/${branch}`], factory);
+
+  const worker = path.join(fixture.root, `worker-${runId}`);
+  git(["clone", "--branch", branch, fixture.remote, worker]);
+  git(["remote", "remove", "origin"], worker);
+  fs.writeFileSync(path.join(worker, "resumed.txt"), "resumed work on top\n", "utf8");
+  const runStoreDir = tempRunStore();
+  const prAdapter = createFakePrAdapter();
+
+  const result = await applyCommitEffects({
+    effects: [gitRepoCommitEffectDescriptor({ id: GIT_REPO_COMMIT_EFFECT_ID })],
+    ctx: {
+      ...effectContext({
+        fixture,
+        worker,
+        runId,
+        runStoreDir,
+        prAdapter,
+        store: createIntentStore({ runStoreDir }),
+      }),
+      pendingGitIntent: {
+        runId: "run_previous",
+        artifactKind: "commit",
+        git: {
+          owner: "acme",
+          repo: "product",
+          resource_id: "repo-1",
+          branch,
+          base_sha: fixture.baseSha,
+          head_sha: factoryHead,
+          tree_sha: factoryTree,
+        },
+      },
+    },
+  });
+
+  assert.equal(result.outcome, "ok");
+  const workerHead = git(["rev-parse", "HEAD"], worker).stdout.trim();
+  assert.equal(remoteHead(fixture.remote, branch), workerHead, "the resumed commit must land on top of the human addition");
+  const pending = readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir });
+  assert.equal(pending.runId, runId);
+  assert.equal(pending.git.head_sha, workerHead, "the observed intent must rebaseline to the landed head");
+});
+
+test("git_repo pre-push ownership still fails closed when the recorded head was rewritten away", async () => {
+  const fixture = createGitFixture("rewritten");
+  const runId = "run_rewritten_resume";
+  const branch = branchNameForIssue("AF-1");
+
+  const factory = path.join(fixture.root, "factory");
+  git(["clone", "--branch", "main", fixture.remote, factory]);
+  git(["config", "user.name", "Factory"], factory);
+  git(["config", "user.email", "factory@example.invalid"], factory);
+  git(["checkout", "-b", branch], factory);
+  fs.writeFileSync(path.join(factory, "feature.txt"), "factory work\n", "utf8");
+  git(["add", "feature.txt"], factory);
+  git(["commit", "-m", "factory execution"], factory);
+  git(["push", "origin", `HEAD:refs/heads/${branch}`], factory);
+  const factoryHead = git(["rev-parse", "HEAD"], factory).stdout.trim();
+  const factoryTree = git(["rev-parse", "HEAD^{tree}"], factory).stdout.trim();
+
+  fs.writeFileSync(path.join(factory, "feature.txt"), "rewritten work\n", "utf8");
+  git(["add", "feature.txt"], factory);
+  git(["commit", "--amend", "-m", "rewritten execution"], factory);
+  git(["push", "--force", "origin", `HEAD:refs/heads/${branch}`], factory);
+
+  const worker = path.join(fixture.root, `worker-${runId}`);
+  git(["clone", "--branch", branch, fixture.remote, worker]);
+  git(["remote", "remove", "origin"], worker);
+  fs.writeFileSync(path.join(worker, "resumed.txt"), "must not land\n", "utf8");
+  const runStoreDir = tempRunStore();
+
+  const result = await applyCommitEffects({
+    effects: [gitRepoCommitEffectDescriptor({ id: GIT_REPO_COMMIT_EFFECT_ID })],
+    ctx: {
+      ...effectContext({
+        fixture,
+        worker,
+        runId,
+        runStoreDir,
+        prAdapter: createFakePrAdapter(),
+        store: createIntentStore({ runStoreDir }),
+      }),
+      pendingGitIntent: {
+        runId: "run_previous",
+        artifactKind: "commit",
+        git: {
+          owner: "acme",
+          repo: "product",
+          resource_id: "repo-1",
+          branch,
+          base_sha: fixture.baseSha,
+          head_sha: factoryHead,
+          tree_sha: factoryTree,
+        },
+      },
+    },
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.equal(result.reason, "git_repo_remote_branch_not_owned");
+  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+});
+
+test("git_repo same-run replay awaits ancestry and rejects a rewritten observed branch", async () => {
+  const fixture = createGitFixture("replay-rewritten");
+  const runId = "run_replay_rewritten";
+  const branch = branchNameForIssue("AF-1");
+  const factory = path.join(fixture.root, "factory");
+  git(["clone", "--branch", "main", fixture.remote, factory]);
+  git(["config", "user.name", "Factory"], factory);
+  git(["config", "user.email", "factory@example.invalid"], factory);
+  git(["checkout", "-b", branch], factory);
+  fs.writeFileSync(path.join(factory, "feature.txt"), "observed work\n", "utf8");
+  git(["add", "feature.txt"], factory);
+  git(["commit", "-m", "observed execution"], factory);
+  git(["push", "origin", `HEAD:refs/heads/${branch}`], factory);
+  const observedHead = git(["rev-parse", "HEAD"], factory).stdout.trim();
+  const observedTree = git(["rev-parse", "HEAD^{tree}"], factory).stdout.trim();
+
+  fs.writeFileSync(path.join(factory, "feature.txt"), "foreign rewrite\n", "utf8");
+  git(["add", "feature.txt"], factory);
+  git(["commit", "--amend", "-m", "foreign rewrite"], factory);
+  git(["push", "--force", "origin", `HEAD:refs/heads/${branch}`], factory);
+
+  const runStoreDir = tempRunStore();
+  const prAdapter = createFakePrAdapter();
+  const result = await applyCommitEffects({
+    effects: [gitRepoCommitEffectDescriptor({ id: GIT_REPO_COMMIT_EFFECT_ID })],
+    ctx: {
+      ...effectContext({
+        fixture,
+        worker: path.join(fixture.root, "missing-worker"),
+        runId,
+        runStoreDir,
+        prAdapter,
+        store: createIntentStore({ runStoreDir }),
+      }),
+      pendingGitIntent: {
+        runId,
+        artifactKind: "commit",
+        git: {
+          owner: "acme",
+          repo: "product",
+          resource_id: "repo-1",
+          branch,
+          base_sha: fixture.baseSha,
+          head_sha: observedHead,
+          tree_sha: observedTree,
+        },
+      },
+    },
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.equal(result.reason, "git_repo_remote_branch_not_owned");
+  assert.equal(prAdapter.created.length, 0);
 });
 
 test("git_repo replay with no remote branch and no worktree fails closed and clears the stale marker", async () => {
@@ -468,6 +771,7 @@ function effectContext({
     },
   };
   return {
+    executionReadiness: () => ({ ok: true }),
     runId,
     repoRoot: fixture.root,
     runStoreDir,

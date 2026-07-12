@@ -1,0 +1,13 @@
+{
+  "workflows": {
+    "decomposition": {
+      "roles": {}
+    },
+    "execution": {
+      "roles": {}
+    },
+    "review": {
+      "roles": {}
+    }
+  }
+}

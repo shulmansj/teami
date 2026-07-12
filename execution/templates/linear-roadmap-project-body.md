@@ -25,10 +25,6 @@ Describe the future state this roadmap item should create.
 
 - Work that should not be included without explicit human approval.
 
-# Open Questions
-
-- Question requiring accountable human judgment before ready for execution, or None. when no open questions remain.
-
 # Underlying Assumptions
 
 - Material premise this item depends on, or None. when no assumptions need separate tracking.

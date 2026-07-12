@@ -29,6 +29,19 @@ function readJson(relativePath) {
   return JSON.parse(fs.readFileSync(path.join(repoRoot, relativePath), "utf8"));
 }
 
+function runtimePromptFromCommand(command) {
+  if (typeof command.stdinInput === "string") return command.stdinInput;
+  const index = command.args.indexOf("-p");
+  if (index >= 0) {
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg;
+  }
+  return command.args.at(-1);
+}
+
 function subagentTurn(runId, overrides = {}) {
   return {
     schema_version: SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION,
@@ -174,7 +187,8 @@ test("orchestrator and judge commands keep their explicit output schemas", async
 
   assert.equal(path.basename(orchestratorCommand.generation_schema_path), "orchestrator-turn-output.schema.json");
   assert.match(result.prompt, /run_schema_isolation/);
-  assert.ok(orchestratorCommand.args.includes(result.prompt));
+  assert.equal(runtimePromptFromCommand(orchestratorCommand), result.prompt);
+  assert.equal(orchestratorCommand.args.includes(result.prompt), false);
   assert.equal(result.raw_output, orchestratorOutput);
   assert.equal(judgeCommand.schema_path, JUDGE_OUTPUT_SCHEMA_PATH);
   assert.equal(judgeCommand.generation_schema_path, JUDGE_OUTPUT_SCHEMA_PATH);

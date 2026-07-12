@@ -3,91 +3,52 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const DEFAULT_FILE_CREDENTIAL_PATH = path.join(".teami", "linear-oauth-token.json");
+import { teamiHomePaths } from "./app-home.mjs";
+
+const DEFAULT_FILE_CREDENTIAL_NAME = "linear-oauth-token.json";
 const CREDENTIAL_ACCOUNT = "refresh_token";
-const WINDOWS_CREDENTIAL_SCRIPT = `
+const WINDOWS_PASSWORD_VAULT_SCRIPT = `
 $ErrorActionPreference = "Stop"
 $target = $env:AF_LINEAR_CREDENTIAL_TARGET
 $user = $env:AF_LINEAR_CREDENTIAL_ACCOUNT
 $action = $env:AF_LINEAR_CREDENTIAL_ACTION
 
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
+[Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime] | Out-Null
+[Windows.Security.Credentials.PasswordCredential,Windows.Security.Credentials,ContentType=WindowsRuntime] | Out-Null
+$vault = New-Object Windows.Security.Credentials.PasswordVault
 
-public class AgenticFactoryCredMan {
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-  public struct CREDENTIAL {
-    public UInt32 Flags;
-    public UInt32 Type;
-    public string TargetName;
-    public string Comment;
-    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-    public UInt32 CredentialBlobSize;
-    public IntPtr CredentialBlob;
-    public UInt32 Persist;
-    public UInt32 AttributeCount;
-    public IntPtr Attributes;
-    public string TargetAlias;
-    public string UserName;
-  }
-
-  [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
-  public static extern bool CredWrite(ref CREDENTIAL credential, UInt32 flags);
-
-  [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
-  public static extern bool CredRead(string target, UInt32 type, UInt32 reservedFlag, out IntPtr credentialPtr);
-
-  [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
-  public static extern bool CredDelete(string target, UInt32 type, UInt32 flags);
-
-  [DllImport("advapi32.dll", EntryPoint = "CredFree", SetLastError = true)]
-  public static extern void CredFree(IntPtr credentialPtr);
+function Test-TeamiCredentialMissing {
+  param($errorRecord)
+  $exception = $errorRecord.Exception
+  if ($exception.InnerException) { $exception = $exception.InnerException }
+  return $exception.HResult -eq -2147023728 -or $exception.Message -match "Element not found|not found"
 }
-"@
 
-$typeGeneric = 1
-$persistLocalMachine = 2
-$notFound = 1168
+function Get-TeamiCredential {
+  param([string]$resource, [string]$userName)
+  try {
+    $credential = $vault.Retrieve($resource, $userName)
+    $credential.RetrievePassword()
+    return $credential
+  } catch {
+    if (Test-TeamiCredentialMissing $_) { return $null }
+    throw
+  }
+}
 
 if ($action -eq "read") {
-  $ptr = [IntPtr]::Zero
-  $ok = [AgenticFactoryCredMan]::CredRead($target, $typeGeneric, 0, [ref]$ptr)
-  if (-not $ok) {
-    if ([Runtime.InteropServices.Marshal]::GetLastWin32Error() -eq $notFound) { exit 3 }
-    throw "Credential Manager read failed"
-  }
-  try {
-    $credential = [Runtime.InteropServices.Marshal]::PtrToStructure($ptr, [type][AgenticFactoryCredMan+CREDENTIAL])
-    if ($credential.CredentialBlobSize -gt 0) {
-      [Console]::Out.Write([Runtime.InteropServices.Marshal]::PtrToStringUni($credential.CredentialBlob, $credential.CredentialBlobSize / 2))
-    }
-  } finally {
-    [AgenticFactoryCredMan]::CredFree($ptr)
-  }
+  $credential = Get-TeamiCredential $target $user
+  if ($null -eq $credential) { exit 3 }
+  [Console]::Out.Write($credential.Password)
 } elseif ($action -eq "write") {
   $secret = [Console]::In.ReadToEnd()
-  $bytes = [System.Text.Encoding]::Unicode.GetBytes($secret)
-  $blob = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
-  try {
-    [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $blob, $bytes.Length)
-    $credential = New-Object AgenticFactoryCredMan+CREDENTIAL
-    $credential.Type = $typeGeneric
-    $credential.TargetName = $target
-    $credential.UserName = $user
-    $credential.CredentialBlob = $blob
-    $credential.CredentialBlobSize = $bytes.Length
-    $credential.Persist = $persistLocalMachine
-    $ok = [AgenticFactoryCredMan]::CredWrite([ref]$credential, 0)
-    if (-not $ok) { throw "Credential Manager write failed" }
-  } finally {
-    [Runtime.InteropServices.Marshal]::FreeHGlobal($blob)
-  }
+  $existing = Get-TeamiCredential $target $user
+  if ($null -ne $existing) { $vault.Remove($existing) }
+  $credential = New-Object Windows.Security.Credentials.PasswordCredential -ArgumentList $target, $user, $secret
+  $vault.Add($credential)
 } elseif ($action -eq "delete") {
-  $ok = [AgenticFactoryCredMan]::CredDelete($target, $typeGeneric, 0)
-  if (-not $ok -and [Runtime.InteropServices.Marshal]::GetLastWin32Error() -ne $notFound) {
-    throw "Credential Manager delete failed"
-  }
+  $credential = Get-TeamiCredential $target $user
+  if ($null -ne $credential) { $vault.Remove($credential) }
 } else {
   throw "Unsupported credential action"
 }
@@ -100,6 +61,7 @@ export function createLinearCredentialStore({
   workspaceId = null,
   target = null,
   repoRoot = process.cwd(),
+  home = undefined,
   platform = process.platform,
   run = spawnSync,
 } = {}) {
@@ -107,10 +69,17 @@ export function createLinearCredentialStore({
   if (!oauth) throw new Error("Linear OAuth config is required for credential storage.");
 
   const identity = credentialIdentity({ domainContext, domainId, workspaceId });
-  const resolvedTarget = target || credentialTargetForConfig(config, repoRoot, identity);
+  const resolvedTarget = target || credentialTargetForConfig(config, identity);
+  const legacyTargets = target
+    ? []
+    : legacyCredentialTargetsForConfig(config, {
+        repoRoot,
+        domainIdentity: identity,
+        currentTarget: resolvedTarget,
+      });
   if (oauth.credential_storage === "file") {
     return createFileCredentialStore({
-      filePath: path.resolve(repoRoot, credentialFilePath({ oauth, domainId: identity.domainId })),
+      filePath: credentialFilePath({ oauth, domainId: identity.domainId, home }),
       target: resolvedTarget,
     });
   }
@@ -119,17 +88,17 @@ export function createLinearCredentialStore({
     throw new Error(`Unsupported Linear OAuth credential storage: ${oauth.credential_storage}`);
   }
 
-  return createOsCredentialStore({ platform, run, target: resolvedTarget });
+  return createOsCredentialStore({ platform, run, target: resolvedTarget, legacyTargets });
 }
 
-export function credentialTargetForConfig(config, repoRoot = process.cwd(), domainIdentity = {}) {
+export function credentialTargetForConfig(config, domainIdentity = {}, maybeDomainIdentity = null) {
   const oauth = config?.linear?.oauth || {};
-  const identityFields = requireCredentialIdentity(domainIdentity, "Linear OAuth credential target");
+  const identityInput =
+    typeof domainIdentity === "string" ? maybeDomainIdentity || {} : domainIdentity;
+  const identityFields = requireCredentialIdentity(identityInput, "Linear OAuth credential target");
   const identity = [
-    "teami-linear-oauth",
     oauth.client_id || "",
     oauth.redirect_uri || "",
-    path.resolve(repoRoot),
     `workspace_id:${identityFields.workspaceId}`,
     `domain_id:${identityFields.domainId}`,
   ].join("\n");
@@ -151,6 +120,37 @@ export function legacyCredentialTargetForConfig(config, repoRoot = process.cwd()
 
 export function isLegacyCredentialTargetForConfig(target, config, repoRoot = process.cwd()) {
   return target === legacyCredentialTargetForConfig(config, repoRoot);
+}
+
+function legacyDomainCredentialTargetForConfig(config, repoRoot = process.cwd(), domainIdentity = {}) {
+  const oauth = config?.linear?.oauth || {};
+  const identityFields = requireCredentialIdentity(
+    domainIdentity,
+    "Legacy Linear OAuth credential target",
+  );
+  const identity = [
+    "teami-linear-oauth",
+    oauth.client_id || "",
+    oauth.redirect_uri || "",
+    path.resolve(repoRoot),
+    `workspace_id:${identityFields.workspaceId}`,
+    `domain_id:${identityFields.domainId}`,
+  ].join("\n");
+  const digest = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 24);
+  return `AgenticFactoryLinearOAuth:${digest}`;
+}
+
+function legacyCredentialTargetsForConfig(
+  config,
+  { repoRoot = process.cwd(), domainIdentity = {}, currentTarget = null } = {},
+) {
+  const targets = [];
+  const identity = credentialIdentity(domainIdentity);
+  if (identity.domainId && identity.workspaceId) {
+    targets.push(legacyDomainCredentialTargetForConfig(config, repoRoot, identity));
+  }
+  targets.push(legacyCredentialTargetForConfig(config, repoRoot));
+  return uniqueCredentialTargets(targets).filter((candidate) => candidate !== currentTarget);
 }
 
 export function createFileCredentialStore({ filePath, target }) {
@@ -206,14 +206,24 @@ export function createRawFileCredentialStore({ filePath, target, warning = null 
   };
 }
 
-export function createOsCredentialStore({ platform = process.platform, run = spawnSync, target }) {
+export function createOsCredentialStore({
+  platform = process.platform,
+  run = spawnSync,
+  target,
+  legacyTargets = [],
+}) {
   const raw = createRawOsCredentialStore({ platform, run, target });
+  const legacyStores = uniqueCredentialTargets(legacyTargets).map((legacyTarget) =>
+    createRawOsCredentialStore({ platform, run, target: legacyTarget }),
+  );
   return {
     kind: raw.kind,
     target,
 
     async readTokenSet() {
-      return parseTokenSecret(await raw.readSecret());
+      const tokenSet = parseTokenSecret(await raw.readSecret());
+      if (tokenSet) return tokenSet;
+      return migrateLegacyCredentialForRead({ raw, legacyStores });
     },
 
     async writeTokenSet(tokenSet) {
@@ -226,14 +236,21 @@ export function createOsCredentialStore({ platform = process.platform, run = spa
   };
 }
 
+async function migrateLegacyCredentialForRead({ raw, legacyStores }) {
+  for (const legacyStore of legacyStores) {
+    const tokenSet = parseTokenSecret(await legacyStore.readSecret());
+    if (!tokenSet) continue;
+    await raw.writeSecret(serializeTokenSet(tokenSet));
+    await legacyStore.deleteSecret();
+    return tokenSet;
+  }
+  return null;
+}
+
 export function createRawOsCredentialStore({ platform = process.platform, run = spawnSync, target }) {
   if (platform === "win32") return createWindowsCredentialStore({ run, target });
   if (platform === "linux") return createLinuxSecretServiceStore({ run, target });
-  if (platform === "darwin") {
-    throw new Error(
-      "macOS Linear OAuth credential storage is not implemented until the Keychain adapter can store tokens without passing them on process argv. Configure credential_storage=file only for local testing.",
-    );
-  }
+  if (platform === "darwin") return createMacosKeychainStore({ run, target });
   throw new Error(
     "OS Linear OAuth credential storage is not implemented for this platform yet. Configure credential_storage=file only for local testing.",
   );
@@ -336,10 +353,60 @@ function createLinuxSecretServiceStore({ run, target }) {
   };
 }
 
+function createMacosKeychainStore({ run, target }) {
+  return {
+    kind: "macos-keychain",
+    target,
+
+    async readSecret() {
+      const result = runMacosSecurityCommand(run, [
+        "find-generic-password",
+        "-a",
+        CREDENTIAL_ACCOUNT,
+        "-s",
+        target,
+        "-w",
+      ]);
+      if (isMacosSecurityNotFound(result)) return null;
+      assertCredentialCommandOk(result, "read", "macOS Keychain");
+      return result.stdout || "";
+    },
+
+    async writeSecret(secret) {
+      const result = runMacosSecurityCommand(
+        run,
+        [
+          "add-generic-password",
+          "-a",
+          CREDENTIAL_ACCOUNT,
+          "-s",
+          target,
+          "-U",
+          "-w",
+        ],
+        secret,
+      );
+      assertCredentialCommandOk(result, "write", "macOS Keychain");
+    },
+
+    async deleteSecret() {
+      const result = runMacosSecurityCommand(run, [
+        "delete-generic-password",
+        "-a",
+        CREDENTIAL_ACCOUNT,
+        "-s",
+        target,
+      ]);
+      if (isMacosSecurityNotFound(result)) return;
+      assertCredentialCommandOk(result, "delete", "macOS Keychain");
+    },
+  };
+}
+
 function runWindowsCredentialCommand(run, action, target, input = "") {
   return run(
     "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_CREDENTIAL_SCRIPT],
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_PASSWORD_VAULT_SCRIPT],
     {
       encoding: "utf8",
       env: {
@@ -353,6 +420,22 @@ function runWindowsCredentialCommand(run, action, target, input = "") {
       maxBuffer: 1024 * 1024,
     },
   );
+}
+
+function runMacosSecurityCommand(run, args, input = undefined) {
+  const options = {
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+  };
+  if (input !== undefined) options.input = input;
+  return run("security", args, options);
+}
+
+function isMacosSecurityNotFound(result) {
+  if (result?.status === 44) return true;
+  const output = `${result?.stderr || ""}\n${result?.stdout || ""}`;
+  return /specified item could not be found|could not be found in the keychain|not found/i.test(output);
 }
 
 function assertCredentialCommandOk(result, action, label) {
@@ -377,11 +460,20 @@ function normalizeTokenSet(tokenSet) {
   };
 }
 
-function credentialFilePath({ oauth, domainId }) {
-  if (domainId) {
-    return path.join(".teami", "domains", domainId, "linear-oauth-token.json");
+function credentialFilePath({ oauth, domainId, home }) {
+  const paths = teamiHomePaths({ home });
+  const pathApi = pathApiForHome(paths.home);
+  const credentialsDir = pathApi.join(paths.home, "credentials");
+  if (oauth.credential_file) {
+    if (path.isAbsolute(oauth.credential_file) || path.win32.isAbsolute(oauth.credential_file)) {
+      return oauth.credential_file;
+    }
+    return pathApi.join(credentialsDir, oauth.credential_file);
   }
-  return oauth.credential_file || DEFAULT_FILE_CREDENTIAL_PATH;
+  if (domainId) {
+    return pathApi.join(credentialsDir, "domains", domainId, DEFAULT_FILE_CREDENTIAL_NAME);
+  }
+  return pathApi.join(credentialsDir, DEFAULT_FILE_CREDENTIAL_NAME);
 }
 
 function credentialIdentity(input = {}) {
@@ -412,4 +504,15 @@ function requireCredentialIdentity(input = {}, label) {
     throw new Error(`${label} requires ${missing.join(" and ")}.`);
   }
   return identity;
+}
+
+function uniqueCredentialTargets(targets) {
+  return [...new Set(targets.filter((target) => typeof target === "string" && target.trim() !== ""))];
+}
+
+function pathApiForHome(home) {
+  if (typeof home === "string" && (/^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\"))) {
+    return path.win32;
+  }
+  return path.posix;
 }

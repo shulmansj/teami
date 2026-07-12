@@ -21,7 +21,7 @@ import {
   runFreshIssueSyntheticWake,
 } from "../src/gateway-loop.mjs";
 import * as triggerIdempotency from "../src/trigger-idempotency.mjs";
-import { runTriggeredExecution } from "../src/trigger-runner.mjs";
+import { runTriggeredExecutionForTest as runTriggeredExecution } from "../src/trigger-runner.mjs";
 import { GIT_REPO_COMMIT_EFFECT_ID } from "../src/workflows/execution/effect-ids.mjs";
 
 test("Ready issue execution poll composes decide, synthetic dispatch, run, effects, and replay over evolving state", async (t) => {
@@ -32,10 +32,11 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
   const priorWriteCredentialEnv = seedParentWriteCredentialEnv();
   t.after(() => restoreParentEnv(priorWriteCredentialEnv));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-exec-loop-e2e-"));
+  process.env.TEAMI_HOME = tempRoot;
   writeExecutionAcceptedPromptFixture(tempRoot);
 
   const gitFixture = createGitFixture(tempRoot);
-  const runStoreDir = path.join(tempRoot, ".teami", "runs");
+  const runStoreDir = path.join(tempRoot, "domains", "domain-1", "runs");
   const domain = domainFixture();
   const registry = { schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION, domains: [domain] };
   const config = executionConfig();
@@ -43,6 +44,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
     domain,
     config,
     repoRoot: tempRoot,
+    home: tempRoot,
     behaviorRepoId: "local:execution-loop-e2e",
   });
   const linearCache = writeExecutionLinearCache(domainContext.linear.cachePath);
@@ -52,7 +54,8 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
     "todo",
     "in_progress",
     "in_review",
-    "blocked",
+    "human_review",
+    "needs_principal",
     "done",
   ]);
   assert.deepEqual(
@@ -127,6 +130,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
       config,
       ...input,
       repoRoot: tempRoot,
+      home: tempRoot,
       runStoreDir,
       registry,
       domain,
@@ -140,13 +144,18 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
       // installs the one-turn orchestrator seam the production dispatch does
       // not expose directly.
       runTriggeredExecutionFn: (options) =>
-        runTriggeredExecution({ ...options, orchestratorTurnExecutor }),
+        runTriggeredExecution({
+          ...options,
+          executionReadiness: () => ({ ok: true }),
+          orchestratorTurnExecutor,
+        }),
     });
   };
   const pollIssue = (issueId, extra = {}) =>
     processReadyIssue({
       config,
       repoRoot: tempRoot,
+      home: tempRoot,
       runStoreDir,
       registry,
       domain,
@@ -154,6 +163,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
       cache: linearCache,
       client: linearClient,
       candidate: { id: issueId },
+      executionReadiness: () => ({ ok: true }),
       idempotency: triggerIdempotency,
       runFreshIssue,
       runDeps: { ...baseRunDeps, ...(extra.runDeps || {}) },
@@ -323,7 +333,7 @@ function createMutableLinearClient() {
     { id: "state-todo", name: "Todo", type: "unstarted", teamId: "team-1" },
     { id: "state-in-progress", name: "In Progress", type: "started", teamId: "team-1" },
     { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
-    { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
     { id: "state-done", name: "Done", type: "completed", teamId: "team-1" },
   ];
   const byStateId = new Map(states.map((state) => [state.id, state]));
@@ -643,7 +653,8 @@ function writeExecutionLinearCache(cachePath) {
       todo: "state-todo",
       in_progress: "state-in-progress",
       in_review: "state-in-review",
-      blocked: "state-blocked",
+      human_review: "state-human-review",
+      needs_principal: "state-needs-principal",
       done: "state-done",
     },
     projectStatuses: {
@@ -654,6 +665,7 @@ function writeExecutionLinearCache(cachePath) {
     issueLabels: {
       Discovery: "label-discovery",
       "Needs Principal": "label-needs-principal",
+      "human-review": "label-human-review",
     },
   };
   writeLinearCache(cachePath, cache);
@@ -676,9 +688,10 @@ async function greenExecutionProfilePreflight({ resourceId }) {
 }
 
 async function waitForIdle(state, issueId) {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
     if (!state.inFlight.has(issueId)) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`issue remained in-flight: ${issueId}`);
 }
@@ -871,13 +884,15 @@ function executionConfig() {
         labels: {
           discovery: "Discovery",
           needs_principal: "Needs Principal",
+          human_review: "human-review",
         },
         statuses: {
           backlog: { name: "Backlog", type: "backlog" },
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
           in_review: { name: "In Review", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          human_review: { name: "Principal Review", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
         },
       },

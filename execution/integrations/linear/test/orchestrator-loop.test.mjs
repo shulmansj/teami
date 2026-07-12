@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,6 +22,7 @@ import {
   defaultOrchestratorRuntime,
   executeOrchestratorTurn,
 } from "../src/orchestrator-turn.mjs";
+import { buildProjectNeedsPrincipalCommentBody } from "../src/linear/project-needs-principal-comment.mjs";
 import { REPAIR_RETRY_TIMEOUT_MS } from "../src/runtime-command.mjs";
 import { resolveRoleRuntimeAssignments } from "../src/runtime-adapters.mjs";
 import { terminalArtifact } from "../src/workflows/decomposition/artifacts.mjs";
@@ -150,8 +152,9 @@ function validSpawn(runId, {
   reason = "product_context_sufficient",
   envelope = `repair envelope for ${role}`,
   evidenceRef = null,
+  packetFields = {},
 } = {}) {
-  const packet = subagentTurn(runId, { status, reason });
+  const packet = { ...subagentTurn(runId, { status, reason }), ...packetFields };
   const rawOutput = JSON.stringify(packet);
   return {
     ok: true,
@@ -337,7 +340,21 @@ function pauseProducedContent(runId) {
 // reverse of the retired fixed phase order) then terminate(commit) carrying valid
 // producedContent -> a validated commit.
 function promptFromCommand(command, marker) {
-  return command?.args?.find((arg) => typeof arg === "string" && arg.includes(marker)) || "";
+  const prompt = runtimePromptFromCommand(command);
+  return prompt.includes(marker) ? prompt : "";
+}
+
+function runtimePromptFromCommand(command) {
+  if (typeof command?.stdinInput === "string") return command.stdinInput;
+  const index = command?.args?.indexOf("-p") ?? -1;
+  if (index >= 0) {
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg || "";
+  }
+  return command?.args?.at(-1) || "";
 }
 
 function promptSection(prompt, startMarker, endMarker) {
@@ -1012,14 +1029,6 @@ test("orchestrator loop: multi-repo ambiguity pauses for product_questions and e
         assumptions: [],
         constraints: [],
         risks: ["Repo ownership is ambiguous between the allowed resources."],
-        project_update_markdown: [
-          `run_id: ${runId}`,
-          "",
-          "Paused because code repo ownership is ambiguous.",
-          "",
-          "## What I did with each part of your project",
-          "- Identified the work, but did not emit final issues until repo ownership is selected.",
-        ].join("\n"),
         open_questions_markdown: "- Which allowed `resource_id` should own the code issue: `repo-web` or `repo-api`?",
       },
     }),
@@ -1031,6 +1040,7 @@ test("orchestrator loop: multi-repo ambiguity pauses for product_questions and e
   assert.equal(result.output.terminal_output.outcome, "pause");
   assert.equal(result.output.terminal_output.reason, "product_questions");
   assert.equal(Object.hasOwn(result.output.terminal_output, "final_issues"), false);
+  assert.equal(Object.hasOwn(result.output.terminal_output, "project_update_markdown"), false);
   assert.match(result.output.terminal_output.open_questions_markdown, /resource_id/);
   assert.match(result.output.terminal_output.open_questions_markdown, /repo-web/);
   assert.match(result.output.terminal_output.open_questions_markdown, /repo-api/);
@@ -1514,6 +1524,7 @@ test("orchestrator loop: spanSink records orchestrator turns and the single suba
       failure_kind: null,
       failure_code: null,
       context_digest: "product_context_sufficient digest",
+      open_questions_markdown: null,
       source_refs: [{ kind: "linear_project", id: "project-1" }],
     }]),
   );
@@ -2066,7 +2077,7 @@ test("orchestrator loop: eval-mode is read-only over the orchestrator loop", asy
     id: "project-1",
     name: "Eval Project",
     description: null,
-    content: "## Goal\n\nDo it.\n\n## Open Questions\n",
+    content: "## Goal\n\nDo it.\n",
     status: "planned",
     labels: [],
     existing_issues: [],
@@ -2231,14 +2242,95 @@ test("orchestrator loop: the REAL runtime parses the { control_action, produced_
   assert.equal(result.output.terminal_output.final_issues[0].decomposition_key, "project-plan");
   assert.deepEqual(runtimeExecutor.calls.map((c) => c.runtime_role), ["pm"]);
   assert.equal(commandsSeen.length, 2);
-  const secondPrompt = commandsSeen[1].args.find((arg) =>
-    typeof arg === "string" && arg.includes("Decisions so far this run:")
-  );
+  const secondPrompt = promptFromCommand(commandsSeen[1], "Decisions so far this run:");
   assert.ok(secondPrompt, "second orchestrator turn should include the prompt");
   assert.match(secondPrompt, /"status": "continue"/);
   assert.match(secondPrompt, /"reason": "product_context_sufficient"/);
   assert.match(secondPrompt, /"context_digest": "product_context_sufficient digest"/);
   assert.match(secondPrompt, /"runtime_role": "pm"/);
+  assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
+});
+
+test("orchestrator loop: subagent question text reaches the next prompt and final project comment body", async () => {
+  const config = loadLinearConfig({ repoRoot: REPO_ROOT });
+  const runId = "run_loop_question_text";
+  const roster = fakeRoster();
+  const exactQuestion = [
+    "- Question: needs_constraint_decision - should we keep silent retries or show retry failures to users?",
+    "  Why it blocks: the issue split changes depending on the trust promise.",
+    "  Owner: Human",
+  ].join("\n");
+  const runtimeExecutor = scriptedSubagentExecutor([
+    (input) => validSpawn(runId, {
+      role: input.runtime_role,
+      status: "blocked",
+      reason: "needs_constraint_decision",
+      packetFields: {
+        open_questions_markdown: exactQuestion,
+        technical_explanation_markdown:
+          "Silent retries would change the user-visible trust promise for failed integrations.",
+      },
+    }),
+  ]);
+  const assignment = resolveRoleRuntimeAssignments(config, "decomposition").orchestrator;
+  let runtimeCall = 0;
+  const commandsSeen = [];
+  const fakeRunCommand = async (command) => {
+    commandsSeen.push(command);
+    runtimeCall += 1;
+    if (runtimeCall === 1) {
+      return JSON.stringify({
+        control_action: {
+          action: "invoke_library",
+          target_key: "prompt/decomposition/sr_eng_grounding_pass",
+        },
+      });
+    }
+    return JSON.stringify({
+      control_action: { action: "terminate", outcome: "pause", reason: "needs_pm_review" },
+      produced_content: {
+        context_digest: "The technical constraint needs a product decision.",
+        source_refs: [{ kind: "linear_project", id: "project-1" }],
+        assumptions: [],
+        constraints: ["silent retries affect trust copy"],
+        risks: [],
+        open_questions_markdown: exactQuestion,
+      },
+    });
+  };
+  const orchestratorTurnExecutor = (input) =>
+    executeOrchestratorTurn({
+      ...input,
+      orchestratorRuntime: (runtimeInput) =>
+        defaultOrchestratorRuntime({ ...runtimeInput, assignment, runCommand: fakeRunCommand, repoRoot: REPO_ROOT }),
+    });
+
+  const result = await runDecompositionOrchestrator({
+    runId,
+    wake: { id: "wake-1", object_id: "project-1" },
+    event: { id: "event-1" },
+    project: { id: "project-1", name: "Project" },
+    config,
+    runtimeExecutor,
+    orchestratorTurnExecutor,
+    roster,
+    repoRoot: REPO_ROOT,
+  });
+
+  assert.equal(result.output.terminal_output.outcome, "pause");
+  assert.equal(result.output.terminal_output.reason, "needs_pm_review");
+  assert.equal(result.output.terminal_output.open_questions_markdown, exactQuestion);
+  const secondPrompt = promptFromCommand(commandsSeen[1], "Decisions so far this run:");
+  assert.ok(secondPrompt, "second orchestrator turn should include the prior-turn digest");
+  assert.match(secondPrompt, /needs_constraint_decision/);
+  assert.ok(secondPrompt.includes(JSON.stringify(exactQuestion).slice(1, -1)));
+  assert.match(secondPrompt, /technical_explanation_markdown/);
+  const commentBody = buildProjectNeedsPrincipalCommentBody({
+    runId,
+    questionsMarkdown: result.output.terminal_output.open_questions_markdown,
+  });
+  assert.ok(commentBody.includes(exactQuestion));
+  assert.doesNotMatch(commentBody, /What product decision should be resolved/);
   assert.deepEqual(validateOrchestratorOutput(result.output), { ok: true, failureReasons: [] });
 });
 

@@ -88,15 +88,16 @@ fail this dimension. Typical failure mode: `missing_acceptance_criteria`.
 ### `escalation_judgment`
 
 Product, taste, scope, and trust questions are surfaced to humans instead of
-being silently resolved by the workflow. A paused run must carry exact Open
-Questions prose. Typical failure modes: `product_question_not_escalated`,
+being silently resolved by the workflow. A paused run must carry exact
+comment-bound question prose. Typical failure modes: `product_question_not_escalated`,
 `missing_exact_open_questions_markdown`.
 
 ### `discovery_judgment`
 
-Discovery issues are used only for real technical unknowns, not as a dumping
-ground for routine work or as a substitute for product escalation. Discovery
-issues must state what is unknown and what answering it unblocks.
+Technical unknowns that block decomposition are surfaced as narrow
+comment-bound questions, not as a dumping ground for routine work or as a
+substitute for product escalation. The question must state what is unknown and
+what answering it unblocks.
 
 ### `human_decision_load`
 

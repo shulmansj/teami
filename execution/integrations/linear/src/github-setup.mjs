@@ -1,7 +1,12 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
+
+import {
+  gitOperationForArgs,
+  runBoundedSubprocess,
+} from "../../git/bounded-subprocess.mjs";
 
 import { findTokenShapedContent } from "./eval-content-gate.mjs";
 import {
@@ -9,8 +14,10 @@ import {
   scrubGitHubAuthEnv,
 } from "./github-secret-hygiene.mjs";
 import { defaultRunGit } from "./promotion-workspace.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
+import { formatCommand } from "./cli/operator-output.mjs";
 
-// GitHub repo connection for `npm run init` + `doctor` (step 11).
+// GitHub repo connection for `teami init` + `doctor` (step 11).
 // The CLI defaults to the adopter's ambient local git/gh auth. Dry-run remains
 // available as an explicit rehearsal path and records intents only.
 // Setup uses only the adopter's local git/gh auth. No GitHub secret is stored
@@ -57,6 +64,10 @@ const GITHUB_VISIBLE_PROGRESS_PREFIX = "GitHub progress:";
 const SCRUBBED_GITHUB_ENV = Symbol("scrubbed_github_env");
 const CONNECT_GITHUB_REPAIR_PREFIX =
   "connect GitHub to complete adoption: ";
+const CHECKOUTLESS_LOCAL_MARKER = Object.freeze({
+  mode: "none",
+  reason: "init_ran_outside_git_repository",
+});
 
 // Endpoint allowlist for the SETUP transport. Production calls ride on the
 // adopter's local gh and git auth; dry-run transports record the same intent
@@ -242,25 +253,48 @@ export function createMockGitHubSetupTransport({
   };
 }
 
-export function defaultRunCommand(command, args, { cwd, env } = {}) {
+export async function defaultRunCommand(command, args, { cwd, env } = {}) {
   const childEnv = env?.[SCRUBBED_GITHUB_ENV]
     ? { ...env }
     : {
       ...scrubGitHubAuthEnv(process.env),
       ...(env || {}),
     };
-  const result = spawnSync(command, args, {
+  return runBoundedSubprocess({
+    command,
+    args,
+    operation: command === "git" ? gitOperationForArgs(args) : ghSetupOperation(args),
     cwd,
     env: childEnv,
-    encoding: "utf8",
-    windowsHide: true,
+    classifyFailure: ({ stdout, stderr }) => classifySetupCommandFailure(`${stderr}\n${stdout}`),
   });
-  return {
-    ok: result.status === 0,
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+}
+
+function ghSetupOperation(args = []) {
+  if (args[0] === "auth") return "gh_auth_read";
+  if (args[0] === "repo" && args[1] === "create") return "gh_api_mutation";
+  if (args[0] === "api") {
+    const methodIndex = args.indexOf("--method");
+    const method = methodIndex >= 0 ? args[methodIndex + 1] : "GET";
+    return ["GET", "HEAD"].includes(String(method || "").toUpperCase())
+      ? "gh_api_read"
+      : "gh_api_mutation";
+  }
+  return "gh_api_read";
+}
+
+function classifySetupCommandFailure(output) {
+  if (/not found|could not resolve|HTTP 404/i.test(output)) return "not_found";
+  if (/authentication|not logged|HTTP 401|HTTP 403/i.test(output)) return "auth_failed";
+  if (/rate.?limit|HTTP 429/i.test(output)) return "rate_limited";
+  return "command_failed";
+}
+
+function setupCommandError(message, result) {
+  const error = new Error(redactGitHubSecrets(`${message}:${result.failureCode || result.outcome || "failed"}`));
+  error.outcome = result.reconciliationRequired ? "reconciliation_required" : "failed";
+  error.reconciliationRequired = result.reconciliationRequired === true;
+  return error;
 }
 
 function promptDisabledEnv(extra = {}, { pushAuth } = {}) {
@@ -281,8 +315,8 @@ function safeBranchName(branch) {
     : null;
 }
 
-export function ghJsonWithAmbientAuth({ runCommand, args, missingOk = false }) {
-  const auth = runCommand("gh", ["auth", "status", "--hostname", "github.com"], {
+export async function ghJsonWithAmbientAuth({ runCommand, args, missingOk = false }) {
+  const auth = await runCommand("gh", ["auth", "status", "--hostname", "github.com"], {
     env: promptDisabledEnv(),
   });
   if (!auth.ok) {
@@ -290,11 +324,10 @@ export function ghJsonWithAmbientAuth({ runCommand, args, missingOk = false }) {
       auth.stderr.trim() || auth.stdout.trim() || "gh auth status failed; run gh auth login",
     ));
   }
-  const result = runCommand("gh", args, { env: promptDisabledEnv() });
+  const result = await runCommand("gh", args, { env: promptDisabledEnv() });
   if (!result.ok) {
-    const detail = result.stderr.trim() || result.stdout.trim();
-    if (missingOk && /not found|could not resolve|HTTP 404/i.test(detail)) return null;
-    throw new Error(redactGitHubSecrets(detail || `gh ${args.join(" ")} failed`));
+    if (missingOk && result.failureCode === "not_found") return null;
+    throw setupCommandError(`gh ${args[0] || "command"} failed`, result);
   }
   return result.stdout.trim() ? JSON.parse(result.stdout) : null;
 }
@@ -314,7 +347,7 @@ export function createLocalAmbientGitHubSetupTransport({
       calls.push({ endpointId, owner, repo, params: safeSetupParams(params), at: now().toISOString() });
       switch (endpointId) {
         case "get_repository": {
-          const data = ghJsonWithAmbientAuth({
+          const data = await ghJsonWithAmbientAuth({
             runCommand,
             args: ["repo", "view", `${owner}/${repo}`, "--json", "id,nameWithOwner,visibility,url,defaultBranchRef"],
             missingOk: true,
@@ -328,16 +361,16 @@ export function createLocalAmbientGitHubSetupTransport({
         }
         case "create_repository": {
           const visibilityFlag = (params.visibility || "private") === "public" ? "--public" : "--private";
-          const result = runCommand("gh", [
+          const result = await runCommand("gh", [
             "repo", "create", `${owner}/${repo}`,
             visibilityFlag,
             "--disable-issues",
             "--disable-wiki",
           ], { env: promptDisabledEnv() });
           if (!result.ok) {
-            throw new Error(redactGitHubSecrets(result.stderr.trim() || result.stdout.trim() || "gh repo create failed"));
+            throw setupCommandError("gh repo create failed", result);
           }
-          const data = ghJsonWithAmbientAuth({
+          const data = await ghJsonWithAmbientAuth({
             runCommand,
             args: ["repo", "view", `${owner}/${repo}`, "--json", "id,nameWithOwner,visibility,url,defaultBranchRef"],
           });
@@ -346,17 +379,17 @@ export function createLocalAmbientGitHubSetupTransport({
         case "push_initial_branch": {
           const branch = safeBranchName(params.branch);
           if (!branch) throw new Error("default_branch_unresolvable");
-          const result = runCommand("git", ["push", "origin", `HEAD:${branch}`], {
+          const result = await runCommand("git", ["push", "origin", `HEAD:${branch}`], {
             cwd: repoRoot,
             env: promptDisabledEnv({}, { pushAuth: params.push_auth }),
           });
-          if (!result.ok) throw new Error(redactGitHubSecrets(result.stderr.trim() || result.stdout.trim() || "git push failed"));
+          if (!result.ok) throw setupCommandError("git push failed", result);
           return { pushed: true, recorded: true, branch, head_sha: params.head_sha ?? null };
         }
         case "verify_default_branch": {
           const branch = safeBranchName(params.branch);
           if (!branch) throw new Error("default_branch_unresolvable");
-          const result = runCommand("git", ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`], {
+          const result = await runCommand("git", ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`], {
             cwd: repoRoot,
             env: promptDisabledEnv({}, { pushAuth: params.push_auth }),
           });
@@ -364,7 +397,7 @@ export function createLocalAmbientGitHubSetupTransport({
             verified: result.ok,
             default_branch: branch,
             head_sha: params.head_sha ?? null,
-            ...(result.ok ? {} : { detail: redactGitHubSecrets(result.stderr.trim() || result.stdout.trim() || "default branch not found on origin") }),
+            ...(result.ok ? {} : { detail: "default branch not found on origin" }),
           };
         }
         default:
@@ -380,17 +413,17 @@ export function createLocalAmbientGitHubSetupTransport({
 // This file is the LOCAL system of record for "which behavior repo this
 // workspace is connected to": selected repo, owner, default branch, App
 // installation id, permission snapshot, connection_mode (dry_run|real), and
-// verified_at. The step 10 promotion controller resolves the behavior-repo
-// identity from here (resolveBehaviorRepoIdentity); the step 12 scanner and
-// step 13 supervisor read the same file.
+// verified_at. The promotion controller and scanner resolve the behavior-repo
+// identity from here (resolveBehaviorRepoIdentity).
 // ---------------------------------------------------------------------------
 
-export function githubConnectionStatePath(repoRoot = process.cwd()) {
-  return path.join(repoRoot, ".teami", "github-connection.json");
+export function githubConnectionStatePath(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "github-connection.json");
 }
 
-export function readGitHubConnectionState({ repoRoot = process.cwd(), statePath = null } = {}) {
-  const file = statePath || githubConnectionStatePath(repoRoot);
+export function readGitHubConnectionState({ repoRoot = null, home = resolveTeamiHome(), statePath = null } = {}) {
+  void repoRoot;
+  const file = statePath || githubConnectionStatePath(home);
   if (!fs.existsSync(file)) {
     return { ok: false, reason: "missing_github_connection_state", statePath: file };
   }
@@ -428,11 +461,11 @@ function writeGitHubConnectionState({ statePath, connection }) {
 }
 
 // Production behavior-repo identity resolution for the promotion controller:
-// reads the connection state written by `npm run init`. Only a VERIFIED
+// reads the connection state written by `teami init`. Only a VERIFIED
 // connection supplies an identity; everything else fails typed so the caller
 // can fall back to the dry-run placeholder or repair.
-export function resolveBehaviorRepoIdentity({ repoRoot = process.cwd(), statePath = null } = {}) {
-  const read = readGitHubConnectionState({ repoRoot, statePath });
+export function resolveBehaviorRepoIdentity({ repoRoot = null, home = resolveTeamiHome(), statePath = null } = {}) {
+  const read = readGitHubConnectionState({ repoRoot, home, statePath });
   if (!read.ok) return { ok: false, reason: read.reason };
   const connection = read.connection;
   if (connection.status !== "verified" || !connection.repo?.owner || !connection.repo?.name) {
@@ -553,10 +586,10 @@ function formatGitHubOwnerPrompt({ defaultOwner, repoName, visibility }) {
   ].join("\n");
 }
 
-export function defaultResolveAuthenticatedGitHubLogin({ runCommand = defaultRunCommand } = {}) {
+export async function defaultResolveAuthenticatedGitHubLogin({ runCommand = defaultRunCommand } = {}) {
   let result;
   try {
-    result = runCommand("gh", ["api", "user", "--jq", ".login"], { env: promptDisabledEnv() });
+    result = await runCommand("gh", ["api", "user", "--jq", ".login"], { env: promptDisabledEnv() });
   } catch {
     return null;
   }
@@ -603,8 +636,8 @@ function normalizeGitHubRemoteParts(owner, repoWithSuffix) {
   return { owner, repo };
 }
 
-export function listGitRemotes({ repoRoot = process.cwd(), runGit = defaultRunGit } = {}) {
-  const result = runGit(["remote", "-v"], { cwd: repoRoot });
+export async function listGitRemotes({ repoRoot = process.cwd(), runGit = defaultRunGit } = {}) {
+  const result = await runGit(["remote", "-v"], { cwd: repoRoot });
   if (!result.ok) {
     return {
       ok: false,
@@ -620,11 +653,552 @@ export function listGitRemotes({ repoRoot = process.cwd(), runGit = defaultRunGi
   return { ok: true, remotes: [...remotes.entries()].map(([name, url]) => ({ name, url })) };
 }
 
-function getGitRemoteUrl({ repoRoot = process.cwd(), runGit = defaultRunGit, remote = "origin", push = false } = {}) {
+async function recordDryRunGitHubIntentWithoutLocalGit({
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  config = null,
+  transportKind = "dry_run",
+  runGit = defaultRunGit,
+  statePath = null,
+  remoteListing,
+  requestedOwner = null,
+  requestedRepoName = null,
+  requestedVisibility = null,
+  now = () => new Date(),
+  onProgress = () => {},
+  isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  promptGitHubOwner = defaultPromptGitHubOwner,
+  resolveAuthenticatedGitHubLogin = defaultResolveAuthenticatedGitHubLogin,
+} = {}) {
+  void repoRoot;
+  void runGit;
+  const resolvedStatePath = statePath || githubConnectionStatePath(home);
+  const settings = await resolveGitHubSetupSettings({
+    config,
+    requestedOwner,
+    requestedRepoName,
+    requestedVisibility,
+    connectionMode: "dry_run",
+    isTTY,
+    promptGitHubOwner,
+    resolveAuthenticatedGitHubLogin,
+  });
+  if (!settings.ok) {
+    let repair = `fix the requested behavior repo settings (${settings.detail}) and re-run ${formatCommand("init")}`;
+    if (settings.reason === "github_owner_not_selected") {
+      repair = `authenticate the GitHub CLI (gh auth login), set origin to the adopter-owned behavior repo, or re-run ${formatCommand("init --github-owner <owner-or-org>")}`;
+    }
+    return {
+      ok: false,
+      status: "failed",
+      reason: settings.reason,
+      repair,
+      failures: [{ reason: settings.reason, repair: "see above" }],
+      state_path: resolvedStatePath,
+    };
+  }
+
+  const checkedAt = now().toISOString();
+  const repair = `open a git repository checkout, then re-run ${formatCommand("github:init")} without --github-dry-run to complete GitHub adoption`;
+  const state = {
+    schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
+    connection_mode: "dry_run",
+    status: "verified",
+    adoption_complete: false,
+    repo: {
+      id: `dry-run:${settings.fullName}`,
+      owner: settings.owner,
+      owner_source: settings.ownerSource,
+      name: settings.name,
+      full_name: settings.fullName,
+      visibility: settings.visibility,
+      url: `dry-run://github/${settings.fullName}`,
+    },
+    default_branch: null,
+    push_auth: "https",
+    local_auth: {
+      mode: "local_ambient",
+      gh_auth: "dry_run",
+      git_write: "not_checked",
+      real_push_enabled: false,
+      push_auth: "https",
+      checked_at: checkedAt,
+    },
+    remotes: {
+      origin: {
+        url: settings.url,
+        push_url: settings.url,
+        push_auth: "https",
+        planned: true,
+        applied: false,
+      },
+      upstream: null,
+      planned_actions: [{ action: "set_origin", name: "origin", url: settings.url, blocked_by: remoteListing.reason }],
+    },
+    push_verification: {
+      recorded: false,
+      pushed: false,
+      branch: null,
+      head_sha: null,
+      verified: false,
+      dry_run: true,
+      reason: remoteListing.reason,
+    },
+    pre_push_sanitizer: null,
+    pr_generation: {
+      verified: false,
+      derived_from: "dry_run_recorded_without_local_git",
+      mode: "local_ambient",
+      dry_run: true,
+    },
+    failures: [],
+    verified_at: checkedAt,
+    todo: `Dry-run GitHub connection - recorded intent only; ${repair}.`,
+  };
+
+  try {
+    writeGitHubConnectionState({ statePath: resolvedStatePath, connection: state });
+  } catch (error) {
+    return {
+      ok: false,
+      status: "failed",
+      reason: "github_connection_state_write_failed",
+      detail: error.message,
+      repair: `fix the .teami/ write failure and re-run ${formatCommand("init")}`,
+      failures: [{ reason: "github_connection_state_write_failed", repair: "see above", detail: error.message }],
+      state_path: resolvedStatePath,
+    };
+  }
+
+  onProgress(`GitHub repo target: ${settings.fullName} (${settings.visibility})`);
+  onProgress(`recorded (dry-run): behavior repo ${settings.fullName} (visibility ${settings.visibility})`);
+  onProgress(`WARNING local Git remotes were not available (${remoteListing.detail || remoteListing.reason}); recorded dry-run intent only. ${repair}.`);
+  onProgress(`GitHub connection recorded in DRY-RUN mode - adoption is NOT complete. Re-run ${formatCommand("github:init")} without --github-dry-run.`);
+
+  return {
+    ok: true,
+    status: "verified",
+    connection: state,
+    state_path: resolvedStatePath,
+    transport_kind: transportKind,
+    dry_run: true,
+    reason: remoteListing.reason,
+    detail: remoteListing.detail,
+    repair,
+  };
+}
+
+function isNotGitRepositoryListing(remoteListing) {
+  const detail = String(remoteListing?.detail || "");
+  return remoteListing?.reason === "git_remote_listing_failed" && /not a git repository/i.test(detail);
+}
+
+function checkoutlessLocalMarker() {
+  return { ...CHECKOUTLESS_LOCAL_MARKER };
+}
+
+function isCheckoutlessConnection(connection) {
+  return connection?.local_checkout?.mode === CHECKOUTLESS_LOCAL_MARKER.mode;
+}
+
+const CHECKOUTLESS_SEED_README = `# Teami behavior repo
+
+This repository holds your factory's owned configuration.
+
+Teami reads a managed mirror of this repository from your local Teami home. Changes arrive as pull requests for you to review and merge.
+`;
+
+function safeRemoveTemporarySeedDir(seedDir) {
+  try {
+    const resolved = path.resolve(seedDir);
+    const tempRoot = path.resolve(os.tmpdir());
+    const normalizedResolved = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    const normalizedTempRoot = process.platform === "win32" ? tempRoot.toLowerCase() : tempRoot;
+    const insideTemp = normalizedResolved.startsWith(`${normalizedTempRoot}${path.sep}`);
+    const namedSeedDir = path.basename(resolved).startsWith("teami-behavior-seed-");
+    if (insideTemp && namedSeedDir) {
+      fs.rmSync(resolved, { recursive: true, force: true });
+    }
+  } catch {
+    // Cleanup must not hide the setup failure that triggered it.
+  }
+}
+
+async function gitStep({ runGit, args, cwd, env = null, reason }) {
+  const result = await runGit(args, { cwd, ...(env ? { env } : {}) });
+  if (result.ok) return { ok: true, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  return {
+    ok: false,
+    reason,
+    detail: redactGitHubSecrets(result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} failed`),
+  };
+}
+
+async function seedBehaviorRepoFromTemporaryClone({
+  settings,
+  runGit = defaultRunGit,
+  pushAuth = "https",
+  onProgress = () => {},
+} = {}) {
+  const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-behavior-seed-"));
+  try {
+    let step = await gitStep({ runGit, args: ["init"], cwd: seedDir, reason: "seed_git_init_failed" });
+    if (!step.ok) return { ...step, seed_clone_dir: seedDir };
+
+    fs.writeFileSync(path.join(seedDir, "README.md"), CHECKOUTLESS_SEED_README, "utf8");
+
+    step = await gitStep({ runGit, args: ["add", "README.md"], cwd: seedDir, reason: "seed_git_add_failed" });
+    if (!step.ok) return { ...step, seed_clone_dir: seedDir };
+
+    step = await gitStep({
+      runGit,
+      args: [
+        "-c",
+        "user.name=Teami",
+        "-c",
+        "user.email=teami@users.noreply.github.com",
+        "commit",
+        "-m",
+        "Seed Teami behavior repo",
+      ],
+      cwd: seedDir,
+      reason: "seed_git_commit_failed",
+    });
+    if (!step.ok) return { ...step, seed_clone_dir: seedDir };
+
+    step = await gitStep({ runGit, args: ["remote", "add", "origin", settings.url], cwd: seedDir, reason: "seed_git_origin_failed" });
+    if (!step.ok) return { ...step, seed_clone_dir: seedDir };
+
+    const sanitizer = await scanTrackedTreeForSecrets({ repoRoot: seedDir, runGit });
+    if (!sanitizer.ok) {
+      return {
+        ok: false,
+        reason: sanitizer.reason,
+        detail: sanitizer.detail ?? `sanitizer report: ${JSON.stringify(sanitizer.report)}`,
+        sanitizer_report: sanitizer.report ?? null,
+        seed_clone_dir: seedDir,
+      };
+    }
+    onProgress(
+      `pre-push sanitizer: clean (${sanitizer.report.scanned_count} text file(s) scanned, ${sanitizer.report.skipped_binary_count} binary file(s) skipped)`,
+    );
+
+    const head = await gitStep({ runGit, args: ["rev-parse", "HEAD"], cwd: seedDir, reason: "seed_head_unresolvable" });
+    if (!head.ok) return { ...head, sanitizer_report: sanitizer.report, seed_clone_dir: seedDir };
+    const headSha = head.stdout.trim() || null;
+
+    step = await gitStep({
+      runGit,
+      args: ["push", "origin", "HEAD:main"],
+      cwd: seedDir,
+      env: promptDisabledEnv({}, { pushAuth }),
+      reason: "initial_branch_push_failed",
+    });
+    if (!step.ok) return { ...step, sanitizer_report: sanitizer.report, head_sha: headSha, seed_clone_dir: seedDir };
+
+    step = await gitStep({
+      runGit,
+      args: ["ls-remote", "--exit-code", "origin", "refs/heads/main"],
+      cwd: seedDir,
+      env: promptDisabledEnv({}, { pushAuth }),
+      reason: "initial_branch_push_unverified",
+    });
+    if (!step.ok) return { ...step, sanitizer_report: sanitizer.report, head_sha: headSha, seed_clone_dir: seedDir };
+
+    return {
+      ok: true,
+      seed_clone_dir: seedDir,
+      default_branch: "main",
+      head_sha: headSha,
+      push_auth: pushAuth,
+      sanitizer_report: sanitizer.report,
+    };
+  } finally {
+    safeRemoveTemporarySeedDir(seedDir);
+  }
+}
+
+async function runRealGitHubInitPhaseWithoutLocalCheckout({
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  config = null,
+  transport,
+  runGit = defaultRunGit,
+  statePath = null,
+  requestedOwner = null,
+  requestedRepoName = null,
+  requestedVisibility = null,
+  remoteListing,
+  now = () => new Date(),
+  onProgress = () => {},
+  isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  promptGitHubOwner = defaultPromptGitHubOwner,
+  resolveAuthenticatedGitHubLogin = defaultResolveAuthenticatedGitHubLogin,
+} = {}) {
+  void repoRoot;
+  const resolvedStatePath = statePath || githubConnectionStatePath(home);
+  const settings = await resolveGitHubSetupSettings({
+    config,
+    requestedOwner,
+    requestedRepoName,
+    requestedVisibility,
+    connectionMode: "real",
+    isTTY,
+    promptGitHubOwner,
+    resolveAuthenticatedGitHubLogin,
+  });
+  if (!settings.ok) {
+    let repair = `fix the requested behavior repo settings (${settings.detail}) and re-run ${formatCommand("init")}`;
+    if (settings.reason === "github_owner_not_selected") {
+      repair = `authenticate the GitHub CLI (gh auth login), or re-run ${formatCommand("init --github-owner <owner-or-org>")}`;
+    }
+    return {
+      ok: false,
+      status: "failed",
+      reason: settings.reason,
+      repair,
+      failures: [{ reason: settings.reason, repair: "see above" }],
+      state_path: resolvedStatePath,
+    };
+  }
+
+  const checkedAt = now().toISOString();
+  const pushAuth = pushAuthForRemoteUrl(settings.url);
+  const state = {
+    schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
+    connection_mode: "real",
+    status: "failed",
+    adoption_complete: false,
+    repo: {
+      id: null,
+      owner: settings.owner,
+      owner_source: settings.ownerSource,
+      name: settings.name,
+      full_name: settings.fullName,
+      visibility: settings.visibility,
+      url: null,
+    },
+    default_branch: null,
+    push_auth: pushAuth,
+    local_auth: null,
+    local_checkout: checkoutlessLocalMarker(),
+    remotes: {
+      origin: {
+        url: settings.url,
+        push_url: settings.url,
+        push_auth: pushAuth,
+        planned: true,
+        applied: false,
+        local_checkout: "none",
+      },
+      upstream: null,
+      planned_actions: [],
+    },
+    push_verification: null,
+    pre_push_sanitizer: null,
+    pr_generation: null,
+    failures: [],
+    verified_at: null,
+  };
+
+  const callTransport = async (endpointId, params = {}) => {
+    return transport.request({
+      endpointId,
+      owner: settings.owner,
+      repo: settings.name,
+      params,
+    });
+  };
+
+  const finishFailure = async ({ status, reason, repair, detail = null, extra = {} }) => {
+    const safeDetail = detail ? redactGitHubSecrets(detail) : null;
+    state.status = status;
+    state.failures = [{ reason, repair, ...(safeDetail ? { detail: safeDetail } : {}) }];
+    try {
+      writeGitHubConnectionState({ statePath: resolvedStatePath, connection: state });
+    } catch (writeError) {
+      onProgress(`WARNING could not record the GitHub connection state: ${redactGitHubSecrets(writeError.message)}`);
+    }
+    onProgress(`FAIL GitHub setup: ${reason}${safeDetail ? ` - ${safeDetail}` : ""}`);
+    onProgress(`Repair: ${repair}`);
+    return {
+      ok: false,
+      status,
+      reason,
+      repair,
+      ...(safeDetail ? { detail: safeDetail } : {}),
+      failures: state.failures,
+      state_path: resolvedStatePath,
+      connection: state,
+      ...extra,
+    };
+  };
+
+  onProgress(`GitHub repo target: ${settings.fullName} (${settings.visibility})`);
+  onProgress(`GitHub local checkout: none detected; Teami will connect the behavior repo without writing to this folder`);
+
+  let existsResponse;
+  try {
+    onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Checking whether ${settings.fullName} is available on GitHub...`);
+    existsResponse = await callTransport("get_repository");
+  } catch (error) {
+    return finishFailure({
+      status: "failed",
+      reason: "github_repo_lookup_failed",
+      detail: error.message,
+      repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth and GitHub availability, then re-run ${formatCommand("init")}`,
+    });
+  }
+
+  let creation = null;
+  if (existsResponse.exists !== true) {
+    try {
+      onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Creating GitHub repo ${settings.fullName}...`);
+      creation = await callTransport("create_repository", {
+        visibility: settings.visibility,
+        default_branch: "main",
+      });
+    } catch (error) {
+      return finishFailure({
+        status: "failed",
+        reason: "behavior_repo_creation_failed",
+        detail: error.message,
+        repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth can create repositories under ${settings.owner}, then re-run ${formatCommand("init")}`,
+      });
+    }
+    if (creation.pending === "org_approval_required") {
+      return finishFailure({
+        status: "pending_org_approval",
+        reason: "behavior_repo_creation_pending_org_approval",
+        detail: creation.detail ?? null,
+        repair:
+          `organization policy requires owner approval before the behavior repo can be created: ask the ${settings.owner} org owner to approve repository creation (or choose a different owner with --github-owner), then re-run ${formatCommand("init")}. Init stops here rather than silently completing a partial adoption.`,
+      });
+    }
+    if (creation.created !== true) {
+      return finishFailure({
+        status: "failed",
+        reason: "behavior_repo_creation_blocked",
+        detail: creation.detail ?? null,
+        repair:
+          `${CONNECT_GITHUB_REPAIR_PREFIX}repository creation is blocked for ${settings.owner} (org policy or insufficient setup permission); resolve the block or choose a different owner, then re-run ${formatCommand("init")}`,
+      });
+    }
+    state.repo.id = creation.repo?.id ?? state.repo.id ?? null;
+    state.repo.url = creation.repo?.html_url ?? settings.url;
+    state.repo.visibility = creation.repo?.visibility ?? settings.visibility;
+    onProgress(`created: behavior repo ${settings.fullName} (visibility ${state.repo.visibility})`);
+  } else {
+    state.repo.id = existsResponse.repo?.id ?? state.repo.id ?? null;
+    state.repo.url = existsResponse.repo?.html_url ?? settings.url;
+    state.repo.visibility = existsResponse.repo?.visibility ?? state.repo.visibility;
+    onProgress(`found: behavior repo ${settings.fullName} already available on GitHub`);
+  }
+
+  const existingRepoEmpty = existsResponse.exists === true && existsResponse.repo?.empty === true;
+  const shouldSeed = creation?.created === true || existingRepoEmpty;
+  const existingDefaultBranch = existsResponse.repo?.default_branch || creation?.repo?.default_branch || "main";
+
+  if (shouldSeed) {
+    onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Seeding ${settings.fullName} from a temporary local clone...`);
+    const seed = await seedBehaviorRepoFromTemporaryClone({ settings, runGit, pushAuth, onProgress });
+    state.pre_push_sanitizer = seed.sanitizer_report ?? null;
+    if (!seed.ok) {
+      if (seed.reason === "token_or_secret_like") {
+        return finishFailure({
+          status: "failed",
+          reason: "initial_push_blocked_token_shaped_content",
+          detail: seed.detail ?? null,
+          repair: `the initial seed push would publish token/secret-shaped content - remove the flagged content, then re-run ${formatCommand("init")}`,
+          extra: { seed_clone_dir: seed.seed_clone_dir },
+        });
+      }
+      return finishFailure({
+        status: "failed",
+        reason: seed.reason,
+        detail: seed.detail ?? null,
+        repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local git push access to ${settings.fullName} and re-run ${formatCommand("init")}`,
+        extra: { seed_clone_dir: seed.seed_clone_dir },
+      });
+    }
+    state.default_branch = seed.default_branch;
+    state.push_verification = {
+      recorded: true,
+      pushed: true,
+      branch: seed.default_branch,
+      head_sha: seed.head_sha,
+      verified: true,
+      push_auth: pushAuth,
+      seed_clone: "temporary",
+    };
+    state.local_auth = {
+      mode: "local_ambient",
+      gh_auth: "verified",
+      git_write: "verified",
+      real_push_enabled: true,
+      push_auth: pushAuth,
+      checked_at: checkedAt,
+    };
+    onProgress(`pushed: ${seed.default_branch} @ ${seed.head_sha ?? "unknown"} from temporary seed clone (verified on remote: yes)`);
+  } else {
+    state.default_branch = existingDefaultBranch;
+    state.push_verification = {
+      recorded: false,
+      pushed: false,
+      branch: existingDefaultBranch,
+      head_sha: null,
+      verified: false,
+      push_auth: pushAuth,
+      reason: "existing_non_empty_repo_no_initial_push_required",
+    };
+    state.local_auth = {
+      mode: "local_ambient",
+      gh_auth: "verified",
+      git_write: "not_required_existing_non_empty_repo",
+      real_push_enabled: true,
+      push_auth: pushAuth,
+      checked_at: checkedAt,
+    };
+    onProgress(`verified: behavior repo ${settings.fullName} is non-empty; no seed push needed`);
+  }
+
+  state.pr_generation = {
+    verified: true,
+    derived_from: "checkoutless_behavior_repo_connection",
+    mode: "local_ambient",
+  };
+  state.status = "verified";
+  state.adoption_complete = true;
+  state.verified_at = now().toISOString();
+  state.failures = [];
+
+  try {
+    writeGitHubConnectionState({ statePath: resolvedStatePath, connection: state });
+  } catch (error) {
+    return finishFailure({
+      status: "failed",
+      reason: "github_connection_state_write_failed",
+      detail: error.message,
+      repair: `fix the .teami/ write failure and re-run ${formatCommand("init")}`,
+    });
+  }
+
+  return {
+    ok: true,
+    status: "verified",
+    connection: state,
+    state_path: resolvedStatePath,
+    transport_kind: transport.kind,
+    checkoutless: true,
+    reason: remoteListing.reason,
+    detail: remoteListing.detail,
+  };
+}
+async function getGitRemoteUrl({ repoRoot = process.cwd(), runGit = defaultRunGit, remote = "origin", push = false } = {}) {
   const args = push
     ? ["remote", "get-url", "--push", remote]
     : ["remote", "get-url", remote];
-  const result = runGit(args, { cwd: repoRoot });
+  const result = await runGit(args, { cwd: repoRoot });
   if (!result.ok || !result.stdout.trim()) {
     return {
       ok: false,
@@ -720,31 +1294,31 @@ export function planRemoteLayout({ remotes = [], starterRemoteUrls = [], behavio
   return { ok: true, classified, plannedActions, upstream, originAlreadyBehaviorRepo: originRemote?.kind === "behavior_repo" };
 }
 
-export function applyRemotePlan({
+export async function applyRemotePlan({
   repoRoot = process.cwd(),
   runGit = defaultRunGit,
   remotePlan,
   behaviorRepoUrl,
 } = {}) {
-  const initial = listGitRemotes({ repoRoot, runGit });
+  const initial = await listGitRemotes({ repoRoot, runGit });
   if (!initial.ok) return initial;
-  const restore = (failure) => ({
+  const restore = async (failure) => ({
     ...failure,
-    rollback: restoreRemoteSnapshot({ repoRoot, runGit, remotes: initial.remotes }),
+    rollback: await restoreRemoteSnapshot({ repoRoot, runGit, remotes: initial.remotes }),
   });
   for (const action of remotePlan?.plannedActions || []) {
     let result = null;
     if (action.action === "rename_remote") {
-      result = runGit(["remote", "rename", action.from, action.to], { cwd: repoRoot });
+      result = await runGit(["remote", "rename", action.from, action.to], { cwd: repoRoot });
     } else if (action.action === "remove_duplicate_starter_origin") {
-      result = runGit(["remote", "remove", action.name], { cwd: repoRoot });
+      result = await runGit(["remote", "remove", action.name], { cwd: repoRoot });
     } else if (action.action === "set_origin") {
-      const listing = listGitRemotes({ repoRoot, runGit });
+      const listing = await listGitRemotes({ repoRoot, runGit });
       if (!listing.ok) return listing;
       const hasOrigin = listing.remotes.some((remote) => remote.name === "origin");
       result = hasOrigin
-        ? runGit(["remote", "set-url", "origin", behaviorRepoUrl], { cwd: repoRoot })
-        : runGit(["remote", "add", "origin", behaviorRepoUrl], { cwd: repoRoot });
+        ? await runGit(["remote", "set-url", "origin", behaviorRepoUrl], { cwd: repoRoot })
+        : await runGit(["remote", "add", "origin", behaviorRepoUrl], { cwd: repoRoot });
     }
     if (result && !result.ok) {
       return restore({
@@ -754,7 +1328,7 @@ export function applyRemotePlan({
       });
     }
   }
-  const after = listGitRemotes({ repoRoot, runGit });
+  const after = await listGitRemotes({ repoRoot, runGit });
   if (!after.ok) return restore(after);
   const verify = planRemoteLayout({
     remotes: after.remotes,
@@ -784,24 +1358,24 @@ export function applyRemotePlan({
   return { ok: true, applied: true };
 }
 
-function restoreRemoteSnapshot({ repoRoot = process.cwd(), runGit = defaultRunGit, remotes = [] } = {}) {
+async function restoreRemoteSnapshot({ repoRoot = process.cwd(), runGit = defaultRunGit, remotes = [] } = {}) {
   const desired = new Map(remotes.map((remote) => [remote.name, remote.url]));
-  const current = listGitRemotes({ repoRoot, runGit });
+  const current = await listGitRemotes({ repoRoot, runGit });
   if (!current.ok) return { ok: false, reason: "git_remote_rollback_listing_failed", detail: current.detail };
   const failures = [];
   for (const remote of current.remotes) {
     if (!desired.has(remote.name)) {
-      const remove = runGit(["remote", "remove", remote.name], { cwd: repoRoot });
+      const remove = await runGit(["remote", "remove", remote.name], { cwd: repoRoot });
       if (!remove.ok) failures.push({ action: "remove", name: remote.name, detail: remove.stderr.trim() || remove.stdout.trim() });
     }
   }
-  const refreshed = listGitRemotes({ repoRoot, runGit });
+  const refreshed = await listGitRemotes({ repoRoot, runGit });
   if (!refreshed.ok) return { ok: false, reason: "git_remote_rollback_refresh_failed", detail: refreshed.detail, failures };
   const present = new Set(refreshed.remotes.map((remote) => remote.name));
   for (const [name, url] of desired.entries()) {
     const result = present.has(name)
-      ? runGit(["remote", "set-url", name, url], { cwd: repoRoot })
-      : runGit(["remote", "add", name, url], { cwd: repoRoot });
+      ? await runGit(["remote", "set-url", name, url], { cwd: repoRoot })
+      : await runGit(["remote", "add", name, url], { cwd: repoRoot });
     if (!result.ok) {
       failures.push({
         action: present.has(name) ? "set-url" : "add",
@@ -823,8 +1397,8 @@ function restoreRemoteSnapshot({ repoRoot = process.cwd(), runGit = defaultRunGi
 // file NAMES; binary files are skipped and disclosed in the report.
 // ---------------------------------------------------------------------------
 
-export function scanTrackedTreeForSecrets({ repoRoot = process.cwd(), runGit = defaultRunGit } = {}) {
-  const listed = runGit(["ls-files", "-z"], { cwd: repoRoot });
+export async function scanTrackedTreeForSecrets({ repoRoot = process.cwd(), runGit = defaultRunGit } = {}) {
+  const listed = await runGit(["ls-files", "-z"], { cwd: repoRoot });
   if (!listed.ok) {
     return {
       ok: false,
@@ -887,7 +1461,7 @@ function normalizeGhRepo(data, owner, repo) {
     visibility: visibility === "public" ? "public" : "private",
     private: visibility !== "public",
     default_branch: data?.defaultBranchRef?.name || "main",
-    empty: data?.defaultBranchRef && !data.defaultBranchRef.name,
+    empty: data?.defaultBranchRef === null || Boolean(data?.defaultBranchRef && !data.defaultBranchRef.name),
     html_url: data?.url || `https://github.com/${owner}/${repo}`,
   };
 }
@@ -909,6 +1483,7 @@ function safeSetupParams(params = {}) {
 
 export async function runGitHubInitPhase({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   config = null,
   transport = null,
   runGit = defaultRunGit,
@@ -926,21 +1501,59 @@ export async function runGitHubInitPhase({
   // connection_mode is derived from the transport, never caller-asserted:
   // anything that is not the real transport records dry_run.
   const connectionMode = effectiveTransport.kind === "real" ? "real" : "dry_run";
-  const resolvedStatePath = statePath || githubConnectionStatePath(repoRoot);
+  const resolvedStatePath = statePath || githubConnectionStatePath(home);
 
   if (connectionMode === "dry_run") {
     for (const line of DRY_RUN_GITHUB_SETUP_BANNER) onProgress(line);
   }
 
   onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Checking local Git remotes...`);
-  const remoteListing = listGitRemotes({ repoRoot, runGit });
+  const remoteListing = await listGitRemotes({ repoRoot, runGit });
   if (!remoteListing.ok) {
+    if (connectionMode === "dry_run") {
+      return recordDryRunGitHubIntentWithoutLocalGit({
+        repoRoot,
+        home,
+        config,
+        transportKind: effectiveTransport.kind,
+        runGit,
+        statePath: resolvedStatePath,
+        remoteListing,
+        requestedOwner,
+        requestedRepoName,
+        requestedVisibility,
+        now,
+        onProgress,
+        isTTY,
+        promptGitHubOwner,
+        resolveAuthenticatedGitHubLogin,
+      });
+    }
+    if (isNotGitRepositoryListing(remoteListing)) {
+      return runRealGitHubInitPhaseWithoutLocalCheckout({
+        repoRoot,
+        home,
+        config,
+        transport: effectiveTransport,
+        runGit,
+        statePath: resolvedStatePath,
+        remoteListing,
+        requestedOwner,
+        requestedRepoName,
+        requestedVisibility,
+        now,
+        onProgress,
+        isTTY,
+        promptGitHubOwner,
+        resolveAuthenticatedGitHubLogin,
+      });
+    }
     return {
       ok: false,
       status: "failed",
       reason: remoteListing.reason,
       detail: remoteListing.detail,
-      repair: "run npm run init from the root of the adopter checkout (a git repository)",
+      repair: `make sure local git can list remotes, then re-run ${formatCommand("init")}`,
       failures: [{ reason: remoteListing.reason, repair: "see above", ...(remoteListing.detail ? { detail: remoteListing.detail } : {}) }],
       state_path: resolvedStatePath,
     };
@@ -978,9 +1591,9 @@ export async function runGitHubInitPhase({
     resolveAuthenticatedGitHubLogin,
   });
   if (!settings.ok) {
-    let repair = `fix the requested behavior repo settings (${settings.detail}) and re-run npm run init`;
+    let repair = `fix the requested behavior repo settings (${settings.detail}) and re-run ${formatCommand("init")}`;
     if (settings.reason === "github_owner_not_selected") {
-      repair = "authenticate the GitHub CLI (gh auth login), set origin to the adopter-owned behavior repo, or re-run npm run init -- --github-owner <owner-or-org>";
+      repair = `authenticate the GitHub CLI (gh auth login), set origin to the adopter-owned behavior repo, or re-run ${formatCommand("init --github-owner <owner-or-org>")}`;
     }
     return {
       ok: false,
@@ -1014,7 +1627,7 @@ export async function runGitHubInitPhase({
     };
   }
   onProgress(`GitHub repo target: ${settings.fullName} (${settings.visibility})`);
-  const previousConnectionRead = readGitHubConnectionState({ repoRoot, statePath: resolvedStatePath });
+  const previousConnectionRead = readGitHubConnectionState({ repoRoot, home, statePath: resolvedStatePath });
   const previousConnection = previousConnectionRead.ok ? previousConnectionRead.connection : null;
   const state = {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -1041,7 +1654,7 @@ export async function runGitHubInitPhase({
     verified_at: null,
     ...(connectionMode === "dry_run"
       ? {
-        todo: "Dry-run GitHub connection — recorded intents only; re-run npm run github:init without --github-dry-run to complete adoption.",
+        todo: `Dry-run GitHub connection - recorded intents only; re-run ${formatCommand("github:init")} without --github-dry-run to complete adoption.`,
       }
       : {}),
   };
@@ -1095,7 +1708,7 @@ export async function runGitHubInitPhase({
       reason: remotePlan.reason,
       detail: remotePlan.detail,
       repair:
-        "keep origin pointed at the adopter-owned behavior repo, and remove or rename any other non-starter GitHub remotes that make the behavior repo binding ambiguous; then re-run npm run init.",
+        `keep origin pointed at the adopter-owned behavior repo, and remove or rename any other non-starter GitHub remotes that make the behavior repo binding ambiguous; then re-run ${formatCommand("init")}.`,
       extra: { conflicts: remotePlan.conflicts },
     });
   }
@@ -1119,7 +1732,7 @@ export async function runGitHubInitPhase({
       status: "failed",
       reason: "github_repo_lookup_failed",
       detail: error.message,
-      repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth and GitHub availability, then re-run npm run init`,
+      repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth and GitHub availability, then re-run ${formatCommand("init")}`,
     });
   }
   if (originBinding && existsResponse.exists !== true) {
@@ -1128,7 +1741,7 @@ export async function runGitHubInitPhase({
       reason: "behavior_repo_unreachable",
       detail: `origin points to ${settings.fullName}, but gh could not reach that repository`,
       repair:
-        "verify origin points to the adopter-owned GitHub behavior repo and that `gh auth status --hostname github.com` can see it, then re-run npm run init",
+        `verify origin points to the adopter-owned GitHub behavior repo and that gh auth status --hostname github.com can see it, then re-run ${formatCommand("init")}`,
     });
   }
 
@@ -1147,7 +1760,7 @@ export async function runGitHubInitPhase({
         status: "failed",
         reason: "behavior_repo_creation_failed",
         detail: error.message,
-        repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth can create repositories under ${settings.owner}, then re-run npm run init`,
+        repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth can create repositories under ${settings.owner}, then re-run ${formatCommand("init")}`,
       });
     }
     if (creation.pending === "org_approval_required") {
@@ -1156,7 +1769,7 @@ export async function runGitHubInitPhase({
         reason: "behavior_repo_creation_pending_org_approval",
         detail: creation.detail ?? null,
         repair:
-          `organization policy requires owner approval before the behavior repo can be created: ask the ${settings.owner} org owner to approve repository creation (or choose a different owner with --github-owner), then re-run npm run init. Init stops here rather than silently completing a partial adoption.`,
+          `organization policy requires owner approval before the behavior repo can be created: ask the ${settings.owner} org owner to approve repository creation (or choose a different owner with --github-owner), then re-run ${formatCommand("init")}. Init stops here rather than silently completing a partial adoption.`,
       });
     }
     if (creation.created !== true) {
@@ -1165,7 +1778,7 @@ export async function runGitHubInitPhase({
         reason: "behavior_repo_creation_blocked",
         detail: creation.detail ?? null,
         repair:
-          `${CONNECT_GITHUB_REPAIR_PREFIX}repository creation is blocked for ${settings.owner} (org policy or insufficient setup permission); resolve the block or choose a different owner, then re-run npm run init`,
+          `${CONNECT_GITHUB_REPAIR_PREFIX}repository creation is blocked for ${settings.owner} (org policy or insufficient setup permission); resolve the block or choose a different owner, then re-run ${formatCommand("init")}`,
       });
     }
     state.repo.id = creation.repo?.id ?? state.repo.id ?? null;
@@ -1188,18 +1801,18 @@ export async function runGitHubInitPhase({
 
   // ---- d. Set origin + pre-push sanitizer + push verify -------------------
   const remoteApply = connectionMode === "real"
-    ? applyRemotePlan({ repoRoot, runGit, remotePlan, behaviorRepoUrl: behaviorRepoRemoteUrl })
+    ? await applyRemotePlan({ repoRoot, runGit, remotePlan, behaviorRepoUrl: behaviorRepoRemoteUrl })
     : { ok: true, applied: false };
   if (!remoteApply.ok) {
     return finishFailure({
       status: "failed",
       reason: remoteApply.reason,
       detail: remoteApply.detail,
-      repair: "fix the local git remote layout and re-run npm run init",
+      repair: `fix the local git remote layout and re-run ${formatCommand("init")}`,
     });
   }
   const remotesApplied = remoteApply.applied === true;
-  const originPushUrl = getGitRemoteUrl({ repoRoot, runGit, remote: "origin", push: true });
+  const originPushUrl = await getGitRemoteUrl({ repoRoot, runGit, remote: "origin", push: true });
   const recordedPushUrl = originPushUrl.ok ? originPushUrl.url : behaviorRepoRemoteUrl;
   state.push_auth = pushAuthForRemoteUrl(recordedPushUrl);
   state.remotes = {
@@ -1216,7 +1829,7 @@ export async function runGitHubInitPhase({
     planned_actions: remotePlan.plannedActions,
   };
 
-  const sanitizer = scanTrackedTreeForSecrets({ repoRoot, runGit });
+  const sanitizer = await scanTrackedTreeForSecrets({ repoRoot, runGit });
   state.pre_push_sanitizer = sanitizer.report ?? null;
   if (!sanitizer.ok) {
     if (sanitizer.reason === "token_or_secret_like") {
@@ -1227,32 +1840,32 @@ export async function runGitHubInitPhase({
         repair:
           `the initial push would publish token/secret-shaped content from the local repo — the push is blocked before any byte leaves the machine. Remove or replace the flagged content (${sanitizer.report.findings
             .map((finding) => `${finding.path} [${finding.rule}]`)
-            .join(", ")}), commit the cleanup, then re-run npm run init. Secrets are never sanitized through.`,
+            .join(", ")}), commit the cleanup, then re-run ${formatCommand("init")}. Secrets are never sanitized through.`,
       });
     }
     return finishFailure({
       status: "failed",
       reason: sanitizer.reason,
       detail: sanitizer.detail ?? null,
-      repair: "fix the git working tree listing failure and re-run npm run init",
+      repair: `fix the git working tree listing failure and re-run ${formatCommand("init")}`,
     });
   }
   onProgress(
     `pre-push sanitizer: clean (${sanitizer.report.scanned_count} text file(s) scanned, ${sanitizer.report.skipped_binary_count} binary file(s) skipped)`,
   );
 
-  const branchResult = runGit(["symbolic-ref", "--short", "HEAD"], { cwd: repoRoot });
+  const branchResult = await runGit(["symbolic-ref", "--short", "HEAD"], { cwd: repoRoot });
   if (!branchResult.ok || !branchResult.stdout.trim()) {
     return finishFailure({
       status: "failed",
       reason: "default_branch_unresolvable",
       detail: branchResult.stderr.trim() || "detached HEAD",
-      repair: "check out the branch that should become the behavior repo's default branch, then re-run npm run init",
+      repair: `check out the branch that should become the behavior repo's default branch, then re-run ${formatCommand("init")}`,
     });
   }
   const currentBranch = branchResult.stdout.trim();
   const defaultBranch = existsResponse.repo?.default_branch || creation?.repo?.default_branch || currentBranch;
-  const headResult = runGit(["rev-parse", "HEAD"], { cwd: repoRoot });
+  const headResult = await runGit(["rev-parse", "HEAD"], { cwd: repoRoot });
   const headSha = headResult.ok ? headResult.stdout.trim() : null;
 
   let pushResponse;
@@ -1273,7 +1886,7 @@ export async function runGitHubInitPhase({
       status: "failed",
       reason: "initial_branch_push_failed",
       detail: error.message,
-      repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local git push access to ${settings.fullName} and re-run npm run init`,
+      repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local git push access to ${settings.fullName} and re-run ${formatCommand("init")}`,
     });
   }
   if (branchVerification.verified !== true) {
@@ -1281,7 +1894,7 @@ export async function runGitHubInitPhase({
       status: "failed",
       reason: "initial_branch_push_unverified",
       detail: branchVerification.detail ?? `default branch ${defaultBranch} not verified on ${settings.fullName}`,
-      repair: `${CONNECT_GITHUB_REPAIR_PREFIX}push the initial ${defaultBranch} branch to ${settings.fullName} and re-run npm run init`,
+      repair: `${CONNECT_GITHUB_REPAIR_PREFIX}push the initial ${defaultBranch} branch to ${settings.fullName} and re-run ${formatCommand("init")}`,
     });
   }
   state.default_branch = defaultBranch;
@@ -1328,12 +1941,12 @@ export async function runGitHubInitPhase({
       status: "failed",
       reason: "github_connection_state_write_failed",
       detail: error.message,
-      repair: "fix the .teami/ write failure and re-run npm run init",
+      repair: `fix the .teami/ write failure and re-run ${formatCommand("init")}`,
     });
   }
   if (connectionMode === "dry_run") {
     onProgress(
-      "GitHub connection recorded in DRY-RUN mode — adoption is NOT complete. Re-run npm run github:init without --github-dry-run.",
+      `GitHub connection recorded in DRY-RUN mode - adoption is NOT complete. Re-run ${formatCommand("github:init")} without --github-dry-run.`,
     );
   }
   return {
@@ -1352,21 +1965,22 @@ export async function runGitHubInitPhase({
 
 export async function githubConnectionDoctorChecks({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   config = null,
   transport = null,
   runGit = defaultRunGit,
   statePath = null,
 } = {}) {
   const checks = [];
-  const read = readGitHubConnectionState({ repoRoot, statePath });
+  const read = readGitHubConnectionState({ repoRoot, home, statePath });
   if (!read.ok) {
     checks.push({
       name: "GitHub connection",
       ok: false,
       message: read.reason === "missing_github_connection_state"
-        ? "no GitHub connection state; run npm run init to create and connect the dedicated behavior repo (connect-GitHub repair path)"
-        : `${read.reason}${read.detail ? ` (${read.detail})` : ""}; re-run npm run init to rewrite the GitHub connection state`,
-      fix: "npm run init",
+        ? `no GitHub connection state; run ${formatCommand("init")} to create and connect the dedicated behavior repo (connect-GitHub repair path)`
+        : `${read.reason}${read.detail ? ` (${read.detail})` : ""}; re-run ${formatCommand("init")} to rewrite the GitHub connection state`,
+      fix: formatCommand("init"),
     });
     return checks;
   }
@@ -1383,7 +1997,7 @@ export async function githubConnectionDoctorChecks({
     checks.push({
       name: "GitHub connection",
       ok: false,
-      message: `status=${connection.status}; ${recordedRepair || "re-run npm run init (connect-GitHub repair path)"}`,
+      message: `status=${connection.status}; ${recordedRepair || `re-run ${formatCommand("init")} (connect-GitHub repair path)`}`,
     });
   }
 
@@ -1394,11 +2008,11 @@ export async function githubConnectionDoctorChecks({
       name: "GitHub connection mode",
       ok: false,
       message:
-        "DRY-RUN GitHub connection — recorded intents only, adoption is NOT complete. Re-run npm run github:init without --github-dry-run.",
+        `DRY-RUN GitHub connection - recorded intents only, adoption is NOT complete. Re-run ${formatCommand("github:init")} without --github-dry-run.`,
     });
   }
 
-  const remoteShape = evaluateRemoteShapeCheck({ repoRoot, runGit, connection });
+  const remoteShape = await evaluateRemoteShapeCheck({ repoRoot, runGit, connection });
   checks.push(remoteShape);
 
   const owner = connection.repo?.owner;
@@ -1418,7 +2032,7 @@ export async function githubConnectionDoctorChecks({
         ok: repoLookup.exists === true,
         message: repoLookup.exists === true
           ? `${owner}/${repoName} reachable with local gh auth`
-          : `${owner}/${repoName} was not reachable with local gh auth; run gh auth login or fix origin`,
+          : `${owner}/${repoName} was not reachable with local gh auth; run gh auth login or fix behavior repo access`,
       });
     } catch (error) {
       checks.push({
@@ -1427,7 +2041,9 @@ export async function githubConnectionDoctorChecks({
         message: `${error.message}; run gh auth login or fix the behavior repo access`,
       });
     }
-    checks.push(evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }));
+    checks.push(isCheckoutlessConnection(connection)
+      ? evaluateCheckoutlessLocalGitWriteCheck({ connection })
+      : await evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }));
   } else if (connection.connection_mode === "real") {
     checks.push({
       name: "GitHub behavior repo reachable",
@@ -1444,7 +2060,7 @@ export async function githubConnectionDoctorChecks({
   return checks;
 }
 
-function evaluateRemoteShapeCheck({ repoRoot, runGit, connection }) {
+async function evaluateRemoteShapeCheck({ repoRoot, runGit, connection }) {
   const name = "GitHub remote shape";
   const expectedOrigin = connection.remotes?.origin?.url ?? null;
   const expectedUpstream = connection.remotes?.upstream?.url ?? null;
@@ -1452,17 +2068,24 @@ function evaluateRemoteShapeCheck({ repoRoot, runGit, connection }) {
     return {
       name,
       ok: false,
-      message: "no origin recorded in the GitHub connection state; re-run npm run init",
+      message: `no origin recorded in the GitHub connection state; re-run ${formatCommand("init")}`,
+    };
+  }
+  if (isCheckoutlessConnection(connection)) {
+    return {
+      name,
+      ok: true,
+      message: `no local checkout; managed behavior mirror remote -> ${expectedOrigin}`,
     };
   }
   if (connection.remotes?.origin?.applied === false) {
     return {
       name,
       ok: false,
-      message: `origin not applied (dry-run planned only: origin -> ${expectedOrigin}${expectedUpstream ? `, upstream -> ${expectedUpstream}` : ""}); re-run npm run github:init without --github-dry-run to set remotes`,
+      message: `origin not applied (dry-run planned only: origin -> ${expectedOrigin}${expectedUpstream ? `, upstream -> ${expectedUpstream}` : ""}); re-run ${formatCommand("github:init")} without --github-dry-run to set remotes`,
     };
   }
-  const listing = listGitRemotes({ repoRoot, runGit });
+  const listing = await listGitRemotes({ repoRoot, runGit });
   if (!listing.ok) {
     return { name, ok: false, message: `${listing.reason}; run doctor from the adopter checkout root` };
   }
@@ -1489,12 +2112,22 @@ function evaluateRemoteShapeCheck({ repoRoot, runGit, connection }) {
       `upstream is ${actualUpstream ?? "missing"}, expected the preserved starter remote ${expectedUpstream}; repair: git remote ${actualUpstream ? "set-url" : "add"} upstream ${expectedUpstream}`,
     );
   }
-  return { name, ok: false, message: `remote drift: ${problems.join("; ")} (or re-run npm run init)` };
+  return { name, ok: false, message: `remote drift: ${problems.join("; ")} (or re-run ${formatCommand("init")})` };
 }
 
-function evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }) {
+function evaluateCheckoutlessLocalGitWriteCheck({ connection }) {
+  const seeded = connection.local_auth?.git_write === "verified";
+  return {
+    name: "GitHub local write auth",
+    ok: true,
+    message: seeded
+      ? `temporary seed push verified behavior repo write access via ${connection.push_auth || "https"} auth`
+      : `no adopter checkout; existing behavior repo is connected and managed mirror pushes will use ${connection.push_auth || "https"} auth`,
+  };
+}
+async function evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }) {
   const branch = "refs/heads/teami/doctor-write-check";
-  const result = runGit(["push", "--dry-run", "origin", `HEAD:${branch}`], {
+  const result = await runGit(["push", "--dry-run", "origin", `HEAD:${branch}`], {
     cwd: repoRoot,
     env: promptDisabledEnv({}, { pushAuth: connection.push_auth }),
   });
@@ -1508,6 +2141,6 @@ function evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }) {
   return {
     name: "GitHub local write auth",
     ok: false,
-    message: `${result.stderr.trim() || result.stdout.trim() || "git push --dry-run failed"}; fix local git credentials for origin and re-run npm run doctor`,
+    message: `${result.stderr.trim() || result.stdout.trim() || "git push --dry-run failed"}; fix local git credentials for origin and re-run ${formatCommand("doctor")}`,
   };
 }

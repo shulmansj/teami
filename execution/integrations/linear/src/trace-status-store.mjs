@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 import {
   TRACE_RECEIPT_SCHEMA_VERSION,
   findSecretContentKeys,
@@ -21,14 +22,26 @@ const DEFAULT_HEALTH = Object.freeze({
 });
 const RECENT_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 
-export function traceTelemetryPaths(repoRoot = process.cwd()) {
-  const telemetryDir = path.resolve(repoRoot, ".agent-shell", "telemetry");
+export function traceTelemetryPaths(home = undefined) {
+  const telemetryHome = resolveTraceTelemetryHome(home);
+  const telemetryDir = path.join(teamiHomePaths({ home: telemetryHome }).phoenixDataDir, "telemetry");
   return {
     telemetryDir,
     healthFile: path.join(telemetryDir, "trace-health.json"),
     runsDir: path.join(telemetryDir, "runs"),
     outboxFile: path.join(telemetryDir, "phoenix-outbox.jsonl"),
   };
+}
+
+function resolveTraceTelemetryHome(home) {
+  if (home !== undefined && !hasTeamiHomeOverride(process.env) && path.resolve(home) !== path.resolve(process.cwd())) {
+    return home;
+  }
+  return resolveTeamiHome();
+}
+
+function hasTeamiHomeOverride(env) {
+  return typeof env?.TEAMI_HOME === "string" && env.TEAMI_HOME.trim() !== "";
 }
 
 export function recordTraceStatus({

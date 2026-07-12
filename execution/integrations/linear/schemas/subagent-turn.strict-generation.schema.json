@@ -16,9 +16,7 @@
     "open_questions_markdown",
     "project_update_markdown",
     "technical_explanation_markdown",
-    "discovery_issues",
     "final_issues",
-    "discovery_issue_updates",
     "draft_issues",
     "product_source_count",
     "unresolved_product_question_count",
@@ -100,40 +98,6 @@
         "null"
       ]
     },
-    "discovery_issues": {
-      "type": [
-        "array",
-        "null"
-      ],
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "discovery_key",
-          "title",
-          "body_markdown",
-          "in_session_research",
-          "evidence_gap"
-        ],
-        "properties": {
-          "discovery_key": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "body_markdown": {
-            "type": "string"
-          },
-          "in_session_research": {
-            "type": "string"
-          },
-          "evidence_gap": {
-            "type": "string"
-          }
-        }
-      }
-    },
     "final_issues": {
       "type": [
         "array",
@@ -149,7 +113,10 @@
           "depends_on",
           "assignment",
           "output",
-          "acceptance_criteria"
+          "acceptance_criteria",
+          "work_type",
+          "requires_human_review",
+          "resource_target"
         ],
         "properties": {
           "decomposition_key": {
@@ -180,18 +147,32 @@
             }
           },
           "work_type": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "enum": [
               "code",
-              "non_code"
+              "non_code",
+              null
+            ]
+          },
+          "requires_human_review": {
+            "type": [
+              "boolean",
+              "null"
             ]
           },
           "resource_target": {
-            "type": "object",
+            "type": [
+              "object",
+              "null"
+            ],
             "additionalProperties": false,
             "required": [
               "kind",
-              "id"
+              "id",
+              "repo_scope"
             ],
             "properties": {
               "kind": {
@@ -203,36 +184,13 @@
                 "minLength": 1
               },
               "repo_scope": {
-                "type": "string",
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "minLength": 1
               }
             }
-          }
-        }
-      }
-    },
-    "discovery_issue_updates": {
-      "type": [
-        "array",
-        "null"
-      ],
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "issue_id",
-          "discovery_key",
-          "body_markdown"
-        ],
-        "properties": {
-          "issue_id": {
-            "type": "string"
-          },
-          "discovery_key": {
-            "type": "string"
-          },
-          "body_markdown": {
-            "type": "string"
           }
         }
       }

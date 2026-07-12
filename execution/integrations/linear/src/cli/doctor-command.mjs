@@ -1,11 +1,12 @@
 import fs from "node:fs";
 
 import { readLinearCache } from "../cache.mjs";
+import { readClaudePluginHealth } from "../claude-plugin-health.mjs";
 import { formatRuntimeRoleAssignmentsSection } from "../config.mjs";
 import { doctorCheck, normalizeDoctorChecks } from "../doctor-check.mjs";
 import { resolveForegroundDomainCache } from "../domain-command-context.mjs";
 import { readDomainRegistry } from "../domain-registry.mjs";
-import { githubConnectionDoctorChecks } from "../github-setup.mjs";
+import { defaultRunCommand, githubConnectionDoctorChecks } from "../github-setup.mjs";
 import {
   createLinearCredentialStore,
   legacyCredentialTargetForConfig,
@@ -15,9 +16,13 @@ import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
 import {
   doctorDomainRegistryFromDisk,
   doctorLinear,
+  doctorMergePathGitHubCheck,
 } from "../linear-service.mjs";
+import {
+  createDefaultExecutionPullRequestAdapter,
+} from "../execution-pr-adapter.mjs";
 import { phoenixStatus } from "../local-phoenix-manager.mjs";
-import { localSupervisorDoctorChecks } from "../local-supervisor.mjs";
+import { resourcesToRepoIdentity } from "../review-pr-discovery.mjs";
 import {
   readRuntimeSmokeCache,
   runtimeSmokeCachePath,
@@ -25,13 +30,21 @@ import {
 } from "../runtime-smoke.mjs";
 import { createCliOutput } from "./cli-output.mjs";
 import { doctorExitCode, renderDoctorReport } from "./doctor-report.mjs";
+import {
+  completeDomainTeamMissingRecoveryForDomain,
+  formatCommand,
+} from "./operator-output.mjs";
 import { flagValue } from "./flags.mjs";
 import { githubDoctorTransportFromConnection } from "./github-command-options.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
+import { createSetupStateStore } from "../setup-orchestrator.mjs";
+const PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE = "https://github.com/shulmansj/teami";
 export async function runDoctorCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, output = createCliOutput() } = context;
+  const { config, repoRoot, home = resolveTeamiHome(), cachePath, output = createCliOutput() } = context;
   const checks = await doctorGraphqlLinear({
     config,
     repoRoot,
+    home,
     cachePath,
     domainId: flagValue(args, "--domain"),
   });
@@ -41,16 +54,17 @@ export async function runDoctorCommand({ context, command, args }) {
   process.exitCode = doctorExitCode(checks);
 }
 export async function runDoctorLinearCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, output = createCliOutput() } = context;
+  const { config, repoRoot, home = resolveTeamiHome(), cachePath, output = createCliOutput() } = context;
   const checks = await doctorGraphqlLinear({
     config,
     repoRoot,
+    home,
     cachePath,
     domainId: flagValue(args, "--domain"),
     includeRuntimeSmoke: false,
     includePhoenix: false,
     includeGitHub: false,
-    includeLocalSupervisor: false,
+    includeClaudePlugin: false,
   });
   output.heading(`Teami ${output.symbols.separator} Linear doctor`);
   renderDoctorReport(checks, output);
@@ -60,20 +74,35 @@ export async function runDoctorLinearCommand({ context, command, args }) {
 async function doctorGraphqlLinear({
   config,
   repoRoot,
+  home = resolveTeamiHome(),
   cachePath,
   domainId = null,
   includeRuntimeSmoke = true,
   includePhoenix = true,
   includeGitHub = true,
-  includeLocalSupervisor = true,
+  includeClaudePlugin = true,
+  claudePluginRunCommand = defaultRunCommand,
+  claudePluginMarketplaceSource = PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE,
 }) {
+  const adminRevocationCheck = doctorAdminRevocationRequirement({ home });
+  const claudePluginCheck = includeClaudePlugin
+    ? await doctorClaudePluginContract({
+        repoRoot,
+        runCommand: claudePluginRunCommand,
+        marketplaceSource: claudePluginMarketplaceSource,
+      })
+    : null;
+  const crossSurfaceChecks = [adminRevocationCheck, ...(claudePluginCheck ? [claudePluginCheck] : [])];
   const domainDoctor = doctorDomainRegistryFromDisk({
     repoRoot,
+    home,
     orphanHints: likelyDomainOrphans({ cachePath }),
   });
-  if (!domainDoctor.registryAvailable) return normalizeDoctorChecks(domainDoctor.checks);
+  if (!domainDoctor.registryAvailable) {
+    return normalizeDoctorChecks([...domainDoctor.checks, ...crossSurfaceChecks]);
+  }
 
-  const registry = readDomainRegistry({ repoRoot });
+  const registry = readDomainRegistry({ home });
   const selectedDomains = domainId
     ? registry.domains.filter((domain) => domain.id === domainId)
     : registry.domains.filter((domain) => domain.status === "active");
@@ -81,7 +110,7 @@ async function doctorGraphqlLinear({
     name: "domain registry",
     ok: domainDoctor.healthy,
     message: `${domainDoctor.checks.length} domain${domainDoctor.checks.length === 1 ? "" : "s"} configured`,
-  }, ...domainDoctor.checks, ...doctorProductRepoBindingChecksForDomains(
+  }, ...domainDoctor.checks, ...crossSurfaceChecks, ...doctorProductRepoBindingChecksForDomains(
     domainId ? registry.domains.filter((domain) => domain.id === domainId) : registry.domains,
   )];
 
@@ -94,13 +123,11 @@ async function doctorGraphqlLinear({
     return normalizeDoctorChecks(checks);
   }
 
-  const foregrounds = [];
   for (const domain of selectedDomains) {
     if (domain.status !== "active") continue;
     let foreground;
     try {
-      foreground = resolveForegroundDomainCache({ config, repoRoot, registry, domainId: domain.id });
-      foregrounds.push(foreground);
+      foreground = resolveForegroundDomainCache({ config, repoRoot, home, registry, domainId: domain.id });
     } catch (error) {
       checks.push({
         name: `domain ${domain.id} selection`,
@@ -131,17 +158,25 @@ async function doctorGraphqlLinear({
       });
       const authResult = await setupAuth.client.verifyAuth();
       const doctor = await doctorLinear({ client: setupAuth.client, config: foreground.config, cache: foreground.cache });
+      const mergePathGitHubCheck = await doctorMergePathGitHubCheck({
+        ...mergePathRepoIdentityForDomain(foreground.context),
+        createPrAdapter: ({ repoIdentity }) => createDefaultExecutionPullRequestAdapter({ repoIdentity }),
+      });
       const teamCheck = doctor.checks.find((check) => check.name === "team");
+      const savedTeamCheck = doctor.checks.find((check) => check.name === "cache teamId" && check.ok === false);
+      const teamVisibilityCheck = domainTeamVisibilityCheck({
+        domain,
+        teamCheck,
+        savedTeamCheck,
+        teamKey: foreground.config.linear.team.key,
+      });
       checks.push({
         name: `domain ${domain.id} Linear setup OAuth`,
         ok: true,
         message: `GraphQL auth verified for viewer ${authResult.viewerId}`,
-      }, {
-        name: `domain ${domain.id} Linear team visibility`,
-        ok: teamCheck?.ok === true,
-        message: teamCheck?.ok === true
-          ? `can see team ${foreground.config.linear.team.key}`
-          : teamCheck?.message || `team ${foreground.config.linear.team.key} not visible`,
+      }, teamVisibilityCheck, {
+        ...mergePathGitHubCheck,
+        name: `domain ${domain.id} ${mergePathGitHubCheck.name}`,
       }, ...doctor.checks.map((check) => ({
         ...check,
         name: `domain ${domain.id} ${check.name}`,
@@ -158,7 +193,7 @@ async function doctorGraphqlLinear({
   if (includeRuntimeSmoke) {
     checks.push(...(await runtimeSmokeDoctorChecks({
       config,
-      cache: readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot)),
+      cache: readRuntimeSmokeCache(runtimeSmokeCachePath(config, home)),
     })));
   }
   if (includePhoenix) {
@@ -174,23 +209,80 @@ async function doctorGraphqlLinear({
   if (includeGitHub) {
     let githubDoctorTransport = null;
     try {
-      githubDoctorTransport = githubDoctorTransportFromConnection({ repoRoot, config });
+      githubDoctorTransport = githubDoctorTransportFromConnection({ repoRoot, home, config });
     } catch {
       // githubConnectionDoctorChecks will fail closed for real connections
       // without a live transport instead of reporting dry-run checks as true.
       githubDoctorTransport = null;
     }
-    checks.push(...(await githubConnectionDoctorChecks({ repoRoot, config, transport: githubDoctorTransport })));
-  }
-  if (includeLocalSupervisor) {
-    const supervisorForeground = foregrounds.length === 1 ? foregrounds[0] : null;
-    checks.push(...(await localSupervisorDoctorChecks({
-      repoRoot,
-      config: supervisorForeground?.config || config,
-      cachePath: supervisorForeground?.context?.linear?.cachePath || cachePath,
-    })));
+    checks.push(...(await githubConnectionDoctorChecks({ repoRoot, home, config, transport: githubDoctorTransport })));
   }
   return normalizeDoctorChecks(checks);
+}
+
+async function doctorClaudePluginContract({ repoRoot, runCommand, marketplaceSource } = {}) {
+  const health = await readClaudePluginHealth({
+    repoRoot,
+    runCommand,
+    pluginName: "teami",
+    marketplaceName: "teami",
+    marketplaceSource,
+    scope: "user",
+  });
+  return {
+    name: "Claude plugin launch contract",
+    ok: health.ok === true,
+    message: health.ok
+      ? `teami@teami ${health.version} is enabled from the trusted marketplace with an exact npx launch`
+      : `${health.reason || "claude_plugin_unhealthy"}${health.detail ? `: ${health.detail}` : ""}; rerun ${formatCommand("init")}`,
+  };
+}
+
+function doctorAdminRevocationRequirement({ home } = {}) {
+  try {
+    const requirement = createSetupStateStore({ home }).readAdminRevocationRequirement();
+    return {
+      name: "one-time Linear admin revocation",
+      ok: !requirement,
+      message: requirement
+        ? "unverified after an interrupted or failed one-shot admin flow; revoke Teami access in Linear Settings -> Applications, then uninstall the blocked local state and start setup again (a fresh token cannot prove the lost token is gone)"
+        : "no unresolved one-shot admin grant marker",
+    };
+  } catch (error) {
+    return {
+      name: "one-time Linear admin revocation",
+      ok: false,
+      message: `local revocation evidence is unreadable: ${redactOAuthSecrets(error.message)}`,
+    };
+  }
+}
+
+function domainTeamVisibilityCheck({ domain, teamCheck = null, savedTeamCheck = null, teamKey = null } = {}) {
+  if (savedTeamCheck?.ok === false && domain?.linear?.team_id) {
+    const recovery = completeDomainTeamMissingRecoveryForDomain(domain);
+    return {
+      name: `domain ${domain.id} Linear team visibility`,
+      ok: false,
+      message: `${recovery.what} ${recovery.why}`,
+      fix: recovery.fix,
+      showMessage: true,
+    };
+  }
+  return {
+    name: `domain ${domain.id} Linear team visibility`,
+    ok: teamCheck?.ok === true,
+    message: teamCheck?.ok === true
+      ? `can see team ${teamKey || domain?.linear?.team_key || "unknown"}`
+      : teamCheck?.message || `team ${teamKey || domain?.linear?.team_key || "unknown"} not visible`,
+  };
+}
+
+function mergePathRepoIdentityForDomain(domainContext) {
+  try {
+    return { repoIdentity: resourcesToRepoIdentity(domainContext) };
+  } catch (error) {
+    return { repoIdentity: null, repoIdentityError: error.message };
+  }
 }
 
 function doctorProductRepoBindingChecksForDomains(domains = []) {
@@ -222,9 +314,10 @@ function formatProductRepoBindingReadout(domain) {
 
 export function doctorProductRepoBindingChecks({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   domainId = null,
 } = {}) {
-  const registry = readDomainRegistry({ repoRoot });
+  const registry = readDomainRegistry({ home });
   if (!registry) return [];
   const domains = domainId
     ? registry.domains.filter((domain) => domain.id === domainId)
@@ -273,7 +366,7 @@ async function doctorLegacyCredentialTargets({ config, repoRoot, context }) {
   const legacyOAuthStore = createLinearCredentialStore({
     config,
     repoRoot,
-    target: legacyCredentialTargetForConfig(config, repoRoot),
+    target: legacyCredentialTargetForConfig(config),
   });
 
   try {
@@ -282,7 +375,7 @@ async function doctorLegacyCredentialTargets({ config, repoRoot, context }) {
       name: `domain ${context.domainId} legacy Linear OAuth credential target`,
       ok: !tokenSet,
       message: tokenSet
-        ? `legacy pre-domain target found for workspace=${context.linear.workspaceId}; rerun npm run init -- --domain ${context.domainId} or npm run reset`
+        ? `legacy pre-domain target found for workspace=${context.linear.workspaceId}; rerun ${formatCommand(`init --domain ${context.domainId}`)} or ${formatCommand("reset")}`
         : "no legacy pre-domain target found",
     });
   } catch (error) {
@@ -314,4 +407,5 @@ function likelyDomainOrphans({ cachePath } = {}) {
 
 export {
   doctorGraphqlLinear,
+  domainTeamVisibilityCheck,
 };

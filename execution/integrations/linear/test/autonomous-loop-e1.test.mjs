@@ -25,7 +25,7 @@ const TARGET_KEY = "prompt/decomposition/sr_eng_grounding_pass";
 
 function tempRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-e1-"));
-  fs.mkdirSync(path.join(root, ".teami"), { recursive: true });
+  process.env.TEAMI_HOME = root;
   return root;
 }
 

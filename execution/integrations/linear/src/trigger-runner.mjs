@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { formatCommand } from "./cli/operator-output.mjs";
+import { shippedExecutionReadiness } from "./execution-readiness-gate.mjs";
 import { evaluateDecompositionEligibility, runDecomposition } from "./linear-service.mjs";
 import { createTrace, recordSpan } from "./trace.mjs";
-import { createOrchestratorTurnTraceSink } from "./orchestrator-turn-trace-sink.mjs";
+import {
+  createCheckpointFlushingTurnSpanSink,
+  createOrchestratorTurnTraceSink,
+} from "./orchestrator-turn-trace-sink.mjs";
 import {
   parseResourceTargetFromDescription,
   renderResourceTargetBlock,
@@ -10,6 +15,7 @@ import {
 import {
   DEFAULT_MAX_RUNTIME_OUTPUT_BYTES,
   DEFAULT_RUNTIME_TIMEOUT_MS,
+  perRunTempEnvSubset,
   runRuntimeCommand,
 } from "./runtime-command.mjs";
 import {
@@ -31,6 +37,7 @@ import { commitPayload as executionCommitPayload } from "./workflows/execution/c
 import {
   EXECUTION_REQUIRED_CAPABILITIES,
   EXECUTION_WORKFLOW_TYPE,
+  executionDefinition,
 } from "./workflows/execution/definition.mjs";
 import {
   GIT_REPO_COMMIT_EFFECT_ID,
@@ -52,9 +59,8 @@ import {
   remediationFailureSignature,
   renderRemediationMarker,
 } from "./remediation-marker.mjs";
-import { doctorMergeDoneAutomationCheck } from "./linear/doctor-service.mjs";
-import { isIssueClosed } from "./linear/matching-utils.mjs";
-import { issueNeedsPrincipalEscalationEffectDescriptor } from "./linear/issue-needs-principal-effect.mjs";
+import { isIssueClosed, issueHasLabel } from "./linear/matching-utils.mjs";
+import { applyNeedsPrincipalEscalationPair } from "./linear/needs-principal-comment.mjs";
 import {
   locatePullRequestForIssue,
   resourcesToRepoIdentity,
@@ -90,13 +96,14 @@ import {
   writeRunArtifact,
 } from "../../../engine/run-store.mjs";
 import { canApplyTerminal } from "../../../engine/terminal-gate.mjs";
-import { getWorkflowDefinition } from "../../../engine/workflow-registry.mjs";
+import { getWorkflowDefinition, registerWorkflow } from "../../../engine/workflow-registry.mjs";
 import {
   isRecord,
   MODULE_REPO_ROOT,
   runOrchestratorLoop,
   runtimeEvidenceEntries,
 } from "../../../engine/orchestrator-loop.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
 export { runRuntimeCommand, resolveRuntimeSpawnCommand } from "./runtime-command.mjs";
 export { runOrchestratorLoop } from "../../../engine/orchestrator-loop.mjs";
 export { DECOMPOSITION_REQUIRED_CAPABILITIES } from "./workflows/decomposition/definition.mjs";
@@ -113,7 +120,7 @@ export async function runDecompositionOrchestrator(options = {}) {
 const REQUIRED_CAPABILITIES = DECOMPOSITION_REQUIRED_CAPABILITIES;
 
 export const PRE_DOMAIN_CACHE_REPAIR_REASON = "pre_domain_cache_requires_reinit";
-export const PRE_DOMAIN_CACHE_REPAIR_HINT = "Run npm run init or npm run reset to write a per-domain Linear cache.";
+export const PRE_DOMAIN_CACHE_REPAIR_HINT = `Run ${formatCommand("init")} or ${formatCommand("reset")} to write a per-domain Linear cache.`;
 export const DOMAIN_CONTEXT_REQUIRED_REASON = "domain_context_required";
 export const DOMAIN_REGISTRY_REQUIRED_REASON = "domain_registry_required";
 export const EXECUTION_RUN_DEPS_REQUIRED_REASON = "execution_run_deps_required";
@@ -147,6 +154,7 @@ export async function runTriggeredDecomposition(options = {}) {
     orchestratorTurnExecutor = executeOrchestratorTurn,
     roster = createOrchestratorRoster({ workflowType: DECOMPOSITION_WORKFLOW_TYPE }),
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     leaseDurationMs,
     runnerVersion = "local",
@@ -268,7 +276,7 @@ export async function runTriggeredDecomposition(options = {}) {
   let traceSession = null;
 
   try {
-    assertRunStoreWritable({ repoRoot, runStoreDir });
+    assertRunStoreWritable({ repoRoot, home, domainId: resolvedDomainContext.domainId, runStoreDir });
     await renewal.renewNow();
     traceSession = traceSink
       ? await traceSink.startRun?.({
@@ -346,8 +354,14 @@ export async function runTriggeredDecomposition(options = {}) {
 
     const definition = getDecompositionDefinition();
     // Default per-turn observability: when no sink is injected, collect turn spans
-    // and drain them into the run trace so operators see them in Phoenix by default.
-    const ownTurnSpanSink = spanSink ? null : createOrchestratorTurnTraceSink();
+    // AND checkpoint-flush each one to the trace session as it happens, so a run
+    // that dies mid-flight has already delivered its turn spans to Phoenix.
+    const ownTurnSpanSink = spanSink ? null : createCheckpointFlushingTurnSpanSink({
+      traceSink,
+      session: traceSession,
+      traceName: definition.trace_descriptor.trace_name,
+      traceAttributes: eligibilityTrace.attributes,
+    });
     const {
       output,
       environment,
@@ -380,6 +394,7 @@ export async function runTriggeredDecomposition(options = {}) {
       environment,
       runId,
       repoRoot,
+      home,
       runStoreDir,
       runtimeEvidence,
       acceptedRefs,
@@ -418,6 +433,7 @@ export async function runTriggeredDecomposition(options = {}) {
         if (!mutation.ok) throw new Error(`Could not mark wake mutation start: ${mutation.reason}`);
       },
     });
+    await ownTurnSpanSink?.settle?.();
     ownTurnSpanSink?.drainInto(result?.trace);
     const traceDelivery = await traceSink?.finishRun?.({ session: traceSession, result, wake })
       .catch((error) => ({ status: "trace_delivery_failed", reason: error.message }));
@@ -455,6 +471,30 @@ export async function runTriggeredDecomposition(options = {}) {
 }
 
 export async function runTriggeredExecution(options = {}) {
+  const productionOptions = { ...options };
+  delete productionOptions.executionReadiness;
+  return runTriggeredExecutionInternal({
+    ...productionOptions,
+    executionReadiness: shippedExecutionReadiness,
+  });
+}
+
+export async function runTriggeredExecutionForTest(options = {}) {
+  registerExecutionWorkflowForTest();
+  return runTriggeredExecutionInternal(options);
+}
+
+export function registerExecutionWorkflowForTest() {
+  try {
+    return getWorkflowDefinition(EXECUTION_WORKFLOW_TYPE);
+  } catch (error) {
+    if (!String(error?.message || "").startsWith("unknown_workflow_type:")) throw error;
+    registerWorkflow(executionDefinition);
+    return executionDefinition;
+  }
+}
+
+async function runTriggeredExecutionInternal(options = {}) {
   const {
     store: topLevelStore = null,
     runnerId,
@@ -467,6 +507,7 @@ export async function runTriggeredExecution(options = {}) {
     orchestratorTurnExecutor = executeOrchestratorTurn,
     roster = null,
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     leaseDurationMs,
     runnerVersion = "local",
@@ -486,7 +527,12 @@ export async function runTriggeredExecution(options = {}) {
     gitRemoteUrlOverride = null,
     gitRemoteUrlOverrides = null,
     resolveGitRemoteUrl = null,
+    executionReadiness = shippedExecutionReadiness,
   } = options;
+  const release = executionReadiness();
+  if (!release?.ok) {
+    return { status: "failed_closed", reason: "product_repo_execution_not_released" };
+  }
   const store = topLevelStore || runDeps.store;
   if (!store) throw new Error(`${EXECUTION_RUN_DEPS_REQUIRED_REASON}: runDeps.store is required.`);
   if (typeof runDeps.materialize !== "function") {
@@ -594,7 +640,7 @@ export async function runTriggeredExecution(options = {}) {
   let traceSession = null;
 
   try {
-    assertRunStoreWritable({ repoRoot, runStoreDir });
+    assertRunStoreWritable({ repoRoot, home, domainId: resolvedDomainContext.domainId, runStoreDir });
     await renewal.renewNow();
     traceSession = traceSink
       ? await traceSink.startRun?.({
@@ -655,7 +701,20 @@ export async function runTriggeredExecution(options = {}) {
     });
     const runContext = normalizeMaterializedRunContext(materialized, gitRemoteResolution);
     const runtimeOptions = runtimeOptionsFromRunContext(runContext);
-    const ownTurnSpanSink = spanSink ? null : createOrchestratorTurnTraceSink();
+    const ownTurnSpanSink = spanSink ? null : createCheckpointFlushingTurnSpanSink({
+      traceSink,
+      session: traceSession,
+      traceName: definition.trace_descriptor.trace_name,
+      traceAttributes: knownTraceAttributes({
+        run_id: runId,
+        wake_id: wake.id,
+        domain_id: resolvedDomainContext.trace?.domain_id,
+        workspace_id: resolvedDomainContext.trace?.workspace_id,
+        team_id: resolvedDomainContext.trace?.team_id,
+        source_object_id: effectiveIssueId,
+        trigger_type: wake.trigger_type || null,
+      }),
+    });
     const normalizedResumeFrom = normalizeExecutionResumeFrom(resumeFrom);
     let result = null;
     try {
@@ -746,6 +805,7 @@ export async function runTriggeredExecution(options = {}) {
           environment,
           runId,
           repoRoot,
+          home,
           runStoreDir,
           runtimeEvidence,
           acceptedRefs,
@@ -777,8 +837,10 @@ export async function runTriggeredExecution(options = {}) {
           runnerId,
           retry,
           killPoint,
+          executionReadiness,
           resumeRecord,
         });
+        await ownTurnSpanSink?.settle?.();
         ownTurnSpanSink?.drainInto(result?.trace);
       }
     } finally {
@@ -834,6 +896,7 @@ export async function runTriggeredReview(options = {}) {
     orchestratorTurnExecutor = executeOrchestratorTurn,
     roster = null,
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     leaseDurationMs,
     runnerVersion = "local",
@@ -953,7 +1016,7 @@ export async function runTriggeredReview(options = {}) {
   let traceSession = null;
 
   try {
-    assertRunStoreWritable({ repoRoot, runStoreDir });
+    assertRunStoreWritable({ repoRoot, home, domainId: resolvedDomainContext.domainId, runStoreDir });
     await renewal.renewNow();
     traceSession = traceSink
       ? await traceSink.startRun?.({
@@ -1000,7 +1063,20 @@ export async function runTriggeredReview(options = {}) {
     let acceptedRefs = null;
     let driverSessionHandle = null;
     let reviewInput = null;
-    const ownTurnSpanSink = spanSink ? null : createOrchestratorTurnTraceSink();
+    const ownTurnSpanSink = spanSink ? null : createCheckpointFlushingTurnSpanSink({
+      traceSink,
+      session: traceSession,
+      traceName: definition.trace_descriptor.trace_name,
+      traceAttributes: knownTraceAttributes({
+        run_id: runId,
+        wake_id: wake.id,
+        domain_id: resolvedDomainContext.trace?.domain_id,
+        workspace_id: resolvedDomainContext.trace?.workspace_id,
+        team_id: resolvedDomainContext.trace?.team_id,
+        source_object_id: effectiveIssueId,
+        trigger_type: wake.trigger_type || null,
+      }),
+    });
 
     if (plan.mode === "review") {
       reviewInput = await assembleReviewRuntimeInput({
@@ -1079,6 +1155,7 @@ export async function runTriggeredReview(options = {}) {
       environment,
       runId,
       repoRoot,
+      home,
       runStoreDir,
       runtimeEvidence,
       acceptedRefs,
@@ -1114,6 +1191,7 @@ export async function runTriggeredReview(options = {}) {
       reviewInput,
       plan,
     });
+    await ownTurnSpanSink?.settle?.();
     ownTurnSpanSink?.drainInto(result?.trace);
     const traceDelivery = await traceSink?.finishRun?.({ session: traceSession, result, wake })
       .catch((error) => ({ status: "trace_delivery_failed", reason: error.message }));
@@ -1203,6 +1281,7 @@ async function runExecutionTerminalCommit({
   environment = null,
   runId = null,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   runtimeEvidence = {},
   acceptedRefs = null,
@@ -1219,6 +1298,7 @@ async function runExecutionTerminalCommit({
   runnerId,
   retry = false,
   killPoint = null,
+  executionReadiness = shippedExecutionReadiness,
   resumeRecord = null,
 } = {}) {
   const domainTrace = domainContext?.trace || {};
@@ -1271,7 +1351,7 @@ async function runExecutionTerminalCommit({
     issue_state: issue?.state?.name || null,
   });
 
-  const validation = validateOrchestratorOutput(runResult, executionCommitPayload);
+  const validation = validateOrchestratorOutput(runResult, executionCommitPayload, { requireAccountabilitySection: false });
   if (!validation.ok) return executionFailClosed(trace, validation.failureReasons);
 
   const terminalOutput = runResult.terminal_output;
@@ -1294,6 +1374,8 @@ async function runExecutionTerminalCommit({
     {
       runId: artifact.run_id,
       repoRoot,
+      home,
+      domainId: artifact.domain_id,
       runStoreDir,
       returnDurabilityResult: true,
       payloadValidator: executionCommitPayload,
@@ -1311,6 +1393,8 @@ async function runExecutionTerminalCommit({
   const persistedArtifact = readRunArtifact({
     runId: artifact.run_id,
     repoRoot,
+    home,
+    domainId: artifact.domain_id,
     runStoreDir,
     payloadValidator: executionCommitPayload,
     functionVersion: EXECUTION_FUNCTION_VERSION,
@@ -1346,10 +1430,68 @@ async function runExecutionTerminalCommit({
     };
   }
   if (terminalOutput.outcome !== "commit") {
+    if (terminalOutput.outcome === "pause") {
+      const needsPrincipalPair = await applyNeedsPrincipalEscalationPair({
+        client,
+        config,
+        cache,
+        issueId,
+        issue,
+        domainContext,
+        trace,
+        runId: persistedArtifact.run_id,
+        site: "pause",
+        reason: terminalOutput.reason,
+        siteContent: pauseNeedsPrincipalSiteContent(persistedArtifact.pause_packet),
+      });
+      if (needsPrincipalPair.outcome !== "ok") {
+        const pendingEffectId =
+          needsPrincipalPair.escalation?.pending_effect_id ||
+          needsPrincipalPair.comment?.pending_effect_id ||
+          "linear_needs_principal_pair";
+        recordSpan(trace, "commit_effect_pending", {
+          pending_effect_id: pendingEffectId,
+          reason: needsPrincipalPair.reason,
+          run_id: persistedArtifact.run_id,
+          atomicity: "durable_commit_intent_not_provider_transaction",
+        });
+        if (needsPrincipalPair.outcome === "failed_closed") {
+          return {
+            status: "failed_closed",
+            failureReasons: [needsPrincipalPair.reason || "execution_pause_needs_principal_pair_failed_closed"],
+            pending_effect_id: pendingEffectId,
+            reason: needsPrincipalPair.reason,
+            needs_principal_pair: needsPrincipalPair,
+            trace,
+            durableRecord,
+            artifact: persistedArtifact,
+          };
+        }
+        return {
+          status: "pending",
+          pending_effect_id: pendingEffectId,
+          reason: needsPrincipalPair.reason,
+          needs_principal_pair: needsPrincipalPair,
+          trace,
+          durableRecord,
+          artifact: persistedArtifact,
+        };
+      }
+      return {
+        status: "paused",
+        reason: terminalOutput.reason,
+        applied: needsPrincipalPair.escalation?.applied || [],
+        produced_identities: needsPrincipalPair.escalation?.produced_identities || [],
+        needs_principal_pair: needsPrincipalPair,
+        trace,
+        durableRecord,
+        artifact: persistedArtifact,
+      };
+    }
     return {
-      status: terminalOutput.outcome === "pause" ? "paused" : "failed_closed",
+      status: "failed_closed",
       reason: terminalOutput.reason,
-      failureReasons: terminalOutput.outcome === "failed_closed" ? [terminalOutput.reason] : undefined,
+      failureReasons: [terminalOutput.reason],
       trace,
       durableRecord,
       artifact: persistedArtifact,
@@ -1378,6 +1520,7 @@ async function runExecutionTerminalCommit({
     durable_record: durableRecord,
     retry: retry === true,
     killPoint,
+    executionReadiness,
     runDeps,
     runGit: runContext?.runGit || runDeps.runGit || defaultRunGit,
     store,
@@ -1425,6 +1568,8 @@ async function runExecutionTerminalCommit({
     {
       runId: artifactWithProducedIdentities.run_id,
       repoRoot,
+      home,
+      domainId: artifactWithProducedIdentities.domain_id,
       runStoreDir,
       payloadValidator: executionCommitPayload,
       functionVersion: EXECUTION_FUNCTION_VERSION,
@@ -1478,6 +1623,10 @@ async function runExecutionPreflightForRun({
     remoteUrl: stringOrNull(handle.remoteUrl),
     owner: stringOrNull(handle.owner),
     repo: stringOrNull(handle.repo),
+    // The run's engine-owned temp only — the readiness commands must see the
+    // same temp the worker will, while the preflight otherwise keeps its
+    // ambient host env (its authority probes prove HOST authority).
+    envAugment: perRunTempEnvSubset(runtimeOptions.envAugment),
   });
   return normalizeExecutionProfilePreflightVerdict({ ...verdict, preflight_profile: preflightProfile }, resourceId);
 }
@@ -1504,63 +1653,6 @@ function normalizeExecutionProfilePreflightVerdict(verdict, resourceId) {
   }
   if (stringOrNull(verdict.resource_id)) return verdict;
   return { ...verdict, resource_id: stringOrNull(resourceId) };
-}
-
-function executionPreflightFailClosed({
-  definition,
-  domainContext = null,
-  issue = null,
-  issueId = null,
-  runId = null,
-  traceContext = {},
-  runContext = null,
-  preflight,
-} = {}) {
-  const domainTrace = domainContext?.trace || {};
-  const resource = primaryResource(runContext);
-  const selectedResourceId = stringOrNull(runContext?.selectedResourceId) || resource?.id || null;
-  const failureReasons = [...new Set(preflight?.failure_reasons || ["execution_profile_preflight_failed"])];
-  const trace = createTrace(definition.trace_descriptor.trace_name, knownTraceAttributes({
-    "workflow.name": "issue_execution",
-    "workflow.version": EXECUTION_FUNCTION_VERSION,
-    "teami.domain_id": domainTrace.domain_id,
-    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
-    "linear.workspace_id": domainTrace.workspace_id,
-    "linear.team_id": domainTrace.team_id,
-    "linear.issue_id": issueId,
-    run_id: runId,
-    event_id: traceContext.event_id || null,
-    wake_id: traceContext.wake_id || null,
-    trace_id: traceContext.trace_id || null,
-    attempt: traceContext.attempt || null,
-    workspace_id: domainTrace.workspace_id,
-    domain_id: domainTrace.domain_id,
-    team_id: domainTrace.team_id,
-    behavior_repo_id: domainTrace.behavior_repo_id,
-    source_provider: traceContext.source_provider || "linear",
-    source_object_id: traceContext.source_object_id || issueId,
-    trigger_type: traceContext.trigger_type || null,
-    runner_id: traceContext.runner_id || null,
-    runner_version: traceContext.runner_version || null,
-    work_type: executionWorkTypeForTrace({ issue, resource }),
-    selected_resource_id: selectedResourceId,
-    resource_id: selectedResourceId,
-    "resource.kind": resource?.kind || null,
-    "resource.id": resource?.id || null,
-    "resource.label": resource?.label || null,
-  }));
-  recordSpan(trace, "execution_profile_preflight", executionProfilePreflightSpanAttributes(preflight));
-  recordSpan(trace, "execution_run_failed_closed", {
-    failure_reasons: failureReasons,
-  });
-  return {
-    status: "failed_closed",
-    reason: "execution_profile_preflight_failed",
-    failureReasons,
-    execution_profile_preflight: preflight,
-    readinessVerdict: preflight,
-    trace,
-  };
 }
 
 async function executionPreflightRemediationBlocked({
@@ -1768,26 +1860,6 @@ async function planExecutionPreflightRemediation({
     };
   }
 
-  const mergeDoneCheck = await doctorMergeDoneAutomationCheck({
-    client,
-    team: issue?.team || {
-      id: teamId,
-      key: config?.linear?.team?.key || domainContext?.linear?.teamKey || null,
-      name: config?.linear?.team?.name || domainContext?.linear?.teamName || null,
-    },
-  });
-  if (mergeDoneCheck?.ok !== true) {
-    return {
-      action: "escalate",
-      reason: "merge_done_automation_missing",
-      marker,
-      retry_cycle: retryCycle,
-      remediation_issue_id: null,
-      remediation_issue: null,
-      doctor_check: mergeDoneCheck,
-    };
-  }
-
   if (typeof client?.createIssue !== "function") {
     throw new Error("linear_remediation_issue_create_unavailable");
   }
@@ -1881,8 +1953,7 @@ async function executionPreflightNeedsPrincipalEscalated({
   plan = {},
 } = {}) {
   const reason = plan.reason || "remediation_escalated";
-  const effects = [issueNeedsPrincipalEscalationEffectDescriptor()];
-  const ctx = {
+  const pair = await applyNeedsPrincipalEscalationPair({
     client,
     config,
     cache,
@@ -1891,24 +1962,29 @@ async function executionPreflightNeedsPrincipalEscalated({
     domainContext,
     trace,
     runId,
-    teamId: issue?.teamId || issue?.team?.id || domainContext?.linear?.teamId || cache?.teamId || null,
-    shape: needsPrincipalShapeFromCache({ cache, config }),
-  };
-  const applyResult = await applyCommitEffects({ effects, ctx, trace });
-  if (applyResult.outcome !== "ok") {
+    site: "preflight",
+    reason,
+    siteContent: executionPreflightEscalationSiteContent({
+      issue,
+      issueId,
+      plan,
+    }),
+  });
+  if (pair.outcome !== "ok") {
     recordSpan(trace, "commit_effect_pending", {
-      pending_effect_id: applyResult.pending_effect_id,
-      reason: applyResult.reason,
+      pending_effect_id: pair.escalation?.pending_effect_id || pair.comment?.pending_effect_id || "linear_needs_principal_pair",
+      reason: pair.reason,
       run_id: runId,
       atomicity: "durable_commit_intent_not_provider_transaction",
     });
     return {
-      status: applyResult.outcome === "failed_closed" ? "failed_closed" : "pending",
-      reason: applyResult.reason,
-      failureReasons: [applyResult.reason || reason],
+      status: pair.outcome === "failed_closed" ? "failed_closed" : "pending",
+      reason: pair.reason,
+      failureReasons: [pair.reason || reason],
       execution_profile_preflight: preflight,
       readinessVerdict: preflight,
-      pending_effect_id: applyResult.pending_effect_id,
+      pending_effect_id: pair.escalation?.pending_effect_id || pair.comment?.pending_effect_id || "linear_needs_principal_pair",
+      needs_principal_pair: pair,
       trace,
     };
   }
@@ -1942,8 +2018,9 @@ async function executionPreflightNeedsPrincipalEscalated({
       escalation_reason: reason,
       issue: plan.remediation_issue || null,
     },
-    applied: applyResult.applied,
-    produced_identities: applyResult.produced_identities,
+    applied: pair.escalation.applied,
+    produced_identities: pair.escalation.produced_identities,
+    needs_principal_pair: pair,
     trace,
   };
 }
@@ -2083,34 +2160,24 @@ function recordExecutionPreflightRemediationLifecycleSpan(trace, attributes) {
   recordSpan(trace, "execution_profile_remediation_lifecycle", attributes);
 }
 
-function needsPrincipalShapeFromCache({ cache = null, config = {} } = {}) {
-  const blocked = issueStatusShapeFromCache(cache?.issueStatuses?.blocked, {
-    name: config?.linear?.issue?.statuses?.blocked?.name || "Blocked",
-    type: config?.linear?.issue?.statuses?.blocked?.type || "started",
-  });
-  const labelName = stringOrNull(config?.linear?.issue?.labels?.needs_principal) || "Needs Principal";
-  const label = issueLabelShapeFromCache(
-    cache?.issueLabels?.needs_principal ||
-    cache?.issueLabels?.[labelName],
-    labelName,
+function executionPreflightEscalationSiteContent({ issue = null, issueId = null, plan = {} } = {}) {
+  const original = stringOrNull(issue?.identifier) || stringOrNull(issueId) || "the original execution issue";
+  const prior = plan.remediation_issue
+    ? uniqueStrings([
+        plan.remediation_issue.identifier,
+        plan.remediation_issue.id,
+      ]).join(" / ")
+    : stringOrNull(plan.remediation_issue_id);
+  const lines = [
+    `Teami reached the retry cap while trying to repair execution readiness for ${original}.`,
+  ];
+  if (prior) lines.push(`Prior remediation issue: ${prior}.`);
+  lines.push(
+    `Resource: ${stringOrNull(plan.marker?.resource_id) || "unknown"}.`,
+    `Failure signature: ${stringOrNull(plan.marker?.failure_signature) || "unknown"}.`,
+    `Retry cycle: ${Number.isFinite(plan.retry_cycle) ? plan.retry_cycle : "unknown"}.`,
   );
-  return {
-    team: { id: cache?.teamId || null },
-    issueStatuses: { ...(blocked ? { blocked } : {}) },
-    issueLabels: { ...(label ? { needs_principal: label } : {}) },
-  };
-}
-
-function issueStatusShapeFromCache(value, fallback = {}) {
-  if (!value) return null;
-  if (typeof value === "string") return { id: value, name: fallback.name || null, type: fallback.type || null };
-  return value?.id ? value : null;
-}
-
-function issueLabelShapeFromCache(value, name = null) {
-  if (!value) return null;
-  if (typeof value === "string") return { id: value, name };
-  return value?.id ? value : null;
+  return lines.join("\n");
 }
 
 function remediationMarkerMatches(left, right) {
@@ -2258,6 +2325,7 @@ async function runReviewTerminalCommit({
   environment = null,
   runId = null,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   runtimeEvidence = {},
   acceptedRefs = null,
@@ -2278,7 +2346,6 @@ async function runReviewTerminalCommit({
   reviewInput = null,
   plan = null,
 } = {}) {
-  void cache;
   void store;
   void wake;
   void leaseToken;
@@ -2322,29 +2389,31 @@ async function runReviewTerminalCommit({
   });
 
   let effectiveRunResult = runResult;
-  let validation = validateOrchestratorOutput(effectiveRunResult, reviewCommitPayload);
+  let validation = validateOrchestratorOutput(effectiveRunResult, reviewCommitPayload, { requireAccountabilitySection: false });
   if (
     !validation.ok ||
     effectiveRunResult?.terminal_output?.outcome !== "commit" ||
     (hasPr && pr?.head_sha && effectiveRunResult?.terminal_output?.reviewed_head_sha !== pr.head_sha)
   ) {
-    const failureReasons = validation.ok
-      ? ["reviewed_head_sha_mismatch"]
-      : validation.failureReasons;
+    const escalation = classifyReviewEscalation({
+      validation,
+      terminalOutput: effectiveRunResult?.terminal_output,
+    });
     recordSpan(trace, "review_payload_escalated", {
-      failure_reasons: [...new Set(failureReasons || ["review_payload_invalid"])],
+      failure_reasons: escalation.failureReasons,
     });
     effectiveRunResult = synthesizeReviewEscalationRunResult({
       runId,
       headSha: pr?.head_sha || effectiveRunResult?.terminal_output?.reviewed_head_sha || NO_REVIEW_HEAD_SHA,
-      reason: "review_payload_invalid",
+      reason: escalation.reason,
       body: reviewEscalationBody({
-        reason: "review_payload_invalid",
-        detail: [...new Set(failureReasons || ["review_payload_invalid"])].join(","),
+        reason: escalation.reason,
+        detail: escalation.failureReasons.join(","),
+        questionMarkdown: escalation.questionMarkdown,
       }),
       bounds: effectiveRunResult?.bounds,
     });
-    validation = validateOrchestratorOutput(effectiveRunResult, reviewCommitPayload);
+    validation = validateOrchestratorOutput(effectiveRunResult, reviewCommitPayload, { requireAccountabilitySection: false });
   }
   if (!validation.ok) return reviewFailClosed(trace, validation.failureReasons);
 
@@ -2378,6 +2447,8 @@ async function runReviewTerminalCommit({
     {
       runId: artifact.run_id,
       repoRoot,
+      home,
+      domainId: artifact.domain_id,
       runStoreDir,
       returnDurabilityResult: true,
       payloadValidator: reviewCommitPayload,
@@ -2395,6 +2466,8 @@ async function runReviewTerminalCommit({
   const persistedArtifact = readRunArtifact({
     runId: artifact.run_id,
     repoRoot,
+    home,
+    domainId: artifact.domain_id,
     runStoreDir,
     payloadValidator: reviewCommitPayload,
     functionVersion: REVIEW_FUNCTION_VERSION,
@@ -2438,10 +2511,19 @@ async function runReviewTerminalCommit({
     head_sha: terminalOutput.reviewed_head_sha,
     disposition,
     body: terminalOutput.body,
+    human_briefing: terminalOutput.human_briefing,
     comments: Array.isArray(terminalOutput.comments) ? terminalOutput.comments : [],
     run_id: persistedArtifact.run_id,
   };
-  const commitEffects = reviewCommitEffects({ disposition, hasPr, runDeps });
+  const gateLabelFresh = await readFreshHumanReviewGateLabel({
+    client,
+    config,
+    cache,
+    issueId,
+    disposition,
+    trace,
+  });
+  const commitEffects = reviewCommitEffects({ disposition, hasPr, gateLabelFresh, runDeps });
   const ctx = {
     client,
     config,
@@ -2496,14 +2578,77 @@ async function runReviewTerminalCommit({
     };
   }
 
+  let needsPrincipalPair = null;
+  if (disposition === "escalate") {
+    needsPrincipalPair = await applyNeedsPrincipalEscalationPair({
+      client,
+      config,
+      cache,
+      issueId,
+      issue,
+      domainContext,
+      trace,
+      runId: persistedArtifact.run_id,
+      site: "review",
+      reason: reviewNeedsPrincipalReason(terminalOutput),
+      siteContent: reviewNeedsPrincipalSiteContent(terminalOutput),
+    });
+    if (needsPrincipalPair.outcome !== "ok") {
+      recordSpan(trace, "review_commit_effect_pending", {
+        pending_effect_id:
+          needsPrincipalPair.escalation?.pending_effect_id ||
+          needsPrincipalPair.comment?.pending_effect_id ||
+          "linear_needs_principal_pair",
+        reason: needsPrincipalPair.reason,
+        run_id: persistedArtifact.run_id,
+      });
+      if (needsPrincipalPair.outcome === "failed_closed") {
+        return {
+          status: "failed_closed",
+          failureReasons: [needsPrincipalPair.reason || "review_needs_principal_pair_failed_closed"],
+          pending_effect_id:
+            needsPrincipalPair.escalation?.pending_effect_id ||
+            needsPrincipalPair.comment?.pending_effect_id ||
+            "linear_needs_principal_pair",
+          reason: needsPrincipalPair.reason,
+          needs_principal_pair: needsPrincipalPair,
+          trace,
+          durableRecord,
+          artifact: persistedArtifact,
+        };
+      }
+      return {
+        status: "pending",
+        pending_effect_id:
+          needsPrincipalPair.escalation?.pending_effect_id ||
+          needsPrincipalPair.comment?.pending_effect_id ||
+          "linear_needs_principal_pair",
+        reason: needsPrincipalPair.reason,
+        needs_principal_pair: needsPrincipalPair,
+        trace,
+        durableRecord,
+        artifact: persistedArtifact,
+      };
+    }
+  }
+
+  const applied = [
+    ...applyResult.applied,
+    ...(needsPrincipalPair?.escalation?.applied || []),
+  ];
+  const producedIdentities = [
+    ...(applyResult.produced_identities || []),
+    ...(needsPrincipalPair?.escalation?.produced_identities || []),
+  ];
   const artifactWithProducedIdentities = {
     ...persistedArtifact,
-    produced_identities: applyResult.produced_identities,
+    produced_identities: producedIdentities,
   };
   return {
     status: "completed",
-    applied: applyResult.applied,
-    produced_identities: applyResult.produced_identities,
+    applied,
+    produced_identities: producedIdentities,
+    ...(needsPrincipalPair ? { needs_principal_pair: needsPrincipalPair } : {}),
     trace,
     durableRecord,
     artifact: artifactWithProducedIdentities,
@@ -2644,7 +2789,17 @@ async function assembleReviewRuntimeInput({ issue, pr, repoIdentity, prAdapter }
   if (typeof prAdapter?.getPullRequestFiles !== "function") {
     throw new Error("review_pr_adapter_getPullRequestFiles_missing");
   }
-  const diff = await prAdapter.getPullRequestFiles(pr.number);
+  if (typeof prAdapter?.getPullRequest !== "function") {
+    throw new Error("review_pr_adapter_getPullRequest_missing");
+  }
+  // The reviewer is packet-only: acceptance evidence is authored into the PR
+  // body by convention, so the body/title must ride in the packet or the
+  // reviewer cannot verify it. Fetched here (not from the discovery snapshot)
+  // so a body edited after discovery is still seen.
+  const [hydrated, diff] = await Promise.all([
+    prAdapter.getPullRequest(pr.number),
+    prAdapter.getPullRequestFiles(pr.number),
+  ]);
   const files = Array.isArray(diff?.files) ? diff.files.map(reviewDiffFileProjection) : [];
   const packet = {
     schema_version: "teami-review-input/v1",
@@ -2654,6 +2809,8 @@ async function assembleReviewRuntimeInput({ issue, pr, repoIdentity, prAdapter }
       repo: pr.repo,
       number: pr.number,
       head_sha: pr.head_sha,
+      title: stringOrNull(hydrated?.title),
+      body: typeof hydrated?.body === "string" ? hydrated.body : null,
       default_branch: repoIdentity?.default_branch || null,
     },
     diff: {
@@ -2736,6 +2893,7 @@ function reviewTerminalArtifact({
       disposition: terminalOutput.disposition,
       body: terminalOutput.body,
       reviewed_head_sha: terminalOutput.reviewed_head_sha,
+      ...(typeof terminalOutput.human_briefing === "string" ? { human_briefing: terminalOutput.human_briefing } : {}),
       ...(Array.isArray(terminalOutput.comments) ? { comments: terminalOutput.comments } : {}),
       linear_issue_id: issueId || issue?.id || null,
       github_pull_request: pr ? {
@@ -2816,17 +2974,64 @@ function synthesizeReviewEscalationRunResult({
   };
 }
 
-function reviewEscalationBody({ reason, detail = null, noPr = false } = {}) {
+// A structurally valid non-commit terminal (e.g. a pause asking for more context)
+// is the model declining to finish the review — not a malformed payload. Label it
+// by what happened so the escalation reads as the reviewer's judgment, not an
+// engine defect.
+function classifyReviewEscalation({ validation, terminalOutput = null } = {}) {
+  if (!validation?.ok) {
+    return {
+      reason: "review_payload_invalid",
+      failureReasons: [...new Set(validation?.failureReasons || ["review_payload_invalid"])],
+      questionMarkdown: null,
+    };
+  }
+  const outcome = stringOrNull(terminalOutput?.outcome);
+  if (outcome !== "commit") {
+    const modelReason = stringOrNull(terminalOutput?.reason);
+    return {
+      reason: "review_not_completed",
+      failureReasons: [
+        `review_terminal_outcome_${outcome || "missing"}${modelReason ? `:${modelReason}` : ""}`,
+      ],
+      questionMarkdown: stringOrNull(terminalOutput?.open_questions_markdown),
+    };
+  }
+  return {
+    reason: "review_payload_invalid",
+    failureReasons: ["reviewed_head_sha_mismatch"],
+    questionMarkdown: null,
+  };
+}
+
+function reviewEscalationBody({ reason, detail = null, noPr = false, questionMarkdown = null } = {}) {
   const lines = [
     "Teami review escalated.",
     "",
     `Reason: ${reason || "review_escalation_required"}.`,
   ];
   if (detail) lines.push(`Detail: ${detail}.`);
+  if (questionMarkdown) lines.push("", "The reviewer asked:", "", questionMarkdown);
   if (noPr) {
     lines.push("No reviewable open PR was available, so only the Linear escalation route was applied.");
   }
   return lines.join("\n");
+}
+
+function reviewNeedsPrincipalReason(terminalOutput = {}) {
+  const riskReason = Array.isArray(terminalOutput?.risks)
+    ? terminalOutput.risks.map((risk) => stringOrNull(risk)).find(Boolean)
+    : null;
+  if (riskReason) return riskReason;
+  const digest = stringOrNull(terminalOutput?.context_digest);
+  const match = digest?.match(/^Review escalated:\s*(.+)$/u);
+  if (match?.[1]) return match[1].trim();
+  return "review_escalated";
+}
+
+function reviewNeedsPrincipalSiteContent(terminalOutput = {}) {
+  return stringOrNull(terminalOutput?.body) ||
+    "The review could not complete without a human decision.";
 }
 
 function isOrchestratorOutputValidationError(error) {
@@ -2924,6 +3129,29 @@ function pausePacketFromTerminalOutput(terminalOutput = {}) {
   };
 }
 
+function pauseNeedsPrincipalSiteContent(pausePacket = {}) {
+  const lines = [];
+  const reason = stringOrNull(pausePacket?.reason);
+  if (reason) lines.push(`Pause reason: ${reason}.`);
+  const questionMarkdown = stringOrNull(pausePacket?.open_questions_markdown);
+  if (questionMarkdown) lines.push("", "Agent questions:", "", questionMarkdown);
+  const contextDigest = stringOrNull(pausePacket?.context_digest);
+  if (contextDigest) lines.push("", "Context:", contextDigest);
+  appendPausePacketList(lines, "Assumptions", pausePacket?.assumptions);
+  appendPausePacketList(lines, "Constraints", pausePacket?.constraints);
+  appendPausePacketList(lines, "Risks", pausePacket?.risks);
+  return lines.join("\n").trim() ||
+    "The execution agent paused because it needs the Principal to decide how this issue should continue.";
+}
+
+function appendPausePacketList(lines, label, items) {
+  const entries = Array.isArray(items)
+    ? items.map((item) => stringOrNull(item)).filter(Boolean)
+    : [];
+  if (entries.length === 0) return;
+  lines.push("", `${label}:`, ...entries.map((entry) => `- ${entry}`));
+}
+
 function packetsFromRuntimeEvidence(runtimeEvidence = {}) {
   return Object.values(runtimeEvidence || {}).flatMap((entry) => {
     if (!Array.isArray(entry?.turns)) return [];
@@ -2936,6 +3164,50 @@ function packetsFromRuntimeEvidence(runtimeEvidence = {}) {
   });
 }
 
+async function readFreshHumanReviewGateLabel({
+  client,
+  config,
+  cache,
+  issueId,
+  disposition,
+  trace,
+} = {}) {
+  if (disposition !== "approve") return false;
+  const labelName = stringOrNull(config?.linear?.issue?.labels?.human_review);
+  const labelId = labelName ? stringOrNull(cache?.issueLabels?.[labelName]) : null;
+  if (!labelId) {
+    recordSpan(trace, "human_review_gate_label_fresh_read", {
+      selected: false,
+      reason: "human_review_label_cache_missing",
+    });
+    return false;
+  }
+  const id = stringOrNull(issueId);
+  if (!id || typeof client?.getIssueContext !== "function") {
+    recordSpan(trace, "human_review_gate_label_fresh_read", {
+      selected: false,
+      reason: "human_review_issue_fresh_read_unavailable",
+    });
+    return false;
+  }
+
+  try {
+    const freshIssue = await client.getIssueContext(id);
+    const selected = issueHasLabel(freshIssue, labelId) === true;
+    recordSpan(trace, "human_review_gate_label_fresh_read", {
+      selected,
+      label_id: labelId,
+    });
+    return selected;
+  } catch (error) {
+    recordSpan(trace, "human_review_gate_label_fresh_read", {
+      selected: false,
+      reason: `human_review_issue_fresh_read_failed:${String(error?.message || error || "unknown_error").slice(0, 160)}`,
+    });
+    return false;
+  }
+}
+
 function executionCommitEffects({ definition, runDeps }) {
   const overlays = effectImplementationOverlays(runDeps);
   return definition.commit_effects.map((effect) => ({
@@ -2944,9 +3216,9 @@ function executionCommitEffects({ definition, runDeps }) {
   }));
 }
 
-function reviewCommitEffects({ disposition, hasPr, runDeps }) {
+function reviewCommitEffects({ disposition, hasPr, gateLabelFresh = false, runDeps }) {
   const overlays = effectImplementationOverlays(runDeps);
-  return selectEffectsForDisposition(disposition, hasPr).map((effect) => ({
+  return selectEffectsForDisposition(disposition, hasPr, gateLabelFresh).map((effect) => ({
     ...effect,
     ...(overlays.get(effect.id) || {}),
   }));
@@ -3112,16 +3384,30 @@ function normalizeExecutionResumeFrom(resumeFrom) {
     : null;
   const priorRunId = stringOrNull(resumeFrom.priorRunId);
   const coldReconstruct = resumeFrom.coldReconstruct === true || resumeFrom.mode === "cold_reconstruct";
+  const resumeContext = normalizeExecutionResumeContext(resumeFrom.resumeContext || resumeFrom.resume_context || {
+    text: resumeFrom.reviewerNotes,
+    provenance_tag: "af_review_failure_marker",
+  });
   if ((!sessionHandle || !priorRunId) && !coldReconstruct) return null;
   if (!priorRunId) return null;
   return {
     sessionHandle,
     priorRunId,
     ...(coldReconstruct ? { coldReconstruct: true } : {}),
-    reviewerNotes: typeof resumeFrom.reviewerNotes === "string" ? resumeFrom.reviewerNotes : "",
+    resumeContext,
     smokeTests: isRecord(resumeFrom.smokeTests) ? resumeFrom.smokeTests : {},
     runtimeVersion: stringOrNull(resumeFrom.runtimeVersion),
     head_sha: stringOrNull(resumeFrom.head_sha || resumeFrom.headSha),
+  };
+}
+
+function normalizeExecutionResumeContext(context) {
+  if (!isRecord(context)) return null;
+  const text = typeof context.text === "string" ? context.text : "";
+  if (text === "") return null;
+  return {
+    text,
+    provenance_tag: stringOrNull(context.provenance_tag || context.provenanceTag) || "resume_context",
   };
 }
 
@@ -3245,13 +3531,23 @@ function executionWorkTypeForTrace({ issue = null, resource = null } = {}) {
 
 export async function finishWakeFromRunnerResult({ store, wake, runnerId, leaseToken, result, traceDelivery = null }) {
   const mapping = mapRunnerOutcomeToWake(result);
+  const providerUpdateIds = providerUpdateIdsForResult(result);
+  const reconciliationVerified = ["completed", "paused"].includes(result?.status) && providerUpdateIds.length > 0;
   const completed = await store.completeWake({
     wakeId: wake.id,
     runnerId,
     leaseToken,
     status: mapping.status,
     reason: mapping.reason,
-    providerUpdateIds: providerUpdateIdsForResult(result),
+    providerUpdateIds,
+    reconciliationVerified,
+    reconciliationEvidenceDigest: reconciliationVerified
+      ? createHash("sha256").update(JSON.stringify({
+          status: result.status,
+          provider_update_ids: providerUpdateIds,
+          produced_identities: result?.produced_identities || [],
+        })).digest("hex")
+      : null,
     artifact: result?.artifact || null,
     artifactPointer: result?.durableRecord?.artifact_path
       ? { artifact_path: result.durableRecord.artifact_path }
@@ -3324,6 +3620,7 @@ export async function runDecompositionEvalMode({
   roster = createOrchestratorRoster({ workflowType: DECOMPOSITION_WORKFLOW_TYPE }),
   runId = defaultRunId({ wake: { id: "eval" } }),
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   traceId = null,
   domainContext = null,
@@ -3374,6 +3671,7 @@ export async function runDecompositionEvalMode({
     environment,
     runId,
     repoRoot,
+    home,
     runStoreDir,
     runtimeEvidence,
     acceptedRefs,

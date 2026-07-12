@@ -37,15 +37,42 @@ test("verifyPollScopeApplied fails and reports an offender for a different proje
   assert.deepEqual(result.offenders, [{ domainId: "domain-1", index: 1, projectId: "project-2" }]);
 });
 
-test("verifyPollScopeApplied fails and reports an offender for a missing project id", () => {
+test("verifyPollScopeApplied ignores no-project bookkeeping entries but fails when the seeded project was never processed", () => {
   const result = verifyPollScopeApplied(
     pollResult([{ domainId: "domain-1", processed: [{ action: "processed" }] }]),
     "project-1",
   );
 
+  // A processed entry with no project id is non-project poll work (a status/marker
+  // sweep), not a scope violation — so it is not an offender. The run still fails
+  // because the seeded project itself was never processed.
   assert.equal(result.ok, false);
   assert.deepEqual(result.processedProjectIds, [undefined]);
-  assert.deepEqual(result.offenders, [{ domainId: "domain-1", index: 0, projectId: undefined }]);
+  assert.deepEqual(result.offenders, []);
+});
+
+test("verifyPollScopeApplied passes when the seeded project is processed alongside no-project bookkeeping entries", () => {
+  // The real scoped gateway poll interleaves the seeded project (processed by several
+  // targets) with no-project sweep entries; the scope held iff the seeded project was
+  // processed and no OTHER project id appears.
+  const result = verifyPollScopeApplied(
+    pollResult([
+      {
+        domainId: "domain-1",
+        processed: [
+          { projectId: "project-1" },
+          { action: "status-sweep" },
+          { action: "marker-sweep" },
+          { projectId: "project-1" },
+        ],
+      },
+    ]),
+    "project-1",
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.processedProjectIds, ["project-1", undefined, undefined, "project-1"]);
+  assert.deepEqual(result.offenders, []);
 });
 
 test("verifyPollScopeApplied fails when nothing was processed", () => {
