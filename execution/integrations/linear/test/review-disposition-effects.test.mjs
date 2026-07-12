@@ -11,7 +11,6 @@ import {
   LINEAR_ISSUE_READY_EFFECT_ID,
   issueReadyEffect,
 } from "../src/linear/issue-ready-effect.mjs";
-import { ISSUE_NEEDS_PRINCIPAL_EFFECT_ID } from "../src/linear/issue-needs-principal-effect.mjs";
 import { resolveReadyIssueStatus } from "../src/linear/shape-resolver.mjs";
 import {
   selectEffectsForDisposition,
@@ -19,6 +18,7 @@ import {
 import {
   GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+  LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
 } from "../src/workflows/review/effect-ids.mjs";
 
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -29,8 +29,12 @@ test("review disposition selector returns the S5 effect set for each route", () 
     GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
     GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   ]);
+  assert.deepEqual(effectIds(selectEffectsForDisposition("approve", true, true)), [
+    GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+    GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
+    LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+  ]);
   assert.equal(approveEffects.includes(LINEAR_ISSUE_READY_EFFECT_ID), false);
-  assert.equal(approveEffects.includes(ISSUE_NEEDS_PRINCIPAL_EFFECT_ID), false);
   assert.deepEqual(effectIds(selectEffectsForDisposition("request-changes", true)), [
     GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
     GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
@@ -39,16 +43,12 @@ test("review disposition selector returns the S5 effect set for each route", () 
   assert.deepEqual(effectIds(selectEffectsForDisposition("escalate", true)), [
     GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
     GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
-    ISSUE_NEEDS_PRINCIPAL_EFFECT_ID,
   ]);
   assert.deepEqual(effectIds(selectEffectsForDisposition("diff_incomplete", true)), [
     GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
     GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
-    ISSUE_NEEDS_PRINCIPAL_EFFECT_ID,
   ]);
-  assert.deepEqual(effectIds(selectEffectsForDisposition("escalate", false)), [
-    ISSUE_NEEDS_PRINCIPAL_EFFECT_ID,
-  ]);
+  assert.deepEqual(effectIds(selectEffectsForDisposition("escalate", false)), []);
 
   assert.throws(() => selectEffectsForDisposition("approved", true), /review_disposition_invalid:approved/);
   assert.throws(
@@ -109,7 +109,6 @@ test("issue ready effect moves the issue to the Todo execution trigger status", 
       status: "Todo",
       status_id: "state-todo",
       state_id: "state-todo",
-      label_id: null,
     },
   }]);
 });
@@ -231,7 +230,7 @@ test("approve disposition leaves the issue in In Review", async () => {
   assert.equal(issue.state.name, "In Review");
 });
 
-test("escalate disposition moves the issue to Blocked with Needs Principal", async () => {
+test("escalate disposition writes the GitHub review route before the Linear pair runs inline", async () => {
   const prAdapter = createFakeReviewPrAdapter();
   const issue = issueInReview();
   const client = createFakeLinearClient({ issue });
@@ -255,15 +254,11 @@ test("escalate disposition moves the issue to Blocked with Needs Principal", asy
     parseAfReviewCommentMarker(prAdapter.commentsByNumber.get(7)[0].body).marker.disposition,
     "escalate",
   );
-  assert.deepEqual(linearUpdates(client), [{
-    method: "updateIssue",
-    id: "issue-1",
-    input: { stateId: "state-blocked", labelIds: ["label-needs-principal"] },
-  }]);
-  assertBlockedWithNeedsPrincipal(issue);
+  assert.deepEqual(linearUpdates(client), []);
+  assert.equal(issue.state.name, "In Review");
 });
 
-test("no-PR escalation moves the issue to Blocked with Needs Principal", async () => {
+test("no-PR escalation has no generic commit effects before the Linear pair runs inline", async () => {
   const issue = issueInReview();
   const client = createFakeLinearClient({ issue });
 
@@ -280,15 +275,11 @@ test("no-PR escalation moves the issue to Blocked with Needs Principal", async (
   });
 
   assert.equal(result.outcome, "ok");
-  assert.deepEqual(linearUpdates(client), [{
-    method: "updateIssue",
-    id: "issue-1",
-    input: { stateId: "state-blocked", labelIds: ["label-needs-principal"] },
-  }]);
-  assertBlockedWithNeedsPrincipal(issue);
+  assert.deepEqual(linearUpdates(client), []);
+  assert.equal(issue.state.name, "In Review");
 });
 
-test("diff_incomplete applies as an escalation with canonical GitHub failure status", async () => {
+test("diff_incomplete applies canonical GitHub failure status before the Linear pair runs inline", async () => {
   const prAdapter = createFakeReviewPrAdapter();
   const issue = issueInReview();
   const client = createFakeLinearClient({ issue });
@@ -312,12 +303,8 @@ test("diff_incomplete applies as an escalation with canonical GitHub failure sta
     parseAfReviewCommentMarker(prAdapter.commentsByNumber.get(7)[0].body).marker.disposition,
     "escalate",
   );
-  assert.deepEqual(linearUpdates(client), [{
-    method: "updateIssue",
-    id: "issue-1",
-    input: { stateId: "state-blocked", labelIds: ["label-needs-principal"] },
-  }]);
-  assertBlockedWithNeedsPrincipal(issue);
+  assert.deepEqual(linearUpdates(client), []);
+  assert.equal(issue.state.name, "In Review");
 });
 
 function effectIds(effects) {
@@ -355,7 +342,7 @@ function configWithReviewStatuses() {
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
           in_review: { name: "In Review", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
         },
       },
@@ -371,7 +358,7 @@ function reviewShape() {
       todo: { id: "state-todo", name: "Todo", type: "unstarted", teamId: "team-1" },
       in_progress: { id: "state-in-progress", name: "In Progress", type: "started", teamId: "team-1" },
       in_review: { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
-      blocked: { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+      needs_principal: { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
       done: { id: "state-done", name: "Done", type: "completed", teamId: "team-1" },
     },
     issueLabels: {
@@ -386,9 +373,15 @@ function createFakeLinearClient({ issue, extraStates = [] }) {
     ["state-todo", { id: "state-todo", name: "Todo", type: "unstarted", teamId: "team-1" }],
     ["state-in-progress", { id: "state-in-progress", name: "In Progress", type: "started", teamId: "team-1" }],
     ["state-in-review", { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" }],
-    ["state-blocked", {
-      id: "state-blocked",
-      name: "Blocked",
+    ["state-needs-principal", {
+      id: "state-needs-principal",
+      name: "Principal Escalation",
+      type: "started",
+      teamId: "team-1",
+    }],
+    ["state-needs-principal", {
+      id: "state-needs-principal",
+      name: "Principal Escalation",
       type: "started",
       teamId: "team-1",
     }],
@@ -422,11 +415,6 @@ function createFakeLinearClient({ issue, extraStates = [] }) {
 
 function linearUpdates(client) {
   return client.events.filter((event) => event.method === "updateIssue");
-}
-
-function assertBlockedWithNeedsPrincipal(issue) {
-  assert.equal(issue.state.name, "Blocked");
-  assert.deepEqual(issue.labels.map((label) => label.id), ["label-needs-principal"]);
 }
 
 function createFakeReviewPrAdapter() {

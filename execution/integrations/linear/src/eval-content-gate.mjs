@@ -35,6 +35,9 @@ export const SECRET_KEY_PATTERN =
 // gate scans harder than the bounded trace path.
 export const SECRET_VALUE_PATTERNS = Object.freeze([
   /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/,
+  // Basic credentials are base64-wrapped token material (x-access-token:<token>);
+  // the 24-char floor keeps prose like "Basic authentication" from tripping.
+  /Basic\s+[A-Za-z0-9+/=]{24,}/,
   new RegExp("\\b" + "sk-" + "[A-Za-z0-9_-]{16,}"),
   new RegExp("\\b" + "gh[pousr]_" + "[A-Za-z0-9_]{16,}"),
   new RegExp("\\b" + "github_" + "pat_" + "[A-Za-z0-9_]{20,}"),
@@ -301,6 +304,14 @@ const labelPolicy = {
   },
 };
 
+const projectCommentPolicy = {
+  object: {
+    author_id: { allow: "string" },
+    body: { allow: "string" },
+    created_at: { allow: "string" },
+  },
+};
+
 const phasePacketSummaryPolicy = {
   object: {
     schema_version: { allow: "string" },
@@ -321,7 +332,6 @@ const phasePacketSummaryPolicy = {
     // Issue payloads inside packets duplicate the terminal output artifact;
     // the output section is the single promoted copy.
     final_issues: { exclude: "duplicated_in_output_final_issues" },
-    discovery_issues: { exclude: "duplicated_in_output_discovery_issues" },
   },
 };
 
@@ -372,20 +382,6 @@ const finalIssuePolicy = {
   },
 };
 
-const discoveryIssuePolicy = {
-  object: {
-    decomposition_key: { allow: "string" },
-    decompositionKey: { allow: "string" },
-    title: { allow: "string" },
-    body_markdown: { allow: "string" },
-    in_session_research: { allow: "scalar" },
-    evidence_gap: { allow: "scalar" },
-    depends_on: { array: { allow: "string" } },
-    assignee_id: { exclude: "workspace_internal_routing_id" },
-    label_ids: { exclude: "workspace_internal_routing_id" },
-  },
-};
-
 const dependencyRelationPolicy = {
   object: {
     blocking: { allow: "string" },
@@ -418,6 +414,7 @@ const judgeFixtureInputPolicy = {
         id: { allow: "string" },
         name: { allow: "string" },
         description: { allow: "string" },
+        comments: { array: projectCommentPolicy },
         content: { allow: "string" },
         status: { allow: "string" },
         labels: { array: labelPolicy },
@@ -443,7 +440,6 @@ const judgeFixtureInputPolicy = {
     terminal_status: { allow: "string" },
     terminal_reason: { allow: "string" },
     final_issues: { array: finalIssuePolicy },
-    discovery_issues: { array: discoveryIssuePolicy },
     dependency_relations: { array: dependencyRelationPolicy },
     project_update_markdown: { allow: "string" },
     open_questions_markdown: { allow: "string" },
@@ -473,6 +469,7 @@ export const RICH_EXAMPLE_CONTENT_POLICY = Object.freeze({
             id: { allow: "string" },
             name: { allow: "string" },
             description: { allow: "string" },
+            comments: { array: projectCommentPolicy },
             content: { allow: "string" },
             status: { allow: "string" },
             labels: { array: labelPolicy },
@@ -516,7 +513,6 @@ export const RICH_EXAMPLE_CONTENT_POLICY = Object.freeze({
         terminal_reason: { allow: "string" },
         phase_packets: { array: phasePacketSummaryPolicy },
         final_issues: { array: finalIssuePolicy },
-        discovery_issues: { array: discoveryIssuePolicy },
         dependency_relations: {
           array: dependencyRelationPolicy,
         },

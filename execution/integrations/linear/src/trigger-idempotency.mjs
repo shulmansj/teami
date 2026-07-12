@@ -4,15 +4,17 @@ import path from "node:path";
 
 import {
   defaultRunStoreDir,
-  fsyncDirectoryAfterRename,
   readRunArtifact,
-  renameWithRetry,
-  writeFileAndFsync,
 } from "../../../engine/run-store.mjs";
+import {
+  fsyncDirectoryAfterRename,
+  writeAtomicJson,
+} from "../../../engine/atomic-file.mjs";
 import {
   computeProjectSnapshotHash,
   projectSnapshotProjection,
 } from "./project-snapshot-store.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
 
 export const TRIGGER_FINGERPRINT_FIELD = "trigger_fingerprint_v1";
 export const UNCONFIRMED_LINEAR_MUTATION_INTENT_SCHEMA_VERSION =
@@ -36,12 +38,23 @@ const PROJECT_TRIGGER_TYPE = "linear.project.planned";
 
 export function computeTriggerFingerprint(project) {
   const semanticStatus = project?.status?.name || project?.status?.type || null;
-  return computeProjectSnapshotHash(projectSnapshotProjection({ project, semanticStatus }));
+  const fingerprintProject = project && typeof project === "object"
+    ? { ...project, comments: undefined }
+    : project;
+  return computeProjectSnapshotHash(projectSnapshotProjection({
+    project: fingerprintProject,
+    semanticStatus,
+  }));
 }
 
-export function listReplayPending({ domainId, repoRoot = process.cwd(), runStoreDir = null } = {}) {
+export function listReplayPending({
+  domainId,
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  runStoreDir = null,
+} = {}) {
   requireNonEmptyString(domainId, "domainId");
-  const dirPath = mutationIntentDir({ repoRoot, runStoreDir });
+  const dirPath = mutationIntentDir({ repoRoot, home, domainId, runStoreDir });
   if (!fs.existsSync(dirPath)) return [];
 
   return fs.readdirSync(dirPath, { withFileTypes: true })
@@ -50,6 +63,7 @@ export function listReplayPending({ domainId, repoRoot = process.cwd(), runStore
       intentPath: path.join(dirPath, entry.name),
       domainId,
       repoRoot,
+      home,
       runStoreDir,
     }))
     .filter(Boolean)
@@ -58,9 +72,14 @@ export function listReplayPending({ domainId, repoRoot = process.cwd(), runStore
     .map(({ startedAt, objectType, ...pending }) => pending);
 }
 
-export function listGitReplayPending({ domainId, repoRoot = process.cwd(), runStoreDir = null } = {}) {
+export function listGitReplayPending({
+  domainId,
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  runStoreDir = null,
+} = {}) {
   requireNonEmptyString(domainId, "domainId");
-  const dirPath = mutationIntentDir({ repoRoot, runStoreDir });
+  const dirPath = mutationIntentDir({ repoRoot, home, domainId, runStoreDir });
   if (!fs.existsSync(dirPath)) return [];
 
   return fs.readdirSync(dirPath, { withFileTypes: true })
@@ -69,6 +88,7 @@ export function listGitReplayPending({ domainId, repoRoot = process.cwd(), runSt
       intentPath: path.join(dirPath, entry.name),
       domainId,
       repoRoot,
+      home,
       runStoreDir,
     }))
     .filter(Boolean)
@@ -81,10 +101,11 @@ export function readReplayPending({
   domainId,
   projectId,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
   requireNonEmptyString(projectId, "projectId");
-  return listReplayPending({ domainId, repoRoot, runStoreDir })
+  return listReplayPending({ domainId, repoRoot, home, runStoreDir })
     .find((pending) => pending.projectId === projectId) || null;
 }
 
@@ -92,10 +113,11 @@ export function readGitReplayPending({
   domainId,
   objectId,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
   requireNonEmptyString(objectId, "objectId");
-  return listGitReplayPending({ domainId, repoRoot, runStoreDir })
+  return listGitReplayPending({ domainId, repoRoot, home, runStoreDir })
     .find((pending) => pending.objectId === objectId) || null;
 }
 
@@ -104,10 +126,11 @@ export async function replayPendingGitMutation({
   objectId,
   pending = null,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   applyGitMutationFn = null,
 } = {}) {
-  const target = pending || readGitReplayPending({ domainId, objectId, repoRoot, runStoreDir });
+  const target = pending || readGitReplayPending({ domainId, objectId, repoRoot, home, runStoreDir });
   if (!target) return { action: "git_replay", status: "no_pending", cleared: false };
   if (target.objectType && target.objectType !== "issue") {
     return { action: "git_replay", status: "wrong_object_type", cleared: false };
@@ -121,6 +144,7 @@ export async function replayPendingGitMutation({
     objectId: resolvedObjectId,
     pending: target,
     repoRoot,
+    home,
     runStoreDir,
   });
   return { action: "git_replay", status: "delegated", cleared: false, result, pending: target };
@@ -139,7 +163,9 @@ export function writeMutationIntent({
   triggerType = null,
   git = null,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
+  onBoundary = () => {},
 } = {}) {
   const record = mutationIntentRecord({
     domainId,
@@ -154,14 +180,35 @@ export function writeMutationIntent({
     triggerType,
     git,
   });
-  const filePath = mutationIntentPath({ runId, repoRoot, runStoreDir });
-  writeJsonAtomic(filePath, record);
+  const filePath = mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir });
+  writeJsonAtomic(filePath, record, { onBoundary });
 
   const readBack = readJsonFile(filePath);
   if (JSON.stringify(readBack) !== JSON.stringify(record)) {
     throw new Error("Mutation intent read-back validation failed.");
   }
   return record;
+}
+
+export function readMutationIntent({
+  domainId,
+  runId,
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  runStoreDir = null,
+} = {}) {
+  requireNonEmptyString(domainId, "domainId");
+  assertSafeRunId(runId);
+  const filePath = mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir });
+  if (!fs.existsSync(filePath)) return null;
+  const record = readJsonFile(filePath);
+  normalizeMutationIntent(record);
+  return record;
+}
+
+export function mutationIntentDigest(record) {
+  const normalized = normalizeMutationIntent(record);
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
 export function clearMutationIntent({
@@ -171,13 +218,14 @@ export function clearMutationIntent({
   objectType = null,
   runId,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
   requireNonEmptyString(domainId, "domainId");
   const expectedObjectId = objectId || projectId;
   requireNonEmptyString(expectedObjectId, objectType === "issue" ? "objectId" : "projectId");
   assertSafeRunId(runId);
-  const filePath = mutationIntentPath({ runId, repoRoot, runStoreDir });
+  const filePath = mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir });
   if (!fs.existsSync(filePath)) return { cleared: false };
 
   const existing = normalizeMutationIntent(readJsonFile(filePath));
@@ -196,16 +244,18 @@ export function clearMutationIntent({
 }
 
 export function readSuppression({
+  domainId = null,
   projectId,
   objectType = "project",
   objectId = null,
   fingerprint,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
   const identity = suppressionObjectIdentity({ projectId, objectType, objectId });
   assertFingerprint(fingerprint);
-  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, runStoreDir });
+  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, home, domainId, runStoreDir });
   if (!fs.existsSync(filePath)) return null;
   const note = readJsonFile(filePath);
   if (identity.objectType === "project") {
@@ -232,6 +282,7 @@ export function writeSuppression({
   reason,
   createdAt,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
   const note = suppressionNote({
@@ -246,15 +297,17 @@ export function writeSuppression({
     createdAt,
   });
   const identity = suppressionObjectIdentity({ projectId, objectType, objectId });
-  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, runStoreDir });
+  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, home, domainId, runStoreDir });
   writeJsonAtomic(filePath, note);
 
   const readBack = readSuppression({
+    domainId,
     projectId,
     objectType,
     objectId,
     fingerprint,
     repoRoot,
+    home,
     runStoreDir,
   });
   if (JSON.stringify(readBack) !== JSON.stringify(note)) {
@@ -263,7 +316,7 @@ export function writeSuppression({
   return note;
 }
 
-function replayPendingFromIntentPath({ intentPath, domainId, repoRoot, runStoreDir }) {
+function replayPendingFromIntentPath({ intentPath, domainId, repoRoot, home, runStoreDir }) {
   const intent = normalizeMutationIntent(readJsonFile(intentPath));
   if (intent.domain_id !== domainId) return null;
   if (!REPLAYABLE_ARTIFACT_KINDS.has(intent.artifact_kind)) return null;
@@ -280,7 +333,7 @@ function replayPendingFromIntentPath({ intentPath, domainId, repoRoot, runStoreD
     };
   }
 
-  const artifact = readRunArtifact({ runId: intent.run_id, repoRoot, runStoreDir });
+  const artifact = readRunArtifact({ runId: intent.run_id, repoRoot, home, domainId, runStoreDir });
   if (!artifact) throw new Error(`mutation_intent_missing_run_artifact:${intent.run_id}`);
   if (artifact.domain_id !== domainId) throw new Error(`mutation_intent_artifact_domain_mismatch:${intent.run_id}`);
   if (artifact.linear_project_id !== intent.linear_project_id) {
@@ -547,48 +600,35 @@ function suppressionObjectIdentity({ projectId, objectType = "project", objectId
   return { objectType: "issue", objectId: resolvedObjectId };
 }
 
-function mutationIntentPath({ runId, repoRoot, runStoreDir }) {
+function mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir }) {
   assertSafeRunId(runId);
-  return path.join(mutationIntentDir({ repoRoot, runStoreDir }), `${runId}.json`);
+  return path.join(mutationIntentDir({ repoRoot, home, domainId, runStoreDir }), `${runId}.json`);
 }
 
-function mutationIntentDir({ repoRoot, runStoreDir }) {
-  return path.join(runCustodyDir({ repoRoot, runStoreDir }), "unconfirmed-linear-mutation-intents");
+function mutationIntentDir({ repoRoot, home, domainId, runStoreDir }) {
+  return path.join(runCustodyDir({ repoRoot, home, domainId, runStoreDir }), "unconfirmed-linear-mutation-intents");
 }
 
-function suppressionPath({ projectId, fingerprint, repoRoot, runStoreDir }) {
+function suppressionPath({ projectId, fingerprint, repoRoot, home, domainId, runStoreDir }) {
   requireNonEmptyString(projectId, "projectId");
   assertFingerprint(fingerprint);
   return path.join(
-    suppressionDir({ repoRoot, runStoreDir }),
+    suppressionDir({ repoRoot, home, domainId, runStoreDir }),
     `${contentAddress(projectId)}.${fingerprint}.json`,
   );
 }
 
-function suppressionDir({ repoRoot, runStoreDir }) {
-  return path.join(runCustodyDir({ repoRoot, runStoreDir }), "trigger-suppressions");
+function suppressionDir({ repoRoot, home, domainId, runStoreDir }) {
+  return path.join(runCustodyDir({ repoRoot, home, domainId, runStoreDir }), "trigger-suppressions");
 }
 
-function runCustodyDir({ repoRoot, runStoreDir }) {
-  return path.resolve(runStoreDir || defaultRunStoreDir(repoRoot));
+function runCustodyDir({ repoRoot, home = resolveTeamiHome(), domainId, runStoreDir }) {
+  void repoRoot;
+  return path.resolve(runStoreDir || defaultRunStoreDir({ home, domainId }));
 }
 
-function writeJsonAtomic(filePath, value) {
-  const dirPath = path.dirname(filePath);
-  fs.mkdirSync(dirPath, { recursive: true });
-  const tempPath = path.join(
-    dirPath,
-    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
-  );
-  try {
-    writeFileAndFsync(tempPath, `${JSON.stringify(value, null, 2)}\n`);
-    JSON.parse(fs.readFileSync(tempPath, "utf8"));
-    renameWithRetry(tempPath, filePath);
-    fsyncDirectoryAfterRename(dirPath);
-  } catch (error) {
-    if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
-    throw error;
-  }
+function writeJsonAtomic(filePath, value, { onBoundary = () => {} } = {}) {
+  writeAtomicJson({ filePath, value, onBoundary });
 }
 
 function readJsonFile(filePath) {

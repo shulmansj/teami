@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import {
+  ENGINE_VERSION,
+  RUN_ARTIFACT_SCHEMA_VERSION,
+} from "../../../engine/engine-contract-constants.mjs";
 import { runOrchestratorLoop } from "../../../engine/orchestrator-loop.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import {
@@ -14,7 +18,10 @@ import { DOMAIN_REGISTRY_SCHEMA_VERSION } from "../src/domain-registry.mjs";
 import {
   defaultOrchestratorRuntime,
 } from "../src/orchestrator-turn.mjs";
-import { runTriggeredExecution } from "../src/trigger-runner.mjs";
+import {
+  registerExecutionWorkflowForTest,
+  runTriggeredExecutionForTest as runTriggeredExecution,
+} from "../src/trigger-runner.mjs";
 import { formatAfReviewCommentBody } from "../src/execution-pr-adapter.mjs";
 import {
   resolveRoleRuntimeAssignments,
@@ -28,6 +35,8 @@ import {
 } from "../src/workflows/execution/effect-ids.mjs";
 import { executionDefinition } from "../src/workflows/execution/definition.mjs";
 
+registerExecutionWorkflowForTest();
+
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const HEAD_SHA = "b".repeat(40);
 const REVIEWER_NOTES = formatAfReviewCommentBody({
@@ -36,9 +45,23 @@ const REVIEWER_NOTES = formatAfReviewCommentBody({
   head_sha: HEAD_SHA,
   run_id: "run-review",
 });
+const REVIEW_RESUME_CONTEXT = Object.freeze({
+  text: REVIEWER_NOTES,
+  provenance_tag: "af_review_failure_marker",
+});
+
+function tempWarmRoot(prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  process.env.TEAMI_HOME = root;
+  return root;
+}
 
 test("resumeFrom drives the first orchestrator turn through a warm command with reviewer notes", async () => {
   const config = loadLinearConfig({ repoRoot });
+  config.workflows.execution.roles.orchestrator.warm_continuation = {
+    enabled: true,
+    required: true,
+  };
   const assignment = resolveRoleRuntimeAssignments(config, "execution").orchestrator;
   const runtimeVersion = "0.130.0";
   const smokeTests = {
@@ -91,7 +114,7 @@ test("resumeFrom drives the first orchestrator turn through a warm command with 
         runtime: "codex",
       },
       priorRunId: "run-prior",
-      reviewerNotes: REVIEWER_NOTES,
+      resumeContext: REVIEW_RESUME_CONTEXT,
       smokeTests,
       runtimeVersion,
       head_sha: HEAD_SHA,
@@ -101,11 +124,13 @@ test("resumeFrom drives the first orchestrator turn through a warm command with 
   assert.equal(commands.length, 1);
   assert.equal(commands[0].mode, "warm_required");
   assert.ok(commands[0].args.includes("prior-driver-session"));
-  assert.ok(
+  assert.match(commands[0].stdinInput, /Please preserve the OAuth browser flow/);
+  assert.equal(
     commands[0].args.some((arg) =>
       typeof arg === "string" && arg.includes("Please preserve the OAuth browser flow")
     ),
-    "the resumed first-turn prompt should contain the reviewer notes",
+    false,
+    "the resumed first-turn prompt must not be in argv",
   );
   assert.equal(result.output.terminal_output.run_id, "run-fresh");
   assert.equal(result.output.terminal_output.outcome, "commit");
@@ -119,7 +144,7 @@ test("resumeFrom drives the first orchestrator turn through a warm command with 
 
 test("runTriggeredExecution records the warm resume outcome on the persisted artifact", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-warm-runner-"));
+  const tempRoot = tempWarmRoot("teami-warm-runner-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const store = createFakeStore();
   const runDeps = createRunDeps({ tempRoot, store });
@@ -135,7 +160,7 @@ test("runTriggeredExecution records the warm resume outcome on the persisted art
         runtime: "codex",
       },
       priorRunId: "run-prior",
-      reviewerNotes: REVIEWER_NOTES,
+      resumeContext: REVIEW_RESUME_CONTEXT,
       smokeTests: {},
       runtimeVersion: "0.130.0",
       head_sha: HEAD_SHA,
@@ -160,13 +185,14 @@ test("runTriggeredExecution records the warm resume outcome on the persisted art
     },
   });
 
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "completed", JSON.stringify(result));
   assert.equal(result.result.status, "completed");
   assert.equal(seenTurns.length, 1);
   assert.notEqual(seenTurns[0].runId, "run-prior");
   assert.equal(seenTurns[0].firstTurnWarmStart.priorRunId, "run-prior");
   assert.equal(seenTurns[0].firstTurnWarmStart.sessionHandle.id, "prior-driver-session");
-  assert.equal(seenTurns[0].priorTurns[0].reviewer_notes, REVIEWER_NOTES);
+  assert.equal(seenTurns[0].priorTurns[0].resume_context.text, REVIEWER_NOTES);
+  assert.equal(seenTurns[0].priorTurns[0].reason, "af_review_failure_marker");
   assert.deepEqual(result.result.artifact.resume, {
     resume_status: "committed",
     terminal_outcome: "commit",
@@ -185,7 +211,7 @@ test("runTriggeredExecution records the warm resume outcome on the persisted art
 
 test("runTriggeredExecution cold resume seeds reviewer notes without a warm session handle", async () => {
   registerGitRepoResourceKind();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-cold-runner-"));
+  const tempRoot = tempWarmRoot("teami-cold-runner-");
   writeExecutionAcceptedPromptFixture(tempRoot);
   const store = createFakeStore();
   const runDeps = createRunDeps({ tempRoot, store });
@@ -208,7 +234,7 @@ test("runTriggeredExecution cold resume seeds reviewer notes without a warm sess
     resumeFrom: {
       coldReconstruct: true,
       priorRunId: "cold_resume_pr_7_bbbbbbbbbbbb",
-      reviewerNotes: REVIEWER_NOTES,
+      resumeContext: REVIEW_RESUME_CONTEXT,
       smokeTests: {},
       runtimeVersion: null,
       head_sha: HEAD_SHA,
@@ -232,10 +258,11 @@ test("runTriggeredExecution cold resume seeds reviewer notes without a warm sess
     },
   });
 
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "completed", JSON.stringify(result));
   assert.equal(seenTurns.length, 1);
   assert.equal(seenTurns[0].firstTurnWarmStart, null);
-  assert.equal(seenTurns[0].priorTurns[0].reviewer_notes, REVIEWER_NOTES);
+  assert.equal(seenTurns[0].priorTurns[0].resume_context.text, REVIEWER_NOTES);
+  assert.equal(seenTurns[0].priorTurns[0].reason, "af_review_failure_marker");
   assert.equal(runDeps.materializeCalls[0].pendingGitIntent.git.branch, branch);
   assert.equal(runDeps.materializeCalls[0].pendingGitIntent.git.resource_id, "repo-1");
   assert.deepEqual(
@@ -350,7 +377,9 @@ test("runWarmResumeIssueSyntheticWake refetches latest review notes and seeds re
   assert.equal(captured[0].resumeFrom.sessionHandle.id, "prior-driver-session");
   assert.equal(Object.hasOwn(captured[0].resumeFrom, "coldReconstruct"), false);
   assert.equal(Object.hasOwn(captured[0].runDeps, "coldResumeGitIntent"), false);
-  assert.equal(captured[0].resumeFrom.reviewerNotes, latestNotes);
+  assert.equal(captured[0].resumeFrom.resumeContext.provenance_tag, "af_review_failure_marker");
+  assert.match(captured[0].resumeFrom.resumeContext.text, /Latest reviewer note: keep setup OAuth-only/);
+  assert.match(captured[0].resumeFrom.resumeContext.text, /Do not open a second PR/);
   assert.equal(captured[0].resumeFrom.head_sha, HEAD_SHA);
   assert.deepEqual(statuses.at(-1).note, {
     resume_status: "committed",
@@ -358,6 +387,137 @@ test("runWarmResumeIssueSyntheticWake refetches latest review notes and seeds re
     head_sha: HEAD_SHA,
     prior_run_id: "run-prior",
   });
+});
+
+test("runWarmResumeIssueSyntheticWake includes failed merge facts and non-app Linear comments", async () => {
+  const tempRoot = tempWarmRoot("teami-warm-context-");
+  const ctx = {
+    ...domainContext(),
+    linear: {
+      ...domainContext().linear,
+      cachePath: path.join(tempRoot, "linear-cache.json"),
+    },
+  };
+  fs.writeFileSync(
+    ctx.linear.cachePath,
+    `${JSON.stringify({
+      teamId: "team-1",
+      app_identity_id: "app-viewer-1",
+      app_identity_name: "Teami App",
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  const captured = [];
+  const priorRun = {
+    run_id: "run-prior",
+    object_id: "issue-1",
+    workflow_type: "execution",
+    status: "completed",
+    started_at: "2026-06-28T10:00:00.000Z",
+    terminal_at: "2026-06-28T10:05:00.000Z",
+    session_handle_pointer: {
+      source: "run_artifact.runtime_metadata",
+      runtime_metadata_paths: [["runtime_metadata", "orchestrator", "session_handle"]],
+    },
+  };
+
+  const result = await runWarmResumeIssueSyntheticWake({
+    config: loadLinearConfig({ repoRoot }),
+    repoRoot,
+    domain: { id: "domain-1" },
+    domainContext: ctx,
+    registry: domainRegistry(),
+    issueId: "issue-1",
+    priorRunId: "run-prior",
+    prNumber: 7,
+    head_sha: HEAD_SHA,
+    warmResumeDecision: {
+      action: "warm_resume",
+      resumeContextProvenanceTag: "linear_todo_reentry",
+    },
+    store: {
+      findLatestRunForObject(id) {
+        assert.equal(id, "issue-1");
+        return priorRun;
+      },
+      findLatestMergeRunForIssuePrHead(input) {
+        assert.deepEqual(input, { issueId: "issue-1", prNumber: 7, headSha: HEAD_SHA });
+        return {
+          run_id: "run-merge-failed",
+          workflow_type: "merge",
+          merge_outcome: {
+            issue_id: "issue-1",
+            pr_number: 7,
+            head_sha: HEAD_SHA,
+            outcome: "failed",
+            reason: "merge conflict: README.md",
+            observed_at: "2026-06-29T10:20:00.000Z",
+          },
+        };
+      },
+    },
+    runDeps: {
+      prAdapter: {
+        async listPullRequestComments() {
+          return [];
+        },
+      },
+      linearClient: {
+        async listIssueComments(issueId) {
+          assert.equal(issueId, "issue-1");
+          return [
+            {
+              id: "comment-human",
+              body: "Please keep the existing settings screen copy.",
+              createdAt: "2026-06-29T10:30:00.000Z",
+              user: { id: "user-1", name: "Dana", displayName: "Dana P." },
+            },
+            {
+              id: "comment-app",
+              body: "Factory status update should not be treated as user input.",
+              createdAt: "2026-06-29T10:31:00.000Z",
+              user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+            },
+          ];
+        },
+      },
+    },
+    resolveSessionHandle: () => ({
+      id: "prior-driver-session",
+      role: "orchestrator",
+      run_id: "run-prior",
+      runtime: "codex",
+    }),
+    isRunResumable: () => true,
+    createTraceSink: () => ({ async shutdown() {} }),
+    createRuntimeExecutor: () => ({}),
+    runTriggeredExecutionFn: async (options) => {
+      captured.push(options);
+      return {
+        status: "completed",
+        result: {
+          artifact: {
+            resume: {
+              resume_status: "committed",
+              terminal_outcome: "commit",
+              head_sha: HEAD_SHA,
+              prior_run_id: "run-prior",
+            },
+          },
+        },
+      };
+    },
+  });
+
+  assert.equal(result.resume_status, "committed");
+  assert.equal(captured.length, 1);
+  const context = captured[0].resumeFrom.resumeContext;
+  assert.equal(context.provenance_tag, "linear_todo_reentry");
+  assert.match(context.text, /Latest merge failure:/);
+  assert.match(context.text, /merge conflict: README\.md/);
+  assert.match(context.text, /2026-06-29T10:30:00\.000Z Dana P\. \(user-1\)/);
+  assert.match(context.text, /Please keep the existing settings screen copy/);
+  assert.doesNotMatch(context.text, /Factory status update should not be treated as user input/);
 });
 
 test("runWarmResumeIssueSyntheticWake cold-reconstructs from durable PR identity when local run state is gone", async () => {
@@ -434,7 +594,8 @@ test("runWarmResumeIssueSyntheticWake cold-reconstructs from durable PR identity
   assert.equal(captured.length, 1);
   assert.equal(Object.hasOwn(captured[0].resumeFrom, "sessionHandle"), false);
   assert.equal(captured[0].resumeFrom.coldReconstruct, true);
-  assert.equal(captured[0].resumeFrom.reviewerNotes, latestNotes);
+  assert.equal(captured[0].resumeFrom.resumeContext.provenance_tag, "af_review_failure_marker");
+  assert.match(captured[0].resumeFrom.resumeContext.text, /Cold reviewer note: continue on the existing PR/);
   assert.equal(captured[0].resumeFrom.durableIdentity.resource_id, "repo-1");
   assert.equal(captured[0].resumeFrom.durableIdentity.pull_request_number, "7");
   assert.deepEqual(captured[0].runDeps.coldResumeGitIntent.git, {
@@ -445,6 +606,132 @@ test("runWarmResumeIssueSyntheticWake cold-reconstructs from durable PR identity
     head_sha: HEAD_SHA,
   });
   assert.equal(captured[0].resumeFrom.priorRunId, `cold_resume_pr_7_${HEAD_SHA.slice(0, 12)}`);
+});
+
+test("runWarmResumeIssueSyntheticWake cold-reconstructs when the prior session is recorded as unpersisted", async () => {
+  const tempRoot = tempWarmRoot("teami-warm-unpersisted-");
+  const runId = "run-prior-unpersisted";
+  const runDir = path.join(tempRoot, "domains", "domain-1", "runs");
+  fs.mkdirSync(runDir, { recursive: true });
+  const terminalOutput = {
+    outcome: "commit",
+    reason: "synthesis_complete",
+    context_digest: "Prior execution completed on an unpersisted-session runtime.",
+    source_refs: [],
+    assumptions: [],
+    constraints: [],
+    risks: [],
+  };
+  fs.writeFileSync(path.join(runDir, `${runId}.json`), `${JSON.stringify({
+    schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
+    engine_version: ENGINE_VERSION,
+    function_version: "test-execution",
+    workflow_version: "test-execution",
+    kind: "commit",
+    run_id: runId,
+    domain_id: "domain-1",
+    workspace_id: "workspace-1",
+    team_id: "team-1",
+    linear_issue_id: "issue-1",
+    terminal_output: terminalOutput,
+    evidence: { perspectives_run: [] },
+    bounds: { rounds_used: 1, max_rounds: 99 },
+    environment: {},
+    runtime_assignments: {
+      orchestrator: { capabilities: { persisted_session_handles: false } },
+    },
+    runtime_metadata: {},
+    payload_schema_id: "teami-flat-run-payload/v1",
+    payload: {
+      terminal_output: terminalOutput,
+      linear_issue_id: "issue-1",
+    },
+  }, null, 2)}\n`, "utf8");
+  const branch = "af/execution/AF-1-5215fde5";
+  const captured = [];
+
+  try {
+    const result = await runWarmResumeIssueSyntheticWake({
+      config: loadLinearConfig({ repoRoot }),
+      repoRoot: tempRoot,
+      home: tempRoot,
+      domain: { id: "domain-1" },
+      domainContext: domainContext(),
+      registry: domainRegistry(),
+      issueId: "issue-1",
+      prNumber: 7,
+      head_sha: HEAD_SHA,
+      warmResumeDecision: {
+        action: "warm_resume",
+        durableIdentity: {
+          resource_id: "repo-1",
+          owner: "acme",
+          repo: "product",
+          branch,
+          head_sha: HEAD_SHA,
+          pull_request_number: "7",
+        },
+      },
+      store: {
+        findLatestRunForObject(id) {
+          assert.equal(id, "issue-1");
+          return {
+            run_id: runId,
+            object_id: "issue-1",
+            workflow_type: "execution",
+            status: "completed",
+            started_at: "2026-06-28T10:00:00.000Z",
+            terminal_at: "2026-06-28T10:05:00.000Z",
+          };
+        },
+      },
+      isRunResumable: () => true,
+      resolveSessionHandle: () => ({
+        id: "session-unpersisted",
+        role: "orchestrator",
+        run_id: runId,
+      }),
+      runDeps: {
+        prAdapter: {
+          async listPullRequestComments() {
+            return [];
+          },
+        },
+      },
+      createTraceSink: () => ({ async shutdown() {} }),
+      createRuntimeExecutor: () => ({}),
+      runTriggeredExecutionFn: async (options) => {
+        captured.push(options);
+        return {
+          status: "completed",
+          result: {
+            artifact: {
+              resume: {
+                resume_status: "committed",
+                terminal_outcome: "commit",
+                head_sha: HEAD_SHA,
+                prior_run_id: options.resumeFrom.priorRunId,
+              },
+            },
+          },
+        };
+      },
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(captured.length, 1);
+    assert.equal(
+      Object.hasOwn(captured[0].resumeFrom, "sessionHandle"),
+      false,
+      "a session the prior run recorded as unpersisted must not ride into the engine",
+    );
+    assert.equal(captured[0].resumeFrom.coldReconstruct, true);
+    assert.equal(captured[0].resumeFrom.coldReconstructReason, "warm_resume_session_not_continuable");
+    assert.equal(captured[0].resumeFrom.priorRunId, runId);
+    assert.equal(captured[0].resumeFrom.durableIdentity.pull_request_number, "7");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("warm resume escalates without reconstruction when no prior run is resumable", async () => {
@@ -482,6 +769,7 @@ test("warm resume escalates without reconstruction when no prior run is resumabl
 
 function runOptions({ repoRoot, store, runDeps }) {
   return {
+    executionReadiness: () => ({ ok: true }),
     issueId: "issue-1",
     domainContext: domainContext(),
     registry: domainRegistry(),
@@ -527,7 +815,8 @@ function runOptions({ repoRoot, store, runDeps }) {
     config: executionConfig(),
     cache: { workspaceId: "workspace-1", teamId: "team-1" },
     repoRoot,
-    runStoreDir: path.join(repoRoot, ".teami", "runs"),
+    home: repoRoot,
+    runStoreDir: path.join(repoRoot, "domains", "domain-1", "runs"),
     runtimeExecutor: {
       async executeSubagent() {
         throw new Error("subagent executor should not be called by this one-turn fixture");
@@ -650,7 +939,7 @@ function fakeEffect(effectId, calls, identity) {
       return { ok: true, identity };
     },
     async verify() {
-      return { ok: true };
+      return { ok: true, identity };
     },
   };
 }
@@ -784,7 +1073,7 @@ function domainRegistry() {
         team_name_last_seen_at: "2026-06-26T00:00:00.000Z",
         provisioned_by_teami: true,
         webhook_id: "webhook-1",
-        cache_path: ".teami/domains/domain-1/linear.json",
+        cache_path: "domains/domain-1/linear.json",
       },
       resources: domainContext().resources,
       policy_profile: "default",

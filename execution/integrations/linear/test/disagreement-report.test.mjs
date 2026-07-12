@@ -37,7 +37,9 @@ const TRACE_IDENTITY = Object.freeze({
 const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" });
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-disagreement-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-disagreement-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function recordTestTraceStatus(options) {
@@ -260,7 +262,7 @@ test("run mode detects human/LLM label conflict and preserves raw records and Ph
     assert.equal(call.method, null, `non-GET request observed: ${call.pathname}`);
     assert.equal(call.body, null);
   }
-  assert.ok(!fs.existsSync(path.join(repoRoot, ".teami", "gate-reports")));
+  assert.ok(!fs.existsSync(path.join(repoRoot, "gate-reports")));
 
   const lines = formatDisagreementReport(report);
   assert.ok(lines[0].includes("never persisted"));
@@ -312,7 +314,7 @@ test("run mode surfaces judge_invalid and judge_missing receipt attempts as work
       status: "trace_exported",
       observedAt: "2026-06-10T01:00:00.000Z",
     });
-    const runsDir = path.join(repoRoot, ".teami", "runs");
+    const runsDir = path.join(repoRoot, "domains", "support-ops", "runs");
     fs.mkdirSync(runsDir, { recursive: true });
     fs.writeFileSync(path.join(runsDir, "run-judge.judge.json"), JSON.stringify({
       schema_version: 1,

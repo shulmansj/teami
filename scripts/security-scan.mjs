@@ -1,32 +1,33 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { runBoundedGit } from "../execution/integrations/git/bounded-subprocess.mjs";
 
 const CONFIG_PATH = ".gitleaks.toml";
 const SEED_PATH = ".security-scan-seed.tmp";
 const MAX_FINDINGS = 50;
 const SCANNER_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-if (isDirectRun()) runCli(process.argv.slice(2));
+if (isDirectRun()) await runCli(process.argv.slice(2));
 
 export { scanDir, scanHistory, scanTree };
 
-function runCli(argv) {
+async function runCli(argv) {
   const mode = argv[0];
   try {
     if (mode === "tree") {
-      const result = scanTree();
+      const result = await scanTree();
       reportAndExit(result, "tree");
     } else if (mode === "dir") {
       const result = scanDir(argv[1]);
       reportAndExit(result, "dir");
     } else if (mode === "history") {
-      const result = scanHistory();
+      const result = await scanHistory();
       reportAndExit(result, "history");
     } else if (mode === "seed") {
-      runSeedCheck();
+      await runSeedCheck();
     } else {
       fail(`Unknown security scan command: ${mode || "(missing)"}`);
     }
@@ -39,10 +40,10 @@ function isDirectRun() {
   return process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 }
 
-function scanTree(options = {}) {
-  const repoRoot = gitOutput(["rev-parse", "--show-toplevel"]).trim();
+async function scanTree(options = {}) {
+  const repoRoot = (await gitOutput(["rev-parse", "--show-toplevel"])).trim();
   const config = loadConfig(repoRoot);
-  const files = options.files || trackedAndUntrackedFiles(repoRoot);
+  const files = options.files || await trackedAndUntrackedFiles(repoRoot);
   const activeSourceMode = sourceModeActive(repoRoot, config);
   return scanFiles({ scanRoot: repoRoot, files, config, activeSourceMode });
 }
@@ -143,8 +144,8 @@ function isFileSymlink(fullPath, entry) {
   }
 }
 
-function scanHistory() {
-  const repoRoot = gitOutput(["rev-parse", "--show-toplevel"]).trim();
+async function scanHistory() {
+  const repoRoot = (await gitOutput(["rev-parse", "--show-toplevel"])).trim();
   const config = loadConfig(repoRoot);
   const findings = [];
   const excludedPathspecs = [
@@ -156,25 +157,21 @@ function scanHistory() {
   for (const rule of config.rules.filter((candidate) => candidate.history !== false && !candidate.pathRegex)) {
     const historyRegex = rule.historyRegex || rule.rawRegex;
     if (!historyRegex) continue;
-    const result = git(["log", "--all", "-G", historyRegex, "--format=%H", "--", ".", ...excludedPathspecs], {
+    const result = await git(["log", "--all", "-G", historyRegex, "--format=%H", "--", ".", ...excludedPathspecs], {
       cwd: repoRoot,
       encoding: "utf8",
     });
     if (result.status !== 0) {
-      process.stdout.write(result.stdout || "");
-      process.stderr.write(result.stderr || "");
       fail(`git log history scan failed for ${rule.id}`);
     }
     const commits = [...new Set((result.stdout || "").split(/\r?\n/).filter(Boolean))];
     for (const commit of commits) {
-      const grep = git(["grep", "-nI", "-E", "-e", historyRegex, commit, "--", ".", ...excludedPathspecs], {
+      const grep = await git(["grep", "-nI", "-E", "-e", historyRegex, commit, "--", ".", ...excludedPathspecs], {
         cwd: repoRoot,
         encoding: "utf8",
       });
       if (grep.status === 1) continue;
       if (grep.status !== 0) {
-        process.stdout.write(grep.stdout || "");
-        process.stderr.write(grep.stderr || "");
         fail(`git grep history scan failed for ${rule.id} at ${commit}`);
       }
       for (const line of (grep.stdout || "").split(/\r?\n/).filter(Boolean)) {
@@ -206,8 +203,8 @@ function scanHistory() {
   };
 }
 
-function runSeedCheck() {
-  const repoRoot = gitOutput(["rev-parse", "--show-toplevel"]).trim();
+async function runSeedCheck() {
+  const repoRoot = (await gitOutput(["rev-parse", "--show-toplevel"])).trim();
   const seedPath = path.join(repoRoot, SEED_PATH);
   // Assemble strict fake seeds at runtime so this scanner's own source is still scanned.
   const seedValue = (...parts) => parts.join("");
@@ -232,12 +229,12 @@ function runSeedCheck() {
 
   try {
     writeFileSync(seedPath, `${seed}\n`, "utf8");
-    const planted = scanTree();
+    const planted = await scanTree();
     if (planted.findings.length === 0) {
       fail("security:secrets:seed did not catch the planted fake secret.");
     }
     rmSync(seedPath, { force: true });
-    const cleaned = scanTree();
+    const cleaned = await scanTree();
     if (cleaned.findings.length > 0) {
       printFindings(cleaned.findings);
       fail("security:secrets:seed removed the seed, but the normal tree scan still fails.");
@@ -381,17 +378,15 @@ function parseTomlValue(value) {
   return value;
 }
 
-function trackedAndUntrackedFiles(repoRoot) {
-  const result = git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+async function trackedAndUntrackedFiles(repoRoot) {
+  const result = await git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
     cwd: repoRoot,
     encoding: "buffer",
   });
   if (result.status !== 0) {
-    process.stdout.write(result.stdout?.toString("utf8") || "");
-    process.stderr.write(result.stderr?.toString("utf8") || "");
     fail("git ls-files failed while building the security scan file list.");
   }
-  return result.stdout.toString("utf8").split("\0").filter(Boolean).sort();
+  return result.stdout.split("\0").filter(Boolean).sort();
 }
 
 function findingAllowed({ finding, config, activeSourceMode }) {
@@ -494,27 +489,21 @@ function normalizeRepoPath(repoPath) {
   return repoPath.split(path.sep).join("/");
 }
 
-function gitOutput(args) {
-  const result = git(args, { encoding: "utf8" });
+async function gitOutput(args) {
+  const result = await git(args, { encoding: "utf8" });
   if (result.status !== 0) {
-    process.stdout.write(result.stdout || "");
-    process.stderr.write(result.stderr || "");
     fail(`git ${args.join(" ")} failed with exit code ${result.status}.`);
   }
   return result.stdout;
 }
 
-function git(args, options = {}) {
-  return spawnSync(gitCommand(), args, {
+async function git(args, options = {}) {
+  const result = await runBoundedGit(args, {
     cwd: options.cwd || process.cwd(),
-    encoding: options.encoding === "buffer" ? undefined : options.encoding || "utf8",
-    stdio: options.stdio || "pipe",
-    windowsHide: true,
+    operation: "security_git_read",
   });
-}
-
-function gitCommand() {
-  return process.platform === "win32" ? "git.exe" : "git";
+  if (result.outputTruncated) fail(`git ${args[0] || "command"} output exceeded the security scan bound.`);
+  return result;
 }
 
 function fail(message) {

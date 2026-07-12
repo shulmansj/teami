@@ -29,6 +29,7 @@ import {
 import {
   decompositionDefinition,
 } from "./workflows/decomposition/definition.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
 export const FIXTURE_DATASET_ROW_SCHEMA_VERSION =
   "teami-fixture-dataset-row/v1";
@@ -98,17 +99,6 @@ const finalIssuePolicy = Object.freeze({
     acceptance_criteria: { array: stringPolicy },
     depends_on: { array: stringPolicy },
     dependsOn: { array: stringPolicy },
-  },
-});
-const discoveryIssuePolicy = Object.freeze({
-  object: {
-    decomposition_key: stringPolicy,
-    decompositionKey: stringPolicy,
-    title: stringPolicy,
-    body_markdown: stringPolicy,
-    in_session_research: scalarPolicy,
-    evidence_gap: scalarPolicy,
-    depends_on: { array: stringPolicy },
   },
 });
 const dependencyRelationPolicy = Object.freeze({
@@ -202,11 +192,6 @@ export const DEFAULT_FIXTURE_EXPORT_PROFILE = Object.freeze({
       defaultTier: "digest",
       policy: { array: finalIssuePolicy },
     }),
-    "input.discovery_issues": field({
-      tier: "raw_opt_in",
-      defaultTier: "digest",
-      policy: { array: discoveryIssuePolicy },
-    }),
     "input.dependency_relations": field({ policy: { array: dependencyRelationPolicy } }),
     "input.project_update_markdown": field({
       tier: "raw_opt_in",
@@ -248,16 +233,16 @@ export const DEFAULT_FIXTURE_EXPORT_PROFILE = Object.freeze({
   }),
 });
 
-export function defaultFixtureExportDir(repoRoot = process.cwd()) {
-  return path.join(repoRoot, ".teami", "fixture-exports");
+export function defaultFixtureExportDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "fixture-exports");
 }
 
-export function fixtureExportGrantPath(repoRoot = process.cwd()) {
-  return path.join(defaultFixtureExportDir(repoRoot), "consent-grant.json");
+export function fixtureExportGrantPath(home = resolveTeamiHome()) {
+  return path.join(defaultFixtureExportDir(home), "consent-grant.json");
 }
 
-export function fixtureExportLogPath(repoRoot = process.cwd()) {
-  return path.join(defaultFixtureExportDir(repoRoot), "export-log.jsonl");
+export function fixtureExportLogPath(home = resolveTeamiHome()) {
+  return path.join(defaultFixtureExportDir(home), "export-log.jsonl");
 }
 
 export function buildFixtureExportConsentPreview({
@@ -343,7 +328,8 @@ export function createFixtureExportGrant({
 
 export function writeFixtureExportGrant({
   repoRoot = process.cwd(),
-  grantPath = fixtureExportGrantPath(repoRoot),
+  home = resolveTeamiHome(),
+  grantPath = fixtureExportGrantPath(home),
   ...options
 } = {}) {
   const grant = createFixtureExportGrant({ repoRoot, ...options });
@@ -353,8 +339,10 @@ export function writeFixtureExportGrant({
 
 export function readFixtureExportGrant({
   repoRoot = process.cwd(),
-  grantPath = fixtureExportGrantPath(repoRoot),
+  home = resolveTeamiHome(),
+  grantPath = fixtureExportGrantPath(home),
 } = {}) {
+  void repoRoot;
   try {
     if (!fs.existsSync(grantPath)) {
       return { ok: false, reason: "fixture_export_consent_required", grant_path: grantPath };
@@ -536,13 +524,14 @@ export function buildFixtureDatasetExport({
 
 export async function runFixtureDatasetExport({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   definitions = [decompositionDefinition],
   workflowTypes = null,
   profile = DEFAULT_FIXTURE_EXPORT_PROFILE,
   destination = DEFAULT_DESTINATION,
   grant = null,
-  grantPath = fixtureExportGrantPath(repoRoot),
-  outputDir = defaultFixtureExportDir(repoRoot),
+  grantPath = fixtureExportGrantPath(home),
+  outputDir = defaultFixtureExportDir(home),
   ensureReady = ensurePhoenixReady,
   fetchImpl = globalThis.fetch,
   onProgress = () => {},
@@ -554,7 +543,7 @@ export async function runFixtureDatasetExport({
     : resolveDefinitionList(definitions);
   const grantRead = grant
     ? { ok: true, grant, grant_path: grantPath }
-    : readFixtureExportGrant({ repoRoot, grantPath });
+    : readFixtureExportGrant({ repoRoot, home, grantPath });
   const resolvedGrant = grantRead.grant;
   const preview = buildFixtureExportConsentPreview({
     repoRoot,
@@ -650,7 +639,7 @@ export async function runFixtureDatasetExport({
     };
   }
   const batchContentHash = sha256CanonicalJson(active.map((entry) => entry.batch_content_hash));
-  const existing = findExistingExportByBatchHash({ repoRoot, outputDir, batchContentHash });
+  const existing = findExistingExportByBatchHash({ repoRoot, home, outputDir, batchContentHash });
   if (existing) {
     return {
       ok: true,
@@ -659,7 +648,7 @@ export async function runFixtureDatasetExport({
       batch_content_hash: batchContentHash,
       manifest_path: existing.manifest_path,
       jsonl_path: existing.jsonl_path,
-      log_path: fixtureExportLogPath(repoRoot),
+      log_path: fixtureExportLogPath(home),
     };
   }
 
@@ -696,7 +685,7 @@ export async function runFixtureDatasetExport({
     row_count: active.reduce((total, entry) => total + entry.manifest.row_count, 0),
     destination_type: manifest.destination.destination_type,
   };
-  appendJsonLine(fixtureExportLogPath(repoRoot), logEvent);
+  appendJsonLine(fixtureExportLogPath(home), logEvent);
   onProgress(`fixture export: wrote ${manifest.jsonl_path}`);
   return {
     ok: true,
@@ -705,7 +694,7 @@ export async function runFixtureDatasetExport({
     batch_content_hash: batchContentHash,
     manifest_path: manifestPath,
     jsonl_path: jsonlPath,
-    log_path: fixtureExportLogPath(repoRoot),
+    log_path: fixtureExportLogPath(home),
     row_count: logEvent.row_count,
     skipped,
   };
@@ -1133,8 +1122,8 @@ function parseExamplesBody(body) {
   return [];
 }
 
-function findExistingExportByBatchHash({ repoRoot, outputDir, batchContentHash }) {
-  const logPath = fixtureExportLogPath(repoRoot);
+function findExistingExportByBatchHash({ repoRoot, home = resolveTeamiHome(), outputDir, batchContentHash }) {
+  const logPath = fixtureExportLogPath(home);
   if (!fs.existsSync(logPath)) return null;
   const lines = fs.readFileSync(logPath, "utf8").split(/\r?\n/).filter(Boolean);
   for (const line of lines) {

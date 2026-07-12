@@ -27,6 +27,7 @@ test("In Progress recovery skips an issue with a live wake lease", async () => {
 
   const result = await pollGatewayDomain({
     repoRoot,
+    home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
     domain: domainFixture(),
@@ -63,6 +64,7 @@ test("In Progress recovery warm-resumes an expired running wake with a failed re
 
   const result = await pollGatewayDomain({
     repoRoot,
+    home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
     domain: domainFixture(),
@@ -100,6 +102,7 @@ test("In Progress recovery escalates an expired running wake when no execution P
 
   const result = await pollGatewayDomain({
     repoRoot,
+    home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
     domain: domainFixture(),
@@ -123,10 +126,15 @@ test("In Progress recovery escalates an expired running wake when no execution P
   assert.equal(result.processed[0].reason, "ready_fix_pr_missing");
   assert.deepEqual(calls.filter((call) => call[0] === "updateIssue"), [
     ["updateIssue", "issue-in-progress", {
-      stateId: "state-blocked",
-      labelIds: ["label-needs-principal"],
+      stateId: "state-needs-principal",
     }],
   ]);
+  const commentCalls = calls.filter((call) => call[0] === "createIssueComment");
+  assert.equal(commentCalls.length, 1, "the blocking transition must explain itself on the issue");
+  assert.equal(commentCalls[0][1], "issue-in-progress");
+  assert.match(commentCalls[0][2], /needs a human decision/);
+  assert.match(commentCalls[0][2], /move this issue back to Todo/);
+  assert.match(commentCalls[0][2], /ready_fix_pr_missing/);
 });
 
 function clientFixture({ calls = [] } = {}) {
@@ -151,7 +159,7 @@ function clientFixture({ calls = [] } = {}) {
     async listWorkflowStates(teamId) {
       calls.push(["listWorkflowStates", teamId]);
       return [
-        { id: "state-blocked", name: "Blocked", type: "started", teamId },
+        { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId },
       ];
     },
     async findIssueLabelsByName(name, teamId) {
@@ -162,14 +170,30 @@ function clientFixture({ calls = [] } = {}) {
       ];
       return name ? labels.filter((label) => label.name === name) : labels;
     },
+    async listIssueComments(id) {
+      calls.push(["listIssueComments", id]);
+      return calls
+        .filter((call) => call[0] === "createIssueComment" && call[1] === id)
+        .map((call, index) => ({
+          id: `comment-${index + 1}`,
+          body: call[2],
+          user: { id: "app-viewer-1", name: "Teami App" },
+        }));
+    },
     async updateIssue(id, input) {
       calls.push(["updateIssue", id, input]);
+      issue.state = { id: input.stateId, name: "Principal Escalation", type: "started" };
+      if (Object.prototype.hasOwnProperty.call(input, "labelIds")) {
+        issue.labels = input.labelIds.map((labelId) => ({ id: labelId }));
+      }
       return {
         ...issue,
         id,
-        state: { id: input.stateId, name: "Blocked", type: "started" },
-        labels: (input.labelIds || []).map((labelId) => ({ id: labelId })),
       };
+    },
+    async createIssueComment(id, body) {
+      calls.push(["createIssueComment", id, body]);
+      return { id: `comment-${calls.length}`, body, user: { id: "app-viewer-1", name: "Teami App" } };
     },
   };
 }
@@ -277,19 +301,16 @@ function configFixture() {
         labels: {
           discovery: "Discovery",
           needs_principal: "Needs Principal",
+          human_review: "human-review",
         },
         statuses: {
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
           in_review: { name: "In Review", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          human_review: { name: "Principal Review", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
         },
-      },
-    },
-    workflows: {
-      review: {
-        max_autonomous_fix_rounds: 99,
       },
     },
   };
@@ -327,14 +348,16 @@ function domainFixture() {
 
 function writeDomainCache(repoRoot) {
   writeLinearCache(
-    path.join(repoRoot, ".teami", "domains", "domain-1", "linear.json"),
+    path.join(repoRoot, "domains", "domain-1", "linear.json"),
     {
       teamId: "team-1",
+      app_identity_id: "app-viewer-1",
       issueStatuses: {
         todo: "state-todo",
         in_progress: "state-in-progress",
         in_review: "state-in-review",
-        blocked: "state-blocked",
+        human_review: "state-human-review",
+        needs_principal: "state-needs-principal",
         done: "state-done",
       },
       projectStatuses: {
@@ -343,13 +366,16 @@ function writeDomainCache(repoRoot) {
       issueLabels: {
         Discovery: "label-discovery",
         "Needs Principal": "label-needs-principal",
+        "human-review": "label-human-review",
       },
     },
   );
 }
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-in-progress-recovery-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-in-progress-recovery-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 async function flushAsync() {

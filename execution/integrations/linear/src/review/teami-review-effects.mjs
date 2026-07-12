@@ -5,10 +5,12 @@ import {
 import {
   GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+  LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
 } from "../workflows/review/effect-ids.mjs";
 
 export const GITHUB_PR_REVIEW_COMMENT_OP = "post_af_review_comment";
 export const GITHUB_AF_REVIEW_STATUS_OP = "set_af_review_status";
+export const LINEAR_HUMAN_REVIEW_BRIEFING_OP = "post_human_review_briefing";
 
 export const githubPrReviewCommentEffect = Object.freeze({
   id: GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
@@ -38,6 +40,20 @@ export const githubAfReviewStatusEffect = Object.freeze({
   }),
 });
 
+export const linearHumanReviewBriefingEffect = Object.freeze({
+  id: LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+  provider: "linear",
+  op: LINEAR_HUMAN_REVIEW_BRIEFING_OP,
+  probe: probeLinearHumanReviewBriefingEffect,
+  apply: applyLinearHumanReviewBriefingEffect,
+  verify: verifyLinearHumanReviewBriefingEffect,
+  producedIdentity: Object.freeze({
+    resource_kind: "linear_issue_comment",
+    target_ids: humanReviewBriefingTargetIds,
+    identity: humanReviewBriefingProducedIdentity,
+  }),
+});
+
 export const AF_REVIEW_COMMIT_EFFECTS = Object.freeze([
   githubPrReviewCommentEffect,
   githubAfReviewStatusEffect,
@@ -57,6 +73,13 @@ export function githubAfReviewStatusEffectDescriptor(overrides = {}) {
   });
 }
 
+export function linearHumanReviewBriefingEffectDescriptor(overrides = {}) {
+  return Object.freeze({
+    ...linearHumanReviewBriefingEffect,
+    ...overrides,
+  });
+}
+
 export function teamiReviewCommitEffectDescriptors({
   comment = {},
   status = {},
@@ -65,6 +88,122 @@ export function teamiReviewCommitEffectDescriptors({
     githubPrReviewCommentEffectDescriptor(comment),
     githubAfReviewStatusEffectDescriptor(status),
   ]);
+}
+
+export async function probeLinearHumanReviewBriefingEffect(ctx = {}) {
+  const resolved = resolveHumanReviewBriefingInputs(ctx, {
+    requiredMethods: ["listIssueComments"],
+  });
+  if (!resolved.ok) return { satisfied: false, reason: resolved.reason };
+
+  try {
+    const lookup = await lookupHumanReviewBriefingComment(resolved);
+    if (lookup.status === "found") {
+      return {
+        satisfied: true,
+        identity: humanReviewBriefingIdentity({
+          review: resolved.review,
+          comment: lookup.comment,
+        }),
+      };
+    }
+    return { satisfied: false, reason: humanReviewBriefingLookupReason(lookup) };
+  } catch (error) {
+    return {
+      satisfied: false,
+      reason: `linear_human_review_briefing_lookup_failed:${safeErrorMessage(error)}`,
+    };
+  }
+}
+
+export async function applyLinearHumanReviewBriefingEffect(ctx = {}) {
+  const resolved = resolveHumanReviewBriefingInputs(ctx, {
+    requiredMethods: ["listIssueComments", "createIssueComment"],
+    requiredStoreMethods: ["briefingRecords", "upsertBriefingRecord"],
+  });
+  if (!resolved.ok) return advisoryBriefingResult(resolved.reason);
+  const { client, store, review } = resolved;
+
+  if (!firstNonEmptyString([review.human_briefing])) {
+    return advisoryBriefingResult("linear_human_review_briefing_missing");
+  }
+
+  let existing;
+  try {
+    existing = await lookupHumanReviewBriefingComment(resolved);
+  } catch (error) {
+    return advisoryBriefingResult(
+      `linear_human_review_briefing_lookup_failed:${safeErrorMessage(error)}`,
+    );
+  }
+  if (existing.status === "found") {
+    return {
+      ok: true,
+      briefing_posted: true,
+      identity: humanReviewBriefingIdentity({ review, comment: existing.comment }),
+    };
+  }
+
+  let posted;
+  try {
+    posted = await client.createIssueComment(
+      review.issue_id,
+      review.human_briefing.replace(/\s+$/u, ""),
+    );
+  } catch (error) {
+    return advisoryBriefingResult(
+      `linear_human_review_briefing_post_failed:${safeErrorMessage(error)}`,
+    );
+  }
+
+  try {
+    store.upsertBriefingRecord({
+      issue_id: review.issue_id,
+      head_sha: review.head_sha,
+      run_id: review.run_id,
+      comment_id: firstNonEmptyString([posted?.comment_id, posted?.id]),
+      posted_at: firstNonEmptyString([posted?.createdAt, posted?.created_at])
+        || new Date().toISOString(),
+    });
+  } catch (error) {
+    // The comment reached the human but the factory failed to record it, so
+    // replay cannot prove the briefing exists and may post it again.
+    return advisoryBriefingResult(
+      `linear_human_review_briefing_record_failed:${safeErrorMessage(error)}`,
+    );
+  }
+
+  return {
+    ok: true,
+    briefing_posted: true,
+    identity: humanReviewBriefingIdentity({ review, comment: posted }),
+  };
+}
+
+export async function verifyLinearHumanReviewBriefingEffect(ctx = {}) {
+  const resolved = resolveHumanReviewBriefingInputs(ctx, {
+    requiredMethods: ["listIssueComments"],
+  });
+  if (!resolved.ok) return advisoryBriefingResult(resolved.reason);
+
+  try {
+    const lookup = await lookupHumanReviewBriefingComment(resolved);
+    if (lookup.status === "found") {
+      return {
+        ok: true,
+        briefing_posted: true,
+        identity: humanReviewBriefingIdentity({
+          review: resolved.review,
+          comment: lookup.comment,
+        }),
+      };
+    }
+    return advisoryBriefingResult(humanReviewBriefingLookupReason(lookup));
+  } catch (error) {
+    return advisoryBriefingResult(
+      `linear_human_review_briefing_lookup_failed:${safeErrorMessage(error)}`,
+    );
+  }
 }
 
 export async function probeGithubPrReviewCommentEffect(ctx = {}) {
@@ -248,6 +387,88 @@ export async function verifyGithubAfReviewStatusEffect(ctx = {}) {
   }
   if (inspection.terminal) return terminalFailure(inspection.reason);
   return pendingFailure(inspection.reason);
+}
+
+// The briefing comment carries no machine marker: the human surface stays
+// pure prose. The machine-readable side lives in the local trigger store's
+// briefing record, and a briefing "exists" only when the record for this
+// exact head names a comment that is still present on the issue — the
+// record alone cannot satisfy the effect, because the point of the briefing
+// is that the human can see it.
+export async function lookupHumanReviewBriefingComment({ client, store, review }) {
+  const record = store.briefingRecords({ issueId: review.issue_id });
+  if (!record || record.head_sha !== review.head_sha) {
+    return Object.freeze({ status: "missing" });
+  }
+  const comments = await client.listIssueComments(review.issue_id);
+  if (!Array.isArray(comments)) {
+    throw new Error("linear_issue_comments_required");
+  }
+  const comment = comments.find((candidate) =>
+    firstNonEmptyString([candidate?.comment_id, candidate?.id]) === record.comment_id);
+  if (!comment) {
+    return Object.freeze({ status: "missing", record });
+  }
+  return Object.freeze({ status: "found", comment, record });
+}
+
+function resolveHumanReviewBriefingInputs(ctx = {}, {
+  requiredMethods = [],
+  requiredStoreMethods = ["briefingRecords"],
+} = {}) {
+  const review = normalizeReviewContext(ctx.review);
+  if (!review.ok) return invalid(`linear_human_review_briefing_${review.reason}`);
+
+  const issueId = firstNonEmptyString([
+    ctx.issueId,
+    ctx.issue_id,
+    ctx.issue?.id,
+    ctx.review?.issue_id,
+    ctx.review?.issueId,
+  ]);
+  if (!issueId) return invalid("linear_human_review_briefing_issue_id_missing");
+
+  const runId = firstNonEmptyString([
+    ctx.review?.run_id,
+    ctx.review?.runId,
+    ctx.runId,
+    ctx.run_id,
+    ctx.artifact?.run_id,
+    ctx.artifact?.runId,
+  ]);
+  if (!runId) return invalid("linear_human_review_briefing_run_id_missing");
+
+  const client = ctx.client;
+  if (!client || typeof client !== "object") {
+    return invalid("linear_human_review_briefing_client_missing");
+  }
+  for (const method of requiredMethods) {
+    if (typeof client[method] !== "function") {
+      return invalid(`linear_human_review_briefing_client_${method}_missing`);
+    }
+  }
+
+  const store = ctx.store;
+  if (!store || typeof store !== "object") {
+    return invalid("linear_human_review_briefing_store_missing");
+  }
+  for (const method of requiredStoreMethods) {
+    if (typeof store[method] !== "function") {
+      return invalid(`linear_human_review_briefing_store_${method}_missing`);
+    }
+  }
+
+  return {
+    ok: true,
+    client,
+    store,
+    review: Object.freeze({
+      ...review.value,
+      issue_id: issueId,
+      run_id: runId,
+      human_briefing: stringValue(ctx.review?.human_briefing ?? ctx.review?.humanBriefing) || "",
+    }),
+  };
 }
 
 function resolveReviewInputs(ctx = {}, {
@@ -455,6 +676,14 @@ function githubAfReviewStatusIdentity({ review, state }) {
   });
 }
 
+function humanReviewBriefingIdentity({ review, comment }) {
+  return Object.freeze({
+    issue_id: review.issue_id,
+    head_sha: review.head_sha,
+    comment_id: firstNonEmptyString([comment?.comment_id, comment?.id]),
+  });
+}
+
 function githubReviewCommentTargetIds(identity) {
   const repo = repoSlug(identity);
   return stringIds([
@@ -484,6 +713,32 @@ function githubAfReviewStatusProducedIdentity(identity) {
     review: identity || {},
     state: identity?.state,
   });
+}
+
+function humanReviewBriefingTargetIds(identity) {
+  return stringIds([
+    identity?.comment_id,
+    identity?.issue_id && identity?.head_sha
+      ? `${identity.issue_id}@${identity.head_sha}:human_review_briefing`
+      : null,
+  ]);
+}
+
+function humanReviewBriefingProducedIdentity(identity) {
+  const issueId = firstNonEmptyString([identity?.issue_id]);
+  const headSha = firstNonEmptyString([identity?.head_sha]);
+  const commentId = firstNonEmptyString([identity?.comment_id]);
+  if (!issueId || !headSha || !commentId) return null;
+  return Object.freeze({
+    issue_id: issueId,
+    head_sha: headSha,
+    comment_id: commentId,
+  });
+}
+
+function humanReviewBriefingLookupReason(lookup) {
+  if (lookup?.status === "missing") return "linear_human_review_briefing_missing";
+  return "linear_human_review_briefing_lookup_failed";
 }
 
 function repoSlug(identity) {
@@ -517,8 +772,20 @@ function pendingFailure(reason) {
   return { ok: false, reason };
 }
 
+function advisoryBriefingResult(reason) {
+  return {
+    ok: true,
+    briefing_posted: false,
+    reason: reason || "linear_human_review_briefing_not_posted",
+  };
+}
+
 function invalid(reason) {
   return { ok: false, reason };
+}
+
+function safeErrorMessage(error) {
+  return String(error?.message || error || "unknown_error").replace(/\s+/g, "_").slice(0, 160);
 }
 
 function firstNonEmptyString(values) {

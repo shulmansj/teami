@@ -49,7 +49,9 @@ const TARGET_SNAPSHOT_PATH =
   "execution/evals/decomposition/accepted-prompts/decomposition-quality-judge.md";
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-undo-answer-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-undo-answer-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function hex(label) {
@@ -57,7 +59,7 @@ function hex(label) {
 }
 
 function writeVerifiedGitHubState(root) {
-  const filePath = path.join(root, ".teami", "github-connection.json");
+  const filePath = path.join(root, "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -564,7 +566,7 @@ test("B-READ worklist authority: a stale registry cache must not override live m
   const envelopeHash = hex(proposalInstanceId);
   // A STALE registry cache row claims this proposal is still an OPEN PR (an
   // earlier snapshot). Live PR state below says it is MERGED and accepted.
-  const registryDir = path.join(root, ".teami", "promotion-candidates");
+  const registryDir = path.join(root, "promotion-candidates");
   fs.mkdirSync(registryDir, { recursive: true });
   fs.writeFileSync(path.join(registryDir, `${envelopeHash}.json`), `${JSON.stringify({
     schema_version: PROMOTION_REGISTRY_SCHEMA_VERSION,

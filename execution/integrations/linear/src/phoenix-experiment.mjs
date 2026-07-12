@@ -37,6 +37,7 @@ import {
 } from "./workspace-eval-policy.mjs";
 import { decompositionDefinition } from "./workflows/decomposition/definition.mjs";
 import { evalNamespacePaths } from "../../../engine/eval-namespace.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
 // Track F: the thin, agent-callable Phoenix experiment wrapper
 // (`npm run phoenix:experiment-decomposition`) plus managed-experiment
@@ -94,19 +95,20 @@ const LABEL_RANK = Object.fromEntries(
 // matching the run-store conventions).
 // ---------------------------------------------------------------------------
 
-export function defaultExperimentReceiptDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "experiments");
+export function defaultExperimentReceiptDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "experiments");
 }
 
-export function experimentReceiptPath({ receiptId, repoRoot = process.cwd(), receiptDir = null } = {}) {
+export function experimentReceiptPath({ receiptId, repoRoot = null, home = resolveTeamiHome(), receiptDir = null } = {}) {
+  void repoRoot;
   if (!receiptId || typeof receiptId !== "string" || !SAFE_ID_PATTERN.test(receiptId)) {
     throw new Error(`Invalid receipt_id for the managed-experiment receipt store: ${receiptId}`);
   }
-  return path.join(receiptDir || defaultExperimentReceiptDir(repoRoot), `${receiptId}.json`);
+  return path.join(receiptDir || defaultExperimentReceiptDir(home), `${receiptId}.json`);
 }
 
-export function readExperimentReceipt({ receiptId, repoRoot = process.cwd(), receiptDir = null } = {}) {
-  const filePath = experimentReceiptPath({ receiptId, repoRoot, receiptDir });
+export function readExperimentReceipt({ receiptId, repoRoot = null, home = resolveTeamiHome(), receiptDir = null } = {}) {
+  const filePath = experimentReceiptPath({ receiptId, repoRoot, home, receiptDir });
   if (!fs.existsSync(filePath)) return { ok: true, exists: false, path: filePath, receipt: null };
   try {
     return { ok: true, exists: true, path: filePath, receipt: JSON.parse(fs.readFileSync(filePath, "utf8")) };

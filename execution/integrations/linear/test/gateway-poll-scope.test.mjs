@@ -115,6 +115,7 @@ async function runGatewayPoll({
   try {
     return await runGatewayOnce({
       repoRoot,
+      home: repoRoot,
       config: configFixture(),
       registry: registryFixture(),
       acquireLock: () => ({ ok: true, release() {} }),
@@ -124,7 +125,6 @@ async function runGatewayPoll({
         inProgressIssues,
         inReviewIssues,
       }),
-      collectResumeReconciliation: async () => emptyResumeReport(),
       idempotency: {
         listReplayPending: async () => [],
         listGitReplayPending: async () => [],
@@ -204,13 +204,14 @@ function issueCandidate({
 
 function writeDomainCache(repoRoot) {
   writeLinearCache(
-    path.join(repoRoot, ".teami", "domains", "domain-1", "linear.json"),
+    path.join(repoRoot, "domains", "domain-1", "linear.json"),
     {
       teamId: "team-1",
       issueStatuses: {
         todo: "state-todo",
         in_progress: "state-in-progress",
         in_review: "state-in-review",
+        human_review: "state-human-review",
       },
       projectStatuses: {
         planned: "status-planned",
@@ -260,16 +261,8 @@ function configFixture() {
   };
 }
 
-function emptyResumeReport() {
-  return {
-    ok: true,
-    summary: { item_count: 0, by_pm_state: {}, by_classification: {} },
-    generated_at: "2026-06-24T12:00:00.000Z",
-    items: [],
-    sources: [],
-  };
-}
-
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-gateway-poll-scope-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-gateway-poll-scope-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }

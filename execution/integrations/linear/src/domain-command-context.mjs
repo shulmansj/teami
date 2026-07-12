@@ -4,20 +4,24 @@ import {
   resolveForegroundDomainContext,
   resolveWakeDomainContext,
 } from "./domain-resolver.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
+import { formatCommand } from "./cli/operator-output.mjs";
 
 export function resolveForegroundDomainCache({
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   registry = null,
   domainId = null,
   readCache = readLinearCache,
 } = {}) {
-  const loadedRegistry = registry || readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
+  const loadedRegistry = registry || readDomainRegistry({ home }) || emptyDomainRegistry();
   const resolved = resolveForegroundDomainContext({
     registry: loadedRegistry,
     domainId,
     config,
     repoRoot,
+    home,
   });
   if (!resolved.ok) {
     const error = new Error(foregroundDomainErrorMessage(resolved));
@@ -53,7 +57,7 @@ export function foregroundDomainErrorMessage(resolved) {
     return `domain_required: multiple active domains are configured; pass --domain <domain_id>.${suffix}`;
   }
   if (resolved?.reason === "no_active_domains") {
-    return `no_active_domains: no active domains are configured. Run npm run init.${suffix}`;
+    return `no_active_domains: no active domains are configured. Run ${formatCommand("init")}.${suffix}`;
   }
   if (resolved?.reason === "domain_not_found") {
     return `domain_not_found: no configured domain matches --domain.${suffix}`;
@@ -65,19 +69,19 @@ export function foregroundDomainErrorMessage(resolved) {
   return `${resolved?.reason || "domain_resolution_failed"}: could not resolve a foreground domain.${suffix}`;
 }
 
-export function decorateWakeViewsForDomains({ views, registry, config, repoRoot = process.cwd(), domainId = null } = {}) {
+export function decorateWakeViewsForDomains({ views, registry, config, repoRoot = process.cwd(), home = resolveTeamiHome(), domainId = null } = {}) {
   return (views || [])
-    .map((wake) => decorateWakeViewForDomains({ wake, registry, config, repoRoot }))
+    .map((wake) => decorateWakeViewForDomains({ wake, registry, config, repoRoot, home }))
     .filter((wake) => !domainId || wake.domainId === domainId || wake.resolvedDomainId === domainId);
 }
 
 export async function listWakeViewsForDomains({
 } = {}) {
-  throw new Error("wake_views_retired: use npm run gateway -- status for local trigger state.");
+  throw new Error(`wake_views_retired: use ${formatCommand("gateway status")} for local trigger state.`);
 }
 
-export function decorateWakeViewForDomains({ wake, registry, config, repoRoot = process.cwd() } = {}) {
-  const loadedRegistry = registry || readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
+export function decorateWakeViewForDomains({ wake, registry, config, repoRoot = process.cwd(), home = resolveTeamiHome() } = {}) {
+  const loadedRegistry = registry || readDomainRegistry({ home }) || emptyDomainRegistry();
   const workspaceId = wake.workspace_id || wake.workspaceId || wake.organization_id || null;
   const webhookIds = wake.webhook_ids || wake.webhookIds || (wake.webhook_id ? [wake.webhook_id] : []);
   const teamIds = wake.team_ids || wake.teamIds || wake.project_team_ids || wake.projectTeamIds || [];
@@ -91,6 +95,7 @@ export function decorateWakeViewForDomains({ wake, registry, config, repoRoot = 
       registry: loadedRegistry,
       config,
       repoRoot,
+      home,
       selector: {
         workspaceId,
         webhookId: webhookIds,

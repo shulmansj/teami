@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { prepareTestHomeEnvironment } from "./test-home-isolation.mjs";
+import { runBoundedGit } from "../../git/bounded-subprocess.mjs";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 // repoRoot = .../execution/integrations/linear/test -> up four levels.
@@ -16,11 +19,12 @@ const repoRoot = path.resolve(testDir, "..", "..", "..", "..");
 // checkouts.
 const SKIP_DIRS = new Set([".git", "node_modules", "coverage", "dist", "tmp"]);
 
-function discoverViaGit() {
-  const result = spawnSync("git", ["-C", repoRoot, "ls-files", "-z", "*.test.mjs"], {
-    encoding: "utf8",
+async function discoverViaGit() {
+  const result = await runBoundedGit(["-C", repoRoot, "ls-files", "-z", "*.test.mjs"], {
+    operation: "git_read",
+    cwd: repoRoot,
   });
-  if (result.status !== 0 || typeof result.stdout !== "string") return null;
+  if (!result.ok || result.outputTruncated || typeof result.stdout !== "string") return null;
   const rel = result.stdout.split("\0").filter(Boolean);
   if (rel.length === 0) return null;
   return rel.map((relative) => path.join(repoRoot, relative));
@@ -43,7 +47,10 @@ function discoverViaWalk(dir) {
       continue;
     }
     if (stat.isDirectory()) {
-      if (SKIP_DIRS.has(name)) continue;
+      // Dot-directories hold untracked local state (archived checkouts,
+      // tool worktrees) whose suites must never run; node --test's own
+      // discovery skips them too.
+      if (SKIP_DIRS.has(name) || name.startsWith(".")) continue;
       found.push(...discoverViaWalk(full));
     } else if (name.endsWith(".test.mjs")) {
       found.push(full);
@@ -52,7 +59,13 @@ function discoverViaWalk(dir) {
   return found;
 }
 
-const discovered = discoverViaGit() ?? discoverViaWalk(repoRoot);
+let discovered = await discoverViaGit();
+if (discovered === null) {
+  console.error(
+    "run-tests: git ls-files discovery failed; falling back to a filesystem walk (untracked *.test.mjs may be included)",
+  );
+  discovered = discoverViaWalk(repoRoot);
+}
 const testFiles = [...new Set(discovered)].sort((a, b) => a.localeCompare(b));
 
 if (testFiles.length === 0) {
@@ -60,10 +73,40 @@ if (testFiles.length === 0) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, ["--test", ...testFiles], {
-  cwd: repoRoot,
-  stdio: "inherit",
-});
+// The source checkout keeps an identity-bearing development fixture at
+// config.example.json. The published showroom deliberately omits that file and
+// carries only the identity-clean package default. Tests still need a concrete
+// fixture path, so create a short-lived compatibility copy when the suite runs
+// from the transformed public artifact. It is removed before the security scan.
+const linearRoot = path.join(repoRoot, "execution", "integrations", "linear");
+const devConfigPath = path.join(linearRoot, "config.example.json");
+const packagedConfigPath = path.join(linearRoot, "config.package-default.json");
+const createdPublicConfigFixture = !existsSync(devConfigPath) && existsSync(packagedConfigPath);
+if (createdPublicConfigFixture) copyFileSync(packagedConfigPath, devConfigPath);
+
+// Every state store now resolves under the per-user home (F2b relocation off repoRoot).
+// node --test runs each file in its own child process, so preload a per-process TEAMI_HOME
+// (see _teami-home-isolation.mjs) into every child — each file gets an isolated home instead
+// of racing on (and polluting) the developer's real home. --import propagates to the children.
+const homeIsolationPreload = pathToFileURL(
+  path.join(testDir, "_teami-home-isolation.mjs"),
+).href;
+const testHome = prepareTestHomeEnvironment();
+let result;
+try {
+  result = spawnSync(
+    process.execPath,
+    ["--import", homeIsolationPreload, "--test", ...testFiles],
+    {
+      cwd: repoRoot,
+      env: testHome.childEnv,
+      stdio: "inherit",
+    },
+  );
+} finally {
+  testHome.cleanup();
+  if (createdPublicConfigFixture && existsSync(devConfigPath)) unlinkSync(devConfigPath);
+}
 
 if (result.error) {
   console.error(result.error.message);

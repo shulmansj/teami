@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,10 +6,13 @@ import {
   branchNameForIssue,
   GIT_REPO_COMMIT_BRANCH_PREFIX,
 } from "./git-branch-names.mjs";
+import { gitRemoteAuthEnv } from "./git-remote-auth.mjs";
 import {
-  defaultRunGit,
   resolveGitRepoRemoteUrl,
 } from "./git-repo-materializer.mjs";
+import { scanStagedContent } from "./staged-content-guard.mjs";
+import { runBoundedGit } from "./bounded-subprocess.mjs";
+import { shippedExecutionReadiness } from "../linear/src/execution-readiness-gate.mjs";
 
 export const GIT_REPO_COMMIT_OP = "commit_push_open_pr";
 export const GIT_REPO_COMMIT_EFFECT_ID = "git_repo_commit";
@@ -30,13 +32,6 @@ const DEFAULT_AF_COMMIT_AUTHOR = Object.freeze({
   name: "Teami",
   email: "teami@example.invalid",
 });
-
-const GITHUB_TOKEN_ENV_NAMES = Object.freeze([
-  "GH_TOKEN",
-  "GITHUB_TOKEN",
-  "GITHUB_ACCESS_TOKEN",
-  "GITHUB_PAT",
-]);
 
 export const gitRepoCommitEffect = Object.freeze({
   id: GIT_REPO_COMMIT_EFFECT_ID,
@@ -62,7 +57,7 @@ export async function probeGitRepoCommitEffect(ctx = {}) {
   const remote = await safeProbeRemoteBranch(resolved.value);
   if (!remote.ok) return { satisfied: false, reason: remote.reason };
   if (!remote.branch.exists) return { satisfied: false, reason: "git_repo_remote_branch_absent" };
-  const ownership = pendingGitOwnsRemoteBranch({ pending, inputs: resolved.value, remoteBranch: remote.branch });
+  const ownership = await pendingGitOwnsRemoteBranch({ pending, inputs: resolved.value, remoteBranch: remote.branch });
   if (!ownership.ok) return { satisfied: false, reason: ownership.reason };
   if (!pendingRunMatchesCurrent(pending, resolved.value)) {
     return { satisfied: false, reason: "git_repo_pending_marker_different_run" };
@@ -87,6 +82,8 @@ export async function applyGitRepoCommitEffect(ctx = {}) {
   let inputs = null;
 
   try {
+    const readiness = (ctx.executionReadiness || shippedExecutionReadiness)();
+    if (!readiness?.ok) return terminalFailure("product_repo_execution_not_released");
     const pending = await readPendingGitIntent(ctx);
     const resolved = resolveGitInputs(ctx, { pending, requireWorkingDir: false });
     if (!resolved.ok) return terminalFailure(resolved.reason);
@@ -105,16 +102,19 @@ export async function applyGitRepoCommitEffect(ctx = {}) {
     const owned = await ensureRemoteBranchIsOwnedBeforePush({ ctx, inputs, pending });
     if (!owned.ok) return terminalFailure(owned.reason);
 
-    const prepared = pending?.git && pendingRunMatchesCurrent(pending, inputs) && checkoutExistingLocalExecutionCommit(inputs)
+    const prepared = pending?.git && pendingRunMatchesCurrent(pending, inputs) && await checkoutExistingLocalExecutionCommit(inputs)
       ? { ok: true, reusedLocalCommit: true }
-      : prepareCommit({ ctx, inputs, hooksDir });
+      : await prepareCommit({ ctx, inputs, hooksDir });
     if (!prepared.ok) return terminalFailure(prepared.reason);
 
     await persistGitIntent(ctx, prePushGitIdentity(inputs));
     mutationStarted = true;
 
-    const push = pushBranch({ inputs, hooksDir });
+    const push = await pushBranch({ inputs, hooksDir });
     const afterPushRemote = await safeProbeRemoteBranch(inputs);
+    if (!push.ok && push.reconciliationRequired && (!afterPushRemote.ok || !afterPushRemote.branch.exists)) {
+      return pendingFailure("git_repo_push_reconciliation_required");
+    }
     if (!push.ok && (!afterPushRemote.ok || !afterPushRemote.branch.exists)) {
       await clearGitIntent(ctx).catch(() => {});
       return terminalFailure("git_repo_push_failed_no_remote_branch");
@@ -128,7 +128,7 @@ export async function applyGitRepoCommitEffect(ctx = {}) {
     const remote = afterPushRemote.ok ? afterPushRemote : await safeProbeRemoteBranch(inputs);
     if (!remote.ok || !remote.branch.exists) return pendingFailure(remote.reason || "git_repo_remote_branch_missing_after_push");
 
-    const expectedHead = localHeadSha(inputs);
+    const expectedHead = await localHeadSha(inputs);
     if (expectedHead && remote.branch.head_sha !== expectedHead) {
       return pendingFailure("git_repo_remote_head_mismatch_after_push");
     }
@@ -171,15 +171,15 @@ export async function verifyGitRepoCommitEffect(ctx = {}) {
   return { ok: false, reason: probe.reason || "git_repo_commit_not_verified" };
 }
 
-export function computeStagedDiffMetrics({ runGit = defaultRunGit, workingDir, baseSha = null, gitEnv = {} } = {}) {
+export async function computeStagedDiffMetrics({ runGit = runBoundedGit, workingDir, baseSha = null, gitEnv = {} } = {}) {
   const baseArgs = baseSha ? [baseSha] : [];
-  const numstat = runGit(["diff", "--cached", "--numstat", ...baseArgs, "--"], {
+  const numstat = await runGit(["diff", "--cached", "--numstat", ...baseArgs, "--"], {
     cwd: workingDir,
     env: gitEnv,
   });
   if (!numstat.ok) return { ok: false, reason: "git_repo_diff_numstat_failed" };
 
-  const patch = runGit(["diff", "--cached", "--binary", ...baseArgs, "--"], {
+  const patch = await runGit(["diff", "--cached", "--binary", ...baseArgs, "--"], {
     cwd: workingDir,
     env: gitEnv,
   });
@@ -249,7 +249,11 @@ async function continueReplayIfRemoteBranchExists({ ctx, inputs, pending }) {
     return { done: false, mutationStarted: false };
   }
 
-  if (hasObservedGitHeadTree(pending.git) && !remoteMatchesGitIdentity(remote.branch, pending.git)) {
+  if (
+    hasObservedGitHeadTree(pending.git) &&
+    !remoteMatchesGitIdentity(remote.branch, pending.git) &&
+    !await remoteDescendsFromGitIdentity({ inputs, remoteBranch: remote.branch, git: pending.git })
+  ) {
     return { done: true, result: terminalFailure("git_repo_remote_branch_not_owned"), mutationStarted: false };
   }
 
@@ -300,12 +304,25 @@ async function ensureRemoteBranchIsOwnedBeforePush({ inputs, pending }) {
   return pendingGitOwnsRemoteBranch({ pending, inputs, remoteBranch: remote.branch });
 }
 
-function prepareCommit({ ctx, inputs, hooksDir }) {
+async function prepareCommit({ ctx, inputs, hooksDir }) {
   const { runGit, workingDir, localGitEnv } = inputs;
-  const add = runGit(["add", "-A"], { cwd: workingDir, env: localGitEnv });
+  const add = await runGit(["add", "-A"], { cwd: workingDir, env: localGitEnv });
   if (!add.ok) return { ok: false, reason: "git_repo_stage_failed" };
 
-  const metrics = computeStagedDiffMetrics({
+  const stagedGuard = await (ctx.scanStagedContent || scanStagedContent)({
+    runGit,
+    workingDir,
+    gitEnv: localGitEnv,
+  });
+  if (!stagedGuard.ok) {
+    return {
+      ok: false,
+      reason: "git_repo_staged_content_guard_failed",
+      staged_content_guard: stagedGuard.report,
+    };
+  }
+
+  const metrics = await computeStagedDiffMetrics({
     runGit,
     workingDir,
     baseSha: inputs.baseSha,
@@ -314,14 +331,14 @@ function prepareCommit({ ctx, inputs, hooksDir }) {
   const budget = evaluateDiffBudget(metrics, diffBudgetFromContext(ctx));
   if (!budget.ok) return { ok: false, reason: budget.reason, metrics: budget.metrics };
 
-  const checkout = runGit(["checkout", "-B", inputs.branch], {
+  const checkout = await runGit(["checkout", "-B", inputs.branch], {
     cwd: workingDir,
     env: localGitEnv,
   });
   if (!checkout.ok) return { ok: false, reason: "git_repo_branch_checkout_failed" };
 
   const author = resolveCommitAuthor(ctx);
-  const commit = runGit([
+  const commit = await runGit([
     "-c",
     `core.hooksPath=${hooksDir}`,
     "-c",
@@ -340,24 +357,24 @@ function prepareCommit({ ctx, inputs, hooksDir }) {
   return { ok: true, metrics: budget.metrics };
 }
 
-function checkoutExistingLocalExecutionCommit(inputs) {
+async function checkoutExistingLocalExecutionCommit(inputs) {
   const { runGit, workingDir, localGitEnv, branch, baseSha } = inputs;
   if (!workingDir || !fs.existsSync(workingDir)) return false;
-  const branchHead = runGit(["rev-parse", "--verify", `${branch}^{commit}`], {
+  const branchHead = await runGit(["rev-parse", "--verify", `${branch}^{commit}`], {
     cwd: workingDir,
     env: localGitEnv,
   });
   if (!branchHead.ok) return false;
   const headSha = branchHead.stdout.trim();
   if (!headSha || headSha === baseSha) return false;
-  const checkout = runGit(["checkout", branch], {
+  const checkout = await runGit(["checkout", branch], {
     cwd: workingDir,
     env: localGitEnv,
   });
   return checkout.ok;
 }
 
-function pushBranch({ inputs, hooksDir }) {
+async function pushBranch({ inputs, hooksDir }) {
   return inputs.runGit([
     "-c",
     `core.hooksPath=${hooksDir}`,
@@ -381,13 +398,13 @@ async function safeProbeRemoteBranch(inputs) {
 }
 
 export async function probeRemoteBranch({
-  runGit = defaultRunGit,
+  runGit = runBoundedGit,
   remoteUrl,
   branch,
   remoteGitEnv = {},
 } = {}) {
   const ref = `refs/heads/${branch}`;
-  const lsRemote = runGit(["ls-remote", "--heads", remoteUrl, ref], {
+  const lsRemote = await runGit(["ls-remote", "--heads", remoteUrl, ref], {
     env: remoteGitEnv,
   });
   if (!lsRemote.ok) throw new Error("git_repo_remote_branch_probe_failed");
@@ -405,16 +422,16 @@ export async function probeRemoteBranch({
 }
 
 async function fetchRemoteTreeSha({
-  runGit = defaultRunGit,
+  runGit = runBoundedGit,
   remoteUrl,
   branch,
   remoteGitEnv = {},
 } = {}) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-git-probe-"));
   try {
-    const init = runGit(["init"], { cwd: tempDir, env: remoteGitEnv });
+    const init = await runGit(["init"], { cwd: tempDir, env: remoteGitEnv });
     if (!init.ok) throw new Error("git_repo_remote_tree_probe_init_failed");
-    const fetch = runGit([
+    const fetch = await runGit([
       "fetch",
       "--depth=1",
       "--no-tags",
@@ -425,7 +442,7 @@ async function fetchRemoteTreeSha({
       env: remoteGitEnv,
     });
     if (!fetch.ok) throw new Error("git_repo_remote_tree_probe_fetch_failed");
-    const tree = runGit(["rev-parse", "FETCH_HEAD^{tree}"], {
+    const tree = await runGit(["rev-parse", "FETCH_HEAD^{tree}"], {
       cwd: tempDir,
       env: remoteGitEnv,
     });
@@ -554,7 +571,7 @@ function resolveGitInputs(ctx = {}, { pending = null, requireWorkingDir = true }
     return invalid("git_repo_working_dir_missing");
   }
 
-  const runGit = ctx.runGit || ctx.runContext?.runGit || defaultRunGit;
+  const runGit = ctx.runGit || ctx.runContext?.runGit || runBoundedGit;
   const runContext = ctx.runContext || {};
   // Honor the same offline remote-URL override the materializer uses, so paths
   // that resolve the remote WITHOUT a materializer handle (e.g. the after-push
@@ -760,8 +777,8 @@ function gitRepoCommitIdentity({ inputs, remoteBranch, pullRequest }) {
   };
 }
 
-function localHeadSha(inputs) {
-  const head = inputs.runGit(["rev-parse", "HEAD"], {
+async function localHeadSha(inputs) {
+  const head = await inputs.runGit(["rev-parse", "HEAD"], {
     cwd: inputs.workingDir,
     env: inputs.localGitEnv,
   });
@@ -824,40 +841,11 @@ function normalizeDiffBudget(budget = DEFAULT_GIT_REPO_DIFF_BUDGET) {
 }
 
 function gitRemoteEnv({ ctx = {}, remoteUrl }) {
-  const base = normalizeGitEnv(ctx.remoteGitEnv || ctx.gitRemoteEnv || {});
-  const token = nonEmptyString(ctx.githubToken) || resolveAmbientGitHubToken(process.env) || resolveGhAuthToken(remoteUrl);
-  if (!token || !looksLikeGitHubRemote(remoteUrl)) return base;
-  const count = Number.parseInt(base.GIT_CONFIG_COUNT || process.env.GIT_CONFIG_COUNT || "0", 10);
-  const next = Number.isFinite(count) && count >= 0 ? count : 0;
-  return {
-    ...base,
-    GIT_CONFIG_COUNT: String(next + 1),
-    [`GIT_CONFIG_KEY_${next}`]: "http.extraHeader",
-    [`GIT_CONFIG_VALUE_${next}`]: `Authorization: Bearer ${token}`,
-  };
-}
-
-function resolveAmbientGitHubToken(env = process.env) {
-  for (const name of GITHUB_TOKEN_ENV_NAMES) {
-    const value = nonEmptyString(env?.[name]);
-    if (value) return value;
-  }
-  return null;
-}
-
-function resolveGhAuthToken(remoteUrl) {
-  if (!looksLikeGitHubRemote(remoteUrl)) return null;
-  const result = spawnSync("gh", ["auth", "token"], {
-    encoding: "utf8",
-    windowsHide: true,
+  return gitRemoteAuthEnv({
+    baseEnv: ctx.remoteGitEnv || ctx.gitRemoteEnv || {},
+    remoteUrl,
+    token: nonEmptyString(ctx.githubToken),
   });
-  if (result.status !== 0) return null;
-  return nonEmptyString(result.stdout);
-}
-
-function looksLikeGitHubRemote(remoteUrl) {
-  const value = String(remoteUrl || "");
-  return /^https:\/\/github\.com\//i.test(value) || /^git@github\.com:/i.test(value);
 }
 
 async function runEffectKillPoint(ctx, point) {
@@ -921,17 +909,39 @@ function remoteMatchesGitIdentity(remoteBranch, git) {
   return !treeSha || remoteBranch.tree_sha === treeSha;
 }
 
-function pendingGitOwnsRemoteBranch({ pending, inputs, remoteBranch }) {
+async function pendingGitOwnsRemoteBranch({ pending, inputs, remoteBranch }) {
   if (!pending?.git || pending.git.branch !== inputs.branch) {
     return { ok: false, reason: "git_repo_remote_branch_not_owned" };
   }
   if (!hasObservedGitHead(pending.git)) {
     return { ok: false, reason: "git_repo_pending_observed_identity_missing" };
   }
-  if (!remoteMatchesGitIdentity(remoteBranch, pending.git)) {
+  if (
+    !remoteMatchesGitIdentity(remoteBranch, pending.git) &&
+    !await remoteDescendsFromGitIdentity({ inputs, remoteBranch, git: pending.git })
+  ) {
     return { ok: false, reason: "git_repo_remote_branch_not_owned" };
   }
   return { ok: true };
+}
+
+// A remote head that strictly descends from the factory's recorded head means
+// the factory's work is intact underneath additions a person pushed to the
+// branch — the factory collaborates on top of them instead of failing closed.
+// Ancestry is answered from the local checkout, whose materialization proved
+// the same descent; when the objects are absent (worktree gone, or the remote
+// moved again mid-run) this answers false and the caller stays fail-closed —
+// the plain (non-force) push remains the final collision guard either way.
+async function remoteDescendsFromGitIdentity({ inputs, remoteBranch, git }) {
+  const recordedHead = nonEmptyString(git?.head_sha);
+  const remoteHead = nonEmptyString(remoteBranch?.head_sha);
+  if (!recordedHead || !remoteHead || recordedHead === remoteHead) return false;
+  if (!inputs?.workingDir || !fs.existsSync(inputs.workingDir)) return false;
+  const ancestry = await inputs.runGit(["merge-base", "--is-ancestor", recordedHead, remoteHead], {
+    cwd: inputs.workingDir,
+    env: inputs.localGitEnv,
+  });
+  return ancestry.ok === true;
 }
 
 function pendingRunMatchesCurrent(pending, inputs) {

@@ -18,16 +18,19 @@ import {
   strictParseSubagentTurn,
 } from "./runtime-adapters.mjs";
 import { runRuntimeCommand } from "./runtime-command.mjs";
-import "./workflows/execution/definition.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
+import { formatCommand } from "./cli/operator-output.mjs";
 
 export const RUNTIME_SMOKE_SCHEMA_VERSION = 4;
 const DEFAULT_RUNTIME_SMOKE_PATH = path.join(".teami", "runtime-smoke.json");
 const DEFAULT_RUNTIME_SMOKE_TIMEOUT_MS = 5 * 60 * 1000;
 
-export function runtimeSmokeCachePath(config, repoRoot = process.cwd()) {
+export function runtimeSmokeCachePath(config, home = resolveTeamiHome()) {
+  const configuredPath = config?.runtime?.smoke_cache_path || DEFAULT_RUNTIME_SMOKE_PATH;
+  if (path.isAbsolute(configuredPath)) return path.normalize(configuredPath);
   return path.resolve(
-    repoRoot,
-    config?.runtime?.smoke_cache_path || DEFAULT_RUNTIME_SMOKE_PATH,
+    teamiHomePaths({ home }).home,
+    stripLegacyTeamiPrefix(configuredPath),
   );
 }
 
@@ -49,11 +52,21 @@ export function runtimeVersionsFromRuntimeSmokeCache(cache) {
   return cache?.schema_version === RUNTIME_SMOKE_SCHEMA_VERSION ? cache.runtimeVersions || {} : {};
 }
 
+function stripLegacyTeamiPrefix(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/");
+  return normalized === ".teami"
+    ? "."
+    : normalized.startsWith(".teami/")
+      ? normalized.slice(".teami/".length)
+      : normalized;
+}
+
 export async function runRuntimeSmokeChecks({
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runCommand = runRuntimeCommand,
-  cachePath = runtimeSmokeCachePath(config, repoRoot),
+  cachePath = runtimeSmokeCachePath(config, home),
   force = false,
   now = () => new Date(),
   timeoutMs = DEFAULT_RUNTIME_SMOKE_TIMEOUT_MS,
@@ -166,14 +179,17 @@ export async function runRuntimeSmokeCheck({
       prompt: smokePrompt({ runId, role, turn: "start" }),
       repoRoot,
     });
-    const startOutput = await runCommand(startCommand, { timeoutMs });
+    const startResult = await runCommand(startCommand, { timeoutMs, includeStreams: true });
+    const startOutput = typeof startResult === "string" ? startResult : String(startResult?.output || "");
+    const startStderr = typeof startResult?.stderr === "string" ? startResult.stderr.trim() : "";
     parseAndValidateRuntimeSmokeTurnOutput(startOutput, { runId });
     const warm = await runOptionalWarmContinuationSmoke({
       assignment,
       role,
       version,
       runId,
-      startOutput,
+      // Handle extraction only — codex >= 0.141.0 prints the session id on stderr.
+      startOutput: startStderr ? `${startOutput}\n${startStderr}` : startOutput,
       runCommand,
       timeoutMs,
       repoRoot,
@@ -293,8 +309,8 @@ export async function runtimeSmokeDoctorChecks({
       ok,
       message: ok
         ? `version ${version} passed session_start schema-valid subagent-turn readiness${warmMessage}`
-        : "missing or failed; run npm run runtime-smoke",
-      fix: ok ? null : "npm run runtime-smoke",
+        : `missing or failed; run ${formatCommand("runtime-smoke")}`,
+      fix: ok ? null : formatCommand("runtime-smoke"),
     });
   }
   return checks;

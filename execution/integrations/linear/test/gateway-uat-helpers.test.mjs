@@ -3,12 +3,70 @@ import test from "node:test";
 
 import {
   classifyReplayRecovery,
+  cleanupProjects,
   DEFAULT_CONSECUTIVE_COMMITS,
   DEFAULT_UAT_PREFIX,
   NO_LINEAR_DOMAIN_MESSAGE,
   parseGatewayUatArgs,
   selectUatDomain,
 } from "../uat/gateway-uat.mjs";
+
+test("gateway UAT cleanup archives every created issue before its project", async () => {
+  const calls = [];
+  const context = {
+    keepArtifacts: false,
+    client: {
+      async getProjectContext(projectId) {
+        calls.push(["getProjectContext", projectId]);
+        return { id: projectId, issues: [{ id: `${projectId}-1` }, { id: `${projectId}-2` }] };
+      },
+      async archiveIssue(issueId) {
+        calls.push(["archiveIssue", issueId]);
+      },
+      async archiveProject(projectId) {
+        calls.push(["archiveProject", projectId]);
+      },
+    },
+  };
+
+  const result = await cleanupProjects(context, ["project-a", "project-a"]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.archivedProjects, 1);
+  assert.equal(result.archivedIssues, 2);
+  assert.deepEqual(calls, [
+    ["getProjectContext", "project-a"],
+    ["archiveIssue", "project-a-1"],
+    ["archiveIssue", "project-a-2"],
+    ["archiveProject", "project-a"],
+  ]);
+});
+
+test("gateway UAT cleanup leaves the project visible when any issue cannot be archived", async () => {
+  const archivedProjects = [];
+  const context = {
+    keepArtifacts: false,
+    client: {
+      async getProjectContext() {
+        return { id: "project-a", issues: [{ id: "issue-a" }, { id: "issue-b" }] };
+      },
+      async archiveIssue(issueId) {
+        if (issueId === "issue-b") throw new Error("archive denied");
+      },
+      async archiveProject(projectId) {
+        archivedProjects.push(projectId);
+      },
+    },
+  };
+
+  const result = await cleanupProjects(context, ["project-a"]);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.archivedProjects, 0);
+  assert.equal(result.archivedIssues, 1);
+  assert.deepEqual(archivedProjects, []);
+  assert.equal(result.results[0].action, "issue_archive_failed");
+});
 
 test("gateway UAT no-domain guard fails before any live Linear setup", () => {
   assert.throws(

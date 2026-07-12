@@ -32,6 +32,12 @@ instances.
 
 Teami keeps live authority local.
 
+There is no hosted inbox, hosted credential custody, GitHub App, token broker,
+or always-on supervisor in the supported product. The adopter starts the
+foreground gateway when they want Teami listening. When it is stopped or the
+machine is off, Teami makes no external change; Linear remains the queue and
+the next foreground poll reconciles eligible work.
+
 The local gateway polls Linear's current state with the adopter's OAuth grant
 for projects in the trigger state. Linear is the queue: moving a project to
 `Planned` is the human handoff, and the gateway records local wake state,
@@ -44,17 +50,18 @@ deterministic gates pass, emits trace/eval evidence to local Phoenix, and runs
 repo or agent commands from the adopter's machine.
 
 The behavior-repo GitHub path uses the adopter's own git/`gh` auth for
-reviewable proposal branches and pull requests for process changes. Agentic
-Factory stores no GitHub secret. PR provenance is visible in local run evidence
+reviewable proposal branches and pull requests for process changes. Teami
+stores no GitHub secret. PR provenance is visible in local run evidence
 and the PR body.
 
 Product-repo grants are local and explicit. `teami domain grant` records
 selected GitHub repo coordinates as a domain `git_repo` resource. The grant
-records `owner/repo` and default branch only. Execution materializes a fresh
-per-run clone through the adopter's ambient local GitHub authority, then strips
-remotes and credential config before handing the cwd to the worker. It is not OS
-isolation, container isolation, all-repositories GitHub access, or a substitute
-for local permission checks.
+records `owner/repo` and default branch only. Product-repo write-capable
+execution is not shipped: the presence of materializer and workflow modules is
+not permission to edit, commit, push, or open a product-repo PR. Any future
+activation must prove credential and process isolation, domain confinement,
+bounded Git behavior, staged-content guards, and no push after a failed safety
+gate.
 
 ## Roles
 

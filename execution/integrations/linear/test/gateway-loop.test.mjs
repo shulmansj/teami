@@ -14,7 +14,6 @@ import {
   replayPendingMutation,
   runFreshSyntheticWake,
   runGatewayOnce,
-  runGatewayStartup,
 } from "../src/gateway-loop.mjs";
 
 const FINGERPRINT = "fingerprint-1";
@@ -107,22 +106,20 @@ test("gateway startup drains replay before the first planned-project poll", asyn
       calls.push("replay");
       return { status: "verified", cleared: true, result: { status: "completed" } };
     },
-    collectResumeReconciliation: async () => {
-      calls.push("resume");
-      return emptyResumeReport();
-    },
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls, ["lock", "listReplay", "replay", "resume", "poll", "release"]);
+  assert.deepEqual(calls, ["lock", "listReplay", "replay", "poll", "release"]);
 });
 
 test("replay clears intent only after verified completed or paused results", async () => {
   const cleared = [];
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-replay-home-"));
   const completed = await replayPendingMutation({
     client: {},
     config: configFixture(),
     cache: {},
+    home,
     projectId: "project-1",
     pending: {
       domainId: "support-ops",
@@ -143,6 +140,7 @@ test("replay clears intent only after verified completed or paused results", asy
     projectId: "project-1",
     runId: "run-1",
     repoRoot: process.cwd(),
+    home,
     runStoreDir: null,
   }]);
 
@@ -151,6 +149,7 @@ test("replay clears intent only after verified completed or paused results", asy
     client: {},
     config: configFixture(),
     cache: {},
+    home,
     projectId: "project-1",
     pending: {
       domainId: "support-ops",
@@ -255,12 +254,15 @@ test("suppressed decision emits repair state and does not run fresh decompositio
 
 test("fresh rejected result writes suppression only when the project remains planned at the same fingerprint", async () => {
   const repoRoot = tempRepo();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-fresh-suppression-home-"));
   const writes = [];
   const events = [];
   const client = snapshotClient(projectFixture());
   const result = await processPlannedProject({
     repoRoot,
+    home,
     config: configFixture(),
+    cache: cacheFixture(),
     domain: domainFixture(),
     domainContext: domainContextFixture(),
     client,
@@ -295,9 +297,142 @@ test("fresh rejected result writes suppression only when the project remains pla
     reason: "missing_required_template",
     createdAt: "2026-06-24T12:00:00.000Z",
     repoRoot,
+    home,
     runStoreDir: null,
   }]);
   assert.equal(client.snapshotReads, 2);
+});
+
+test("fresh rejected result writes no suppression when the project is in a same-category attention status", async () => {
+  const repoRoot = tempRepo();
+  const writes = [];
+  const events = [];
+  const client = snapshotClient([
+    projectFixture(),
+    projectFixture({
+      status: { id: "status-principal-escalation", name: "Principal Escalation", type: "planned" },
+    }),
+  ]);
+  const result = await processPlannedProject({
+    repoRoot,
+    config: configFixture(),
+    cache: cacheFixture(),
+    domain: domainFixture(),
+    domainContext: domainContextFixture(),
+    client,
+    candidate: { id: "project-1" },
+    runTimeoutMs: 0,
+    now: () => new Date("2026-06-24T12:00:00.000Z"),
+    emitStatus: (event) => events.push(event),
+    idempotency: {
+      computeTriggerFingerprint: () => FINGERPRINT,
+      readReplayPending: async () => null,
+      readSuppression: async () => null,
+      writeSuppression: async (input) => {
+        writes.push(input);
+        return input;
+      },
+    },
+    runFreshProject: async () => ({
+      status: "rejected",
+      reason: "missing_required_template",
+      wake: { run_id: "run-rejected" },
+    }),
+  });
+
+  assert.equal(result.action, "fresh");
+  assert.deepEqual(events.map((event) => event.state), ["working"]);
+  assert.deepEqual(writes, []);
+  assert.equal(client.snapshotReads, 2);
+});
+
+test("paused project result writes no suppression so moving back to Planned fires fresh again", async () => {
+  const repoRoot = tempRepo();
+  const writes = [];
+  const events = [];
+  const client = snapshotClient(projectFixture());
+  let freshRuns = 0;
+  const idempotency = {
+    computeTriggerFingerprint: () => FINGERPRINT,
+    readReplayPending: async () => null,
+    readSuppression: async () => null,
+    writeSuppression: async (input) => {
+      writes.push(input);
+      return input;
+    },
+  };
+  const options = {
+    repoRoot,
+    config: configFixture(),
+    cache: cacheFixture(),
+    domain: domainFixture(),
+    domainContext: domainContextFixture(),
+    client,
+    candidate: { id: "project-1" },
+    runTimeoutMs: 0,
+    now: () => new Date("2026-06-24T12:00:00.000Z"),
+    emitStatus: (event) => events.push(event),
+    idempotency,
+    runFreshProject: async () => {
+      freshRuns += 1;
+      return freshRuns === 1
+        ? { status: "paused", reason: "product_questions", wake: { run_id: "run-paused" } }
+        : { status: "completed", reason: "synthesis_complete", wake: { run_id: "run-resumed" } };
+    },
+  };
+
+  const paused = await processPlannedProject(options);
+  const refired = await processPlannedProject(options);
+
+  assert.equal(paused.action, "fresh");
+  assert.equal(paused.result.status, "paused");
+  assert.equal(refired.action, "fresh");
+  assert.equal(refired.result.status, "completed");
+  assert.equal(freshRuns, 2);
+  assert.deepEqual(writes, []);
+  assert.deepEqual(events.map((event) => event.state), ["working", "working"]);
+});
+
+test("app-actor Planned move is accepted as actorless candidate and does not refire at same fingerprint", async () => {
+  const repoRoot = tempRepo();
+  const events = [];
+  const candidate = { id: "project-1" };
+  let freshRuns = 0;
+  let sameFingerprintSeen = false;
+  const idempotency = {
+    computeTriggerFingerprint: () => FINGERPRINT,
+    readReplayPending: async () => null,
+    readSuppression: async () => sameFingerprintSeen
+      ? { reason: "same_fingerprint_app_actor_commit" }
+      : null,
+  };
+  const options = {
+    repoRoot,
+    config: configFixture(),
+    cache: cacheFixture(),
+    domain: domainFixture(),
+    domainContext: domainContextFixture(),
+    client: snapshotClient(projectFixture()),
+    candidate,
+    runTimeoutMs: 0,
+    emitStatus: (event) => events.push(event),
+    idempotency,
+    runFreshProject: async () => {
+      freshRuns += 1;
+      sameFingerprintSeen = true;
+      return { status: "completed", reason: "decomposition_complete" };
+    },
+  };
+
+  const accepted = await processPlannedProject(options);
+  const refired = await processPlannedProject(options);
+
+  assert.deepEqual(Object.keys(candidate), ["id"]);
+  assert.equal(accepted.action, "fresh");
+  assert.equal(accepted.result.status, "completed");
+  assert.equal(refired.action, "suppress");
+  assert.equal(freshRuns, 1);
+  assert.deepEqual(events.map((event) => event.state), ["working", "suppressed"]);
 });
 
 test("Linear rate limits back off the domain without reporting an empty poll", async () => {
@@ -390,50 +525,6 @@ test("project-context rate limits stop the current domain poll immediately", asy
   assert.equal(snapshotReads, 1);
 });
 
-test("startup emits resume reconciliation as resume_attention and resume_working status events", async () => {
-  const events = [];
-  const startup = await runGatewayStartup({
-    repoRoot: tempRepo(),
-    config: configFixture(),
-    registry: registryFixture(),
-    runTimeoutMs: 0,
-    createLinearClient: async () => ({ listPlannedProjectCandidates: async () => ({ candidates: [] }) }),
-    idempotency: {
-      listReplayPending: async () => [],
-    },
-    collectResumeReconciliation: async () => ({
-      ...emptyResumeReport(),
-      items: [
-        {
-          pm_state: "Needs your decision",
-          classification: "attention",
-          source: "local-run",
-          ref: "run-1",
-          reason: "operator_question",
-          detail: "Answer the open question.",
-        },
-        {
-          pm_state: "Working",
-          classification: "working",
-          source: "supervisor",
-          ref: "wake-1",
-          reason: "runner_active",
-          detail: "Runner is still active.",
-        },
-      ],
-    }),
-    emitStatus: (event) => events.push(event),
-  });
-
-  assert.deepEqual(events.map((event) => event.state), ["resume_attention", "resume_working"]);
-  assert.equal(events[0].ref, "run-1");
-  assert.equal(events[0].pmState, "Needs your decision");
-  assert.equal(events[1].ref, "wake-1");
-  assert.deepEqual(startup.followUps, [
-    "Verify resume crash-safety in the poll model, or extend the replay gate to resume.",
-  ]);
-});
-
 test("fresh synthetic wake adapter claims a local wake and passes the claim into the runner", async () => {
   const repoRoot = tempRepo();
   const registry = registryFixture();
@@ -488,28 +579,34 @@ test("fresh synthetic wake adapter claims a local wake and passes the claim into
 
 test("gateway lock refuses a second live gateway in the same checkout", () => {
   const repoRoot = tempRepo();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-gateway-home-"));
   const first = acquireGatewayLock({
     repoRoot,
+    home,
     idGenerator: () => "token-1",
     installHandlers: false,
   });
   assert.equal(first.ok, true);
   const second = acquireGatewayLock({
     repoRoot,
+    home,
     idGenerator: () => "token-2",
     installHandlers: false,
     isProcessAlive: () => true,
   });
   assert.equal(second.ok, false);
   assert.equal(second.reason, "gateway_already_running");
-  assert.equal(second.lockPath, gatewayLockPath(repoRoot));
+  assert.equal(second.lockPath, gatewayLockPath(home));
+  assert.ok(!fs.existsSync(path.join(repoRoot, ".teami", "gateway.lock")));
   first.release();
 });
 
-function snapshotClient(project) {
+function snapshotClient(projectOrProjects) {
+  const projects = Array.isArray(projectOrProjects) ? projectOrProjects : [projectOrProjects];
   return {
     snapshotReads: 0,
     async getProjectSnapshotContext(projectId) {
+      const project = projects[Math.min(this.snapshotReads, projects.length - 1)];
       assert.equal(projectId, project.id);
       this.snapshotReads += 1;
       return structuredClone(project);
@@ -517,7 +614,7 @@ function snapshotClient(project) {
   };
 }
 
-function projectFixture() {
+function projectFixture(overrides = {}) {
   return {
     id: "project-1",
     name: "Customer onboarding pilot",
@@ -526,6 +623,7 @@ function projectFixture() {
     status: { id: "status-planned", name: "Planned", type: "planned" },
     labels: [],
     issues: [],
+    ...overrides,
   };
 }
 
@@ -570,6 +668,12 @@ function domainContextFixture() {
   };
 }
 
+function cacheFixture() {
+  return {
+    projectStatuses: { planned: "status-planned" },
+  };
+}
+
 function configFixture() {
   return {
     poll: { interval_ms: 10_000 },
@@ -590,16 +694,6 @@ function configFixture() {
         required_capabilities: ["linear.project.planned", "decomposition.trigger_runner.v1"],
       },
     },
-  };
-}
-
-function emptyResumeReport() {
-  return {
-    ok: true,
-    summary: { item_count: 0, by_pm_state: {}, by_classification: {} },
-    generated_at: "2026-06-24T12:00:00.000Z",
-    items: [],
-    sources: [],
   };
 }
 

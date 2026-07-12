@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { runBoundedGit } from "../../git/bounded-subprocess.mjs";
 
 import {
   resolveDefaultBranchRef as resolveDefaultBranchRefCore,
@@ -19,23 +19,17 @@ export {
 } from "../../../engine/promotion-policy.mjs";
 
 export function defaultRunGit(args, { cwd } = {}) {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
-  return {
-    ok: result.status === 0,
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+  return runBoundedGit(args, { cwd });
 }
 
-export function resolveTrustedPolicyRead({
+export async function resolveTrustedPolicyRead({
   runGit = defaultRunGit,
   ...options
 } = {}) {
   return resolveTrustedPolicyReadCore({ ...options, runGit });
 }
 
-export function resolveDefaultBranchRef({
+export async function resolveDefaultBranchRef({
   runGit = defaultRunGit,
   ...options
 } = {}) {

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { redactOAuthSecrets, runCliCommand } from "./src/cli/dispatch.mjs";
 
@@ -23,6 +25,7 @@ async function main() {
 
 export {
   authorizeLinearSetupWorkspace,
+  ensureNeedsPrincipalProjectStatus,
   explicitInitDomainName,
   promptLinearWorkspacePicker,
   resolveInitDomainName,
@@ -45,11 +48,23 @@ export {
   runOneTriggerWake,
   selectRunnerDomains,
 } from "./src/cli/runner-command.mjs";
-export {
-  resolveSupervisorCommandContext,
-} from "./src/cli/supervisor-command.mjs";
 
-if (process.argv[1]?.replace(/\\/g, "/").endsWith("/execution/integrations/linear/cli.mjs")) {
+// True when this module is the process entrypoint. The Windows npm bin runs `node cli.mjs`
+// (argv[1] is the cli.mjs path), but the Linux/macOS npm bin is a SYMLINK (node_modules/.bin/teami
+// -> cli.mjs), so argv[1] is the symlink — the plain suffix check misses it and the CLI would never
+// run under `npx @shulmansj/teami@release …` on those platforms. Fall back to a realpath comparison for the symlink case.
+function isCliEntrypoint() {
+  const invoked = process.argv[1];
+  if (!invoked) return false;
+  if (invoked.replace(/\\/g, "/").endsWith("/execution/integrations/linear/cli.mjs")) return true;
+  try {
+    return realpathSync(invoked) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isCliEntrypoint()) {
   main().catch((error) => {
     console.error(redactOAuthSecrets(error.message));
     process.exitCode = 1;

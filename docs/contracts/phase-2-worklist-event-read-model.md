@@ -47,7 +47,7 @@ Primary owner-facing copy stays product-language:
 | `internal_only` | No owner-facing row by itself. | Raw candidate/status facts that do not yet block Linear work or behavior PR review. |
 
 Primary copy must not require Git, npm, Node, token, raw diff, branch name,
-check-log, Phoenix ID, endpoint, broker, or stack-trace interpretation. Those
+check-log, Phoenix ID, endpoint, credential internals, or stack-trace interpretation. Those
 details may appear only as optional technical depth.
 
 FYI receipts reach the owner only when they are tied to a behavior PR decision
@@ -180,7 +180,7 @@ Use this checklist for WL-02, PKT-01, PKT-02, PROOF-01, and persona validation:
   covered by this source map.
 - Owner-facing copy says what is waiting, why it matters, what is blocked, and
   where to decide without making the owner interpret Git, npm, Node, token,
-  raw diff, branch, check-log, Phoenix ID, endpoint, broker, or stack-trace
+  raw diff, branch, check-log, Phoenix ID, endpoint, credential internals, or stack-trace
   mechanics.
 - If a later implementation cannot derive a state from this map, it blocks or
   flags the gap instead of adding a second queue/store.

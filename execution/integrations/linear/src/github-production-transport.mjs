@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-
+import { runBoundedSubprocess } from "../../git/bounded-subprocess.mjs";
 import {
   assertGitHubPromotionEndpointShape,
   createDryRunGitHubTransport,
@@ -21,7 +20,8 @@ export function createProductionGitHubPromotionTransport({
   repoIdentity = null,
   now = () => new Date(),
   env = process.env,
-  spawnImpl = spawn,
+  spawnImpl = undefined,
+  runSubprocess = runBoundedSubprocess,
 } = {}) {
   if (repoIdentity?.connection_mode === "real") {
     const pushAuth = repoIdentity.push_auth === "ssh" ? "ssh" : "https";
@@ -32,6 +32,7 @@ export function createProductionGitHubPromotionTransport({
         env,
         pushAuth,
         spawnImpl,
+        runSubprocess,
       }),
       mode: "local_ambient",
       owner: repoIdentity.repo?.owner ?? null,
@@ -60,6 +61,7 @@ function createLocalAmbientGitHubTransport({
   env,
   pushAuth,
   spawnImpl,
+  runSubprocess,
 }) {
   const calls = [];
   return {
@@ -84,6 +86,7 @@ function createLocalAmbientGitHubTransport({
         env,
         pushAuth,
         spawnImpl,
+        runSubprocess,
       });
       const stdout = await runGh({
         endpointId,
@@ -94,6 +97,7 @@ function createLocalAmbientGitHubTransport({
         env,
         pushAuth,
         spawnImpl,
+        runSubprocess,
       });
       return { data: parseGitHubApiResponse({ endpointId, stdout }) };
     },
@@ -184,7 +188,7 @@ function parseGitHubApiResponse({ endpointId, stdout }) {
   return payload;
 }
 
-function runGh({
+async function runGh({
   endpointId,
   phase,
   args,
@@ -193,73 +197,29 @@ function runGh({
   env,
   pushAuth,
   spawnImpl,
+  runSubprocess,
 }) {
-  return new Promise((resolve, reject) => {
-    const childEnv = {
-      ...scrubGitHubAuthEnv(env, { pushAuth }),
-      GH_PROMPT_DISABLED: "1",
-    };
-    let child;
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    try {
-      child = spawnImpl("gh", args, {
-        cwd: repoRoot,
-        env: childEnv,
-        shell: false,
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-    } catch (error) {
-      reject(githubApiRequestError({
-        endpointId,
-        phase,
-        code: null,
-        signal: null,
-        detail: `spawn_failed:${error.message}`,
-      }));
-      return;
-    }
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(githubApiRequestError({
-        endpointId,
-        phase,
-        code: null,
-        signal: null,
-        detail: `spawn_failed:${error.message}`,
-      }));
-    });
-    child.on("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      if (code !== 0) {
-        reject(githubApiRequestError({
-          endpointId,
-          phase,
-          code,
-          signal,
-          detail: stderr.trim() || stdout.trim() || "gh command failed",
-        }));
-        return;
-      }
-      resolve(stdout);
-    });
-
-    if (child.stdin) {
-      if (input !== null) child.stdin.write(input);
-      child.stdin.end();
-    }
+  const result = await runSubprocess({
+    command: "gh",
+    args,
+    operation: ghOperation({ phase, args }),
+    cwd: repoRoot,
+    env: scrubGitHubAuthEnv(env, { pushAuth }),
+    input,
+    ...(spawnImpl ? { spawnImpl } : {}),
+    classifyFailure: ({ stdout, stderr }) => classifyGhFailure(`${stderr}\n${stdout}`),
   });
+  if (!result.ok) {
+    throw githubApiRequestError({
+      endpointId,
+      phase,
+      code: result.status,
+      signal: result.signal,
+      detail: result.failureCode || result.outcome,
+      reconciliationRequired: result.reconciliationRequired,
+    });
+  }
+  return result.stdout;
 }
 
 function githubApiRequestError({
@@ -268,13 +228,34 @@ function githubApiRequestError({
   code,
   signal,
   detail,
+  reconciliationRequired = false,
 }) {
   const status = code === null || code === undefined
     ? `signal_${signal || "unknown"}`
     : `exit_${code}`;
-  return new Error(redactGitHubSecrets(
+  const error = new Error(redactGitHubSecrets(
     `github_api_request_failed:${endpointId}:${phase}:${status}:${detail || "unknown"}`,
   ));
+  error.code = "github_api_request_failed";
+  error.outcome = reconciliationRequired ? "reconciliation_required" : "failed";
+  error.reconciliationRequired = reconciliationRequired;
+  return error;
+}
+
+function ghOperation({ phase, args }) {
+  if (phase === "auth_status") return "gh_auth_read";
+  const methodIndex = args.indexOf("--method");
+  const method = methodIndex >= 0 ? args[methodIndex + 1] : "GET";
+  return ["GET", "HEAD"].includes(String(method || "").toUpperCase())
+    ? "gh_api_read"
+    : "gh_api_mutation";
+}
+
+function classifyGhFailure(output) {
+  if (/not found|could not resolve|HTTP 404/i.test(output)) return "not_found";
+  if (/authentication|not logged|HTTP 401|HTTP 403/i.test(output)) return "auth_failed";
+  if (/rate.?limit|HTTP 429/i.test(output)) return "rate_limited";
+  return "gh_command_failed";
 }
 
 function safeCallParams(params = {}) {

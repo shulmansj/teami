@@ -3,13 +3,16 @@ import path from "node:path";
 
 import { defaultGateReportDir } from "../process-change-gate.mjs";
 import { defaultPromotionRegistryDir, readJsonTolerant } from "./registry-store.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 
 export function collectAutonomousLoopSignalSurfaces({
   repoRoot = process.cwd(),
-  registryDir = defaultPromotionRegistryDir(repoRoot),
-  gateReportDir = defaultGateReportDir(repoRoot),
+  home = resolveTeamiHome(),
+  registryDir = defaultPromotionRegistryDir(home),
+  gateReportDir = defaultGateReportDir(home),
   repoMarkerState = null,
 } = {}) {
+  void repoRoot;
   return {
     registry_records: readRegistryRecords(registryDir),
     gate_reports: readGateReports(gateReportDir),

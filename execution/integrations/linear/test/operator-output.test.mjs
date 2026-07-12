@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { formatCommand, humanizeInterval } from "../src/cli/operator-output.mjs";
+import {
+  formatCommand,
+  formatCommandForContext,
+  humanizeInterval,
+  isInstalledPackageModulePath,
+} from "../src/cli/operator-output.mjs";
 import { factoryLauncherCommand } from "../src/cli/linear-setup-command.mjs";
 
 function withPlatform(value, fn) {
@@ -33,6 +38,20 @@ test("formatCommand renders the Windows launcher form on win32", () => {
   });
 });
 
+test("formatCommandForContext renders the package launcher under node_modules", () => {
+  const packagedPath = String.raw`C:\Users\example\project\node_modules\@shulmansj\teami\src\cli\operator-output.mjs`;
+  assert.equal(isInstalledPackageModulePath(packagedPath), true);
+  assert.equal(formatCommandForContext("doctor", { installedPackageContext: true, platform: "win32" }), "npx @shulmansj/teami@release doctor");
+  assert.equal(formatCommandForContext("gateway status", { installedPackageContext: true, platform: "linux" }), "npx @shulmansj/teami@release gateway status");
+  assert.equal(formatCommandForContext("", { installedPackageContext: true, platform: "darwin" }), "npx @shulmansj/teami@release");
+});
+
+test("formatCommandForContext keeps checkout launcher outside node_modules", () => {
+  const checkoutPath = String.raw`C:\Users\example\repos\teami\execution\integrations\linear\src\cli\operator-output.mjs`;
+  assert.equal(isInstalledPackageModulePath(checkoutPath), false);
+  assert.equal(formatCommandForContext("doctor", { installedPackageContext: false, platform: "win32" }), ".\\teami.cmd doctor");
+  assert.equal(formatCommandForContext("doctor", { installedPackageContext: false, platform: "linux" }), "./teami doctor");
+});
 test("humanizeInterval renders the configured interval in plain English", () => {
   assert.equal(humanizeInterval(10_000), "10 seconds");
   assert.equal(humanizeInterval(1_000), "1 second");

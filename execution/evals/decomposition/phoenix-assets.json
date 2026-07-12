@@ -18,7 +18,7 @@
       "accepted_prompt_version_id": "UHJvbXB0VmVyc2lvbjox",
       "accepted_tag": "teami_accepted",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/decomposition-quality-judge.md",
-      "snapshot_sha256": "c174b595d7728ef7b33a915ee4c0b7a809ca2a1c888ebcf9290c878ba7cb1d53",
+      "snapshot_sha256": "3240bea6c02e81a037e0a0aefbdef98e63fcf480c62819a39d572649e71ac04e",
       "prompt_version": "UHJvbXB0VmVyc2lvbjox",
       "rubric_version": "1.0.0",
       "failure_taxonomy_version": "1.0.0",
@@ -36,7 +36,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/pm-product-sufficiency-pass.md",
-      "snapshot_sha256": "41fceb1ee15b9aa2c6905fe06e7acfa08eb0c4401e8431a26d7e0e980666bca1",
+      "snapshot_sha256": "3b0964184816e237416d2104d46af4516d5f45502ffdcfe818e2d40c1441c6d8",
       "prompt_version": "unpinned-initial"
     },
     {
@@ -51,7 +51,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/sr-eng-grounding-pass.md",
-      "snapshot_sha256": "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843",
+      "snapshot_sha256": "e8e89502e67d82f958197711a5acbf05dd5078442c970e6a548dc2e02cc77798",
       "prompt_version": "unpinned-initial"
     },
     {
@@ -66,7 +66,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/pm-synthesis.md",
-      "snapshot_sha256": "708d18dd67ca915d188ee164a40f738c16cfb5c289b67f45b705562c24c8ba60",
+      "snapshot_sha256": "b558c8ba60f65f4c37ced3222a62d952f44b354f9f2b95d846b4e84baf49d28b",
       "prompt_version": "unpinned-initial"
     },
     {
@@ -81,7 +81,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/sr-eng-blocker-check.md",
-      "snapshot_sha256": "49b008b257f93f889e5d3931eb0c06c090c5444346840ed1b36b8bc31b35a917",
+      "snapshot_sha256": "e486ae18cbfcc936df616813b9a3f1ef912e8670708f5e31cb96e88381950d78",
       "prompt_version": "unpinned-initial"
     },
     {
@@ -96,7 +96,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/orchestrator-governing.md",
-      "snapshot_sha256": "9230bafbaf10b5d6bd9511898b7f65ce3d3cf3ea507d127d5a866e3fffce3ace",
+      "snapshot_sha256": "ac0bb976bcefa1c8b753bb7aa9b4c99e41f0e59252eb652524503859a4d1b126",
       "prompt_version": "unpinned-initial"
     }
   ],
@@ -164,7 +164,7 @@
       "dataset_version_id": "RGF0YXNldFZlcnNpb246Mg==",
       "project_name": null,
       "accepted_artifact_hash_vector": {
-        "snapshot_sha256": "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843",
+        "snapshot_sha256": "e8e89502e67d82f958197711a5acbf05dd5078442c970e6a548dc2e02cc77798",
         "accepted_prompt_version_id": null
       },
       "_note": "Post-extraction baseline for the sr_eng grounding prompt: RXhwZXJpbWVudDo1, the first REAL evaluation run (re-executable example RGF0YXNldEV4YW1wbGU6Mg== on dataset version 2; judge mean 0.900; one legacy ineligible example fails per-run and is excluded)."

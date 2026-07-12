@@ -9,6 +9,7 @@ import { readLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import { readDomainRegistry } from "../src/domain-registry.mjs";
 import { buildDomainContext } from "../src/domain-resolver.mjs";
+import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import {
   acquireGatewayLock,
   runFreshSyntheticWake,
@@ -20,7 +21,7 @@ import { createLinearSetupGraphqlClient } from "../src/linear-setup-auth.mjs";
 import { resolveLinearShape } from "../src/linear/shape-resolver.mjs";
 import { matchesStatus } from "../src/linear/matching-utils.mjs";
 import { createLocalTriggerStore, localTriggerStorePath, readLocalTriggerState } from "../src/local-trigger-store.mjs";
-import { buildProjectTemplateBody } from "../src/project-body.mjs";
+import { renderPlanningBody } from "../src/project-planning-body.mjs";
 import { runTriggeredDecomposition } from "../src/trigger-runner.mjs";
 import {
   readReplayPending,
@@ -39,22 +40,28 @@ export const DEFAULT_POLL_GRACE_MS = 5_000;
 export const DEFAULT_CHILD_CRASH_TIMEOUT_MS = 5 * 60 * 1000;
 
 const CHILD_EVENT_TYPE = "teami_gateway_uat";
-const TERMINAL_PROJECT_STATUSES = new Set(["started", "backlog", "completed", "canceled", "cancelled"]);
 const CRASH_SCENARIOS = Object.freeze({
   commit_before_started: Object.freeze({
     outcome: "commit",
-    terminalStatus: "started",
+    // `in_progress` is the project-status ROLE key (its Linear type is "started"); the shape is
+    // keyed by role, so waiting on "started" would resolve to undefined and never match.
+    terminalStatus: "in_progress",
     description: "kill between issue-create and status started",
   }),
   before_mutation: Object.freeze({
     outcome: "commit",
-    terminalStatus: "started",
+    terminalStatus: "in_progress",
     description: "kill after mutation intent before any Linear mutation",
   }),
-  pause_before_discovery: Object.freeze({
+  pause_before_comment: Object.freeze({
     outcome: "pause",
-    terminalStatus: "backlog",
-    description: "kill on a pause before discovery issue creation",
+    terminalStatus: "needs_principal",
+    description: "kill on a pause before project comment creation",
+  }),
+  pause_after_comment: Object.freeze({
+    outcome: "pause",
+    terminalStatus: "needs_principal",
+    description: "kill on a pause after project comment creation before status move",
   }),
 });
 
@@ -184,6 +191,8 @@ export async function runGatewayUat(options = parseGatewayUatArgs()) {
         createdProjects,
       }));
     }
+    report.scenarios.push(await runPauseCommentScenario(context, { createdProjects }));
+    report.scenarios.push(await runFailedClosedScenario(context, { createdProjects }));
     for (const crashMode of Object.keys(CRASH_SCENARIOS)) {
       report.scenarios.push(await runCrashScenario(context, {
         crashMode,
@@ -201,6 +210,10 @@ export async function runGatewayUat(options = parseGatewayUatArgs()) {
 async function prepareLiveUatContext(options) {
   const repoRoot = path.resolve(options.repoRoot || REPO_ROOT);
   const config = loadLinearConfig({ repoRoot });
+  // The domain registry can bind git_repo resources (since #90); register that resource kind
+  // before reading the registry, or readDomainRegistry throws unknown_resource_kind:git_repo.
+  // (This UAT lives outside `npm test`, so the rot was invisible — same class as live-e2e #160.)
+  registerGitRepoResourceKind();
   const registry = readDomainRegistry({ repoRoot });
   const domain = selectUatDomain({ registry, domainId: options.domainId });
   const domainContext = buildDomainContext({ domain, config, repoRoot });
@@ -290,6 +303,12 @@ async function runCommitPickupScenario(context, { index, createdProjects }) {
     config: context.config,
     registry: context.registry,
     domains: [context.domain],
+    // Scope the poll to THIS scenario's project. The UAT shares a live sandbox team that
+    // accumulates stale Planned projects from interrupted prior runs; an unscoped poll would
+    // process them all serially (real Linear mutations) ahead of this project, blow the tight
+    // pickup budget, and — worse — mutate projects the UAT never created. Scoping keeps the run
+    // hermetic and makes pickup timing independent of leftover sandbox state.
+    pollScope: { projectIds: [project.id] },
     pollIntervalMs: context.pollIntervalMs,
     signal: controller.signal,
     sleep: abortableSleep,
@@ -314,7 +333,9 @@ async function runCommitPickupScenario(context, { index, createdProjects }) {
     );
     pickedWithinMs = picked.observedAtMs - plannedAtMs;
     terminal = await waitForProjectStatus(context, project.id, {
-      status: "started",
+      // The commit path moves the project to the `in_progress` role (Linear type "started");
+      // the shape is keyed by role, so assert the role key, not the type name.
+      status: "in_progress",
       timeoutMs: context.timeoutMs,
     });
     assertCondition(
@@ -343,6 +364,81 @@ async function runCommitPickupScenario(context, { index, createdProjects }) {
   };
 }
 
+async function runPauseCommentScenario(context, { createdProjects }) {
+  const project = await createDisposableProject(context, {
+    name: scenarioProjectName(context, "pause-comment"),
+    summary: "Gateway UAT comment-only pause fixture.",
+    status: "backlog",
+  });
+  createdProjects.push(project.id);
+  const initialContent = project.content || testProjectContent({
+    name: project.name,
+    summary: "Gateway UAT comment-only pause fixture.",
+  });
+  await moveProjectToStatus(context, project.id, "planned");
+
+  const events = await runSingleGatewayPass(context, { outcome: "pause", projectId: project.id });
+  assertCondition(events.some((event) => event.projectId === project.id && event.state === "working"), "pause project was not selected once");
+  const runs = localRunsForProject(context, project.id);
+  assertCondition(runs.length >= 1, "pause scenario did not create a local run record");
+  const runId = runs.at(-1).run_id;
+  const terminal = await waitForProjectStatus(context, project.id, {
+    status: "needs_principal",
+    timeoutMs: context.timeoutMs,
+  });
+  await assertCommentOnlyPauseState(context, {
+    projectId: project.id,
+    runId,
+    initialContent,
+    project: terminal,
+  });
+
+  return {
+    ok: true,
+    name: "planned-pickup-pause-comment",
+    projectId: project.id,
+    runId,
+    terminalStatus: terminal.status?.type || terminal.status?.name || null,
+  };
+}
+
+async function runFailedClosedScenario(context, { createdProjects }) {
+  const project = await createDisposableProject(context, {
+    name: scenarioProjectName(context, "failed-closed"),
+    summary: "Gateway UAT failed_closed fixture.",
+    status: "backlog",
+  });
+  createdProjects.push(project.id);
+  await moveProjectToStatus(context, project.id, "planned");
+
+  const events = await runSingleGatewayPass(context, { outcome: "failed_closed", projectId: project.id });
+  assertCondition(events.some((event) => event.projectId === project.id && event.state === "working"), "failed_closed project was not selected once");
+  const runs = localRunsForProject(context, project.id);
+  assertCondition(runs.length >= 1, "failed_closed scenario did not create a local run record");
+  const runId = runs.at(-1).run_id;
+  const terminal = await waitForProjectStatus(context, project.id, {
+    status: "needs_principal",
+    timeoutMs: context.timeoutMs,
+  });
+  // A failed_closed safety stop now presents identically to a product-question pause: one
+  // app-authored project comment carrying the failure summary + a move to Principal Escalation,
+  // and NO project update. To the human, both stops are simply a project that needs attention.
+  const comments = await appAuthoredProjectComments(context, project.id);
+  assertCondition(comments.length === 1, `failed_closed should post exactly one app-authored project comment, found ${comments.length}`);
+  assertCondition(comments[0].body.includes(`run_id:${runId}`), "failed_closed comment did not carry the run_id marker");
+  const update = await context.client.findProjectUpdateByRunId(project.id, runId);
+  assertCondition(!update, "failed_closed posted a project update instead of a comment");
+  assertCondition((terminal.issues || []).length === 0, "failed_closed created Linear issues");
+
+  return {
+    ok: true,
+    name: "planned-pickup-failed-closed-comment",
+    projectId: project.id,
+    runId,
+    terminalStatus: terminal.status?.type || terminal.status?.name || null,
+  };
+}
+
 async function runCrashScenario(context, { crashMode, createdProjects }) {
   const spec = CRASH_SCENARIOS[crashMode];
   const project = await createDisposableProject(context, {
@@ -351,6 +447,10 @@ async function runCrashScenario(context, { crashMode, createdProjects }) {
     status: "backlog",
   });
   createdProjects.push(project.id);
+  const initialContent = project.content || testProjectContent({
+    name: project.name,
+    summary: `Gateway UAT crash fixture: ${spec.description}.`,
+  });
   await moveProjectToStatus(context, project.id, "planned");
 
   const crash = await spawnCrashChild(context, { crashMode, projectId: project.id });
@@ -366,7 +466,7 @@ async function runCrashScenario(context, { crashMode, createdProjects }) {
   );
 
   const postCrashProject = await context.client.getProjectContext(project.id);
-  assertCrashPreReplayState({ crashMode, project: postCrashProject, shape: context.shape });
+  await assertCrashPreReplayState({ context, crashMode, project: postCrashProject, runId: pendingBefore.runId });
 
   const replayEvents = [];
   const replayResult = await runGatewayOnce({
@@ -374,6 +474,9 @@ async function runCrashScenario(context, { crashMode, createdProjects }) {
     config: context.config,
     registry: context.registry,
     domains: [context.domain],
+    // Scope to the crashed project: the replay pass must reconcile exactly this project's pending
+    // mutation, undisturbed by stale sandbox projects that would also be polled unscoped.
+    pollScope: { projectIds: [project.id] },
     runTimeoutMs: context.timeoutMs,
     onStatus: (event) => replayEvents.push(event),
     runFreshProject: async ({ projectId }) => {
@@ -399,6 +502,14 @@ async function runCrashScenario(context, { crashMode, createdProjects }) {
     status: spec.terminalStatus,
     timeoutMs: context.timeoutMs,
   });
+  if (spec.outcome === "pause") {
+    await assertCommentOnlyPauseState(context, {
+      projectId: project.id,
+      runId: pendingBefore.runId,
+      initialContent,
+      project: terminal,
+    });
+  }
   return {
     ok: true,
     name: `crash-${crashMode}`,
@@ -415,19 +526,23 @@ async function runRejectedSuppressionScenario(context, { createdProjects }) {
     name: scenarioProjectName(context, "rejected-suppression"),
     summary: "Gateway UAT ineligible Planned fixture.",
     status: "backlog",
-    labelIds: [context.shape.projectLabels.hasOpenQuestions.id],
   });
   createdProjects.push(project.id);
-  await moveProjectToStatus(context, project.id, "planned", {
-    labelIds: [context.shape.projectLabels.hasOpenQuestions.id],
+  await context.client.createIssue({
+    title: "Gateway UAT pre-existing execution issue",
+    description: "This issue makes the disposable project ineligible for a fresh decomposition run.",
+    teamId: context.shape.team.id,
+    projectId: project.id,
+    stateId: context.shape.issueStatuses.todo.id,
   });
+  await moveProjectToStatus(context, project.id, "planned");
 
-  const firstEvents = await runSingleGatewayPass(context, { outcome: "commit" });
+  const firstEvents = await runSingleGatewayPass(context, { outcome: "commit", projectId: project.id });
   const firstRuns = localRunsForProject(context, project.id);
   assertCondition(firstEvents.some((event) => event.projectId === project.id && event.state === "working"), "rejected project was not selected once");
   assertCondition(firstRuns.length === 1, `expected one rejected run, found ${firstRuns.length}`);
 
-  const secondEvents = await runSingleGatewayPass(context, { outcome: "commit" });
+  const secondEvents = await runSingleGatewayPass(context, { outcome: "commit", projectId: project.id });
   const secondRuns = localRunsForProject(context, project.id);
   assertCondition(secondEvents.some((event) => event.projectId === project.id && event.state === "suppressed"), "rejected project was not suppressed on same fingerprint");
   assertCondition(secondRuns.length === firstRuns.length, "suppressed project looped into another run");
@@ -435,7 +550,7 @@ async function runRejectedSuppressionScenario(context, { createdProjects }) {
   await context.client.updateProject(project.id, {
     description: `Human change to retrigger gateway UAT at ${new Date().toISOString()}.`,
   });
-  const thirdEvents = await runSingleGatewayPass(context, { outcome: "commit" });
+  const thirdEvents = await runSingleGatewayPass(context, { outcome: "commit", projectId: project.id });
   const thirdRuns = localRunsForProject(context, project.id);
   assertCondition(thirdEvents.some((event) => event.projectId === project.id && event.state === "working"), "human change did not retrigger ineligible project");
   assertCondition(thirdRuns.length === firstRuns.length + 1, "human change did not create exactly one new rejected run");
@@ -450,13 +565,15 @@ async function runRejectedSuppressionScenario(context, { createdProjects }) {
   };
 }
 
-async function runSingleGatewayPass(context, { outcome }) {
+async function runSingleGatewayPass(context, { outcome, projectId = null }) {
   const events = [];
   const result = await runGatewayOnce({
     repoRoot: context.repoRoot,
     config: context.config,
     registry: context.registry,
     domains: [context.domain],
+    // Scope to the scenario's project so leftover sandbox state can never be processed here.
+    ...(projectId ? { pollScope: { projectIds: [projectId] } } : {}),
     runTimeoutMs: context.timeoutMs,
     onStatus: (event) => events.push(event),
     runFreshProject: deterministicRunFreshProject({ outcome }),
@@ -548,6 +665,9 @@ async function runChildCrashGateway(options) {
     config: context.config,
     registry: context.registry,
     domains: [context.domain],
+    // Scope to the child's crash project so this single poll iteration reaches its crash point
+    // without processing unrelated stale sandbox projects first.
+    pollScope: { projectIds: [options.childProjectId] },
     pollIntervalMs: context.pollIntervalMs,
     maxIterations: 1,
     runTimeoutMs: context.timeoutMs,
@@ -603,6 +723,11 @@ function deterministicOrchestrator({ outcome }) {
     runtimeExecutor,
     orchestratorTurnExecutor: async (input = {}) => {
       turn += 1;
+      if (outcome === "failed_closed") {
+        const error = new Error("warm_continuation_unavailable: gateway UAT deterministic safety stop");
+        error.code = "warm_continuation_unavailable";
+        throw error;
+      }
       if (outcome === "commit" && turn === 1) {
         return {
           controlAction: {
@@ -736,20 +861,6 @@ function pauseProducedContent(runId, project = {}) {
       "- Question: Which disposable UAT decision should unblock this project?",
       "  Owner: Gateway UAT",
     ].join("\n"),
-    project_update_markdown: projectUpdateMarkdownForRun(runId, "Gateway UAT paused for deterministic discovery."),
-    discovery_issues: [
-      {
-        discovery_key: "gateway-uat-discovery",
-        title: "Gateway UAT discovery issue",
-        body_markdown: [
-          "Confirm the pause replay path creates discovery issues after a crash before discovery.",
-          "",
-          "Evidence: the parent UAT process killed the child before this issue could be created.",
-        ].join("\n"),
-        in_session_research: "Not applicable to deterministic gateway UAT.",
-        evidence_gap: "Live Linear replay behavior must create this issue idempotently.",
-      },
-    ],
   };
 }
 
@@ -767,11 +878,10 @@ function projectUpdateMarkdownForRun(runId, summary) {
 function createCrashController({ crashMode, projectId, notifyCrash }) {
   let mutationIntent = null;
   let crashed = false;
-  let keepAlive = null;
   const park = (payload) => {
     if (crashed) return new Promise(() => {});
     crashed = true;
-    keepAlive = setInterval(() => {}, 60_000);
+    setInterval(() => {}, 60_000);
     notifyCrash?.({
       projectId,
       runId: mutationIntent?.runId || null,
@@ -816,14 +926,27 @@ function createCrashController({ crashMode, projectId, notifyCrash }) {
           }
           if (prop === "createIssue") {
             return async (input = {}) => {
+              return value.call(target, input);
+            };
+          }
+          if (prop === "createComment") {
+            return async (commentTarget = {}, body) => {
               if (
-                crashMode === "pause_before_discovery" &&
-                input?.projectId === projectId &&
+                crashMode === "pause_before_comment" &&
+                commentTarget?.projectId === projectId &&
                 mutationIntent?.artifactKind === "pause"
               ) {
-                return park({ crashPoint: "after_pause_project_update_before_discovery_issue" });
+                return park({ crashPoint: "before_pause_project_comment" });
               }
-              return value.call(target, input);
+              const result = await value.call(target, commentTarget, body);
+              if (
+                crashMode === "pause_after_comment" &&
+                commentTarget?.projectId === projectId &&
+                mutationIntent?.artifactKind === "pause"
+              ) {
+                return park({ crashPoint: "after_pause_project_comment_before_status" });
+              }
+              return result;
             };
           }
           return typeof value === "function" ? value.bind(target) : value;
@@ -852,7 +975,7 @@ async function moveProjectToStatus(context, projectId, status, extra = {}) {
   });
 }
 
-async function cleanupProjects(context, projectIds) {
+export async function cleanupProjects(context, projectIds) {
   const results = [];
   if (context.keepArtifacts) {
     return { skipped: true, reason: "keep_artifacts", projects: [...projectIds] };
@@ -860,12 +983,21 @@ async function cleanupProjects(context, projectIds) {
   for (const projectId of [...new Set(projectIds)]) {
     try {
       const project = await context.client.getProjectContext(projectId);
-      if (isTerminalProjectStatus(project.status)) {
-        results.push({ projectId, ok: true, action: "already_terminal", status: project.status?.type || project.status?.name || null });
+      const issueResults = [];
+      for (const issue of project.issues || []) {
+        try {
+          await context.client.archiveIssue(issue.id);
+          issueResults.push({ issueId: issue.id, ok: true, action: "archived" });
+        } catch (error) {
+          issueResults.push({ issueId: issue.id, ok: false, error: error.message });
+        }
+      }
+      if (issueResults.some((result) => !result.ok)) {
+        results.push({ projectId, ok: false, action: "issue_archive_failed", issues: issueResults });
         continue;
       }
-      await moveProjectToStatus(context, projectId, "backlog");
-      results.push({ projectId, ok: true, action: "moved_to_backlog" });
+      await context.client.archiveProject(projectId);
+      results.push({ projectId, ok: true, action: "archived", issues: issueResults });
     } catch (error) {
       results.push({ projectId, ok: false, error: error.message });
     }
@@ -873,21 +1005,54 @@ async function cleanupProjects(context, projectIds) {
   return {
     skipped: false,
     ok: results.every((result) => result.ok),
+    archivedProjects: results.filter((result) => result.ok && result.action === "archived").length,
+    archivedIssues: results.reduce(
+      (count, result) => count + (result.issues || []).filter((issue) => issue.ok && issue.action === "archived").length,
+      0,
+    ),
     results,
   };
 }
 
-function assertCrashPreReplayState({ crashMode, project, shape }) {
+async function assertCrashPreReplayState({ context, crashMode, project, runId = null }) {
   if (crashMode === "before_mutation") {
-    assertCondition(matchesStatus(project.status, shape.projectStatuses.planned), "before-mutation crash moved project before replay");
+    assertCondition(matchesStatus(project.status, context.shape.projectStatuses.planned), "before-mutation crash moved project before replay");
     assertCondition((project.issues || []).length === 0, "before-mutation crash created Linear issues");
   } else if (crashMode === "commit_before_started") {
-    assertCondition(matchesStatus(project.status, shape.projectStatuses.planned), "commit crash moved project to started before replay");
+    assertCondition(matchesStatus(project.status, context.shape.projectStatuses.planned), "commit crash moved project to started before replay");
     assertCondition((project.issues || []).length > 0, "commit crash did not create issues before status update");
-  } else if (crashMode === "pause_before_discovery") {
-    assertCondition(matchesStatus(project.status, shape.projectStatuses.backlog), "pause crash did not move project to backlog before replay");
-    assertCondition((project.issues || []).length === 0, "pause crash created discovery issues before replay");
+  } else if (crashMode === "pause_before_comment" || crashMode === "pause_after_comment") {
+    assertCondition(matchesStatus(project.status, context.shape.projectStatuses.planned), "pause crash moved project before replay");
+    assertCondition((project.issues || []).length === 0, "pause crash created Linear issues before replay");
+    const comments = await appAuthoredProjectComments(context, project.id);
+    const expectedComments = crashMode === "pause_after_comment" ? 1 : 0;
+    assertCondition(
+      comments.length === expectedComments,
+      `pause crash expected ${expectedComments} app-authored project comments before replay, found ${comments.length}`,
+    );
+    const update = runId ? await context.client.findProjectUpdateByRunId(project.id, runId) : null;
+    assertCondition(!update, "pause crash created a project update before replay");
   }
+}
+
+async function assertCommentOnlyPauseState(context, { projectId, runId, initialContent, project = null }) {
+  const latestProject = project || await context.client.getProjectContext(projectId);
+  assertCondition(matchesStatus(latestProject.status, context.shape.projectStatuses.needs_principal), "pause did not move project to Principal Escalation");
+  assertCondition((latestProject.issues || []).length === 0, "pause created Linear issues");
+  assertCondition((latestProject.content || "") === (initialContent || ""), "pause rewrote the Linear project body");
+  const comments = await appAuthoredProjectComments(context, projectId);
+  assertCondition(comments.length === 1, `pause expected exactly one app-authored project comment, found ${comments.length}`);
+  assertCondition(comments[0].body.includes(`run_id:${runId}`), "pause comment did not carry the run_id marker");
+  assertCondition(comments[0].body.includes("Which disposable UAT decision should unblock this project?"), "pause comment did not carry the authored question");
+  const update = await context.client.findProjectUpdateByRunId(projectId, runId);
+  assertCondition(!update, "non-failed pause created a project update");
+}
+
+async function appAuthoredProjectComments(context, projectId) {
+  const appIdentityId = context.cache?.app_identity_id || context.shape?.cache?.app_identity_id || null;
+  assertCondition(appIdentityId, "gateway UAT cannot verify app-authored project comments without app identity cache");
+  const comments = await context.client.listComments({ projectId });
+  return (Array.isArray(comments) ? comments : []).filter((comment) => comment?.user?.id === appIdentityId);
 }
 
 async function waitForProjectStatus(context, projectId, { status, timeoutMs }) {
@@ -898,7 +1063,7 @@ async function waitForProjectStatus(context, projectId, { status, timeoutMs }) {
 }
 
 function localRunsForProject(context, projectId) {
-  const state = readLocalTriggerState(localTriggerStorePath(context.repoRoot));
+  const state = readLocalTriggerState(localTriggerStorePath());
   return state.runs.filter((run) => run.object_id === projectId);
 }
 
@@ -908,17 +1073,16 @@ function scenarioProjectName(context, slug) {
 }
 
 function testProjectContent({ name, summary }) {
-  return buildProjectTemplateBody()
-    .replace("Linear project: {project_name}", `Linear project: ${name}`)
-    .replace("## Problem Or Opportunity\n", `## Problem Or Opportunity\n${summary}\n\n`)
-    .replace("## Desired Outcome\n", "## Desired Outcome\nProve the local gateway poll and replay paths against disposable live Linear artifacts.\n\n")
-    .replace("## Acceptance Evidence\n", "## Acceptance Evidence\nThe UAT harness observes status events and terminal Linear state.\n\n");
-}
-
-function isTerminalProjectStatus(status = {}) {
-  const type = String(status?.type || "").toLowerCase();
-  const name = String(status?.name || "").toLowerCase();
-  return TERMINAL_PROJECT_STATUSES.has(type) || TERMINAL_PROJECT_STATUSES.has(name);
+  return renderPlanningBody({
+    problem: `${summary}\n\nDisposable UAT project: ${name}.`,
+    audience: "Teami maintainers validating gateway polling and replay behavior.",
+    desired_outcome: "Prove the local gateway poll and replay paths against disposable live Linear artifacts.",
+    acceptance: "The UAT harness observes status events and terminal Linear state.",
+    scope: "Gateway UAT only; use disposable test-prefixed Linear projects.",
+    constraints: "Use the bound local domain, local credentials, and the real gateway entrypoints.",
+    sources: "Generated by the gateway UAT harness.",
+    human_decisions: "None for this disposable verification run.",
+  });
 }
 
 function createNoopTraceSink() {
@@ -1090,6 +1254,11 @@ export async function main({
       stderr(`Cleanup had failures: ${JSON.stringify(report.cleanup.results)}`);
       exit(1);
       return { ok: false, stage: "cleanup", report };
+    } else {
+      stdout(
+        `Cleanup archived ${report.cleanup.archivedProjects} disposable Linear project(s) and ` +
+        `${report.cleanup.archivedIssues} issue(s).`,
+      );
     }
     stdout("GATEWAY UAT PASS");
     exit(0);
@@ -1098,7 +1267,9 @@ export async function main({
     const message = error instanceof UatUserError ? error.message : `GATEWAY UAT FAIL: ${error?.message || String(error)}`;
     stderr(message);
     if (!(error instanceof UatUserError)) {
-      stderr(`Run store: ${defaultRunStoreDir(options.repoRoot)}`);
+      stderr(options.domainId
+        ? `Run store: ${defaultRunStoreDir({ domainId: options.domainId })}`
+        : "Run store: unavailable until a domain is selected");
     }
     exit(error instanceof UatUserError && error.code === "usage" ? 2 : 1);
     return { ok: false, stage: "run", error };

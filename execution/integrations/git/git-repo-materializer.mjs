@@ -1,10 +1,11 @@
-import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { perRunTempEnv } from "../../engine/runtime-environment.mjs";
 import { registerResourceKind } from "../../engine/resource-registry.mjs";
+import { runBoundedGit } from "./bounded-subprocess.mjs";
 import { branchNameForIssue } from "./git-branch-names.mjs";
 
 const REQUIRED_GIT_REPO_BINDING_FIELDS = Object.freeze([
@@ -13,19 +14,11 @@ const REQUIRED_GIT_REPO_BINDING_FIELDS = Object.freeze([
   "default_branch",
 ]);
 
-export function defaultRunGit(args, { cwd, env, exactEnv = false } = {}) {
-  const result = spawnSync("git", args, {
-    cwd,
-    env: env ? normalizeEnv(exactEnv ? env : { ...process.env, ...env }) : process.env,
-    encoding: "utf8",
-    windowsHide: true,
+export function defaultRunGit(args, options = {}) {
+  return runBoundedGit(args, {
+    ...options,
+    env: options.env ? normalizeEnv(options.env) : undefined,
   });
-  return {
-    ok: result.status === 0,
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? result.error?.message ?? "",
-  };
 }
 
 export function validateGitRepoBinding(binding) {
@@ -74,7 +67,7 @@ export async function materializeGitRepo(resource, runContext = {}) {
     prepareGitContainmentPaths(paths);
     const resumeIntent = issueBranchResumeIntent(runContext, resource);
 
-    const clone = runGit([
+    const clone = await runGit([
       "clone",
       "--depth=1",
       "--branch",
@@ -91,7 +84,7 @@ export async function materializeGitRepo(resource, runContext = {}) {
       throw gitCommandError("git_repo_clone_failed", clone);
     }
 
-    const baseSha = resolveClonedDefaultBranchSha({
+    const baseSha = await resolveClonedDefaultBranchSha({
       defaultBranch,
       workingDir: paths.workingDir,
       runGit,
@@ -99,7 +92,7 @@ export async function materializeGitRepo(resource, runContext = {}) {
     });
 
     const resumeCheckout = resumeIntent
-      ? fetchOwnedIssueBranchHead({
+      ? await fetchOwnedIssueBranchHead({
           intent: resumeIntent,
           remoteUrl,
           workingDir: paths.workingDir,
@@ -108,8 +101,8 @@ export async function materializeGitRepo(resource, runContext = {}) {
         })
       : null;
 
-    removeAllRemotes({ runGit, workingDir: paths.workingDir, gitOptions });
-    neutralizeRepoLocalConfig({
+    await removeAllRemotes({ runGit, workingDir: paths.workingDir, gitOptions });
+    await neutralizeRepoLocalConfig({
       runGit,
       workingDir: paths.workingDir,
       hooksPath: paths.hooksPath,
@@ -118,13 +111,16 @@ export async function materializeGitRepo(resource, runContext = {}) {
 
     const checkoutTarget = resumeCheckout?.headSha || baseSha;
     const checkout = resumeCheckout
-      ? runGit(["checkout", "-B", resumeCheckout.branch, checkoutTarget], gitOptions(paths.workingDir))
-      : runGit(["checkout", "--detach", checkoutTarget], gitOptions(paths.workingDir));
+      ? await runGit(["checkout", "-B", resumeCheckout.branch, checkoutTarget], gitOptions(paths.workingDir))
+      : await runGit(["checkout", "--detach", checkoutTarget], gitOptions(paths.workingDir));
     if (!checkout.ok) {
       throw gitCommandError("git_repo_checkout_failed", checkout);
     }
 
-    const head = runGit(["rev-parse", "HEAD"], gitOptions(paths.workingDir));
+    const head = await runGit(["rev-parse", "HEAD"], {
+      ...gitOptions(paths.workingDir),
+      operation: "git_read",
+    });
     if (!head.ok) {
       throw gitCommandError("git_repo_base_sha_failed", head);
     }
@@ -198,7 +194,7 @@ export function resolveGitRepoRemoteUrl({ resource, repoIdentity, runContext = {
   return nonEmptyString(runContext.gitRemoteUrlOverride) || gitRepoRemoteUrl(repoIdentity);
 }
 
-function resolveClonedDefaultBranchSha({
+async function resolveClonedDefaultBranchSha({
   defaultBranch,
   workingDir,
   runGit,
@@ -212,7 +208,10 @@ function resolveClonedDefaultBranchSha({
   ];
   let lastResult = null;
   for (const ref of probes) {
-    const result = runGit(["rev-parse", "--verify", ref], gitOptions(workingDir));
+    const result = await runGit(["rev-parse", "--verify", ref], {
+      ...gitOptions(workingDir),
+      operation: "git_read",
+    });
     if (result.ok && result.stdout.trim() !== "") return result.stdout.trim();
     lastResult = result;
   }
@@ -235,14 +234,14 @@ function issueBranchResumeIntent(runContext = {}, resource = null) {
   return { branch, headSha, treeSha };
 }
 
-function fetchOwnedIssueBranchHead({
+async function fetchOwnedIssueBranchHead({
   intent,
   remoteUrl,
   workingDir,
   runGit,
   gitOptions,
 }) {
-  const fetch = runGit([
+  const fetch = await runGit([
     "fetch",
     "--depth=1",
     "--no-tags",
@@ -251,16 +250,60 @@ function fetchOwnedIssueBranchHead({
   ], gitOptions(workingDir));
   if (!fetch.ok) throw gitCommandError("git_repo_issue_branch_fetch_failed", fetch);
 
-  const head = runGit(["rev-parse", "FETCH_HEAD^{commit}"], gitOptions(workingDir));
+  const head = await runGit(["rev-parse", "FETCH_HEAD^{commit}"], {
+    ...gitOptions(workingDir),
+    operation: "git_read",
+  });
   if (!head.ok) throw gitCommandError("git_repo_issue_branch_head_probe_failed", head);
   const headSha = head.stdout.trim();
-  const tree = runGit(["rev-parse", "FETCH_HEAD^{tree}"], gitOptions(workingDir));
+  const tree = await runGit(["rev-parse", "FETCH_HEAD^{tree}"], {
+    ...gitOptions(workingDir),
+    operation: "git_read",
+  });
   if (!tree.ok) throw gitCommandError("git_repo_issue_branch_tree_probe_failed", tree);
   const treeSha = tree.stdout.trim();
-  if (headSha !== intent.headSha || (intent.treeSha && treeSha !== intent.treeSha)) {
+  if (headSha === intent.headSha) {
+    if (intent.treeSha && treeSha !== intent.treeSha) {
+      throw new Error("git_repo_remote_branch_not_owned");
+    }
+    return { branch: intent.branch, headSha, treeSha };
+  }
+  // A head that strictly descends from the factory's recorded head means the
+  // factory's work is intact underneath additions a person pushed — resume on
+  // top of them. Anything else (rewind, rewrite, unrelated history) fails
+  // closed: the factory never builds on states it cannot account for.
+  if (!await remoteHeadDescendsFromIntent({ intent, headSha, remoteUrl, workingDir, runGit, gitOptions })) {
     throw new Error("git_repo_remote_branch_not_owned");
   }
   return { branch: intent.branch, headSha, treeSha };
+}
+
+async function remoteHeadDescendsFromIntent({
+  intent,
+  headSha,
+  remoteUrl,
+  workingDir,
+  runGit,
+  gitOptions,
+}) {
+  // The resume fetch is depth-1; ancestry needs the branch's history.
+  const shallow = await runGit(["rev-parse", "--is-shallow-repository"], {
+    ...gitOptions(workingDir),
+    operation: "git_read",
+  });
+  const deepen = await runGit([
+    "fetch",
+    "--no-tags",
+    ...(shallow.ok && shallow.stdout.trim() === "true" ? ["--unshallow"] : []),
+    remoteUrl,
+    `refs/heads/${intent.branch}`,
+  ], gitOptions(workingDir));
+  if (!deepen.ok) return false;
+  const ancestry = await runGit(["merge-base", "--is-ancestor", intent.headSha, headSha], {
+    ...gitOptions(workingDir),
+    operation: "git_read",
+  });
+  return ancestry.ok === true;
 }
 
 // Remove the now-empty per-run wrapper dir (workspaceRoot/<runId>) after a
@@ -297,11 +340,25 @@ export function gitRepoWorkerEnvAugment(paths = {}) {
   return {
     HOME: paths.homeDir,
     USERPROFILE: paths.homeDir,
+    // Windows per-user app-data roots follow the redirected profile:
+    // PowerShell inside a codex worker resolves its ModuleAnalysisCache from
+    // these, and with the profile redirected but these names left ambient it
+    // falls back to a working-directory-relative path that the commit
+    // effect's `git add -A` sweeps into the run's diff (observed live
+    // 2026-07-05). Shaped as the profile's real AppData layout so
+    // profile-derived resolution lands in engine-owned space too; both names
+    // are set on every platform, same as the per-run temp redirect.
+    LOCALAPPDATA: paths.localAppDataDir,
+    APPDATA: paths.appDataDir,
     XDG_CONFIG_HOME: paths.xdgConfigHome,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: paths.globalConfigPath,
     GIT_TEMPLATE_DIR: paths.templateDir,
     GIT_TERMINAL_PROMPT: "0",
+    // Engine-owned per-run temp: keeps the run's children (the codex worker's
+    // workspace-write sandbox setup above all) hermetic against host temp
+    // state. Lives under runDir, so run teardown removes it with the clone.
+    ...perRunTempEnv(paths.tmpDir),
   };
 }
 
@@ -339,15 +396,20 @@ function gitRepoMaterializationPaths({ resource, runContext }) {
     leaf,
   );
   const envDir = path.join(runDir, "git-env");
+  const homeDir = path.join(envDir, "home");
   return {
     runDir,
     workingDir: path.join(runDir, "checkout"),
     envDir,
-    homeDir: path.join(envDir, "home"),
+    homeDir,
+    localAppDataDir: path.join(homeDir, "AppData", "Local"),
+    appDataDir: path.join(homeDir, "AppData", "Roaming"),
     xdgConfigHome: path.join(envDir, "xdg"),
     templateDir: path.join(envDir, "template"),
     hooksPath: path.join(envDir, "empty-hooks"),
     globalConfigPath: path.join(envDir, "gitconfig"),
+    // Outside the checkout so temp files can never land in the worker's diff.
+    tmpDir: path.join(runDir, "tmp"),
   };
 }
 
@@ -366,44 +428,50 @@ function nonEmptyString(value) {
 function prepareGitContainmentPaths(paths) {
   fs.mkdirSync(paths.runDir, { recursive: true });
   fs.mkdirSync(paths.homeDir, { recursive: true });
+  fs.mkdirSync(paths.localAppDataDir, { recursive: true });
+  fs.mkdirSync(paths.appDataDir, { recursive: true });
   fs.mkdirSync(paths.xdgConfigHome, { recursive: true });
   fs.mkdirSync(paths.templateDir, { recursive: true });
   fs.mkdirSync(paths.hooksPath, { recursive: true });
+  fs.mkdirSync(paths.tmpDir, { recursive: true });
   fs.writeFileSync(paths.globalConfigPath, "", { encoding: "utf8" });
 }
 
-function removeAllRemotes({ runGit, workingDir, gitOptions }) {
-  const remotes = runGit(["remote"], gitOptions(workingDir));
+async function removeAllRemotes({ runGit, workingDir, gitOptions }) {
+  const remotes = await runGit(["remote"], {
+    ...gitOptions(workingDir),
+    operation: "git_read",
+  });
   if (!remotes.ok) {
     throw gitCommandError("git_repo_remote_list_failed", remotes);
   }
   for (const remote of remotes.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
-    const removed = runGit(["remote", "remove", remote], gitOptions(workingDir));
+    const removed = await runGit(["remote", "remove", remote], gitOptions(workingDir));
     if (!removed.ok) {
       throw gitCommandError("git_repo_remote_remove_failed", removed);
     }
   }
 }
 
-function neutralizeRepoLocalConfig({ runGit, workingDir, hooksPath, gitOptions }) {
-  runGit(["config", "--local", "--unset-all", "credential.helper"], gitOptions(workingDir));
-  const credentialReset = runGit(["config", "--local", "--replace-all", "credential.helper", ""], gitOptions(workingDir));
+async function neutralizeRepoLocalConfig({ runGit, workingDir, hooksPath, gitOptions }) {
+  await runGit(["config", "--local", "--unset-all", "credential.helper"], gitOptions(workingDir));
+  const credentialReset = await runGit(["config", "--local", "--replace-all", "credential.helper", ""], gitOptions(workingDir));
   if (!credentialReset.ok) {
     throw gitCommandError("git_repo_credential_helper_reset_failed", credentialReset);
   }
 
-  runGit(["config", "--local", "--unset-all", "http.extraHeader"], gitOptions(workingDir));
-  const insteadOfKeys = runGit(
+  await runGit(["config", "--local", "--unset-all", "http.extraHeader"], gitOptions(workingDir));
+  const insteadOfKeys = await runGit(
     ["config", "--local", "--name-only", "--get-regexp", "^url\\..*\\.insteadOf$"],
     gitOptions(workingDir),
   );
   if (insteadOfKeys.ok) {
     for (const key of insteadOfKeys.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
-      runGit(["config", "--local", "--unset-all", key], gitOptions(workingDir));
+      await runGit(["config", "--local", "--unset-all", key], gitOptions(workingDir));
     }
   }
 
-  const hooksOff = runGit(["config", "--local", "--replace-all", "core.hooksPath", hooksPath], gitOptions(workingDir));
+  const hooksOff = await runGit(["config", "--local", "--replace-all", "core.hooksPath", hooksPath], gitOptions(workingDir));
   if (!hooksOff.ok) {
     throw gitCommandError("git_repo_hooks_path_reset_failed", hooksOff);
   }

@@ -1,11 +1,17 @@
 import { createInterface } from "node:readline/promises";
 import { Buffer } from "node:buffer";
 
-import { writeLinearCache } from "../cache.mjs";
+import { readLinearCache, writeLinearCache } from "../cache.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
+import {
+  ensureTrustedClaudeMarketplace,
+  readClaudePluginHealth,
+} from "../claude-plugin-health.mjs";
 import { normalizeDoctorChecks } from "../doctor-check.mjs";
 import { buildDomainContext } from "../domain-resolver.mjs";
 import {
   emptyDomainRegistry,
+  mintDomainId,
   readDomainRegistry,
   upsertDomainRecord,
   writeDomainRegistry,
@@ -16,59 +22,89 @@ import {
   readGitHubConnectionState,
   runGitHubInitPhase,
 } from "../github-setup.mjs";
-import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
+import {
+  authorizeOneShotLinearAdmin,
+  createLinearSetupGraphqlClient,
+} from "../linear-setup-auth.mjs";
 import {
   declaredWorkspaceFromResumeDomain,
   isWorkspaceMismatchError,
   knownRegistryWorkspaces,
   resolveLinearSetupWorkspace,
+  setupCompleteDomainForName,
   setupIncompleteDomainForName,
   setupLinearDomain,
   verifyDeclaredWorkspace,
   workspaceLabel,
 } from "../linear-service.mjs";
+import { domainNameMatchesRegistryDomain } from "../linear/matching-utils.mjs";
+import { createLinearCredentialStore } from "../linear-credential-store.mjs";
 import {
   ensurePhoenixReady,
 } from "../local-phoenix-manager.mjs";
 import {
   runLocalPhoenixTracePreflight,
 } from "../local-phoenix-trace-sink.mjs";
-import {
-  formatLocalSupervisorRegistrationReport,
-  LOCAL_SUPERVISOR_CONSENT_FLAG,
-  registerLocalSupervisorStub,
-} from "../local-supervisor.mjs";
+import { isLinearOAuthWaitEscapedError } from "../linear-oauth.mjs";
+export {
+  OAUTH_CALLBACK_LISTENER,
+  oauthFirewallHint,
+} from "../linear-oauth.mjs";
 import { runRuntimeSmokeChecks } from "../runtime-smoke.mjs";
+import {
+  SETUP_DISCLOSURE_HASH,
+  SETUP_DISCLOSURE_VERSION,
+  createSetupStateStore,
+  runSetupCompletionContract,
+  setupEffectsDisclosure,
+  verifySetupConsent,
+} from "../setup-orchestrator.mjs";
 import { createCliOutput } from "./cli-output.mjs";
 import { doctorGraphqlLinear } from "./doctor-command.mjs";
+import { renderFirstRunUx } from "./first-run-ux.mjs";
 import { renderDoctorCheckLine } from "./doctor-report.mjs";
-import { hasCliFlag, parseCliFlags } from "./flags.mjs";
+import { parseCliFlags } from "./flags.mjs";
 import {
   configWithGithubFlags,
   githubFailureTitle,
   githubSetupTransportFromFlags,
 } from "./github-command-options.mjs";
+import { homeStateProbe } from "./home-state.mjs";
 import {
   createBootstrapLinearCredentialStore,
   promoteSetupCredentialToDomain,
 } from "./local-setup-cleanup.mjs";
-import { formatCommand } from "./operator-output.mjs";
+import {
+  completeDomainTeamMissingRecoveryFromError,
+  formatCommand,
+} from "./operator-output.mjs";
 import {
   gitRepoResourceId,
   registerGitRepoResourceKind,
 } from "../../../git/git-repo-materializer.mjs";
 
 const GITHUB_REPO_DISCOVERY_LIMIT = 50;
+const PROJECT_NEEDS_PRINCIPAL_STATUS_NAME = "Principal Escalation";
+const PROJECT_NEEDS_PRINCIPAL_STATUS_TYPE = "planned";
+const PROJECT_NEEDS_PRINCIPAL_STATUS_COLOR = "#F2994A";
+const PROJECT_PLANNED_STATUS_NAME = "Planned";
+const PROJECT_STATUS_POSITION_INCREMENT = 0.01;
+const PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR_CODE = "PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR";
+const CLAUDE_PLUGIN_NAME = "teami";
+const CLAUDE_PLUGIN_MARKETPLACE = "teami";
+const CLAUDE_PLUGIN_SCOPE = "user";
+const PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE = "https://github.com/shulmansj/teami";
+const ADMIN_REVOCATION_REPAIR = "open Linear Settings -> Applications and revoke Teami access. Linear cannot prove revocation of a lost token through a fresh token, so Teami will not clear this marker automatically. After external revocation, uninstall the blocked local state and start setup again.";
 
 const LINEAR_SETUP_COMMAND_OPTIONS = Object.freeze({
   "domain:add": {
-    intro: "Teami will add a domain to the same factory and learning loop, then ask Linear for read/write browser authorization for that domain's workspace.",
+    intro: "Teami will add a domain to the same factory and learning loop, then ask Linear for read/write browser authorization for that domain's workspace. If Principal Escalation is missing, setup asks once for admin approval to create that one project status.",
     prompt: "Domain name to add to this factory and learning loop: ",
     readyLabel: "Domain",
     runGithubPhase: false,
   },
   init: {
-    intro: "Teami will ask Linear for read/write browser authorization to verify setup and post project updates. No API key is required.",
+    intro: "Teami will ask Linear for read/write browser authorization to verify setup and post project updates. If Principal Escalation is missing, setup asks once for admin approval to create that one project status. No API key is required.",
     prompt: "First domain name: ",
     readyLabel: "First domain",
     runGithubPhase: true,
@@ -76,18 +112,375 @@ const LINEAR_SETUP_COMMAND_OPTIONS = Object.freeze({
 });
 
 export async function runLinearSetupCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, output = createCliOutput() } = context;
+  const output = context?.output || createCliOutput();
+  const home = context?.home || resolveTeamiHome();
+  // Reject malformed flags before asking for authority; validation itself has no effects.
+  const { flags: setupFlags } = parseCliFlags(args || []);
+  explicitWorkspaceExpectation(setupFlags, process.env);
+  const consent = await confirmCliSetupEffects({ context, output });
+  if (!consent.ok) {
+    process.exitCode = 1;
+    return consent;
+  }
+  const setupStore = context?.setupStateStore || createSetupStateStore({ home });
+  let existingAdminMarker = setupStore.readAdminRevocationRequirement?.() ||
+    setupStore.readGlobalAdminRevocationRequired?.();
+  if (existingAdminMarker && setupFlags["repair-admin-revocation"] === true) {
+    output.error({
+      what: "The prior Linear admin token cannot be verified from Teami",
+      why: "Revoking a fresh token would revoke only that token, not prove the interrupted token is gone.",
+      fix: ADMIN_REVOCATION_REPAIR,
+    });
+    process.exitCode = 1;
+    return { ok: false, status: "blocked", reason: "prior_admin_revocation_not_verifiable" };
+  }
+  if (existingAdminMarker) {
+    output.error({
+      what: "One-time Linear admin revocation is unverified",
+      why: "Teami will not start or claim setup complete while a prior admin grant may still be active.",
+      fix: ADMIN_REVOCATION_REPAIR,
+    });
+    process.exitCode = 1;
+    return { ok: false, status: "blocked", reason: "admin_revocation_required" };
+  }
+  if (command === "init") {
+    return runCliSharedOnboarding({
+      context: { ...(context || {}), output, home, setupStateStore: setupStore },
+      args,
+      output,
+      consent,
+    });
+  }
+  const setupLock = setupStore.acquire({ purpose: "setup" });
+  if (!setupLock.ok) {
+    output.error({
+      what: "Another Teami setup is already in progress",
+      why: "CLI and conversational setup share one exclusive setup writer.",
+      fix: "wait for the other setup to finish, then retry this command.",
+    });
+    process.exitCode = 1;
+    return { ok: false, status: "blocked", reason: "setup_lock_held", lock_reason: setupLock.reason || null };
+  }
+  try {
+    const activeSetup = setupStore.findActive?.();
+    if (activeSetup) {
+      output.error({
+        what: "A conversational setup is waiting for authorization",
+        why: "Teami keeps one setup owner at a time so CLI and conversational setup cannot interleave effects.",
+        fix: `resume setup ${activeSetup.setup_id} in the agent, or wait for that authorization session to expire.`,
+      });
+      process.exitCode = 1;
+      return {
+        ok: false,
+        status: "blocked",
+        reason: "setup_session_active",
+        setup_id: activeSetup.setup_id,
+      };
+    }
+    const result = await runLinearSetupCommandImpl({
+      context: { ...(context || {}), output, home, setupStateStore: setupStore },
+      command,
+      args,
+    });
+    if (setupStore.readGlobalAdminRevocationRequired?.()) {
+      output.error({
+        what: "One-time Linear admin revocation could not be verified",
+        why: "The admin token was discarded, but Teami did not receive proof that remote revocation succeeded.",
+        fix: ADMIN_REVOCATION_REPAIR,
+      });
+      process.exitCode = 1;
+      return { ok: false, status: "blocked", reason: "admin_revocation_required" };
+    }
+    return result;
+  } catch (error) {
+    const recovery = completeDomainTeamMissingRecoveryFromError(error);
+    if (!recovery) throw error;
+    output.error({
+      what: recovery.what,
+      why: recovery.why,
+      fix: recovery.fix,
+    });
+    process.exitCode = 1;
+    return { ok: false, status: "blocked", reason: recovery.code || "linear_setup_failed" };
+  } finally {
+    setupLock.release();
+  }
+}
+
+async function runCliSharedOnboarding({ context, args, output, consent } = {}) {
+  const { config, repoRoot, home, setupStateStore } = context;
+  const active = setupStateStore.findActive?.();
+  if (active) {
+    output.error({
+      what: "A conversational setup is waiting for authorization",
+      why: "Teami keeps one setup owner at a time so CLI and conversational setup cannot interleave effects.",
+      fix: `resume setup ${active.setup_id} in the agent, or wait for that authorization session to expire.`,
+    });
+    process.exitCode = 1;
+    return { ok: false, status: "blocked", reason: "setup_session_active", setup_id: active.setup_id };
+  }
+  const { flags } = parseCliFlags(args || []);
+  const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
+  const resolution = resolveSetupCommandDomainNameHint(args || [], registry);
+  const implicitResumeDomain = resolution.completeResumeDomain || resolution.resumeDomain ||
+    resolveGitHubPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) ||
+    resolveClaudePluginPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) || null;
+  const domainName = resolution.domainNameHint ||
+    (implicitResumeDomain ? domainNameForResumeDomain(implicitResumeDomain) : null) ||
+    await resolveInitDomainName(args || [], { command: "init" });
+  const resumeDomain = implicitResumeDomain;
+  const priorDomain = registry.domains.find((domain) =>
+    String(domain?.adopter_provided_name || domain?.id || "").trim().toLowerCase() ===
+      String(domainName).trim().toLowerCase());
+  const workspaceHint = flags.workspace || resumeDomain?.linear?.workspace_id ||
+    priorDomain?.linear?.workspace_id || null;
+  const existingRepos = (resumeDomain?.resources || [])
+    .filter((resource) => resource?.kind === "git_repo")
+    .map((resource) => repoLabel(resource.binding));
+  let repoIntent;
+  if (resumeDomain) {
+    repoIntent = existingRepos.length > 0
+      ? { mode: "allowlist", repos: existingRepos }
+      : { mode: "non_code" };
+  } else {
+    const selection = await discoverAndConfirmDomainGitHubRepos({
+      output,
+      runCommand: context.githubDiscoveryRunCommand || context.runCommand || defaultRunCommand,
+      prompt: context.githubRepoAllowlistPrompt || promptLine,
+      isTTY: "isTTY" in context ? Boolean(context.isTTY) : Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    });
+    if (!selection.confirmed) {
+      process.exitCode = 1;
+      return { ok: false, status: "blocked", reason: selection.reason || "repo_intent_not_confirmed" };
+    }
+    repoIntent = selection.selectedRepos.length > 0
+      ? { mode: "allowlist", repos: selection.selectedRepos.map(repoLabel) }
+      : { mode: "non_code" };
+  }
+
+  const {
+    createProjectMcpToolActions,
+    ProjectMcpToolError,
+  } = await import("../project-mcp-tools.mjs");
+  const actionOptions = {
+    repoRoot,
+    config,
+    home,
+    setupStateStore,
+    ...(context.createLinearSetupAuth ? { createLinearSetupAuth: context.createLinearSetupAuth } : {}),
+    ...(context.startLinearBrowserAuthorization
+      ? { startLinearBrowserAuthorization: context.startLinearBrowserAuthorization }
+      : {}),
+    ...(context.authorizeOneShotLinearAdmin
+      ? {
+          authorizeOneShotAdmin: async () => {
+            throw new ProjectMcpToolError(
+              "admin_consent_required",
+              "Explicit just-in-time confirmation is required before one-shot Linear admin authorization.",
+            );
+          },
+        }
+      : {}),
+    ...(context.startOneShotLinearAdminAuthorization
+      ? { startOneShotAdminAuthorization: context.startOneShotLinearAdminAuthorization }
+      : context.authorizeOneShotLinearAdmin
+        ? {
+            startOneShotAdminAuthorization: async (options) => ({
+              authorizationUrl: "https://linear.app/settings/api/applications",
+              expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+              browser: { opened: true, reason: null },
+              waitForGrant: () => context.authorizeOneShotLinearAdmin(options),
+              close() {},
+            }),
+          }
+        : {}),
+    ...(context.openBrowser ? { openBrowser: context.openBrowser } : {}),
+    ...(context.fetchImpl ? { fetchImpl: context.fetchImpl } : {}),
+    ...(context.runGitHubInitPhase ? { runGitHubPhase: context.runGitHubInitPhase } : {}),
+    ...(context.githubInitTransportFromFlags
+      ? { githubInitTransportFromFlags: context.githubInitTransportFromFlags }
+      : {}),
+    ...(context.githubSetupTransport ? { githubSetupTransport: context.githubSetupTransport } : {}),
+    githubDiscoveryRunCommand: context.githubDiscoveryRunCommand || context.runCommand || null,
+    ...(context.runGit ? { runGit: context.runGit } : {}),
+    ...(context.runClaudePluginRegistrationStep
+      ? { runClaudePluginRegistration: context.runClaudePluginRegistrationStep }
+      : {}),
+    ...(context.claudePluginRunCommand ? { claudePluginRunCommand: context.claudePluginRunCommand } : {}),
+    claudePluginMarketplaceSource: context.claudePluginMarketplaceSource ||
+      PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE,
+    ...(context.ensurePhoenixReady ? { ensurePhoenix: context.ensurePhoenixReady } : {}),
+    ...(context.runLocalPhoenixTracePreflight
+      ? { runPhoenixPreflight: context.runLocalPhoenixTracePreflight }
+      : {}),
+  };
+  if (context.finalGate && !context.runSmoke && !context.runDoctor) {
+    let gatePromise = null;
+    const gate = () => {
+      gatePromise ||= context.finalGate({ config, repoRoot, home });
+      return gatePromise;
+    };
+    actionOptions.runRuntimeSmoke = async () => {
+      const result = await gate();
+      return { ok: result?.smokeOk ?? result?.ok ?? false, results: [] };
+    };
+    actionOptions.runSetupDoctor = async () => {
+      const result = await gate();
+      return [{
+        name: "injected final gate",
+        ok: result?.doctorOk ?? result?.ok ?? false,
+        message: result?.ok ? "verified" : "failed",
+      }];
+    };
+    actionOptions.ensurePhoenix = async () => ({
+      ok: true,
+      appUrl: "http://127.0.0.1:6006",
+      collectorUrl: "http://127.0.0.1:6006/v1/traces",
+    });
+    actionOptions.runPhoenixPreflight = async () => ({ ok: true, traceId: "injected-final-gate" });
+  } else {
+    if (context.runSmoke) actionOptions.runRuntimeSmoke = context.runSmoke;
+    if (context.runDoctor) actionOptions.runSetupDoctor = context.runDoctor;
+  }
+  const actions = createProjectMcpToolActions(actionOptions);
+  const callOnboarding = async (input) => {
+    const timeoutMs = context.sharedSetupCallTimeoutMs || 5 * 60 * 1000;
+    let timer;
+    return Promise.race([
+      actions.init_onboarding(input),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({
+          ok: false,
+          status: "blocked",
+          setup_id: input.setup_id || null,
+          reason: "shared_setup_call_timeout",
+          repair: "Retry setup; the current phase exceeded its bounded local wait.",
+        }), timeoutMs);
+        timer.unref?.();
+      }),
+    ]).finally(() => clearTimeout(timer));
+  };
+  let result = await callOnboarding({
+    domain: domainName,
+    ...(workspaceHint ? { workspace: workspaceHint } : {}),
+    repo_intent: repoIntent,
+    ...(flags["github-owner"] ? { github_owner: flags["github-owner"] } : {}),
+    ...(flags["github-repo"] ? { github_repo: flags["github-repo"] } : {}),
+    ...(flags["github-dry-run"] === true ? { github_dry_run: true } : {}),
+    confirm: true,
+    disclosure_version: consent.version,
+    disclosure_hash: consent.hash,
+  });
+  const shownUrls = new Set();
+  const pollDeadline = Date.now() + (context.authorizationPollTimeoutMs || 15 * 60 * 1000);
+  while (["awaiting_authorization", "admin_consent_required"].includes(result?.status)) {
+    if (Date.now() >= pollDeadline) {
+      result = {
+        ok: false,
+        status: "blocked",
+        setup_id: result?.setup_id,
+        reason: `cli_authorization_poll_timeout:${result?.authorization?.kind || result?.status || "unknown"}`,
+        repair: "Open the displayed authorization URL or restart setup for a fresh callback session.",
+      };
+      break;
+    }
+    if (result.authorization_url && !shownUrls.has(result.authorization_url)) {
+      shownUrls.add(result.authorization_url);
+      output.info(`Linear authorization: ${result.authorization_url}`);
+    }
+    if (result.status === "admin_consent_required") {
+      const answer = await (context.promptAdminProvisioning || promptLine)(
+        "Type YES to approve the one-time Linear admin grant now: ",
+      );
+      if (String(answer || "").trim() !== "YES") {
+        process.exitCode = 1;
+        return { ...result, ok: false, status: "blocked", reason: "one_shot_admin_consent_declined" };
+      }
+      result = await callOnboarding({ setup_id: result.setup_id, admin_confirm: true });
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    result = await callOnboarding({ setup_id: result.setup_id });
+  }
+  for (const line of result?.progress || []) output.detail(line);
+  if (result?.ok) {
+    output.success("Setup verified.");
+    process.exitCode = 0;
+  } else {
+    output.error({
+      what: "Setup remains incomplete",
+      why: result?.error?.message || result?.reason || result?.status || "setup_failed",
+      fix: result?.error?.repair || result?.repair || `repair the reported phase, then rerun ${formatCommand("init")}; setup is resumable.`,
+    });
+    process.exitCode = 1;
+  }
+  return result;
+}
+
+export async function confirmCliSetupEffects({ context = {}, output = createCliOutput() } = {}) {
+  const disclosure = setupEffectsDisclosure();
+  output.section("Setup effects and access");
+  output.detail(`Disclosure ${disclosure.version} (${disclosure.hash})`);
+  for (const effect of disclosure.effects) {
+    output.info(effect.title);
+    output.detail(`Change: ${effect.detail}`);
+    output.detail(`Approval: ${effect.authority}`);
+    output.detail(`Kept after setup: ${effect.retention}`);
+  }
+
+  let confirmed = false;
+  if (typeof context.confirmSetupEffects === "function") {
+    confirmed = await context.confirmSetupEffects(disclosure) === true;
+  } else {
+    const isTTY = "isTTY" in context
+      ? Boolean(context.isTTY)
+      : Boolean(process.stdin.isTTY && process.stdout.isTTY);
+    if (isTTY) {
+      const answer = await (context.promptSetupEffects || promptLine)(
+        `Type YES to accept disclosure ${SETUP_DISCLOSURE_VERSION} (${SETUP_DISCLOSURE_HASH}): `,
+      );
+      confirmed = String(answer || "").trim() === "YES";
+    }
+  }
+
+  const consent = verifySetupConsent({
+    confirm: confirmed,
+    disclosureVersion: SETUP_DISCLOSURE_VERSION,
+    disclosureHash: SETUP_DISCLOSURE_HASH,
+  });
+  if (!consent.ok) {
+    output.error({
+      what: "Setup effects were not confirmed",
+      why: "Teami changes Linear, GitHub, Claude plugin, and local runtime state only after explicit disclosure-bound consent.",
+      fix: "run setup from an interactive terminal and type YES after reviewing the effects.",
+    });
+  }
+  return consent;
+}
+
+async function runLinearSetupCommandImpl({ context, command, args }) {
+  const { config, repoRoot, home = resolveTeamiHome(), cachePath, output = createCliOutput() } = context;
     const commandOptions = LINEAR_SETUP_COMMAND_OPTIONS[command] || LINEAR_SETUP_COMMAND_OPTIONS.init;
     const initArgs = args;
     const { flags: initFlags } = parseCliFlags(initArgs);
-    const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
+    const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
     const domainNameResolution = resolveSetupCommandDomainNameHint(initArgs, registry);
     const domainNameHint = domainNameResolution.domainNameHint;
-    const githubResumeDomain = commandOptions.runGithubPhase
-      ? resolveGitHubPhaseResumeDomain({ args: initArgs, registry, repoRoot })
+    const completeResumeDomain = domainNameResolution.completeResumeDomain || null;
+    const completeResumeContext = completeResumeDomain
+      ? buildDomainContext({ domain: completeResumeDomain, config, repoRoot, home })
       : null;
-    const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
-    const totalSteps = commandOptions.runGithubPhase ? 2 : 1;
+    const githubResumeDomain = commandOptions.runGithubPhase
+      ? resolveGitHubPhaseResumeDomain({ args: initArgs, registry, repoRoot, home })
+      : null;
+    const claudePluginResumeDomain = commandOptions.runGithubPhase && !githubResumeDomain
+      ? resolveClaudePluginPhaseResumeDomain({ args: initArgs, registry, repoRoot, home })
+      : null;
+    const credentialStore = completeResumeContext
+      ? createLinearCredentialStore({ config, repoRoot, domainContext: completeResumeContext })
+      : createBootstrapLinearCredentialStore({ config, repoRoot });
+    const totalSteps = commandOptions.runGithubPhase ? 3 : 1;
+    const authorizeOneShotAdmin = createCliOneShotAdminAuthorization({ context });
     output.heading(`Teami ${output.symbols.separator} setup`);
     output.detail(commandOptions.intro);
     if (githubResumeDomain) {
@@ -100,20 +493,69 @@ export async function runLinearSetupCommand({ context, command, args }) {
       output.info("Linear connected.");
       const githubOk = await runGitHubInitStep({
         repoRoot,
+        home,
         config,
         initFlags,
         output,
         totalSteps,
       });
       if (!githubOk) return;
+      const claudePluginOk = await runClaudePluginInitStep({ context, repoRoot, output, totalSteps });
+      if (!claudePluginOk) return;
+      const phoenix = await runCliPhoenixSetupPhase({
+        context,
+        repoRoot,
+        output,
+        domainContext: buildDomainContext({ domain: githubResumeDomain, config, repoRoot, home }),
+      });
       await finishSetupOutput({
         output,
         commandOptions,
-        phoenixAppUrl: null,
+        phoenixAppUrl: phoenix.appUrl,
+        phoenixOk: phoenix.ok,
         config,
         repoRoot,
+        home,
         cachePath,
         domainId: githubResumeDomain.id,
+        finalGate: context.finalGate,
+        runSmoke: context.runSmoke,
+        runDoctor: context.runDoctor,
+      });
+      return;
+    }
+    if (claudePluginResumeDomain) {
+      output.step(1, totalSteps, "Connect Linear");
+      output.info(
+        `Linear already connected for domain "${domainNameForResumeDomain(claudePluginResumeDomain)}" in workspace ${workspaceLabel(claudePluginResumeDomain.linear)}.`,
+      );
+      output.success(`Workspace: ${workspaceLabel(claudePluginResumeDomain.linear)}`);
+      output.success(`Team "${claudePluginResumeDomain.linear?.team_name || domainNameForResumeDomain(claudePluginResumeDomain)}" already connected`);
+      output.info("Linear connected.");
+      output.step(2, totalSteps, "Connect GitHub");
+      output.info("GitHub already connected.");
+      output.info("GitHub connected.");
+      const claudePluginOk = await runClaudePluginInitStep({ context, repoRoot, output, totalSteps });
+      if (!claudePluginOk) return;
+      const phoenix = await runCliPhoenixSetupPhase({
+        context,
+        repoRoot,
+        output,
+        domainContext: buildDomainContext({ domain: claudePluginResumeDomain, config, repoRoot, home }),
+      });
+      await finishSetupOutput({
+        output,
+        commandOptions,
+        phoenixAppUrl: phoenix.appUrl,
+        phoenixOk: phoenix.ok,
+        config,
+        repoRoot,
+        home,
+        cachePath,
+        domainId: claudePluginResumeDomain.id,
+        finalGate: context.finalGate,
+        runSmoke: context.runSmoke,
+        runDoctor: context.runDoctor,
       });
       return;
     }
@@ -126,59 +568,101 @@ export async function runLinearSetupCommand({ context, command, args }) {
       if (domainNameResolution.resumeDomain.setup_incomplete_cause) {
         output.info(`Previous setup stopped at: ${domainNameResolution.resumeDomain.setup_incomplete_cause}`);
       }
+    } else if (completeResumeDomain) {
+      output.info(
+        `Refreshing existing domain "${domainNameForResumeDomain(completeResumeDomain)}" in Linear workspace ${workspaceLabel(completeResumeDomain.linear)}.`,
+      );
     }
     explicitWorkspaceExpectation(initFlags, process.env);
     const domainName = domainNameHint || await resolveInitDomainName(initArgs, { command });
+    const setupRegistry = registryWithoutRemovedDomainsForName(registry, domainName);
     const linearProgress = createLinearSetupProgress(output);
+    const isTTY = "isTTY" in context
+      ? Boolean(context.isTTY)
+      : Boolean(process.stdin.isTTY && process.stdout.isTTY);
     const workspaceAuthorization = await authorizeLinearSetupWorkspace({
       config,
       repoRoot,
       credentialStore,
-      registry,
+      registry: setupRegistry,
       flags: initFlags,
       env: process.env,
       domainNameHint,
-      isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      resumeDomain: domainNameResolution.resumeDomain || completeResumeDomain,
+      isTTY,
       log: linearProgress,
+      createSetupAuth: context.createLinearSetupAuth || createLinearSetupGraphqlClient,
+      authorizeOneShotAdmin,
+      promptAdminProvisioning: context.promptAdminProvisioning || promptLine,
+      promptReauthorize: context.promptReauthorize || promptLinearReauthorization,
     });
     output.success(`Workspace: ${workspaceLabel(workspaceAuthorization.workspace)}`);
     output.detail(`workspace_id=${workspaceAuthorization.workspace.id}`);
     output.detail("Linear setup authorization verified.");
 
-    const repoAllowlistSelection = await discoverAndConfirmDomainGitHubRepos({
-      command,
-      output,
-      runCommand: context.githubDiscoveryRunCommand || context.runCommand || defaultRunCommand,
-      isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    const repoAllowlistSelection = completeResumeDomain
+      ? {
+          confirmed: false,
+          selectedRepos: [],
+          discoveredRepos: [],
+          reason: "complete_resume_repo_allowlist_skipped",
+        }
+      : await discoverAndConfirmDomainGitHubRepos({
+          command,
+          output,
+          runCommand: context.githubDiscoveryRunCommand || context.runCommand || defaultRunCommand,
+          prompt: context.githubRepoAllowlistPrompt || promptLine,
+          isTTY,
+        });
+
+    const setupCache = setupCacheWithNeedsPrincipalStatus({
+      cache: completeResumeContext ? readLinearCache(completeResumeContext.linear.cachePath) : null,
+      status: workspaceAuthorization.needsPrincipalProjectStatus,
     });
 
     const result = await setupLinearDomain({
       client: workspaceAuthorization.setupAuth.client,
       config,
-      registry,
+      registry: setupRegistry,
       repoRoot,
+      home,
       domainName,
+      cache: setupCache,
+      resumeDomain: completeResumeDomain || domainNameResolution.resumeDomain || null,
       workspace: workspaceAuthorization.workspace,
       declaredWorkspace: workspaceAuthorization.declaredWorkspace,
+      ensureNeedsPrincipalProjectStatus: () => ensureNeedsPrincipalProjectStatus({
+        appClient: workspaceAuthorization.setupAuth.client,
+        adminAuth: () => authorizeOneShotAdmin({
+          config,
+          onProgress: (line) => linearProgress(line),
+        }),
+        log: linearProgress,
+        interactive: isTTY,
+        prompt: context.promptAdminProvisioning || promptLine,
+      }),
       writeCache: (nextCache, context) => {
         writeLinearCache(context.linear.cachePath, nextCache);
       },
       writeRegistry: (nextRegistry) => {
-        writeDomainRegistry({ repoRoot }, nextRegistry);
+        writeDomainRegistry({ home }, nextRegistry);
       },
-      promoteCredential: ({ context }) =>
-        promoteSetupCredentialToDomain({
-          setupCredentialStore: credentialStore,
-          config,
-          repoRoot,
-          domainContext: context,
-        }),
+      promoteCredential: completeResumeDomain
+        ? async () => {}
+        : ({ context }) =>
+            promoteSetupCredentialToDomain({
+              setupCredentialStore: credentialStore,
+              config,
+              repoRoot,
+              domainContext: context,
+            }),
       onPreview: (line) => output.detail(line),
     });
     printSummary(result.summary, output);
     if (repoAllowlistSelection.confirmed) {
       const repoAllowlistUpdate = await persistDomainGitHubRepoAllowlist({
         repoRoot,
+        home,
         domainId: result.domain.id,
         repos: repoAllowlistSelection.selectedRepos,
       });
@@ -188,6 +672,7 @@ export async function runLinearSetupCommand({ context, command, args }) {
         domain: result.domain,
         config,
         repoRoot,
+        home,
         behaviorRepoId: result.context?.trace?.behavior_repo_id,
       });
       if (repoAllowlistUpdate.resources.length === 0) {
@@ -195,61 +680,104 @@ export async function runLinearSetupCommand({ context, command, args }) {
       } else {
         output.success(`Repo allowlist: ${repoAllowlistUpdate.resources.map((resource) => repoLabel(resource.binding)).join(", ")}`);
       }
+    } else if (completeResumeDomain) {
+      output.detail("Repo allowlist unchanged; manage repo grants with domain grant.");
     } else {
       output.detail("Repo allowlist unchanged; GitHub repo discovery was not confirmed.");
     }
-    output.success(`Team "${result.domain.linear?.team_name || domainName}" created (project template + labels ready)`);
+    output.success(
+      `Team "${result.domain.linear?.team_name || domainName}" ${completeResumeDomain ? "ready" : "created"} (labels and statuses ready)`,
+    );
     output.success("Local gateway ready for Planned projects");
     output.info("Linear connected.");
-    let phoenixAppUrl = null;
-    const phoenix = await ensurePhoenixReady({
-      repoRoot,
-      onProgress: (line) => output.detail(line),
-    }).catch((error) => ({ ok: false, reason: error.message }));
-    if (phoenix.ok) {
-      phoenixAppUrl = phoenix.appUrl;
-      output.detail(`Local Phoenix UI: ${phoenix.appUrl}`);
-      output.detail(`Local Phoenix collector: ${phoenix.collectorUrl}`);
-      const preflight = await runLocalPhoenixTracePreflight({
-        repoRoot,
-        ensureReady: async () => phoenix,
-        domainContext: result.context,
-      }).catch((error) => ({ ok: false, status: "trace_delivery_failed", reason: error.message }));
-      if (preflight.ok) {
-        output.detail(`Local Phoenix preflight trace: ${preflight.traceId}`);
-      } else {
-        output.warn(`Local Phoenix trace preflight failed: ${preflight.reason || preflight.status || "unknown"}`);
-        if (preflight.repairHint) output.detail(`Repair: ${preflight.repairHint}`);
-      }
-    } else {
-      output.warn(`Local Phoenix is degraded: ${phoenix.reason || "unavailable"}`);
-      if (phoenix.repairHint) output.detail(`Repair: ${phoenix.repairHint}`);
-    }
     output.detail(`${commandOptions.readyLabel} connected: ${result.domain.id}`);
     if (commandOptions.runGithubPhase) {
       const githubOk = await runGitHubInitStep({
         repoRoot,
+        home,
         config,
         initFlags,
         output,
         totalSteps,
+        runGitHubPhase: context.runGitHubInitPhase,
+        resolveTransport: context.githubInitTransportFromFlags,
       });
       if (!githubOk) return;
+      const claudePluginOk = await runClaudePluginInitStep({ context, repoRoot, output, totalSteps });
+      if (!claudePluginOk) return;
     }
+    const phoenix = await runCliPhoenixSetupPhase({ context, repoRoot, output, domainContext: result.context });
     await finishSetupOutput({
       output,
       commandOptions,
-      phoenixAppUrl,
+      phoenixAppUrl: phoenix.appUrl,
+      phoenixOk: phoenix.ok,
       config,
       repoRoot,
+      home,
       cachePath,
       domainId: result.domain.id,
+      finalGate: context.finalGate,
+      runSmoke: context.runSmoke,
+      runDoctor: context.runDoctor,
     });
     if (!result.ok) process.exitCode = 1;
 }
 
+async function runCliPhoenixSetupPhase({ context, repoRoot, output, domainContext } = {}) {
+  const ready = await (context.ensurePhoenixReady || ensurePhoenixReady)({
+    repoRoot,
+    onProgress: (line) => output.detail(line),
+  }).catch((error) => ({ ok: false, reason: error.message }));
+  if (!ready.ok) {
+    output.warn(`Local Phoenix is degraded: ${ready.reason || "unavailable"}`);
+    if (ready.repairHint) output.detail(`Repair: ${ready.repairHint}`);
+    return { ok: false, appUrl: null, reason: ready.reason || "phoenix_unavailable" };
+  }
+
+  output.detail(`Local Phoenix UI: ${ready.appUrl}`);
+  output.detail(`Local Phoenix collector: ${ready.collectorUrl}`);
+  const preflight = await (context.runLocalPhoenixTracePreflight || runLocalPhoenixTracePreflight)({
+    repoRoot,
+    ensureReady: async () => ready,
+    domainContext,
+  }).catch((error) => ({ ok: false, status: "trace_delivery_failed", reason: error.message }));
+  if (!preflight.ok) {
+    output.warn(`Local Phoenix trace preflight failed: ${preflight.reason || preflight.status || "unknown"}`);
+    if (preflight.repairHint) output.detail(`Repair: ${preflight.repairHint}`);
+    return {
+      ok: false,
+      appUrl: ready.appUrl || null,
+      reason: preflight.reason || preflight.status || "phoenix_trace_preflight_failed",
+    };
+  }
+  output.detail(`Local Phoenix preflight trace: ${preflight.traceId}`);
+  return { ok: true, appUrl: ready.appUrl || null, reason: null };
+}
+
+function createCliOneShotAdminAuthorization({ context } = {}) {
+  const authorize = context.authorizeOneShotLinearAdmin || authorizeOneShotLinearAdmin;
+  const store = context.setupStateStore;
+  return async (options = {}) => {
+    if (!store?.markGlobalAdminRevocationRequired) throw new Error("setup_admin_marker_store_required");
+    store.markGlobalAdminRevocationRequired({ surface: "cli" });
+    const grant = await authorize(options);
+    return {
+      ...grant,
+      async teardown() {
+        const result = await grant.teardown?.();
+        if (result?.revokeVerified === true) {
+          store.clearGlobalAdminRevocationRequired({ revokeVerified: true });
+        }
+        return result;
+      },
+    };
+  };
+}
+
 export async function runSetupGitHubRepoDiscoveryStep({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   domainId,
   command = "init",
   output = createCliOutput(),
@@ -257,7 +785,7 @@ export async function runSetupGitHubRepoDiscoveryStep({
   prompt = promptLine,
   isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
   registry = null,
-  writeRegistry = (nextRegistry) => writeDomainRegistry({ repoRoot }, nextRegistry),
+  writeRegistry = (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
 } = {}) {
   const selection = await discoverAndConfirmDomainGitHubRepos({
     command,
@@ -275,6 +803,7 @@ export async function runSetupGitHubRepoDiscoveryStep({
   }
   const persisted = await persistDomainGitHubRepoAllowlist({
     repoRoot,
+    home,
     domainId,
     repos: selection.selectedRepos,
     registry,
@@ -298,7 +827,7 @@ export async function discoverAndConfirmDomainGitHubRepos({
   output.section("Repository access");
   let discoveredRepos = [];
   try {
-    discoveredRepos = discoverGitHubRepos({ runCommand, limit });
+    discoveredRepos = await discoverGitHubRepos({ runCommand, limit });
   } catch (error) {
     output.warn(`GitHub repo discovery skipped: ${error.message}`);
     output.info(
@@ -359,11 +888,11 @@ export async function discoverAndConfirmDomainGitHubRepos({
   };
 }
 
-export function discoverGitHubRepos({
+export async function discoverGitHubRepos({
   runCommand = defaultRunCommand,
   limit = GITHUB_REPO_DISCOVERY_LIMIT,
 } = {}) {
-  const data = ghJsonWithAmbientAuth({
+  const data = await ghJsonWithAmbientAuth({
     runCommand,
     args: [
       "repo",
@@ -379,14 +908,15 @@ export function discoverGitHubRepos({
 
 export async function persistDomainGitHubRepoAllowlist({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   domainId,
   repos = [],
   registry = null,
-  writeRegistry = (nextRegistry) => writeDomainRegistry({ repoRoot }, nextRegistry),
+  writeRegistry = (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
 } = {}) {
   if (!nonEmptyString(domainId)) throw new Error("github_repo_allowlist_missing_domain");
   registerGitRepoResourceKind();
-  const currentRegistry = registry || readDomainRegistry({ repoRoot });
+  const currentRegistry = registry || readDomainRegistry({ home });
   if (!currentRegistry) throw new Error("github_repo_allowlist_registry_missing");
   const domain = currentRegistry.domains.find((candidate) => candidate.id === domainId);
   if (!domain) throw new Error(`github_repo_allowlist_unknown_domain:${domainId}`);
@@ -469,7 +999,7 @@ async function printBuildTestDetectionLines({
   runCommand,
 } = {}) {
   for (const repo of repos) {
-    const plan = detectGitHubRepoBuildTestPlan({ repo, runCommand });
+    const plan = await detectGitHubRepoBuildTestPlan({ repo, runCommand });
     if (plan.detected) {
       output.success(`Build/test auto-detected for ${repoLabel(repo)}: ${plan.setup_command} -> ${plan.test_command}`);
     } else {
@@ -480,13 +1010,13 @@ async function printBuildTestDetectionLines({
   }
 }
 
-export function detectGitHubRepoBuildTestPlan({
+export async function detectGitHubRepoBuildTestPlan({
   repo,
   runCommand = defaultRunCommand,
 } = {}) {
   let packageJson = null;
   try {
-    packageJson = fetchGitHubPackageJson({ repo, runCommand });
+    packageJson = await fetchGitHubPackageJson({ repo, runCommand });
   } catch {
     return { detected: false, reason: "package_json_unreadable" };
   }
@@ -505,9 +1035,9 @@ export function detectGitHubRepoBuildTestPlan({
   };
 }
 
-function fetchGitHubPackageJson({ repo, runCommand }) {
+async function fetchGitHubPackageJson({ repo, runCommand }) {
   const binding = gitHubRepoBinding(repo);
-  const data = ghJsonWithAmbientAuth({
+  const data = await ghJsonWithAmbientAuth({
     runCommand,
     args: [
       "api",
@@ -593,10 +1123,13 @@ function nonEmptyString(value) {
 
 async function runGitHubInitStep({
   repoRoot,
+  home = resolveTeamiHome(),
   config,
   initFlags = {},
   output,
   totalSteps,
+  runGitHubPhase = null,
+  resolveTransport = null,
 } = {}) {
   // Step 11: GitHub behavior-repo creation/connection. Successful adopter
   // init REQUIRES the GitHub connection because the MVP product promise
@@ -608,20 +1141,32 @@ async function runGitHubInitStep({
   const githubConfig = configWithGithubFlags(config, initFlags);
   output.step(2, totalSteps, "Connect GitHub");
   const githubProgress = createGitHubSetupProgress(output);
-  const githubPhase = await runGitHubInitPhase({
+  const transport = resolveTransport
+    ? await resolveTransport({
+        config: githubConfig,
+        flags: initFlags,
+        repoRoot,
+        onProgress: githubProgress.log,
+      })
+    : await githubInitTransportFromFlags({
+        config: githubConfig,
+        flags: initFlags,
+        repoRoot,
+        onProgress: githubProgress.log,
+      });
+  const phaseInput = {
     repoRoot,
+    home,
     config: githubConfig,
-    transport: await githubInitTransportFromFlags({
-      config: githubConfig,
-      flags: initFlags,
-      repoRoot,
-      onProgress: githubProgress.log,
-    }),
+    transport,
     requestedOwner: initFlags["github-owner"] || null,
     requestedRepoName: initFlags["github-repo"] || null,
     requestedVisibility: initFlags["github-visibility"] || null,
     onProgress: githubProgress.log,
-  });
+  };
+  const githubPhase = runGitHubPhase
+    ? await runGitHubPhase(phaseInput)
+    : await runGitHubInitPhase(phaseInput);
   if (!githubPhase.ok) {
     output.detail(`reason: ${githubPhase.reason}`);
     if (githubPhase.detail) output.detail(githubPhase.detail);
@@ -644,75 +1189,253 @@ async function runGitHubInitStep({
   }
   output.detail(`connection_mode=${githubPhase.connection.connection_mode}`);
   output.info("GitHub connected.");
-  if (hasCliFlag(initFlags, LOCAL_SUPERVISOR_CONSENT_FLAG)) {
-    const supervisor = registerLocalSupervisorStub({
-      repoRoot,
-      explicitConsent: true,
-      trigger: "init",
-    });
-    for (const line of formatLocalSupervisorRegistrationReport(supervisor)) output.detail(line);
-  }
   return true;
+}
+
+async function runClaudePluginInitStep({
+  context = {},
+  repoRoot,
+  output,
+  totalSteps,
+} = {}) {
+  const registerPlugin = context.runClaudePluginRegistrationStep || runClaudePluginRegistrationStep;
+  const result = await registerPlugin({
+    repoRoot,
+    output,
+    totalSteps,
+    runCommand: context.claudePluginRunCommand || defaultRunCommand,
+    marketplaceSource: context.claudePluginMarketplaceSource || PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE,
+  });
+  return result?.ok === true;
+}
+
+export async function runClaudePluginRegistrationStep({
+  repoRoot = process.cwd(),
+  output = createCliOutput(),
+  totalSteps = 3,
+  stepNumber = 3,
+  runCommand = defaultRunCommand,
+  pluginName = CLAUDE_PLUGIN_NAME,
+  marketplaceName = CLAUDE_PLUGIN_MARKETPLACE,
+  marketplaceSource = repoRoot,
+  scope = CLAUDE_PLUGIN_SCOPE,
+} = {}) {
+  output.step(stepNumber, totalSteps, "Install Claude plugin");
+  const current = await readClaudePluginHealth({
+    repoRoot,
+    runCommand,
+    pluginName,
+    marketplaceName,
+    marketplaceSource,
+    scope,
+  });
+  if (current.ok) {
+    output.success(`Claude plugin already installed: ${pluginName}`);
+    output.info(`Claude command available: /${pluginName}:plan`);
+    return { ok: true, status: "already_installed", pluginName };
+  }
+  if (!["claude_plugin_missing", "claude_plugin_marketplace_missing"].includes(current.reason)) {
+    return failClaudePluginRegistration({ output, reason: current.reason, detail: current.detail });
+  }
+
+  const marketplace = await ensureTrustedClaudeMarketplace({
+    repoRoot,
+    runCommand,
+    marketplaceName,
+    marketplaceSource,
+    scope,
+  });
+  if (!marketplace.ok) {
+    return failClaudePluginRegistration({ output, reason: marketplace.reason, detail: marketplace.detail });
+  }
+  output.detail(`Claude plugin marketplace verified: ${marketplaceName}`);
+
+  const installRef = `${pluginName}@${marketplaceName}`;
+  const installResult = await runClaudePluginCommand({
+    runCommand,
+    repoRoot,
+    args: ["plugin", "install", installRef, "--scope", scope],
+  });
+  if (!installResult.ok) {
+    return failClaudePluginRegistration({
+      output,
+      reason: "claude_plugin_install_failed",
+      result: installResult,
+    });
+  }
+
+  const readBack = await readClaudePluginHealth({
+    repoRoot,
+    runCommand,
+    pluginName,
+    marketplaceName,
+    marketplaceSource,
+    scope,
+  });
+  if (!readBack.ok) {
+    return failClaudePluginRegistration({ output, reason: readBack.reason, detail: readBack.detail });
+  }
+
+  output.success(`Claude plugin installed: ${pluginName}`);
+  output.info(`Claude command available: /${pluginName}:plan`);
+  return {
+    ok: true,
+    status: "installed",
+    pluginName,
+    marketplaceName,
+    marketplace: marketplace.status,
+  };
+}
+
+async function runClaudePluginCommand({
+  runCommand,
+  repoRoot,
+  args,
+} = {}) {
+  let result;
+  try {
+    result = await runCommand("claude", args, { cwd: repoRoot });
+  } catch (error) {
+    return {
+      ok: false,
+      status: 1,
+      stdout: "",
+      stderr: error.message,
+      args,
+    };
+  }
+  const status = Number.isInteger(result?.status) ? result.status : result?.ok === true ? 0 : 1;
+  return {
+    ok: result?.ok === true || status === 0,
+    status,
+    stdout: result?.stdout ?? "",
+    stderr: result?.stderr ?? "",
+    args,
+  };
+}
+
+
+function failClaudePluginRegistration({
+  output,
+  reason,
+  result = null,
+  detail = null,
+} = {}) {
+  output.detail(`reason: ${reason}`);
+  const safeDetail = detail || safeClaudeCliDetail(result);
+  if (safeDetail) output.detail(`detail: ${safeDetail}`);
+  output.error({
+    what: "Claude plugin registration failed",
+    why: "Teami needs the Claude plugin before /teami:plan is available in Claude Code.",
+    fix: `repair Claude Code plugin access, then re-run ${formatCommand("init")} (setup is resumable).`,
+  });
+  process.exitCode = 1;
+  return { ok: false, reason, ...(safeDetail ? { detail: safeDetail } : {}) };
+}
+
+function safeClaudeCliDetail(result = null) {
+  const text = String(result?.stderr || result?.stdout || "").trim();
+  if (!text) return "";
+  return text
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\b(?:token|secret|authorization)=\S+/gi, (match) => `${match.split("=")[0]}=[redacted]`)
+    .slice(0, 500);
 }
 
 async function runFinalGate({
   config,
   repoRoot,
+  home = resolveTeamiHome(),
   cachePath,
   domainId,
   output,
+  phoenixOk = null,
   runSmoke = runRuntimeSmokeChecks,
   runDoctor = doctorGraphqlLinear,
 } = {}) {
   output.section("Verifying setup");
-  output.info(`Running your claude/codex once to verify it works${output.symbols.ellipsis} this can take a minute the first time.`);
-  // Don't go silent during the smoke wait: an animated spinner on a TTY, a durable line when
-  // piped/CI. Cleared in finally so it never leaks past the await on either the success or the
-  // throw path (no smoke-runner API change).
-  const smokeProgress = output.progress("Running the runtime check");
-  let smoke;
-  try {
-    smoke = await runSmoke({ config, repoRoot });
-  } catch (error) {
-    smoke = { ok: false, results: [], error: error.message };
-  } finally {
-    smokeProgress.stop();
-  }
-  if (smoke.ok) {
-    output.success("Runtime check passed");
-  } else {
-    output.warn("Runtime check did not pass; setup will still complete.");
-    output.info(`You can re-run the check any time with ${formatCommand("runtime-smoke")}.`);
-  }
-
+  let smoke = { ok: false, results: [], error: "runtime_smoke_not_run" };
   let checks = [];
-  try {
-    checks = await runDoctor({
-      config,
-      repoRoot,
-      cachePath,
-      domainId,
-      includeRuntimeSmoke: false,
-      includePhoenix: false,
-      includeLocalSupervisor: false,
-    });
-  } catch (error) {
-    checks = [{ name: "health check", ok: false, message: error.message }];
-  }
-  checks = normalizeDoctorChecks(checks);
-
-  for (const check of checks) renderDoctorCheckLine(check, output);
-  // A warning must never fail onboarding: the gate keys off `state`, so only a `fail` blocks.
-  const doctorGreen = checks.length > 0 && checks.every((check) => check.state !== "fail");
-  if (doctorGreen) {
+  let doctorGreen = false;
+  let livePhoenixOk = phoenixOk === true;
+  const health = await runSetupCompletionContract({
+    startAt: "consent",
+    continueAfterBlocked: true,
+    phaseAdapters: {
+      consent: async () => ({ status: "healthy", reason: "cli_disclosure_confirmed" }),
+      linear: async () => ({ status: "healthy", reason: "cli_linear_setup_verified" }),
+      product_repos: async () => ({ status: "healthy", reason: "cli_repo_intent_verified" }),
+      github: async () => ({ status: "healthy", reason: "cli_github_phase_verified" }),
+      plugin: async () => ({ status: "healthy", reason: "cli_plugin_phase_verified" }),
+      phoenix: async () => ({
+        status: livePhoenixOk ? "healthy" : "degraded",
+        reason: livePhoenixOk ? "phoenix_trace_verified" : "phoenix_unavailable_or_unverified",
+      }),
+      runtime: async () => {
+        output.info(`Running your claude/codex once to verify it works${output.symbols.ellipsis} this can take a minute the first time.`);
+        const smokeProgress = output.progress("Running the runtime check");
+        try {
+          smoke = await runSmoke({ config, repoRoot, home });
+        } catch (error) {
+          smoke = { ok: false, results: [], error: error.message };
+        } finally {
+          smokeProgress.stop();
+        }
+        if (smoke.ok) {
+          output.success("Runtime check passed");
+        } else {
+          output.warn("Runtime check did not pass; setup cannot be marked complete.");
+          output.info(`You can re-run the check any time with ${formatCommand("runtime-smoke")}.`);
+        }
+        return { status: smoke.ok ? "healthy" : "blocked", reason: smoke.ok ? null : "runtime_smoke_failed" };
+      },
+      doctor: async () => {
+        try {
+          checks = await runDoctor({
+            config,
+            repoRoot,
+            home,
+            cachePath,
+            domainId,
+            includeRuntimeSmoke: false,
+            includePhoenix: true,
+            includeLocalSupervisor: false,
+          });
+        } catch (error) {
+          checks = [{ name: "health check", ok: false, message: error.message }];
+        }
+        checks = normalizeDoctorChecks(checks);
+        for (const check of checks) renderDoctorCheckLine(check, output);
+        doctorGreen = checks.length > 0 && checks.every((check) => check.state !== "fail");
+        const phoenixChecks = checks.filter((check) => /phoenix/i.test(check.name || ""));
+        livePhoenixOk = phoenixOk === true || (
+          phoenixOk === null &&
+          phoenixChecks.length > 0 &&
+          phoenixChecks.every((check) => check.state === "pass")
+        );
+        return { status: doctorGreen ? "healthy" : "blocked", reason: doctorGreen ? null : "doctor_failed" };
+      },
+    },
+  });
+  if (health.ok) {
     output.success("Setup verified.");
+  } else if (health.status === "degraded") {
+    output.warn("Setup health is degraded; local Phoenix must pass before setup is complete.");
   } else {
     output.error({
       what: "Some setup checks need attention",
       fix: `fix the checks above, then re-run ${formatCommand("init")} (setup is resumable).`,
     });
   }
-  return { ok: doctorGreen, smokeOk: Boolean(smoke.ok), doctorOk: doctorGreen };
+  return {
+    ok: health.ok,
+    status: health.status,
+    reason: health.reason,
+    health: health.steps,
+    smokeOk: Boolean(smoke.ok),
+    phoenixOk: livePhoenixOk,
+    doctorOk: doctorGreen,
+  };
 }
 
 // Back-compat alias for the shared launcher-form helper (now `formatCommand` in
@@ -724,8 +1447,10 @@ async function finishSetupOutput({
   output,
   commandOptions,
   phoenixAppUrl = null,
+  phoenixOk = null,
   config,
   repoRoot,
+  home = resolveTeamiHome(),
   cachePath,
   domainId,
   finalGate = runFinalGate,
@@ -735,9 +1460,11 @@ async function finishSetupOutput({
   const gate = await finalGate({
     config,
     repoRoot,
+    home,
     cachePath,
     domainId,
     output,
+    phoenixOk,
     runSmoke,
     runDoctor,
   });
@@ -746,13 +1473,22 @@ async function finishSetupOutput({
     process.exitCode = 1;
     return gate;
   }
+  const firstRunProbe = config ? homeStateProbe({ repoRoot, home, config }) : null;
   output.done(commandOptions.runGithubPhase ? "Setup complete." : `${commandOptions.readyLabel} connected.`);
-  output.nextSteps([
-    'Move a Linear project to "Planned" to start your first run',
-    { text: factoryLauncherCommand("gateway start"), hint: "open your factory for business (polls Linear; Ctrl-C to stop)" },
-    { text: factoryLauncherCommand("doctor"), hint: "re-check everything's healthy" },
-    { text: "Local Phoenix (traces)", hint: phoenixAppUrl || `run ${formatCommand("phoenix:start")}` },
-  ]);
+  renderFirstRunUx({
+    output,
+    probe: firstRunProbe,
+    phoenixAppUrl,
+    gate,
+    commands: {
+      init: factoryLauncherCommand("init"),
+      doctor: factoryLauncherCommand("doctor"),
+      gatewayStart: factoryLauncherCommand("gateway start"),
+      gatewayStatus: factoryLauncherCommand("gateway status"),
+      phoenixStart: formatCommand("phoenix:start"),
+    },
+    plannedProjectText: 'Move a Linear project to "Planned" to start your first run',
+  });
   if (!output.verbose) {
     output.raw(`\n  ${output.style.dim("(Run with --verbose for full detail.)")}\n`);
   }
@@ -777,9 +1513,12 @@ async function authorizeLinearSetupWorkspace({
   flags = {},
   env = process.env,
   domainNameHint = null,
+  resumeDomain = null,
   isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
   log = (line) => console.log(line),
   createSetupAuth = createLinearSetupGraphqlClient,
+  authorizeOneShotAdmin = authorizeOneShotLinearAdmin,
+  promptAdminProvisioning = promptLine,
   promptWorkspace = promptLinearWorkspacePicker,
   promptReauthorize = promptLinearReauthorization,
   maxAuthorizationAttempts = 3,
@@ -789,53 +1528,269 @@ async function authorizeLinearSetupWorkspace({
     flags,
     env,
     domainNameHint,
+    resumeDomain,
     isTTY,
     log,
     promptWorkspace,
   });
   const declaredWorkspace = selection.declaredWorkspace;
+  const completeResume = isCompleteResumeSelection(selection);
   let trustLinePrinted = false;
+  let forceBrowserAuthorization = false;
+  // Browser authorization deliberately does NOT force Linear's consent screen by default: an
+  // already-installed app auto-redirects back instantly (no dead-end "already installed" page).
+  // Only when the user explicitly wants the workspace dropdown — typing R, or recovering from a
+  // wrong-workspace grant — does the retry force prompt=consent so the picker actually appears.
+  let forceConsentAuthorization = false;
 
   for (let attempt = 1; attempt <= maxAuthorizationAttempts; attempt += 1) {
-    if (!trustLinePrinted) {
-      log("Authorizing grants Teami read/write access to the entire selected Linear workspace; Linear has no narrower scope.");
+    const allowBrowserAuth = !completeResume || forceBrowserAuthorization;
+    if (completeResume && !allowBrowserAuth && !trustLinePrinted) {
+      log(`Using existing Linear authorization for domain "${domainNameForResumeDomain(selection.resumeDomain)}".`);
+      trustLinePrinted = true;
+    } else if (allowBrowserAuth && !trustLinePrinted) {
+      log("Authorizing grants Teami read/write access to the entire selected Linear workspace; Linear has no narrower scope. Setup may ask once for admin approval only to create Principal Escalation if it is missing.");
       trustLinePrinted = true;
     }
-    for (const line of workspaceAuthorizationInstructions(selection)) log(line);
+    if (allowBrowserAuth) {
+      for (const line of workspaceAuthorizationInstructions(selection)) log(line);
+    }
 
-    let setupAuth = createSetupAuth({
+    const appSetupAuth = createSetupAuth({
       config,
       repoRoot,
       credentialStore,
-      allowBrowserAuth: true,
+      allowBrowserAuth,
       allowRefresh: true,
-      deferTokenPersistence: true,
+      deferTokenPersistence: allowBrowserAuth,
+      prompt: forceConsentAuthorization ? "consent" : null,
+      waitEscape: allowBrowserAuth && isTTY
+        ? () => createLinearOAuthWaitEscape({ promptReauthorize })
+        : null,
       onProgress: (line) => log(line),
     });
-    const guard = await verifyWorkspaceGrantForSelection({
-      setupAuth,
-      selection,
-      declaredWorkspace,
-      registry,
-      isTTY,
-      attempt,
-      maxAuthorizationAttempts,
-      promptReauthorize,
-      log,
-      allowRetry: true,
-    });
-    if (guard.retry) continue;
+    let guard;
+    try {
+      guard = await verifyWorkspaceGrantForSelection({
+        setupAuth: appSetupAuth,
+        selection,
+        declaredWorkspace,
+        registry,
+        isTTY,
+        attempt,
+        maxAuthorizationAttempts,
+        promptReauthorize,
+        log,
+        allowRetry: allowBrowserAuth,
+      });
+    } catch (error) {
+      if (isLinearOAuthWaitEscapedError(error) && attempt < maxAuthorizationAttempts) {
+        log("Reopening Linear authorization...");
+        forceBrowserAuthorization = true;
+        continue;
+      }
+      if (
+        shouldRetryLinearSetupAuthorization({ error, setupAuth: appSetupAuth }) &&
+        attempt < maxAuthorizationAttempts
+      ) {
+        await requestLinearSetupReauthorization({
+          setupAuth: appSetupAuth,
+          selection,
+          isTTY,
+          promptReauthorize,
+          log,
+        });
+        forceBrowserAuthorization = true;
+        continue;
+      }
+      if (completeResume) throw completeResumeCredentialError(selection.resumeDomain, error);
+      throw error;
+    }
+    if (guard.retry) {
+      if (guard.forceConsent) forceConsentAuthorization = true;
+      continue;
+    }
 
-    await persistVerifiedSetupAuthToken(setupAuth);
+    const needsPrincipalProjectStatus = completeResume
+      ? null
+      : await ensureNeedsPrincipalProjectStatus({
+          appClient: appSetupAuth.client,
+          adminAuth: () => authorizeOneShotAdmin({
+            config,
+            onProgress: (line) => log(line),
+          }),
+          log,
+          interactive: allowBrowserAuth && isTTY,
+          prompt: promptAdminProvisioning,
+        });
+
+    await persistVerifiedSetupAuthToken(appSetupAuth);
     return {
-      setupAuth,
+      setupAuth: appSetupAuth,
       workspace: guard.workspace,
       declaredWorkspace,
       selection,
+      needsPrincipalProjectStatus,
     };
   }
 
   throw new Error("workspace_authorization_retries_exhausted");
+}
+
+async function ensureNeedsPrincipalProjectStatus({
+  appClient,
+  adminAuth,
+  log = () => {},
+  interactive = false,
+  prompt = promptLine,
+} = {}) {
+  const statuses = await listProjectStatusesForNeedsPrincipal(appClient);
+  const existing = resolveExactNeedsPrincipalProjectStatus(statuses);
+  if (existing) return existing;
+
+  if (!interactive) {
+    throw needsPrincipalProjectStatusRepairError(
+      "Principal Escalation project status is missing; re-run `init` from a desktop session with a browser to recreate it (one approval).",
+    );
+  }
+  if (typeof adminAuth !== "function") {
+    throw new Error("Linear setup cannot provision Principal Escalation: admin authorization is unavailable.");
+  }
+
+  await confirmNeedsPrincipalProjectStatusProvisioning({ log, prompt });
+  let adminProvisioner = null;
+  try {
+    adminProvisioner = await adminAuth();
+    const position = positionAfterPlannedProjectStatus(statuses);
+    await adminProvisioner.adminClient.createProjectStatus({
+      name: PROJECT_NEEDS_PRINCIPAL_STATUS_NAME,
+      color: PROJECT_NEEDS_PRINCIPAL_STATUS_COLOR,
+      position,
+      type: PROJECT_NEEDS_PRINCIPAL_STATUS_TYPE,
+    });
+  } finally {
+    await adminProvisioner?.teardown?.();
+  }
+
+  const verified = resolveExactNeedsPrincipalProjectStatus(
+    await listProjectStatusesForNeedsPrincipal(appClient),
+  );
+  if (!verified) {
+    throw needsPrincipalProjectStatusRepairError(
+      `Principal Escalation project status was created but could not be verified as a planned project status.`,
+    );
+  }
+  log("Principal Escalation project status is ready. The one-time admin approval was used once and was not stored.");
+  return verified;
+}
+
+async function listProjectStatusesForNeedsPrincipal(appClient) {
+  if (typeof appClient?.listProjectStatuses !== "function") {
+    throw new Error("Linear setup cannot resolve project statuses: client cannot list project statuses.");
+  }
+  return await appClient.listProjectStatuses();
+}
+
+function resolveExactNeedsPrincipalProjectStatus(statuses = []) {
+  const nameMatches = statuses.filter(
+    (status) => status?.name === PROJECT_NEEDS_PRINCIPAL_STATUS_NAME && !isArchivedLinearEntity(status),
+  );
+  const exactMatches = nameMatches.filter((status) => status.type === PROJECT_NEEDS_PRINCIPAL_STATUS_TYPE);
+  if (exactMatches.length === 1) return exactMatches[0];
+  if (nameMatches.length > 0 || exactMatches.length > 1) {
+    throw needsPrincipalProjectStatusRepairError(
+      `Cannot resolve project status mapping 'needs_principal' by configured name '${PROJECT_NEEDS_PRINCIPAL_STATUS_NAME}': found ${exactMatches.length} planned matches.`,
+    );
+  }
+  return null;
+}
+
+function positionAfterPlannedProjectStatus(statuses = []) {
+  const planned = statuses.find((status) => status?.name === PROJECT_PLANNED_STATUS_NAME);
+  const position = Number(planned?.position);
+  if (!Number.isFinite(position)) {
+    throw new Error("Linear setup cannot provision Principal Escalation: Planned project status position is unavailable.");
+  }
+  return position + PROJECT_STATUS_POSITION_INCREMENT;
+}
+
+function isArchivedLinearEntity(entity) {
+  return entity?.archived === true || entity?.archivedAt;
+}
+
+async function confirmNeedsPrincipalProjectStatusProvisioning({ log, prompt }) {
+  log("Teami needs one-time administrative approval from Linear.");
+  log("It will be used for exactly one thing: creating the single Principal Escalation project status your board needs.");
+  log("The approval is used once, is not stored, and day-to-day runs continue with read/write access only.");
+  await prompt("Press Enter to approve on the next screen: ");
+}
+
+function needsPrincipalProjectStatusRepairError(message) {
+  const error = new Error(message);
+  error.code = PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR_CODE;
+  return error;
+}
+
+function setupCacheWithNeedsPrincipalStatus({ cache = null, status = null } = {}) {
+  if (!status?.id) return cache;
+  return {
+    ...(cache || {}),
+    projectStatuses: {
+      ...(cache?.projectStatuses || {}),
+      needs_principal: status.id,
+    },
+    projectStatusTypes: {
+      ...(cache?.projectStatusTypes || {}),
+      needs_principal: status.type,
+    },
+  };
+}
+
+async function requestLinearSetupReauthorization({
+  setupAuth,
+  selection,
+  isTTY = false,
+  promptReauthorize = promptLinearReauthorization,
+  log = () => {},
+} = {}) {
+  const label = selection?.label || workspaceLabel(selection?.declaredWorkspace || {});
+  log("Stored Linear authorization is missing or no longer valid. Reauthorizing in the browser...");
+  if (isTTY || promptReauthorize !== promptLinearReauthorization) {
+    await promptReauthorize({
+      message: `Linear authorization for workspace ${label} needs to be refreshed. Press Enter to reopen Linear's consent screen: `,
+    });
+  }
+  await setupAuth?.tokenProvider?.clear?.();
+}
+
+function shouldRetryLinearSetupAuthorization({ error, setupAuth } = {}) {
+  if (!isLinearAuthorizationFailure(error)) return false;
+  const source = setupAuth?.tokenProvider?.lastTokenSource;
+  return source === null || source === undefined || source === "stored" || source === "refresh";
+}
+
+function isLinearAuthorizationFailure(error) {
+  const messages = [
+    error?.message,
+    error?.cause?.message,
+    ...(Array.isArray(error?.errors) ? error.errors.map((entry) => entry?.message) : []),
+  ].filter(Boolean).join("\n");
+  return error?.httpStatus === 401 ||
+    /\bHTTP 401\b/i.test(messages) ||
+    /Authentication required|not authenticated|authorization is missing|OAuth token is missing|access token is expired or unavailable/i.test(messages);
+}
+function completeResumeCredentialError(domain, originalError) {
+  const domainName = domainNameForResumeDomain(domain) || "unknown";
+  const workspace = workspaceLabel(domain?.linear || {});
+  const error = new Error(
+    `Linear authorization for existing domain "${domainName}" points at the wrong workspace or could not be verified. Re-run ${formatCommand("init")} --domain "${domainName}" --workspace "${workspace}" from a browser-capable terminal and choose that workspace in Linear's dropdown. If you meant to replace it with another workspace, uninstall the domain first.`,
+  );
+  error.cause = originalError;
+  return error;
+}
+
+function isCompleteResumeSelection(selection) {
+  return selection?.source === "complete_resume";
 }
 
 async function verifyWorkspaceGrantForSelection({
@@ -862,7 +1817,9 @@ async function verifyWorkspaceGrantForSelection({
       });
       if (String(answer || "").trim().toLocaleLowerCase() === "r") {
         await setupAuth.tokenProvider?.clear?.();
-        return { retry: true };
+        // The user asked for the workspace dropdown: the reopen must force Linear's consent
+        // screen, or an already-installed app would silently auto-redirect right back.
+        return { retry: true, forceConsent: true };
       }
     }
     try {
@@ -876,10 +1833,14 @@ async function verifyWorkspaceGrantForSelection({
       if (allowRetry && workspaceMismatchCameFromStoredCredential(setupAuth)) {
         log("Stored Linear setup authorization points at the wrong workspace. Reauthorizing in the browser...");
         await setupAuth.tokenProvider?.clear?.();
-        return { retry: true };
+        // Wrong-workspace recovery needs the picker too — force consent on the reopen.
+        return { retry: true, forceConsent: true };
       }
       await setupAuth.tokenProvider?.discardPendingTokenSet?.();
-      throw new Error(`${error.message}. Pick this workspace from the known workspace list instead.`);
+      const mismatch = new Error(`${error.message}. Pick this workspace from the known workspace list instead.`);
+      mismatch.code = "workspace_mismatch";
+      mismatch.cause = error;
+      throw mismatch;
     }
     return { workspace };
   }
@@ -916,22 +1877,25 @@ async function resolveLinearWorkspaceSelection({
   flags = {},
   env = process.env,
   domainNameHint = null,
+  resumeDomain = null,
   isTTY = false,
   log = (line) => console.log(line),
   promptWorkspace = promptLinearWorkspacePicker,
 } = {}) {
   const knownWorkspaces = knownRegistryWorkspaces(registry);
-  const resumeDomain =
+  const matchedResumeDomain =
+    resumeDomain ||
     setupIncompleteDomainForName(registry, domainNameHint) ||
     (!domainNameHint ? singleSetupIncompleteDomain(registry) : null);
-  const resumeDeclaredWorkspace = declaredWorkspaceFromResumeDomain(resumeDomain);
+  const resumeDeclaredWorkspace = declaredWorkspaceFromResumeDomain(matchedResumeDomain);
   if (resumeDeclaredWorkspace) {
     return {
       mode: "known",
-      source: "resume",
+      source: matchedResumeDomain?.status === "setup_incomplete" ? "resume" : "complete_resume",
       knownWorkspaces,
       declaredWorkspace: resumeDeclaredWorkspace,
       label: workspaceLabel(resumeDeclaredWorkspace),
+      resumeDomain: matchedResumeDomain,
     };
   }
 
@@ -1016,14 +1980,34 @@ async function promptLinearWorkspacePicker({
   throw new Error("workspace_picker_selection_invalid");
 }
 
-async function promptLinearReauthorization({ message } = {}) {
-  return promptLine(message || "press R then Enter to re-authorize: ");
+async function promptLinearReauthorization({ message, signal } = {}) {
+  return promptLine(message || "press R then Enter to re-authorize: ", { signal });
 }
 
-async function promptLine(message) {
+function createLinearOAuthWaitEscape({ promptReauthorize = promptLinearReauthorization } = {}) {
+  const controller = new AbortController();
+  let settled = false;
+  const promise = Promise.resolve(
+    promptReauthorize({
+      message: "After revoking Teami in Linear Settings -> Applications, press Enter here to reopen the sign-in: ",
+      signal: controller.signal,
+    }),
+  ).finally(() => {
+    settled = true;
+  });
+  return {
+    promise,
+    cancel() {
+      if (settled || controller.signal.aborted) return;
+      controller.abort();
+    },
+  };
+}
+
+async function promptLine(message, { signal } = {}) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    return await rl.question(message);
+    return await rl.question(message, signal ? { signal } : undefined);
   } finally {
     rl.close();
   }
@@ -1055,6 +2039,7 @@ function printSummary(summary, output = null) {
   for (const item of summary.found || []) emitSummaryDetail(output, `found: ${item}`);
   for (const item of summary.created || []) emitSummaryDetail(output, `created: ${item}`);
   for (const item of summary.updated || []) emitSummaryDetail(output, `updated: ${item}`);
+  for (const item of summary.notes || []) emitSummaryDetail(output, `note: ${item}`);
   for (const item of summary.failed || []) emitSummaryDetail(output, `failed: ${item}`);
 }
 
@@ -1164,21 +2149,47 @@ function explicitInitDomainName(args = []) {
   return null;
 }
 
+function registryWithoutRemovedDomains(registry = emptyDomainRegistry()) {
+  const domains = (registry?.domains || []).filter((domain) => domain.status !== "removed");
+  if (domains.length === (registry?.domains || []).length) return registry;
+  return { ...(registry || emptyDomainRegistry()), domains };
+}
+
+export function registryWithoutRemovedDomainsForName(registry = emptyDomainRegistry(), domainName = "") {
+  if (typeof domainName !== "string" || domainName.trim() === "") return registryWithoutRemovedDomains(registry);
+  const trimmed = domainName.trim();
+  const slug = (() => {
+    try {
+      return mintDomainId(trimmed, []);
+    } catch {
+      return null;
+    }
+  })();
+  const domains = (registry?.domains || []).filter((domain) =>
+    domain.status !== "removed" || !domainNameMatchesRegistryDomain(domain, trimmed, slug),
+  );
+  if (domains.length === (registry?.domains || []).length) return registry;
+  return { ...(registry || emptyDomainRegistry()), domains };
+}
 function resolveSetupCommandDomainNameHint(args = [], registry = emptyDomainRegistry()) {
+  const resumableRegistry = registryWithoutRemovedDomains(registry);
   const explicit = explicitInitDomainName(args);
   if (explicit) {
+    const resumeDomain = setupIncompleteDomainForName(resumableRegistry, explicit);
     return {
       domainNameHint: explicit,
-      resumeDomain: setupIncompleteDomainForName(registry, explicit),
+      resumeDomain,
+      completeResumeDomain: resumeDomain ? null : setupCompleteDomainForName(resumableRegistry, explicit),
       source: "explicit",
     };
   }
 
-  const resumeDomain = singleSetupIncompleteDomain(registry);
+  const resumeDomain = singleSetupIncompleteDomain(resumableRegistry);
   const domainNameHint = domainNameForResumeDomain(resumeDomain);
   return {
     domainNameHint,
     resumeDomain: domainNameHint ? resumeDomain : null,
+    completeResumeDomain: null,
     source: domainNameHint ? "single_setup_incomplete" : "none",
   };
 }
@@ -1187,20 +2198,36 @@ function resolveGitHubPhaseResumeDomain({
   args = [],
   registry = emptyDomainRegistry(),
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   readConnectionState = readGitHubConnectionState,
 } = {}) {
   if (explicitInitDomainName(args)) return null;
   if (singleSetupIncompleteDomain(registry)) return null;
   const domains = (registry?.domains || []).filter((domain) => domain.status === "active");
   if (domains.length !== 1) return null;
-  return githubConnectionNeedsInit({ repoRoot, readConnectionState }) ? domains[0] : null;
+  return githubConnectionNeedsInit({ repoRoot, home, readConnectionState }) ? domains[0] : null;
+}
+
+function resolveClaudePluginPhaseResumeDomain({
+  args = [],
+  registry = emptyDomainRegistry(),
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  readConnectionState = readGitHubConnectionState,
+} = {}) {
+  if (explicitInitDomainName(args)) return null;
+  if (singleSetupIncompleteDomain(registry)) return null;
+  const domains = (registry?.domains || []).filter((domain) => domain.status === "active");
+  if (domains.length !== 1) return null;
+  return githubConnectionNeedsInit({ repoRoot, home, readConnectionState }) ? null : domains[0];
 }
 
 function githubConnectionNeedsInit({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   readConnectionState = readGitHubConnectionState,
 } = {}) {
-  const read = readConnectionState({ repoRoot });
+  const read = readConnectionState({ repoRoot, home });
   if (!read.ok) return true;
   const connection = read.connection || {};
   return connection.connection_mode !== "real" ||
@@ -1220,10 +2247,12 @@ function domainNameForResumeDomain(domain = null) {
 
 export {
   authorizeLinearSetupWorkspace,
+  ensureNeedsPrincipalProjectStatus,
   explicitInitDomainName,
   finishSetupOutput,
   githubInitTransportFromFlags,
   promptLinearWorkspacePicker,
+  resolveClaudePluginPhaseResumeDomain,
   resolveInitDomainName,
   resolveGitHubPhaseResumeDomain,
   resolveLinearWorkspaceSelection,

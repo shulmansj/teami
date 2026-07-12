@@ -1,8 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import {
   DOCTOR_CHECK_STATES,
@@ -10,10 +7,8 @@ import {
   normalizeDoctorCheck,
   normalizeDoctorChecks,
 } from "../src/doctor-check.mjs";
-import { loadLinearConfig } from "../src/config.mjs";
-import { localSupervisorDoctorChecks } from "../src/supervisor/status.mjs";
-
-const realRepoRoot = path.resolve(import.meta.dirname, "../../../..");
+import { domainTeamVisibilityCheck } from "../src/cli/doctor-command.mjs";
+import { formatCommand } from "../src/cli/operator-output.mjs";
 
 test("doctorCheck builds an S3 record with a derived ok (warn is not a failure)", () => {
   assert.deepEqual(DOCTOR_CHECK_STATES, ["ok", "warn", "fail"]);
@@ -64,21 +59,28 @@ test("normalizeDoctorChecks is idempotent", () => {
   const twice = normalizeDoctorChecks(once);
   assert.deepEqual(twice, once);
 });
+test("domainTeamVisibilityCheck gives deleted saved-team recovery guidance", () => {
+  const check = domainTeamVisibilityCheck({
+    domain: {
+      id: "livetest",
+      linear: {
+        workspace_id: "workspace-1",
+        workspace_name: "agentic factory sandbox",
+        team_id: "18cc5008-0b05-44f9-bdef-2d9e1a56f6d1",
+        team_key: "LIVE",
+        team_name: "livetest",
+      },
+    },
+    teamCheck: { name: "team", ok: false, message: "missing LIVE" },
+    savedTeamCheck: { name: "cache teamId", ok: false, message: "teamId 18cc5008-0b05-44f9-bdef-2d9e1a56f6d1" },
+    teamKey: "LIVE",
+  });
 
-test("the local supervisor OS autostart check is a warn, not a fail", async () => {
-  const config = loadLinearConfig({ repoRoot: realRepoRoot });
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "af-doctor-autostart-"));
-  try {
-    const checks = await localSupervisorDoctorChecks({
-      repoRoot,
-      config,
-      cachePath: path.join(repoRoot, "linear-cache.json"),
-    });
-    const autostart = checks.find((check) => check.name === "local supervisor OS autostart");
-    assert.ok(autostart, "autostart check is present");
-    assert.equal(autostart.state, "warn");
-    assert.equal(autostart.ok, true, "a warning must not count as a failure");
-  } finally {
-    fs.rmSync(repoRoot, { recursive: true, force: true });
-  }
+  assert.equal(check.ok, false);
+  assert.equal(check.showMessage, true);
+  assert.match(check.message, /The Linear team saved for domain "livetest" no longer exists/);
+  assert.match(check.message, /complete_domain_team_missing: domain livetest records Linear team 18cc5008-0b05-44f9-bdef-2d9e1a56f6d1/);
+  assert.match(check.message, /will not guess by name or silently recreate it/);
+  assert.ok(check.fix.includes(formatCommand("uninstall --domain livetest")));
+  assert.ok(check.fix.includes(formatCommand("init --domain livetest")));
 });

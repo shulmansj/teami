@@ -5,6 +5,7 @@ import {
   getWorkflowDefinition,
   registeredWorkflowTypes,
 } from "../../../engine/workflow-registry.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
 import { runAutonomousImprovementDrafter } from "./improvement-drafter.mjs";
 import { scanPromotionCandidates } from "./promotion-candidate-scanner.mjs";
 import {
@@ -88,6 +89,7 @@ function rejectUntrustedAutonomousDiagnosisOverrides(options) {
 
 async function runAutonomousDiagnosisScanWithOverrides({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   registryDir = null,
   runAutonomousDiagnosisCallerImpl = runAutonomousDiagnosisCallerWithOverrides,
   runAutonomousDiagnosisPassImpl = runAutonomousDiagnosisPassWithOverrides,
@@ -98,13 +100,14 @@ async function runAutonomousDiagnosisScanWithOverrides({
 } = {}) {
   const diagnosisPass = await runAutonomousDiagnosisPassImpl({
     repoRoot,
+    home,
     registryDir,
     onProgress,
     now,
     ...overrides,
   });
   if (diagnosisPass?.ok === false) return diagnosisPass;
-  const listed = listPendingAutonomousDiagnosisRecords({ repoRoot, registryDir: registryDir || undefined });
+  const listed = listPendingAutonomousDiagnosisRecords({ repoRoot, home, registryDir: registryDir || undefined });
   if (!listed.ok) return listed;
   const bounds = {
     rounds_used: listed.records.length,
@@ -130,6 +133,7 @@ async function runAutonomousDiagnosisScanWithOverrides({
   for (const record of listed.records) {
     const result = await runAutonomousDiagnosisCallerImpl({
       repoRoot,
+      home,
       registryDir,
       opportunityHash: record.opportunity_hash,
       onProgress,
@@ -154,6 +158,7 @@ async function runAutonomousDiagnosisScanWithOverrides({
 
 async function runAutonomousDiagnosisPassWithOverrides({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   registryDir = null,
   workflowTypes = null,
   resolveTrustedPolicyReadImpl = resolveTrustedPolicyRead,
@@ -161,7 +166,7 @@ async function runAutonomousDiagnosisPassWithOverrides({
   onProgress = () => {},
   now = () => new Date(),
 } = {}) {
-  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(repoRoot);
+  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(home);
   const types = Array.isArray(workflowTypes) && workflowTypes.length > 0
     ? workflowTypes
     : registeredWorkflowTypes();
@@ -169,6 +174,7 @@ async function runAutonomousDiagnosisPassWithOverrides({
   for (const workflowType of types) {
     const result = diagnoseWorkflow({
       repoRoot,
+      home,
       registryDir: resolvedRegistryDir,
       workflowType,
       resolveTrustedPolicyReadImpl,
@@ -189,6 +195,7 @@ async function runAutonomousDiagnosisPassWithOverrides({
 
 function diagnoseWorkflow({
   repoRoot,
+  home = resolveTeamiHome(),
   registryDir,
   workflowType,
   resolveTrustedPolicyReadImpl,
@@ -220,8 +227,9 @@ function diagnoseWorkflow({
   }
   const surfaces = collectAutonomousLoopSignalSurfacesImpl({
     repoRoot,
+    home,
     registryDir,
-    gateReportDir: defaultGateReportDir(repoRoot),
+    gateReportDir: defaultGateReportDir(home),
   });
   const gateReports = (surfaces.gate_reports || [])
     .filter((report) => reportWorkflowType(report) === workflowType)
@@ -319,7 +327,7 @@ function diagnoseWorkflow({
       path: existing.path,
     };
   }
-  const written = writeAutonomousDiagnosisRecord({ repoRoot, registryDir, record });
+  const written = writeAutonomousDiagnosisRecord({ repoRoot, home, registryDir, record });
   onProgress(`autonomous diagnosis: recorded opportunity ${record.opportunity_hash} for ${workflowType}`);
   return {
     ok: true,
@@ -334,6 +342,7 @@ function diagnoseWorkflow({
 
 async function runAutonomousDiagnosisCallerWithOverrides({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   registryDir = null,
   opportunityHash,
   runAutonomousImprovementDrafterImpl = runAutonomousImprovementDrafter,
@@ -344,6 +353,7 @@ async function runAutonomousDiagnosisCallerWithOverrides({
 } = {}) {
   const read = readAutonomousDiagnosisRecord({
     repoRoot,
+    home,
     registryDir: registryDir || undefined,
     opportunityHash,
   });
@@ -359,6 +369,7 @@ async function runAutonomousDiagnosisCallerWithOverrides({
   const hash = read.record.opportunity_hash;
   const append = (event) => appendEvent({
     repoRoot,
+    home,
     registryDir: registryDir || undefined,
     opportunityHash: hash,
     event,
@@ -368,6 +379,7 @@ async function runAutonomousDiagnosisCallerWithOverrides({
   onProgress(`autonomous diagnosis: drafting candidate for opportunity ${hash}`);
   const drafterOptions = {
     repoRoot,
+    home,
     opportunityHash: hash,
     onProgress,
   };
@@ -410,7 +422,7 @@ async function runAutonomousDiagnosisCallerWithOverrides({
   }
 
   onProgress(`autonomous diagnosis: scanning tagged candidate for opportunity ${hash}`);
-  const scan = await scanPromotionCandidatesFn({ repoRoot, onProgress });
+  const scan = await scanPromotionCandidatesFn({ repoRoot, home, onProgress });
   const opened = findOpenedProposalCandidate(scan);
   append({
     action: "autonomous_scan_finished",

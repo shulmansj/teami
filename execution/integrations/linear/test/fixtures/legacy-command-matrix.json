@@ -30,14 +30,6 @@
     { "token": "draft-improvement", "handler": "runDraftImprovementCommand" },
     { "token": "promote-candidate", "handler": "runPromoteCandidateCommand" },
     { "token": "promotion:scan", "handler": "runPromotionScanCommand" },
-    { "token": "supervisor:register", "handler": "runSupervisorRegisterCommand" },
-    { "token": "supervisor:run", "handler": "runSupervisorRunCommand" },
-    { "token": "supervisor", "handler": "runSupervisorRunCommand" },
-    { "token": "supervisor:status", "handler": "runSupervisorStatusCommand" },
-    { "token": "supervisor:reconcile", "handler": "runSupervisorReconcileCommand" },
-    { "token": "supervisor:disable", "handler": "runSupervisorDisableCommand" },
-    { "token": "supervisor:enable", "handler": "runSupervisorEnableCommand" },
-    { "token": "supervisor:unregister", "handler": "runSupervisorUnregisterCommand" },
     { "token": "eval:register-prompt", "handler": "runEvalRegisterPromptCommand" },
     { "token": "eval:register-judge-prompt", "handler": "runEvalRegisterPromptCommand" },
     { "token": "phoenix:stop", "handler": "runPhoenixStopCommand" },
@@ -60,7 +52,6 @@
   },
   "bareNounActions": {
     "gateway": "runGatewayCommand",
-    "runner": "runRunnerCommand",
-    "supervisor": "runSupervisorRunCommand"
+    "runner": "runRunnerCommand"
   }
 }

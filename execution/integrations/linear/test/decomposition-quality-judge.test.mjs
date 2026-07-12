@@ -63,7 +63,9 @@ const ARTIFACT_IDENTITY = Object.freeze({
 });
 
 function tempRepoRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-judge-${label}-`));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `teami-judge-${label}-`));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function sha256(text) {
@@ -177,6 +179,7 @@ function seedRun(repoRoot, runId, { withSnapshot = true, withReceipt = true } = 
   if (withSnapshot) {
     captureProjectSnapshot({
       runId,
+      domainId: TRACE_IDENTITY.domainId,
       project: snapshotProject(),
       semanticStatus: "planned",
       repoRoot,
@@ -221,6 +224,19 @@ function fakeRuntime(outputs) {
     return next;
   };
   return { runCommand, invocations };
+}
+
+function runtimePromptFromCommand(command) {
+  if (typeof command.stdinInput === "string") return command.stdinInput;
+  const index = command.args.indexOf("-p");
+  if (index >= 0) {
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg;
+  }
+  return command.args.at(-1);
 }
 
 function annotationFetchStub({ posts = [] } = {}) {
@@ -338,7 +354,7 @@ test("judge wrapper records rubric version, prompt version, model, and taxonomy 
   // the rubric/taxonomy versions being judged against.
   assert.equal(invocations.length, 1);
   const [command] = invocations[0];
-  const prompt = command.args.at(-1);
+  const prompt = runtimePromptFromCommand(command);
   assert.ok(prompt.includes("decomposition quality judge"), "accepted snapshot text must be in the prompt");
   assert.ok(prompt.includes(`run_id: ${runId}`), "exact project update markdown must be in the inputs");
   assert.ok(prompt.includes('"rubric_version": "1.0.0"'));
@@ -493,7 +509,7 @@ test("the judge never receives Linear mutation capability", async () => {
   assert.equal(command.tool_policy.linear_write, false);
   assert.equal(command.tool_policy.project_mutation, "runner_only");
   assert.equal(command.tool_policy.issue_mutation, "runner_only");
-  for (const value of [command.command, ...command.args]) {
+  for (const value of [command.command, ...command.args, command.stdinInput].filter((item) => item !== undefined)) {
     assert.equal(typeof value, "string", "the runtime gets strings only, never live objects");
   }
 
@@ -676,7 +692,7 @@ test("--candidate-prompt-version executes the Phoenix candidate and labels all m
   assert.equal(result.ok, true);
   assert.equal(result.prompt_source, "phoenix_candidate_version");
   assert.equal(result.prompt_version, candidateId);
-  const prompt = invocations[0][0].args.at(-1);
+  const prompt = runtimePromptFromCommand(invocations[0][0]);
   assert.ok(prompt.includes("CANDIDATE JUDGE PROMPT TEXT"));
   assert.ok(!prompt.includes("Accepted Judge Prompt"), "candidate runs must not silently mix in the accepted snapshot");
   const wire = posts[0].data[0];
@@ -755,6 +771,7 @@ test("judge fails closed before model invocation on missing snapshot, missing ar
   });
   captureProjectSnapshot({
     runId: checkpointId,
+    domainId: TRACE_IDENTITY.domainId,
     project: snapshotProject(),
     semanticStatus: "planned",
     repoRoot,
@@ -1168,7 +1185,6 @@ test("judge runtime assignment follows role conventions and the output schema mi
     "terminal_status",
     "terminal_reason",
     "final_issues",
-    "discovery_issues",
     "dependency_relations",
     "project_update_markdown",
     "open_questions_markdown",
@@ -1189,4 +1205,44 @@ test("judge runtime assignment follows role conventions and the output schema mi
     source_refs: [],
     perspectives_run: [{ role: "pm", outcome: "synthesis_complete" }],
   }]);
+
+  const paused = buildJudgeInputs({
+    artifact: {
+      ...commitArtifact("run-paused-inputs"),
+      kind: "pause",
+      final_issues: undefined,
+      project_update_markdown: undefined,
+      terminal_output: {
+        schema_version: ORCHESTRATOR_OUTPUT_SCHEMA_VERSION,
+        run_id: "run-paused-inputs",
+        workflow_version: ENGINE_VERSION,
+        outcome: "pause",
+        reason: "product_questions",
+        context_digest: "digest-questions",
+        source_refs: [],
+        assumptions: [],
+        constraints: [],
+        risks: [],
+      },
+      pause_packet: {
+        schema_version: ORCHESTRATOR_OUTPUT_SCHEMA_VERSION,
+        run_id: "run-paused-inputs",
+        phase: "orchestrator_terminal",
+        status: "pause",
+        reason: "product_questions",
+        context_digest: "digest-questions",
+        source_refs: [],
+        assumptions: [],
+        constraints: [],
+        risks: [],
+        open_questions_markdown: "- Which segment should launch first?",
+      },
+    },
+    snapshot: { project: { id: "p", name: "n", content: "c", status: "planned" } },
+    allowedFailureModes: ["missing_acceptance_criteria"],
+  });
+  assert.equal(paused.ok, true);
+  assert.equal(paused.inputs.terminal_status, "paused");
+  assert.equal(paused.inputs.project_update_markdown, null);
+  assert.equal(paused.inputs.open_questions_markdown, "- Which segment should launch first?");
 });

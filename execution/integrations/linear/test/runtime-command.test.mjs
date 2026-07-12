@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  applyEnvAugment,
+  perRunTempEnvSubset,
   resolveRuntimeSpawnCommand,
   runRuntimeCommand,
   sanitizeRuntimeDiagnostic,
@@ -147,6 +149,36 @@ test("scrubChildEnv does not mutate process.env", () => {
   }
 });
 
+test("applyEnvAugment evicts case-variant host names on win32 and leaves posix names alone", () => {
+  const base = { Temp: "host-temp-case-variant", TMP: "host-tmp", PATH: "keep-me" };
+  const augment = { TEMP: "engine-run-temp", TMP: "engine-run-temp" };
+
+  const win32 = applyEnvAugment(base, augment, { platform: "win32" });
+  assert.equal(win32.TEMP, "engine-run-temp");
+  assert.equal(win32.TMP, "engine-run-temp");
+  assert.equal(Object.hasOwn(win32, "Temp"), false);
+  assert.equal(win32.PATH, "keep-me");
+
+  const posix = applyEnvAugment(base, augment, { platform: "linux" });
+  assert.equal(posix.Temp, "host-temp-case-variant");
+  assert.equal(posix.TEMP, "engine-run-temp");
+  assert.equal(posix.TMP, "engine-run-temp");
+});
+
+test("perRunTempEnvSubset picks only the per-run temp names off a worker env augment", () => {
+  assert.deepEqual(
+    perRunTempEnvSubset({
+      HOME: "/contained/home",
+      TMPDIR: "/run/tmp",
+      TMP: "/run/tmp",
+      TEMP: "/run/tmp",
+    }),
+    { TMPDIR: "/run/tmp", TMP: "/run/tmp", TEMP: "/run/tmp" },
+  );
+  assert.deepEqual(perRunTempEnvSubset({ HOME: "/contained/home" }), {});
+  assert.deepEqual(perRunTempEnvSubset(), {});
+});
+
 test("runRuntimeCommand spawns with the scrubbed child environment and proof signal", async () => {
   const env = spawnBaseEnv({
     APPDATA: path.join(os.tmpdir(), "env-u1-appdata"),
@@ -277,6 +309,41 @@ test("runRuntimeCommand passes cwd through while preserving child env scrubbing"
   assert.equal(inheritedSpawnCall.options.cwd, undefined);
 });
 
+test("runRuntimeCommand writes stdinInput and cleans generated prompt temp paths", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runtime-prompt-"));
+  fs.writeFileSync(path.join(tempDir, "prompt.md"), "prompt on disk", "utf8");
+  let spawnCall = null;
+
+  const output = await runRuntimeCommand(
+    {
+      command: "runtime-stdin-check",
+      args: ["exec", "--output-schema", "schema.json"],
+      stdinInput: "large runtime prompt",
+      cleanup_paths: [tempDir],
+    },
+    {
+      timeoutMs: 5_000,
+      spawnImpl: fakeSpawn({
+        onSpawn: (call) => {
+          spawnCall = call;
+        },
+        stdout: (call) => JSON.stringify({
+          stdin: call.stdin,
+          stdinEnded: call.stdinEnded === true,
+        }),
+      }),
+    },
+  );
+
+  assert.deepEqual(JSON.parse(output), {
+    stdin: "large runtime prompt",
+    stdinEnded: true,
+  });
+  assert.deepEqual(spawnCall.options.stdio, ["pipe", "pipe", "pipe"]);
+  assert.equal(spawnCall.args.includes("large runtime prompt"), false);
+  assert.equal(fs.existsSync(tempDir), false);
+});
+
 test("runRuntimeCommand preserves APPDATA for simulated win32 Codex shim resolution", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "af-codex-shim-"));
   const codexBin = path.join(tempDir, "npm", "node_modules", "@openai", "codex", "bin");
@@ -334,22 +401,95 @@ test("runRuntimeCommand preserves APPDATA for simulated win32 Codex shim resolut
   });
 });
 
-test("runRuntimeCommand returns stdout only on success and keeps stderr diagnostic-only", async () => {
+test("runRuntimeCommand resolves the codex shim from the host APPDATA while the child sees the redirected per-run roots", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "af-codex-shim-redirect-"));
+  const codexBin = path.join(tempDir, "npm", "node_modules", "@openai", "codex", "bin");
+  fs.mkdirSync(codexBin, { recursive: true });
+  const codexJs = path.join(codexBin, "codex.js");
+  fs.writeFileSync(codexJs, "", "utf8");
+  const env = spawnBaseEnv({ APPDATA: tempDir });
+  const redirectedRoaming = path.join(tempDir, "per-run-profile", "AppData", "Roaming");
+  const redirectedLocal = path.join(tempDir, "per-run-profile", "AppData", "Local");
+
+  let spawnCall = null;
   const output = await runRuntimeCommand(
+    { command: "codex", args: ["exec", "prompt"] },
     {
-      command: "runtime-success",
-      args: [],
-    },
-    {
+      env,
+      platform: "win32",
+      nodePath: process.execPath,
+      envAugment: { APPDATA: redirectedRoaming, LOCALAPPDATA: redirectedLocal },
       timeoutMs: 5_000,
       spawnImpl: fakeSpawn({
-        stdout: JSON.stringify({ ok: true }),
-        stderr: "codex diagnostic preamble",
+        onSpawn: (call) => {
+          spawnCall = call;
+        },
+        stdout: ({ options }) =>
+          JSON.stringify({
+            appdata: options.env.APPDATA || null,
+            localAppdata: options.env.LOCALAPPDATA || null,
+          }),
       }),
     },
   );
 
-  assert.equal(output, "{\"ok\":true}");
+  assert.equal(spawnCall.command, process.execPath, "the host's codex install stays resolvable under a redirected child APPDATA");
+  assert.deepEqual(spawnCall.args, [codexJs, "exec", "prompt"]);
+  assert.deepEqual(JSON.parse(output), {
+    appdata: redirectedRoaming,
+    localAppdata: redirectedLocal,
+  });
+});
+
+test("resolveRuntimeSpawnCommand resolves npm to node + npm-cli.js on win32 (spawn cannot exec .cmd shims)", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "af-npm-shim-"));
+  const fakeNodePath = path.join(tempDir, "node.exe");
+  fs.writeFileSync(fakeNodePath, "", "utf8");
+  const npmBin = path.join(tempDir, "node_modules", "npm", "bin");
+  fs.mkdirSync(npmBin, { recursive: true });
+  const npmCliJs = path.join(npmBin, "npm-cli.js");
+  fs.writeFileSync(npmCliJs, "", "utf8");
+
+  const resolved = resolveRuntimeSpawnCommand("npm", ["install"], {
+    platform: "win32",
+    env: {},
+    nodePath: fakeNodePath,
+  });
+  assert.equal(resolved.command, fakeNodePath);
+  assert.deepEqual(resolved.args, [npmCliJs, "install"]);
+
+  // Non-win32 (or npm-cli.js absent) stays untouched.
+  const untouched = resolveRuntimeSpawnCommand("npm", ["install"], {
+    platform: "linux",
+    env: {},
+    nodePath: fakeNodePath,
+  });
+  assert.deepEqual(untouched, { command: "npm", args: ["install"] });
+});
+
+test("runRuntimeCommand returns clean stdout by default and exposes both streams via includeStreams", async () => {
+  const sessionId = "019f2fa3-9a55-70c3-adda-01cfe085f2bb";
+  const spawnImpl = () => fakeSpawn({
+    stdout: JSON.stringify({ ok: true }),
+    stderr: `OpenAI Codex v0.141.0\nsession id: ${sessionId}`,
+  });
+
+  const plain = await runRuntimeCommand(
+    { command: "runtime-success", args: [] },
+    { timeoutMs: 5_000, spawnImpl: spawnImpl() },
+  );
+  assert.equal(plain, "{\"ok\":true}", "default output stays CLEAN stdout (strict turn validation parses it)");
+
+  const withStreams = await runRuntimeCommand(
+    { command: "runtime-success", args: [] },
+    { timeoutMs: 5_000, includeStreams: true, spawnImpl: spawnImpl() },
+  );
+  assert.equal(withStreams.output, "{\"ok\":true}", "output stays clean with includeStreams too");
+  assert.match(
+    withStreams.stderr,
+    new RegExp(`session id: ${sessionId}`),
+    "the codex >=0.141.0 stderr banner (session id) is available to callers",
+  );
 });
 
 test("runtime command failures redact token-shaped stderr before surfacing errors", async () => {
@@ -496,11 +636,18 @@ function fakeSpawn({
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    const call = { command, args, options, stdin: "", stdinEnded: false };
+    child.stdin = new EventEmitter();
+    child.stdin.write = (chunk) => {
+      call.stdin += chunk.toString("utf8");
+    };
+    child.stdin.end = () => {
+      call.stdinEnded = true;
+    };
     child.kill = () => {
       child.killed = true;
     };
 
-    const call = { command, args, options };
     onSpawn(call);
     setImmediate(() => {
       const stdoutText = typeof stdout === "function" ? stdout(call) : stdout;

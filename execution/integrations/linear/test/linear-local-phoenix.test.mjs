@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
+import zlib from "node:zlib";
 
+import { teamiHomePaths } from "../src/app-home.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import {
   ensurePhoenixReady,
@@ -13,6 +16,8 @@ import {
   probePhoenixIdentity,
   readServiceMetadata,
   recoverStaleServiceMetadata,
+  resolvePhoenixConfig,
+  runtimeFetchDegradationNotice,
   stopPhoenix,
   writeServiceMetadata,
 } from "../src/local-phoenix-manager.mjs";
@@ -53,6 +58,16 @@ import { runDecompositionEvalMode } from "../src/trigger-runner.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
+// Every test here creates its own temp `repoRoot` and drives phoenix state through it
+// (phoenixPaths(repoRoot), ensurePhoenixReady({repoRoot})). That relies on the phoenix
+// home shim mapping an explicit repoRoot -> repoRoot when TEAMI_HOME is unset. The suite
+// preload sets ONE TEAMI_HOME per process, which would divert every test to a single shared
+// home (cross-test pollution). Clear it before each test so each test is isolated via its own
+// repoRoot; the one test that needs a distinct home sets TEAMI_HOME itself, after this hook.
+beforeEach(() => {
+  delete process.env.TEAMI_HOME;
+});
+
 const SUBAGENT_TURN_SCHEMA_VERSION = "linear-decomposition-orchestrator-subagent-turn/v2";
 const LOCAL_TOOL_EVENT_DIFF = [
   "diff --git a/project.md b/project.md",
@@ -64,6 +79,85 @@ test("Phoenix endpoint normalization is loopback-only and derives the OTLP colle
   assert.equal(phoenixCollectorUrl("http://127.0.0.1:6006"), "http://127.0.0.1:6006/v1/traces");
   assert.throws(() => normalizeLocalPhoenixAppUrl("http://0.0.0.0:6006"), /loopback/);
   assert.throws(() => normalizeLocalPhoenixAppUrl("http://192.168.1.5:6006"), /loopback/);
+});
+
+test("Phoenix data and trace telemetry land under the Teami home", async () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-checkout-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-home-"));
+  const homePaths = teamiHomePaths({ home });
+  const oldAgentShell = path.join(repoRoot, ".agent-shell");
+  const expectedPhoenixKeys = ["root", "venvDir", "dataDir", "logsDir", "serviceFile", "telemetryDir"];
+  const expectedTelemetryKeys = ["telemetryDir", "healthFile", "runsDir", "outboxFile"];
+
+  const paths = phoenixPaths(home);
+  assert.deepEqual(Object.keys(paths), expectedPhoenixKeys);
+  assert.equal(paths.root, homePaths.phoenixDataDir);
+  assert.equal(paths.dataDir, homePaths.phoenixDataDir);
+  assert.equal(paths.venvDir, path.join(homePaths.phoenixDataDir, "phoenix-venv"));
+  assert.equal(paths.logsDir, path.join(homePaths.phoenixDataDir, "logs"));
+  assert.equal(paths.serviceFile, path.join(homePaths.phoenixDataDir, "phoenix-service.json"));
+  assert.equal(paths.telemetryDir, path.join(homePaths.phoenixDataDir, "telemetry"));
+
+  const config = resolvePhoenixConfig({
+    repoRoot,
+    env: { ...process.env, TEAMI_HOME: home },
+  });
+  assert.deepEqual(Object.keys(pickPhoenixPathShape(config)), expectedPhoenixKeys);
+  assert.equal(config.serviceFile, paths.serviceFile);
+  assert.equal(config.telemetryDir, paths.telemetryDir);
+  assert.equal(config.serviceFile.startsWith(oldAgentShell), false);
+
+  const result = await ensurePhoenixReady({
+    repoRoot,
+    env: { ...process.env, TEAMI_HOME: home },
+    fetchImpl: async () => new Response("ok", { status: 200 }),
+    runCommand: async () => {
+      throw new Error("home-anchored reuse should not install Phoenix");
+    },
+    spawnImpl: () => {
+      throw new Error("home-anchored reuse should not spawn Phoenix");
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(readServiceMetadata(paths.serviceFile).managed, false);
+  assert.equal(fs.existsSync(path.join(oldAgentShell, "phoenix-service.json")), false);
+
+  const previousTeamiHome = process.env.TEAMI_HOME;
+  process.env.TEAMI_HOME = home;
+  try {
+    const telemetry = traceTelemetryPaths(repoRoot);
+    assert.deepEqual(Object.keys(telemetry), expectedTelemetryKeys);
+    assert.equal(telemetry.telemetryDir, paths.telemetryDir);
+    assert.equal(telemetry.healthFile, path.join(paths.telemetryDir, "trace-health.json"));
+    assert.equal(telemetry.runsDir, path.join(paths.telemetryDir, "runs"));
+    assert.equal(telemetry.outboxFile, path.join(paths.telemetryDir, "phoenix-outbox.jsonl"));
+
+    recordTraceStatus({
+      repoRoot,
+      runId: "run-home",
+      domainId: "support-ops",
+      workspaceId: "workspace-1",
+      teamId: "team-1",
+      traceId: "55555555555555555555555555555555",
+      status: "trace_unavailable",
+      reason: "phoenix_down",
+    });
+    appendAuditOnlyTraceOutbox({
+      repoRoot,
+      record: { run_id: "run-home", trace_id: "55555555555555555555555555555555", reason: "phoenix_down" },
+    });
+  } finally {
+    if (previousTeamiHome === undefined) {
+      delete process.env.TEAMI_HOME;
+    } else {
+      process.env.TEAMI_HOME = previousTeamiHome;
+    }
+  }
+
+  assert.equal(fs.existsSync(path.join(paths.telemetryDir, "runs", "run-home.json")), true);
+  assert.match(fs.readFileSync(path.join(paths.telemetryDir, "phoenix-outbox.jsonl"), "utf8"), /audit_only/);
+  assert.equal(fs.existsSync(path.join(oldAgentShell, "telemetry", "runs", "run-home.json")), false);
+  assert.equal(fs.existsSync(path.join(oldAgentShell, "telemetry", "phoenix-outbox.jsonl")), false);
 });
 
 test("managed Phoenix reuses an existing Phoenix service without taking ownership", async () => {
@@ -134,6 +228,7 @@ test("managed Phoenix cold start is the only readiness path marked as started by
 
   const result = await ensurePhoenixReady({
     repoRoot,
+    env: { ...process.env, TEAMI_PHOENIX_SKIP_INSTALL: "1" },
     probeIdentity: async () => {
       probes += 1;
       return probes === 1
@@ -154,7 +249,141 @@ test("managed Phoenix cold start is the only readiness path marked as started by
   assert.equal(result.reused, false);
   assert.equal(result.started, true);
   assert.equal(starts, 1);
-  assert.ok(installCommands > 0);
+  assert.equal(installCommands, 0);
+});
+
+test("managed Phoenix fetches the carried runtime without system Python, venv, pip, or PATH mutation", async () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-runtime-fetch-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-runtime-home-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-runtime-manifest-"));
+  const platformKey = "fixture-x64";
+  const archive = buildRuntimeFixtureArchive({
+    "bin/python": "fixture python",
+    "bin/phoenix": "fixture phoenix",
+    "Scripts/python.exe": "fixture python exe",
+    "Scripts/phoenix.exe": "fixture phoenix exe",
+  });
+  const { manifestPath, manifestEntry } = writeRuntimeFixtureManifest({ tempDir, archive, platformKey });
+  const env = {
+    ...process.env,
+    TEAMI_HOME: home,
+    PATH: "fixture-path",
+    Path: "fixture-path-win",
+  };
+  const originalPath = process.env.PATH;
+  const originalWindowsPath = process.env.Path;
+  const expectedHomePaths = teamiHomePaths({ home });
+  const events = [];
+  const commands = [];
+  const spawns = [];
+  let probes = 0;
+
+  const result = await ensurePhoenixReady({
+    repoRoot,
+    env,
+    runtimeManifestPath: manifestPath,
+    platformKey,
+    fetchImpl: async (url) => {
+      events.push("fetch");
+      assert.equal(String(url), manifestEntry.asset_url);
+      return new Response(archive, { status: 200 });
+    },
+    probeIdentity: async () => {
+      events.push("probe");
+      probes += 1;
+      return probes === 1
+        ? { ok: false, reason: "unreachable" }
+        : { ok: true, appUrl: "http://127.0.0.1:6006" };
+    },
+    runCommand: async (command, args, options = {}) => {
+      events.push("run");
+      commands.push({ command, args, options });
+    },
+    spawnImpl: (command, args, options = {}) => {
+      events.push("spawn");
+      spawns.push({ command, args, options });
+      return { pid: process.pid, unref() {} };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.started, true);
+  assert.equal(result.root, expectedHomePaths.phoenixDataDir);
+  assert.equal(result.dataDir, expectedHomePaths.phoenixDataDir);
+  assert.equal(result.runtimeDir, expectedHomePaths.runtimeDir);
+  assert.equal(result.serviceFile.startsWith(home), true);
+  assert.equal(result.serviceFile.startsWith(repoRoot), false);
+  assert.equal(fs.existsSync(path.join(expectedHomePaths.runtimeDir, "current")), true);
+  assert.deepEqual(
+    events.filter((event) => ["fetch", "run", "spawn"].includes(event)),
+    ["fetch", "run", "spawn"],
+  );
+
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].command.startsWith(path.join(expectedHomePaths.runtimeDir, "current")), true);
+  assert.equal(commands[0].command.includes("phoenix-venv"), false);
+  assert.notEqual(commands[0].command, "python");
+  assert.notEqual(commands[0].command, "python3");
+  assert.deepEqual(commands[0].args, ["-c", "import phoenix"]);
+  assert.equal(commands[0].args.some((arg) => /venv|pip/i.test(arg)), false);
+  assert.equal(commands[0].options.env.PATH, "fixture-path");
+  assert.equal(commands[0].options.env.Path, "fixture-path-win");
+
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].command.startsWith(path.join(expectedHomePaths.runtimeDir, "current")), true);
+  assert.equal(spawns[0].command.includes("phoenix-venv"), false);
+  assert.notEqual(spawns[0].command, "phoenix");
+  assert.deepEqual(spawns[0].args, ["serve", "--host", "127.0.0.1", "--port", "6006"]);
+  assert.equal(spawns[0].args.some((arg) => /venv|pip/i.test(arg)), false);
+  assert.equal(spawns[0].options.cwd, expectedHomePaths.phoenixDataDir);
+  assert.equal(spawns[0].options.windowsHide, true);
+  assert.equal(spawns[0].options.env.PHOENIX_WORKING_DIR, expectedHomePaths.phoenixDataDir);
+  assert.equal(spawns[0].options.env.PATH, "fixture-path");
+  assert.equal(spawns[0].options.env.Path, "fixture-path-win");
+  assert.notEqual(spawns[0].options.shell, true);
+  assert.equal(process.env.PATH, originalPath);
+  assert.equal(process.env.Path, originalWindowsPath);
+});
+
+test("runtime fetch failure degrades Phoenix readiness without throwing", async () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-runtime-degrade-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-runtime-degrade-home-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-runtime-degrade-manifest-"));
+  const platformKey = "fixture-x64";
+  const archive = buildRuntimeFixtureArchive({ "bin/python": "not downloaded" });
+  const { manifestPath } = writeRuntimeFixtureManifest({ tempDir, archive, platformKey });
+  const env = { ...process.env, TEAMI_HOME: home };
+  let result;
+
+  await assert.doesNotReject(async () => {
+    result = await ensurePhoenixReady({
+      repoRoot,
+      env,
+      runtimeManifestPath: manifestPath,
+      platformKey,
+      fetchImpl: async () => {
+        throw new Error("offline fixture");
+      },
+      probeIdentity: async () => ({ ok: false, reason: "unreachable" }),
+      runCommand: async () => {
+        throw new Error("runtime fetch failure must not run Phoenix import checks");
+      },
+      spawnImpl: () => {
+        throw new Error("runtime fetch failure must not spawn Phoenix");
+      },
+    });
+  });
+
+  const metadata = readServiceMetadata(phoenixPaths(home).serviceFile);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "runtime_fetch_failed");
+  assert.equal(result.repairHint, metadata.repair_hint);
+  assert.match(result.repairHint, /Retry the Teami runtime download/);
+  assert.equal(metadata.status, "runtime_fetch_failed");
+  assert.equal(metadata.managed, false);
+  assert.equal(metadata.pid, null);
+  assert.equal(metadata.last_error_reason, "runtime_fetch_failed");
+  assert.match(runtimeFetchDegradationNotice(), /product work can continue without Phoenix traces/);
 });
 
 test("Phoenix identity probe distinguishes a non-Phoenix port collision", async () => {
@@ -305,6 +534,12 @@ test("local trace contract keeps base capabilities and excludes secret material"
   assert.match(newTraceId(() => new Uint8Array(16).fill(1)), /^[0-9a-f]{32}$/);
   assert.deepEqual(findSecretContentKeys({ nested: { api_key: "secret" } }), ["nested.api_key"]);
   assert.deepEqual(findSecretContentKeys({ message: ["Bearer ", "abcdefghijklmnop"].join("") }), ["message"]);
+  assert.deepEqual(
+    findSecretContentKeys({
+      message: ["Basic ", Buffer.from("x-access-token:fake-token-value", "utf8").toString("base64")].join(""),
+    }),
+    ["message"],
+  );
   assert.equal(enforceTraceContentPolicy({ spans: [{ attributes: { token: "secret" } }] }).ok, false);
   assert.equal(
     enforceTraceContentPolicy({ spans: [{ attributes: { prompt: "full local prompt" } }] }).reason,
@@ -507,6 +742,16 @@ test("runtime tool-event evidence is redacted and exported with outcome and pers
       issueLabels: {
         Discovery: "ilabel-discovery",
         "Needs Principal": "ilabel-needs-principal",
+        "human-review": "ilabel-human-review",
+      },
+      issueStatuses: {
+        backlog: "state-backlog",
+        todo: "state-todo",
+        in_progress: "state-in-progress",
+        in_review: "state-in-review",
+        human_review: "state-human-review",
+        needs_principal: "state-needs-principal",
+        done: "state-done",
       },
     },
     projectId: "project-1",
@@ -620,6 +865,80 @@ test("exporter falls back to Phoenix REST spans when OTLP JSON is unsupported", 
   assert.equal(calls[3].body.data[1].name, "load_project_context");
   assert.match(calls[4].url, /\/v1\/projects\/teami\/spans$/);
   assert.equal(calls[4].body.data.at(-1).name, "post_project_update");
+});
+
+test("Phoenix REST spans treats an all-duplicate 400 as successful idempotent re-delivery", async () => {
+  // When a run is replayed or a paused project is re-processed, the SAME trace is re-sent and
+  // Phoenix 400s it — every span is a duplicate it already holds, none invalid. The spans are
+  // safely in Phoenix, so the export is a successful no-op, not a delivery failure. (Grounded
+  // live 2026-07-07 against Phoenix 14.13.0, which is why trace-health looked red on replays.)
+  const calls = [];
+  const exporter = createLocalPhoenixTraceExporter({
+    collectorUrl: "http://127.0.0.1:6006/v1/traces",
+    appUrl: "http://127.0.0.1:6006",
+    projectName: "teami",
+    traceId: "11111111111111111111111111111111",
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method });
+      if (String(url).endsWith("/v1/traces")) return new Response("unsupported", { status: 415 });
+      if (String(url).includes("/v1/projects?")) return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      if (String(url).endsWith("/v1/projects")) return new Response(JSON.stringify({ data: { id: "project-1" } }), { status: 200 });
+      if (String(url).includes("/v1/projects/teami/spans")) {
+        return new Response(
+          JSON.stringify({
+            error: "Failed to insert 1 spans: 1 duplicate spans",
+            total_received: 1,
+            total_duplicates: 1,
+            total_invalid: 0,
+          }),
+          { status: 400 },
+        );
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  const result = await exporter.forceFlush({
+    trace: { attributes: { run_id: "run-1" }, annotations: [], spans: [{ name: "load_project_context", attributes: { ok: true } }] },
+    run: { run_id: "run-1", status: "completed" },
+    stage: "final",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.transport, "phoenix_rest_spans");
+  assert.match(calls.at(-1).url, /\/v1\/projects\/teami\/spans$/);
+});
+
+test("Phoenix REST spans still fails when a 400 reports genuinely invalid spans", async () => {
+  // A 400 is only benign when it is a CLEAN re-delivery. If Phoenix rejects any span as invalid
+  // (schema/shape error), the trace did NOT fully land — that must still surface as a failure.
+  const exporter = createLocalPhoenixTraceExporter({
+    collectorUrl: "http://127.0.0.1:6006/v1/traces",
+    appUrl: "http://127.0.0.1:6006",
+    projectName: "teami",
+    traceId: "11111111111111111111111111111111",
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/v1/traces")) return new Response("unsupported", { status: 415 });
+      if (String(url).includes("/v1/projects?")) return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      if (String(url).endsWith("/v1/projects")) return new Response(JSON.stringify({ data: { id: "project-1" } }), { status: 200 });
+      if (String(url).includes("/v1/projects/teami/spans")) {
+        return new Response(
+          JSON.stringify({ error: "invalid spans", total_received: 2, total_duplicates: 1, total_invalid: 1 }),
+          { status: 400 },
+        );
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  await assert.rejects(
+    () => exporter.forceFlush({
+      trace: { attributes: { run_id: "run-1" }, annotations: [], spans: [{ name: "load_project_context" }] },
+      run: { run_id: "run-1", status: "completed" },
+      stage: "final",
+    }),
+    /phoenix_rest_spans_http_400/,
+  );
 });
 
 test("trace fetch timeouts fail fast instead of hanging mutation", async () => {
@@ -1360,6 +1679,77 @@ function phoenixSubagentTurn(runId, { status = "continue", reason }) {
   };
 }
 
+function writeRuntimeFixtureManifest({ tempDir, archive, platformKey }) {
+  const manifestEntry = {
+    asset_url: "https://github.com/shulmansj/teami/releases/download/test-runtime/fixture-runtime.tar.gz",
+    size_bytes: archive.length,
+    sha256: sha256Buffer(archive),
+    source_commit: "fixture",
+  };
+  const manifest = {
+    schema_version: 1,
+    phoenix_package: "arize-phoenix==14.13.0",
+    python_tag: "cpython-3.12.13+20260623",
+    platforms: {
+      [platformKey]: manifestEntry,
+    },
+  };
+  const manifestPath = path.join(tempDir, "runtime-manifest.json");
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return { manifestPath, manifestEntry };
+}
+
+function buildRuntimeFixtureArchive(entries) {
+  const chunks = [];
+  for (const [name, content] of Object.entries(entries)) {
+    const body = Buffer.from(content, "utf8");
+    chunks.push(runtimeTarHeader({ name, size: body.length }));
+    chunks.push(body);
+    chunks.push(Buffer.alloc((512 - (body.length % 512)) % 512));
+  }
+  chunks.push(Buffer.alloc(1024));
+  return zlib.gzipSync(Buffer.concat(chunks));
+}
+
+function runtimeTarHeader({ name, size }) {
+  const header = Buffer.alloc(512, 0);
+  writeRuntimeTarString(header, name, 0, 100);
+  writeRuntimeTarString(header, "0000777", 100, 8);
+  writeRuntimeTarString(header, "0000000", 108, 8);
+  writeRuntimeTarString(header, "0000000", 116, 8);
+  writeRuntimeTarString(header, size.toString(8).padStart(11, "0"), 124, 12);
+  writeRuntimeTarString(header, "00000000000", 136, 12);
+  header.fill(0x20, 148, 156);
+  writeRuntimeTarString(header, "0", 156, 1);
+  writeRuntimeTarString(header, "ustar", 257, 6);
+  writeRuntimeTarString(header, "00", 263, 2);
+  const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
+  writeRuntimeTarString(header, checksum.toString(8).padStart(6, "0"), 148, 6);
+  header[154] = 0;
+  header[155] = 0x20;
+  return header;
+}
+
+function writeRuntimeTarString(header, value, offset, length) {
+  const bytes = Buffer.from(value, "utf8");
+  bytes.copy(header, offset, 0, Math.min(bytes.length, length));
+}
+
+function sha256Buffer(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function pickPhoenixPathShape(config) {
+  return {
+    root: config.root,
+    venvDir: config.venvDir,
+    dataDir: config.dataDir,
+    logsDir: config.logsDir,
+    serviceFile: config.serviceFile,
+    telemetryDir: config.telemetryDir,
+  };
+}
+
 function otlpAttributeValue(attributes = [], key) {
   const attribute = attributes.find((candidate) => candidate.key === key);
   return attribute ? otlpValueToJs(attribute.value) : null;
@@ -1383,6 +1773,16 @@ class PhoenixLinearClient {
       issueLabels: {
         Discovery: "ilabel-discovery",
         "Needs Principal": "ilabel-needs-principal",
+        "human-review": "ilabel-human-review",
+      },
+      issueStatuses: {
+        backlog: "state-backlog",
+        todo: "state-todo",
+        in_progress: "state-in-progress",
+        in_review: "state-in-review",
+        human_review: "state-human-review",
+        needs_principal: "state-needs-principal",
+        done: "state-done",
       },
     };
     this.project = {
@@ -1404,6 +1804,7 @@ class PhoenixLinearClient {
     return [
       { id: "status-backlog", name: "Backlog", type: "backlog" },
       { id: "status-planned", name: "Planned", type: "planned" },
+      { id: "status-principal-escalation", name: "Principal Escalation", type: "planned" },
       { id: "status-started", name: "In Progress", type: "started" },
       { id: "status-completed", name: "Completed", type: "completed" },
     ];
@@ -1415,7 +1816,8 @@ class PhoenixLinearClient {
       { id: "state-todo", name: "Todo", type: "unstarted" },
       { id: "state-in-progress", name: "In Progress", type: "started" },
       { id: "state-in-review", name: "In Review", type: "started" },
-      { id: "state-blocked", name: "Blocked", type: "started" },
+      { id: "state-human-review", name: "Principal Review", type: "started" },
+      { id: "state-needs-principal", name: "Principal Escalation", type: "started" },
       { id: "state-done", name: "Done", type: "completed" },
     ];
   }
@@ -1429,6 +1831,7 @@ class PhoenixLinearClient {
     const labels = [
       { id: "ilabel-discovery", name: "Discovery", teamId },
       { id: "ilabel-needs-principal", name: "Needs Principal", teamId },
+      { id: "ilabel-human-review", name: "human-review", teamId },
     ];
     return name ? labels.filter((label) => label.name === name) : labels;
   }

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { renameWithRetry } from "../../../../engine/run-store.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "../app-home.mjs";
 
 export const PROMOTION_REGISTRY_SCHEMA_VERSION =
   "teami-promotion-candidate-registry/v1";
@@ -82,8 +83,8 @@ export function computeNormalizedEnvelope({
 // budgets/dedupe truth stays with repo-visible PR markers (CONSTRAINTS #10).
 // ---------------------------------------------------------------------------
 
-export function defaultPromotionRegistryDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "promotion-candidates");
+export function defaultPromotionRegistryDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "promotion-candidates");
 }
 
 export function promotionRegistryPath({ registryDir, envelopeHash }) {

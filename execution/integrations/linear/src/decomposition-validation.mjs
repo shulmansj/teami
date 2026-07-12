@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadLinearConfig } from "./config.mjs";
+import { loadLinearConfigAsync } from "./config.mjs";
 import { createSnapshotEvalLinearClient } from "./decomposition-eval-cli.mjs";
 import { validateOrchestratorOutput } from "../../../engine/orchestrator-output.mjs";
 import { runDecompositionEvalMode } from "./trigger-runner.mjs";
@@ -184,7 +184,7 @@ export function createLocalValidationDomainContext({ teamId = "eval-team-1" } = 
 export async function runDecompositionValidation({
   repoRoot = REPO_ROOT,
   config = null,
-  loadConfig = loadLinearConfig,
+  loadConfig = loadLinearConfigAsync,
   fixturePath = FROZEN_PROJECT_FIXTURE_PATH,
   operatorDir = defaultValidationOperatorDir(),
   runStoreDir = null,
@@ -192,7 +192,7 @@ export async function runDecompositionValidation({
   runEvalMode = runDecompositionEvalMode,
   validateOutput = validateDecompositionOrchestratorOutput,
 } = {}) {
-  const resolvedConfig = config || loadConfig({ repoRoot });
+  const resolvedConfig = config || await loadConfig({ repoRoot });
   const project = loadFrozenWebhookInboxProject({ fixturePath, config: resolvedConfig });
   const snapshot = createSnapshotEvalLinearClient({ config: resolvedConfig, project });
   const domainContext = createLocalValidationDomainContext({ teamId: snapshot.cache.teamId });

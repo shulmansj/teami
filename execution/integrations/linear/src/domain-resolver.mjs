@@ -7,15 +7,17 @@ import {
   readDomainRegistry,
   validateDomainRegistry,
 } from "./domain-registry.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
 
 export function resolveDomainContext({
   registry,
   domainId,
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot),
 } = {}) {
-  const loaded = loadRegistry(registry, repoRoot);
+  const loaded = loadRegistry(registry, home);
   const domain = loaded.domains.find((candidate) => candidate.id === domainId);
   if (!domain) {
     return {
@@ -31,7 +33,7 @@ export function resolveDomainContext({
       candidates: domainCandidates([domain]),
     };
   }
-  return { ok: true, context: buildDomainContext({ domain, config, repoRoot, behaviorRepoId }) };
+  return { ok: true, context: buildDomainContext({ domain, config, repoRoot, home, behaviorRepoId }) };
 }
 
 export function resolveForegroundDomainContext({
@@ -39,18 +41,19 @@ export function resolveForegroundDomainContext({
   domainId = null,
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot),
 } = {}) {
-  const loaded = loadRegistry(registry, repoRoot);
+  const loaded = loadRegistry(registry, home);
   if (domainId) {
-    return resolveDomainContext({ registry: loaded, domainId, config, repoRoot, behaviorRepoId });
+    return resolveDomainContext({ registry: loaded, domainId, config, repoRoot, home, behaviorRepoId });
   }
 
   const activeDomains = loaded.domains.filter((domain) => domain.status === "active");
   if (activeDomains.length === 1) {
     return {
       ok: true,
-      context: buildDomainContext({ domain: activeDomains[0], config, repoRoot, behaviorRepoId }),
+      context: buildDomainContext({ domain: activeDomains[0], config, repoRoot, home, behaviorRepoId }),
     };
   }
   return {
@@ -68,9 +71,10 @@ export function resolveWakeDomainContext({
   selector = {},
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot),
 } = {}) {
-  const loaded = loadRegistry(registry, repoRoot);
+  const loaded = loadRegistry(registry, home);
   const workspaceId = selector.workspaceId || null;
   if (!workspaceId) {
     return { ok: false, reason: "missing_workspace_id", candidates: [] };
@@ -110,6 +114,7 @@ export function resolveWakeDomainContext({
       reasonMany: "ambiguous_webhook_id",
       config,
       repoRoot,
+      home,
       behaviorRepoId,
     });
   }
@@ -124,6 +129,7 @@ export function resolveWakeDomainContext({
       reasonMany: "ambiguous_team_id",
       config,
       repoRoot,
+      home,
       behaviorRepoId,
     });
   }
@@ -136,6 +142,7 @@ export function resolveWakeDomainContext({
       reasonMany: "ambiguous_domain_project_team_intersection",
       config,
       repoRoot,
+      home,
       behaviorRepoId,
     });
   }
@@ -143,7 +150,7 @@ export function resolveWakeDomainContext({
   if (workspaceDomains.length === 1 && workspaceDomains[0].status === "active") {
     return {
       ok: true,
-      context: buildDomainContext({ domain: workspaceDomains[0], config, repoRoot, behaviorRepoId }),
+      context: buildDomainContext({ domain: workspaceDomains[0], config, repoRoot, home, behaviorRepoId }),
     };
   }
   return {
@@ -157,6 +164,7 @@ export function buildDomainContext({
   domain,
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot),
 } = {}) {
   const context = {
@@ -171,7 +179,7 @@ export function buildDomainContext({
       teamName: domain.linear.team_name,
       webhookId: domain.linear.webhook_id,
       cachePath: domainCachePath({
-        repoRoot,
+        home,
         domainId: domain.id,
         cachePath: domain.linear.cache_path,
       }),
@@ -218,8 +226,8 @@ export function behaviorRepoIdForRepoRoot(repoRoot = process.cwd()) {
   return `local:${digest}`;
 }
 
-function loadRegistry(registry, repoRoot) {
-  const loaded = registry || readDomainRegistry({ repoRoot });
+function loadRegistry(registry, home) {
+  const loaded = registry || readDomainRegistry({ home });
   validateDomainRegistry(loaded);
   return loaded;
 }
@@ -231,10 +239,11 @@ function oneOrFailure({
   reasonMany,
   config,
   repoRoot,
+  home,
   behaviorRepoId,
 }) {
   if (matches.length === 1) {
-    return { ok: true, context: buildDomainContext({ domain: matches[0], config, repoRoot, behaviorRepoId }) };
+    return { ok: true, context: buildDomainContext({ domain: matches[0], config, repoRoot, home, behaviorRepoId }) };
   }
   return {
     ok: false,

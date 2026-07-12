@@ -36,6 +36,9 @@ export function redactGitHubSecrets(text) {
     redacted = redacted.replace(pattern, REDACTED);
   }
   redacted = redacted.replace(/\b(Bearer\s+)([A-Za-z0-9._~+/=-]{8,})/gi, `$1${REDACTED}`);
+  // Basic credentials are base64 and CONTAIN the token (x-access-token:<token>).
+  // The 24-char floor keeps prose like "Basic authentication" untouched.
+  redacted = redacted.replace(/\b(Basic\s+)([A-Za-z0-9+/=]{24,})/gi, `$1${REDACTED}`);
   redacted = redacted.replace(
     GITHUB_AUTH_ENV_ASSIGNMENT,
     (_match, name, separator, quote) => `${name}${separator}${quote}${REDACTED}`,

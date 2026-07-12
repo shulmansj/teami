@@ -8,6 +8,7 @@ import {
   readJsonTolerant,
   writeRegistryFile,
 } from "./registry-store.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 
 export const AUTONOMOUS_DIAGNOSIS_SCHEMA_VERSION =
   "teami-autonomous-diagnosis/v1";
@@ -108,9 +109,11 @@ export function buildAutonomousDiagnosisRecord({
 
 export function writeAutonomousDiagnosisRecord({
   repoRoot = process.cwd(),
-  registryDir = defaultPromotionRegistryDir(repoRoot),
+  home = resolveTeamiHome(),
+  registryDir = defaultPromotionRegistryDir(home),
   record,
 } = {}) {
+  void repoRoot;
   if (!record || record.schema_version !== AUTONOMOUS_DIAGNOSIS_SCHEMA_VERSION) {
     throw new Error("invalid_autonomous_diagnosis_record");
   }
@@ -129,9 +132,11 @@ export function writeAutonomousDiagnosisRecord({
 
 export function readAutonomousDiagnosisRecord({
   repoRoot = process.cwd(),
-  registryDir = defaultPromotionRegistryDir(repoRoot),
+  home = resolveTeamiHome(),
+  registryDir = defaultPromotionRegistryDir(home),
   opportunityHash,
 } = {}) {
+  void repoRoot;
   const filePath = autonomousDiagnosisRecordPath({ registryDir, opportunityHash });
   if (!fs.existsSync(filePath)) return { ok: false, exists: false, path: filePath, reason: "autonomous_diagnosis_not_found" };
   const record = readJsonTolerant(filePath);
@@ -144,12 +149,13 @@ export function readAutonomousDiagnosisRecord({
 
 export function appendAutonomousDiagnosisEvent({
   repoRoot = process.cwd(),
-  registryDir = defaultPromotionRegistryDir(repoRoot),
+  home = resolveTeamiHome(),
+  registryDir = defaultPromotionRegistryDir(home),
   opportunityHash,
   event,
   now = () => new Date(),
 } = {}) {
-  const read = readAutonomousDiagnosisRecord({ repoRoot, registryDir, opportunityHash });
+  const read = readAutonomousDiagnosisRecord({ repoRoot, home, registryDir, opportunityHash });
   if (!read.ok) return read;
   const before = read.record;
   const after = JSON.parse(JSON.stringify(before));
@@ -166,8 +172,10 @@ export function appendAutonomousDiagnosisEvent({
 
 export function listPendingAutonomousDiagnosisRecords({
   repoRoot = process.cwd(),
-  registryDir = defaultPromotionRegistryDir(repoRoot),
+  home = resolveTeamiHome(),
+  registryDir = defaultPromotionRegistryDir(home),
 } = {}) {
+  void repoRoot;
   if (!fs.existsSync(registryDir)) return { ok: true, records: [] };
   const records = [];
   for (const name of fs.readdirSync(registryDir).sort()) {

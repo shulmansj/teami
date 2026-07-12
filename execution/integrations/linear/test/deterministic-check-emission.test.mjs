@@ -80,7 +80,6 @@ function commitArtifact(runId) {
 }
 
 function pauseArtifact(runId) {
-  const projectUpdate = `run_id: ${runId}`;
   const openQuestions = "- Which provider tier?";
   return {
     schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
@@ -111,9 +110,7 @@ function pauseArtifact(runId) {
       reason: "product_questions",
       ...AUDIT_FIELDS,
       open_questions_markdown: openQuestions,
-      project_update_markdown: projectUpdate,
     },
-    discovery_issues: [],
   };
 }
 
@@ -453,12 +450,13 @@ test("eval-mode parity: in-memory artifact, explicit trace id, and supplied eval
       },
       pause_state_correctness: {
         project: {
-          labels: [{ id: "label-open-questions" }],
-          status: { id: "status-backlog", type: "backlog" },
-          content: "## Open Questions\n- Which provider tier?",
+          status: { id: "status-principal-escalation", type: "planned" },
+          comments: [
+            { author_id: "app-viewer-1", body: "- Which provider tier?" },
+          ],
         },
-        hasOpenQuestionsLabelId: "label-open-questions",
-        backlogStatusId: "status-backlog",
+        attentionStatusId: "status-principal-escalation",
+        appIdentityId: "app-viewer-1",
       },
     },
     ensureReady: readyStub,
@@ -494,8 +492,8 @@ test("artifact-driven pause runs name the missing post-mutation project state in
   assert.equal(pauseCheck.skip_reason, "post_mutation_project_state_not_recorded_in_run_artifact");
   assert.deepEqual(pauseCheck.missing_inputs, [
     "project",
-    "hasOpenQuestionsLabelId",
-    "backlogStatusId",
+    "attentionStatusId",
+    "appIdentityId",
   ]);
   // The packet sufficiency check still runs from the recorded packets.
   const sufficiency = checks.find((check) => check.name === "accepted_packet_sufficiency");
@@ -681,9 +679,9 @@ test("code evaluators emit only the documented pass|needs_revision subset of the
     }),
     evaluateAcceptedPacketSufficiencyOffline({ phasePackets: [] }),
     evaluatePauseState({
-      project: { labels: [], status: { id: "s" }, content: "" },
-      hasOpenQuestionsLabelId: "l",
-      backlogStatusId: "s2",
+      project: { labels: [], status: { id: "s" }, comments: [] },
+      attentionStatusId: "s2",
+      appIdentityId: "app-viewer-1",
     }),
   ];
   for (const output of outputs) {

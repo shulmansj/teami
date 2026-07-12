@@ -9,6 +9,7 @@ import {
   buildLibraryRolePurposeTask,
   buildSubagentInvocationEnvelope,
 } from "../../../engine/subagent-invocation-envelope.mjs";
+import { buildOrchestratorPrompt } from "../src/orchestrator-turn.mjs";
 
 const DISCIPLINE_LINE =
   "Use ONLY the inlined project context and prior-turn digest; emit EXACTLY one JSON object matching the schema and nothing else — no prose; do not call tools.";
@@ -17,7 +18,7 @@ const PROJECT = {
   id: "project-1",
   name: "Onboarding cleanup",
   description: "Make setup completion unambiguous.",
-  content: "## Goal\nShip onboarding clarity.\n\n## Open Questions\n",
+  content: "## Goal\nShip onboarding clarity.\n",
   status: { id: "status-1", name: "planned", type: "planned" },
   labels: [{ id: "label-1", name: "decomposition-ready" }],
   issues: [{
@@ -57,6 +58,8 @@ test("buildSubagentInvocationEnvelope includes persona, run, task, project, prio
   assert.ok(envelope.includes(`schema_version: ${JSON.stringify(SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION)}`));
   assert.ok(envelope.includes("context_digest:"));
   assert.ok(envelope.includes("source_refs: array of strings"));
+  assert.ok(envelope.includes("open_questions_markdown"));
+  assert.doesNotMatch(envelope, /discovery_issues/);
 });
 
 test("buildSubagentInvocationEnvelope accepts array-form allowed outcomes and omits empty prior digest", () => {
@@ -108,6 +111,49 @@ test("buildSubagentInvocationEnvelope caps oversized project context and fails c
   );
 });
 
+test("project comments reach orchestrator and subagent context before oversized project content truncates", () => {
+  const answerText = "Answer: launch concierge onboarding before self-serve billing.";
+  const project = {
+    ...PROJECT,
+    comments: [{
+      body: answerText,
+      createdAt: "2026-06-29T10:02:00.000Z",
+      user: { id: "user-founder-1" },
+    }],
+    content: `## Goal\n${"oversized-content ".repeat(8000)}`,
+    issues: Array.from({ length: 150 }, (_, index) => ({
+      id: `issue-${index + 1}`,
+      identifier: `FAC-${index + 1}`,
+      title: `Oversized issue payload ${index + 1} ${"details ".repeat(40)}`,
+      state: "Todo",
+    })),
+  };
+
+  const prompt = buildOrchestratorPrompt({
+    runId: "run-comment-proof",
+    project,
+    selectableTargets: ["prompt/decomposition/pm_product_sufficiency_pass"],
+    priorTurns: [],
+    bounds: { rounds_used: 0, max_rounds: 4 },
+    invocableRuntimeRoles: ["pm", "sr_eng"],
+  });
+  assert.ok(prompt.includes(answerText));
+  assert.ok(prompt.indexOf('"comments"') < prompt.indexOf('"content"'));
+
+  const envelope = buildSubagentInvocationEnvelope({
+    body: "You are the product manager persona.",
+    runId: "run-comment-proof",
+    role: "pm",
+    task: "Use the human answer to decide whether the project can be decomposed.",
+    project,
+    allowedOutcomes: SUBAGENT_TURN_OUTCOMES,
+  });
+
+  assert.ok(envelope.includes(answerText));
+  assert.ok(envelope.includes("[...truncated...]"));
+  assert.ok(envelope.indexOf('"comments"') < envelope.indexOf('"content"'));
+});
+
 test("buildLibraryRolePurposeTask includes human name, target key, and run objective", () => {
   const task = buildLibraryRolePurposeTask({
     humanName: "Senior Engineer",
@@ -118,4 +164,22 @@ test("buildLibraryRolePurposeTask includes human name, target key, and run objec
   assert.ok(task.includes("Senior Engineer"));
   assert.ok(task.includes("prompt/decomposition/sr_eng"));
   assert.ok(task.includes("Split onboarding setup into agent-ready implementation work."));
+});
+
+test("toolUse envelopes swap the no-tools discipline for the in-repo tool-using contract", async () => {
+  const { buildSubagentInvocationEnvelope } = await import("../../../engine/subagent-invocation-envelope.mjs");
+  const base = {
+    body: "worker persona",
+    runId: "run_x",
+    role: "worker",
+    task: "implement the issue",
+    project: { id: "p1", name: "P" },
+    allowedOutcomes: [["continue", "work_complete"]],
+  };
+  const toolless = buildSubagentInvocationEnvelope(base);
+  assert.match(toolless, /do not call tools/);
+  const tooled = buildSubagentInvocationEnvelope({ ...base, toolUse: true });
+  assert.doesNotMatch(tooled, /do not call tools/);
+  assert.match(tooled, /working directory is the target repository clone/);
+  assert.match(tooled, /FINAL message must be EXACTLY one JSON object/);
 });

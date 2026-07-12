@@ -1,0 +1,235 @@
+{
+  "now": "2026-07-03T12:00:00.000Z",
+  "items": [
+    {
+      "issue_id": "issue-queue",
+      "identifier": "TEAM-1",
+      "title": "Approve the dashboard copy",
+      "issue_status_role": "human_review",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-queue",
+        "pr_number": 11,
+        "parked_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parked_at": "2026-07-03T10:00:00.000Z"
+      },
+      "pr_number": 11,
+      "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "check_state": "green",
+      "check_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pr_state": "open",
+      "briefing_status": "found"
+    },
+    {
+      "issue_id": "issue-missing-briefing",
+      "identifier": "TEAM-2",
+      "title": "Review onboarding tone",
+      "issue_status_role": "human_review",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-missing-briefing",
+        "pr_number": 12,
+        "parked_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "parked_at": "2026-07-03T09:30:00.000Z"
+      },
+      "pr_number": 12,
+      "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "check_state": "green",
+      "check_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pr_state": "open",
+      "briefing_status": "missing"
+    },
+    {
+      "issue_id": "issue-label-removed",
+      "identifier": "TEAM-3",
+      "title": "Ungate pricing text",
+      "issue_status_role": "human_review",
+      "gate_label_present": false,
+      "park_record": {
+        "issue_id": "issue-label-removed",
+        "pr_number": 13,
+        "parked_head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "parked_at": "2026-07-03T09:00:00.000Z"
+      },
+      "pr_number": 13,
+      "current_head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "check_state": "green",
+      "check_head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "pr_state": "open",
+      "briefing_status": "found"
+    },
+    {
+      "issue_id": "issue-drift",
+      "identifier": "TEAM-4",
+      "title": "Re-review changed visuals",
+      "issue_status_role": "human_review",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-drift",
+        "pr_number": 14,
+        "parked_head_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "parked_at": "2026-07-03T08:00:00.000Z"
+      },
+      "pr_number": 14,
+      "current_head_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "check_state": "absent",
+      "check_head_sha": null,
+      "pr_state": "open",
+      "briefing_status": "found"
+    },
+    {
+      "issue_id": "issue-unvetted-done",
+      "identifier": "TEAM-5",
+      "title": "Done before merge",
+      "issue_status_role": "done",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-unvetted-done",
+        "pr_number": 15,
+        "parked_head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+        "parked_at": "2026-07-03T07:00:00.000Z"
+      },
+      "pr_number": 15,
+      "current_head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "check_state": "green",
+      "check_head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "pr_state": "open"
+    },
+    {
+      "issue_id": "issue-landed-done",
+      "identifier": "TEAM-6",
+      "title": "Accepted and landed",
+      "issue_status_role": "done",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-landed-done",
+        "pr_number": 16,
+        "parked_head_sha": "1111111111111111111111111111111111111111",
+        "parked_at": "2026-07-03T06:00:00.000Z"
+      },
+      "pr_number": 16,
+      "current_head_sha": "1111111111111111111111111111111111111111",
+      "check_state": "green",
+      "check_head_sha": "1111111111111111111111111111111111111111",
+      "pr_state": "merged"
+    },
+    {
+      "issue_id": "issue-todo-open",
+      "identifier": "TEAM-7",
+      "title": "Send-back in flight",
+      "issue_status_role": "todo",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-todo-open",
+        "pr_number": 17,
+        "parked_head_sha": "2222222222222222222222222222222222222222",
+        "parked_at": "2026-07-03T05:00:00.000Z"
+      },
+      "pr_number": 17,
+      "current_head_sha": "2222222222222222222222222222222222222222",
+      "check_state": "green",
+      "check_head_sha": "2222222222222222222222222222222222222222",
+      "pr_state": "open"
+    },
+    {
+      "issue_id": "issue-sent-back",
+      "identifier": "TEAM-8",
+      "title": "Warm resumed",
+      "issue_status_role": "todo",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-sent-back",
+        "pr_number": 18,
+        "parked_head_sha": "3333333333333333333333333333333333333333",
+        "parked_at": "2026-07-02T05:00:00.000Z"
+      },
+      "pr_number": 18,
+      "current_head_sha": "3333333333333333333333333333333333333333",
+      "check_state": "green",
+      "check_head_sha": "3333333333333333333333333333333333333333",
+      "pr_state": "open",
+      "latest_execution_run": {
+        "run_id": "run-execution-sent-back",
+        "workflow_type": "execution",
+        "object_id": "issue-sent-back",
+        "started_at": "2026-07-02T05:30:00.000Z",
+        "terminal_reason": "todo re-entry run observed"
+      }
+    },
+    {
+      "issue_id": "issue-absent",
+      "issue_missing": true,
+      "read_error": "Linear issue was not found in active domains",
+      "park_record": {
+        "issue_id": "issue-absent",
+        "pr_number": 19,
+        "parked_head_sha": "4444444444444444444444444444444444444444",
+        "parked_at": "2026-07-01T05:00:00.000Z"
+      }
+    },
+    {
+      "issue_id": "issue-closed-done",
+      "identifier": "TEAM-9",
+      "title": "Closed without merge",
+      "issue_status_role": "done",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-closed-done",
+        "pr_number": 20,
+        "parked_head_sha": "5555555555555555555555555555555555555555",
+        "parked_at": "2026-07-01T04:00:00.000Z"
+      },
+      "pr_number": 20,
+      "current_head_sha": "5555555555555555555555555555555555555555",
+      "check_state": "green",
+      "check_head_sha": "5555555555555555555555555555555555555555",
+      "pr_state": "closed"
+    },
+    {
+      "issue_id": "issue-landing-failed",
+      "identifier": "TEAM-10",
+      "title": "Accepted but merge failed",
+      "issue_status_role": "done",
+      "gate_label_present": true,
+      "park_record": {
+        "issue_id": "issue-landing-failed",
+        "pr_number": 22,
+        "parked_head_sha": "7777777777777777777777777777777777777777",
+        "parked_at": "2026-07-03T03:55:00.000Z"
+      },
+      "pr_number": 22,
+      "current_head_sha": "7777777777777777777777777777777777777777",
+      "check_state": "green",
+      "check_head_sha": "7777777777777777777777777777777777777777",
+      "pr_state": "open"
+    }
+  ],
+  "run_records": [
+    {
+      "run_id": "run-accepted-old",
+      "workflow_type": "merge",
+      "started_at": "2026-06-01T00:00:00.000Z",
+      "merge_outcome": {
+        "issue_id": "issue-accepted-no-record",
+        "pr_number": 21,
+        "head_sha": "6666666666666666666666666666666666666666",
+        "outcome": "merged",
+        "reason": "parked head merged",
+        "observed_at": "2026-06-01T00:05:00.000Z"
+      }
+    },
+    {
+      "run_id": "run-landing-failed",
+      "workflow_type": "merge",
+      "started_at": "2026-07-03T04:00:00.000Z",
+      "merge_outcome": {
+        "issue_id": "issue-landing-failed",
+        "pr_number": 22,
+        "head_sha": "7777777777777777777777777777777777777777",
+        "outcome": "failed",
+        "reason": "GitHub refused the merge because the PR was not mergeable.",
+        "observed_at": "2026-07-03T04:10:00.000Z"
+      }
+    }
+  ]
+}

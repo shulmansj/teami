@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { writeLinearCache } from "../src/cache.mjs";
 import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
 import {
   gatewayPollTargets,
@@ -17,6 +18,10 @@ const FINGERPRINT = "fingerprint-1";
 test("project poll runs through the registered Planned descriptor", async (t) => {
   const projectDescriptor = gatewayPollTargets().find((descriptor) => descriptor.input_status === "Planned");
   assert.ok(projectDescriptor, "the Planned project descriptor is registered");
+  assert.equal(
+    gatewayPollTargets().some((descriptor) => descriptor.input_status === "Principal Escalation"),
+    false,
+  );
   assert.equal(typeof projectDescriptor.listCandidates, "function");
   assert.equal(typeof projectDescriptor.process, "function");
   assert.equal(typeof projectDescriptor.inFlightKey, "function");
@@ -39,13 +44,16 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
   t.after(restore);
 
   const repoRoot = tempRepo();
+  writeLinearCache(path.join(repoRoot, "domains", "support-ops", "linear.json"), {
+    projectStatuses: { planned: "status-planned" },
+  });
   const suppression = { reason: "same_fingerprint_rejected" };
   const events = [];
   const client = {
     async listPlannedProjectCandidates(teamId, page) {
       calls.push(["client-list", teamId, page]);
       assert.equal(teamId, "team-1");
-      assert.deepEqual(page, { first: 25, after: null });
+      assert.deepEqual(page, { plannedStateId: "status-planned", first: 25, after: null });
       return {
         candidates: [{ id: "project-1" }],
         pageInfo: { hasNextPage: false, endCursor: null },
@@ -60,6 +68,7 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
 
   const result = await pollGatewayDomain({
     repoRoot,
+    home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
     domain: domainFixture(),
@@ -77,6 +86,7 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
           domainId: "support-ops",
           projectId: "project-1",
           repoRoot,
+          home: repoRoot,
           runStoreDir: null,
         });
         return null;
@@ -84,9 +94,11 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
       readSuppression: async (input) => {
         calls.push(["read-suppression", input.projectId]);
         assert.deepEqual(input, {
+          domainId: "support-ops",
           projectId: "project-1",
           fingerprint: FINGERPRINT,
           repoRoot,
+          home: repoRoot,
           runStoreDir: null,
         });
         return suppression;
@@ -136,8 +148,10 @@ test("a second registered descriptor is iterated by pollGatewayDomain", async (t
   });
   t.after(unregister);
 
+  const repoRoot = tempRepo();
   const result = await pollGatewayDomain({
-    repoRoot: tempRepo(),
+    repoRoot,
+    home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
     domain: domainFixture(),
@@ -217,5 +231,7 @@ function configFixture() {
 }
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-poll-target-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-poll-target-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
