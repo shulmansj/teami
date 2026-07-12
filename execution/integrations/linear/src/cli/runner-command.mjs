@@ -9,11 +9,13 @@ import {
   runGatewayOnce,
   selectGatewayDomains,
 } from "../gateway-loop.mjs";
+import { collectHumanReviewGateStatusReport } from "../linear/human-review-gate-status.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
 import { normalizeLocalPhoenixAppUrl } from "../local-phoenix-manager.mjs";
 import {
   runRuntimeSmokeChecks,
 } from "../runtime-smoke.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 import { flagValue, parseCliFlags } from "./flags.mjs";
 import { homeStateProbe } from "./home-state.mjs";
 import {
@@ -44,7 +46,7 @@ export async function runGatewayCommand(input) {
   }
   if (subcommand && !subcommand.startsWith("--")) {
     output.error({
-      what: "Usage: npm run gateway -- [status] [--domain <id>]",
+      what: `Usage: ${formatCommand("gateway [status] [--domain <id>]")}`,
       why: `Unknown gateway subcommand: ${subcommand}`,
     });
     process.exitCode = 2;
@@ -69,7 +71,7 @@ function gatewayWatchLine() {
 }
 
 async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
-  const { config, repoRoot, output } = context;
+  const { config, repoRoot, home, output } = context;
   agenticFactoryHeading(output, "gateway");
   let selection;
   let result;
@@ -89,6 +91,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
   try {
     selection = resolveGatewaySelection({
       repoRoot,
+      home,
       config,
       domainId: flags.domain || null,
     });
@@ -99,6 +102,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
     if (typeof ticker.unref === "function") ticker.unref();
     result = await loop({
       repoRoot,
+      home,
       config,
       registry: selection.registry,
       domains: selection.domains,
@@ -115,7 +119,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
     output.error({
       what: "Gateway could not start",
       why: redactOAuthSecrets(error.message),
-      fix: "run npm run init or pass --domain for an active domain, then retry.",
+      fix: `run ${formatCommand("init")} or pass --domain for an active domain, then retry.`,
     });
     process.exitCode = 1;
     return;
@@ -132,7 +136,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
 }
 
 async function runGatewayStatusCommand({ context, args }) {
-  const { config, repoRoot, output } = context;
+  const { config, repoRoot, home, output } = context;
   agenticFactoryHeading(output, "gateway status");
   const { flags } = parseCliFlags(args);
   if (flags.requeue || flagValue(args, "--requeue")) {
@@ -149,11 +153,13 @@ async function runGatewayStatusCommand({ context, args }) {
   try {
     const selection = resolveGatewaySelection({
       repoRoot,
+      home,
       config,
       domainId: flags.domain || null,
     });
     result = await runGatewayOnce({
       repoRoot,
+      home,
       config,
       registry: selection.registry,
       domains: selection.domains,
@@ -162,13 +168,13 @@ async function runGatewayStatusCommand({ context, args }) {
     output.error({
       what: "Gateway status could not be read",
       why: redactOAuthSecrets(error.message),
-      fix: "run npm run init or pass --domain for a configured active domain, then retry.",
+      fix: `run ${formatCommand("init")} or pass --domain for a configured active domain, then retry.`,
     });
     process.exitCode = 1;
     return;
   }
 
-  renderGatewayStatusResult(result, output, { repoRoot });
+  renderGatewayStatusResult(result, output, { repoRoot, home });
   printVerboseHint(output);
   process.exitCode = gatewayExitCode(result);
 }
@@ -178,9 +184,9 @@ async function runGatewayStatusCommand({ context, args }) {
 // polls Linear, drains replay, or starts a decomposition — that active one-pass lives behind
 // `trigger-status`. Always exits 0; it is a status report, not a health gate (that is `doctor`).
 async function runGatewayStatusReadOnly({ context }) {
-  const { config, repoRoot, output } = context;
+  const { config, repoRoot, home, output } = context;
   agenticFactoryHeading(output, "gateway status");
-  const probe = homeStateProbe({ repoRoot });
+  const probe = homeStateProbe({ repoRoot, home, config });
 
   if (probe.state === "uninitialized") {
     output.warn("Not set up yet — this checkout has no active factory domain.");
@@ -210,16 +216,17 @@ async function runGatewayStatusReadOnly({ context }) {
   } else {
     output.nextSteps([{ text: formatCommand("gateway start"), hint: "open your factory for business" }]);
   }
-  renderLatestRunEvidence({ repoRoot, output });
+  renderLatestRunEvidence({ repoRoot, home, output });
+  await renderHumanReviewGateStatus({ repoRoot, home, config, output });
   printVerboseHint(output);
   process.exitCode = 0;
 }
 
-function resolveGatewaySelection({ repoRoot, config, domainId = null } = {}) {
-  const registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry();
+function resolveGatewaySelection({ repoRoot, home = resolveTeamiHome(), config, domainId = null } = {}) {
+  const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
   const domains = selectGatewayDomains({ registry, domainId });
   if (domains.length === 0) {
-    throw new Error("no_active_domains: no active domains are configured. Run npm run init.");
+    throw new Error(`no_active_domains: no active domains are configured. Run ${formatCommand("init")}.`);
   }
   return { registry, domains, config };
 }
@@ -239,9 +246,20 @@ function renderGatewayCompletion(result, output) {
   output.keyValues(compactPairs([
     ["Status", result.status],
     ["Reason", result.reason],
-    ["Iterations", Array.isArray(result.iterations) ? result.iterations.length : null],
-    ["Events", Array.isArray(result.statuses) ? result.statuses.length : null],
+    ["Iterations", gatewayRetentionCount(result, "iterations")],
+    ["Events", gatewayRetentionCount(result, "statuses")],
   ]), { heading: "Gateway" });
+}
+
+function gatewayRetentionCount(result, kind) {
+  const records = kind === "iterations" ? result?.iterations : result?.statuses;
+  if (!Array.isArray(records)) return null;
+  const counts = result?.retention?.[kind];
+  const total = Number.isInteger(counts?.total) ? counts.total : records.length;
+  const retained = Number.isInteger(counts?.retained) ? counts.retained : records.length;
+  const dropped = Number.isInteger(counts?.dropped) ? counts.dropped : Math.max(0, total - retained);
+  if (dropped > 0) return `${total} total; ${retained} recent retained; ${dropped} older dropped`;
+  return `${total} total; all retained`;
 }
 
 function renderGatewayStatusResult(result, output, { repoRoot } = {}) {
@@ -257,8 +275,6 @@ function renderGatewayStatusResult(result, output, { repoRoot } = {}) {
   renderGatewayEvents(result.statuses || [], output);
   renderPlannedProjectSummary(result, output);
   renderLatestRunEvidence({ repoRoot, output });
-  const reconciliation = result.startup?.resumeReconciliation;
-  if (reconciliation) renderNextResumeReconciliationReport(reconciliation, output);
 }
 
 function renderGatewayEvents(events, output) {
@@ -355,11 +371,11 @@ function plannedProjectRow(domain, entry = {}) {
   };
 }
 
-function renderLatestRunEvidence({ repoRoot, output, limit = 5 } = {}) {
+function renderLatestRunEvidence({ repoRoot, home = resolveTeamiHome(), output, limit = 5 } = {}) {
   output.section("Latest run evidence");
   let local;
   try {
-    local = readLocalEvalInputs({ repoRoot });
+    local = readLocalEvalInputs({ repoRoot, home });
   } catch (error) {
     output.warn(`Local run evidence could not be read: ${redactOAuthSecrets(error.message)}`);
     return;
@@ -385,6 +401,99 @@ function renderLatestRunEvidence({ repoRoot, output, limit = 5 } = {}) {
   }
 }
 
+async function renderHumanReviewGateStatus({ repoRoot, home = resolveTeamiHome(), config, output } = {}) {
+  output.section("Human review gate");
+  let report;
+  try {
+    report = await collectHumanReviewGateStatusReport({ repoRoot, home, config });
+  } catch (error) {
+    output.warn(`Human review gate status could not be read: ${redactOAuthSecrets(error.message)}`);
+    return;
+  }
+
+  for (const warning of report.warnings || []) {
+    output.warn(`Human review gate read warning: ${redactOAuthSecrets(warning.reason || "unknown")}`);
+  }
+
+  if (
+    (report.queue || []).length === 0 &&
+    (report.reconciliation || []).length === 0 &&
+    (report.verdicts || []).length === 0
+  ) {
+    output.success("No human-review gate work found.");
+    return;
+  }
+
+  if ((report.queue || []).length > 0) {
+    output.info("Queue");
+    for (const row of report.queue) {
+      output.info(`${gateIssueLabel(row)}: ${row.reason}`);
+      output.keyValues(compactPairs([
+        ["Domain", row.domain_id],
+        ["PR", row.pr_number ? `#${row.pr_number}` : null],
+        ["Parked", row.parked_at],
+        ["Age", humanizeGateAge(row.age_ms)],
+        ["Head", shortSha(row.parked_head_sha)],
+      ]));
+    }
+  }
+
+  if ((report.reconciliation || []).length > 0) {
+    output.info("Reconciliation");
+    for (const row of report.reconciliation) {
+      const line = `${gateIssueLabel(row)}: ${humanizeToken(row.category)} - ${row.reason}`;
+      if (row.severity === "success") output.success(line);
+      else if (row.severity === "info") output.info(line);
+      else output.warn(line);
+      output.keyValues(compactPairs([
+        ["Domain", row.domain_id],
+        ["Status", row.issue_status_role],
+        ["PR", row.pr_number ? `#${row.pr_number}` : null],
+        ["PR state", row.pr_state],
+        ["Parked head", shortSha(row.parked_head_sha)],
+        ["Current head", shortSha(row.current_head_sha)],
+        ["Observed", row.observed_at],
+      ]));
+    }
+  }
+
+  if ((report.verdicts || []).length > 0) {
+    output.info("Verdicts");
+    for (const row of report.verdicts) {
+      const line = `${row.issue_id}: ${humanizeToken(row.verdict)} - ${row.reason}`;
+      if (row.verdict === "accepted") output.success(line);
+      else if (row.verdict === "sent_back") output.info(line);
+      else output.warn(line);
+      output.keyValues(compactPairs([
+        ["Run", row.run_id],
+        ["PR", row.pr_number ? `#${row.pr_number}` : null],
+        ["Head", shortSha(row.head_sha)],
+        ["Observed", row.observed_at],
+      ]));
+    }
+  }
+}
+
+function gateIssueLabel(row = {}) {
+  const issue = row.identifier || row.issue_id || "issue";
+  return row.title ? `${issue} ${row.title}` : issue;
+}
+
+function shortSha(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? text.slice(0, 12) : null;
+}
+
+function humanizeGateAge(ms) {
+  if (!Number.isFinite(ms)) return null;
+  const totalMinutes = Math.max(0, Math.round(ms / 60_000));
+  if (totalMinutes < 60) return `${totalMinutes} minute${totalMinutes === 1 ? "" : "s"}`;
+  const totalHours = Math.round(totalMinutes / 60);
+  if (totalHours < 48) return `${totalHours} hour${totalHours === 1 ? "" : "s"}`;
+  const days = Math.round(totalHours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
 function gatewayExitCode(result) {
   if (result.reason === "gateway_already_running") return 0;
   if (result.ok && GATEWAY_SUCCESS_STATUSES.has(result.status)) return 0;
@@ -392,13 +501,14 @@ function gatewayExitCode(result) {
 }
 
 export async function runRuntimeSmokeCommand({ context, command, args }) {
-  const { config, repoRoot, output } = context;
+  const { config, repoRoot, home, output } = context;
     agenticFactoryHeading(output, "runtime smoke");
     let result;
     try {
       result = await runRuntimeSmokeChecks({
         config,
         repoRoot,
+        home,
         force: args.includes("--force"),
       });
     } catch (error) {
@@ -421,7 +531,7 @@ function renderRuntimeSmokeResult(result, output) {
     output.error({
       what: "Runtime smoke found runtime checks that need repair",
       why: runtimeSmokeFailureSummary(result),
-      fix: "repair the failing runtime command, model, or adapter config, then rerun npm run runtime-smoke -- --force.",
+      fix: `repair the failing runtime command, model, or adapter config, then rerun ${formatCommand("runtime-smoke --force")}.`,
     });
   }
   output.keyValues([
@@ -466,7 +576,7 @@ async function inspectTriggerStatus({
 }
 
 async function requeueTriggerWake() {
-  throw new Error("wake_requeue_retired: use run_id replay through npm run gateway -- status.");
+  throw new Error(`wake_requeue_retired: use run_id replay through ${formatCommand("gateway status")}.`);
 }
 
 function formatTriggerWakeStatusLine({ wake } = {}) {
@@ -645,67 +755,10 @@ function toDate(value) {
   return value instanceof Date ? value : new Date(value);
 }
 
-function renderNextResumeReconciliationReport(report, output) {
-  output.section("Next resume");
-  if (report.ok) output.success("No stalled resume work needs intervention.");
-  else output.warn("Resume work needs operator attention.");
-  output.keyValues([
-    ["Items", report.summary.item_count],
-    ["PM states", formatOperatorPmStateCounts(report.summary.by_pm_state)],
-    ["Generated", report.generated_at],
-  ]);
-  const unavailableSources = report.sources
-    .filter((source) => source.status === "unavailable" || source.status === "unreadable")
-    .map((source) => `${source.id}=${source.reason || source.status}`);
-  if (unavailableSources.length > 0) output.warn(`Degraded sources: ${unavailableSources.join(", ")}`);
-  if (report.summary.item_count === 0) {
-    output.success("No aged, expired, dead-lettered, resumed, proposal, or attention work found.");
-  } else {
-    output.section("Resume targets");
-    for (const item of report.items) {
-      const headline = `${operatorPmStateLabel(item.pm_state)}: ${item.ref}`;
-      if (item.pm_state === "Working") output.success(headline);
-      else output.warn(headline);
-      output.keyValues(compactPairs([
-        ["Classification", item.classification],
-        ["Source", item.source],
-        ["Reason", item.reason],
-        ["Detail", item.detail],
-        ["Surface", item.next_surface],
-      ]));
-      output.detail(`pm_state=${item.pm_state}`);
-      output.detail(`item_id=${item.id}`);
-    }
-  }
-  output.detail(report._note || "");
-  output.detail("external_actions=no gateway work claimed, no Linear writes, no GitHub writes");
-  output.detail(`sources=${redactOAuthSecrets(JSON.stringify(report.sources || []))}`);
-}
-
-function formatOperatorPmStateCounts(counts = {}) {
-  return [
-    "Working",
-    "Needs your decision",
-    "Safe stop",
-    "Proposal ready",
-  ].map((label) => `${label}=${counts[rawPmStateLabel(label)] || 0}`).join(", ");
-}
-
-function operatorPmStateLabel(state) {
-  if (state === "Blocked but safe") return "Safe stop";
-  return state || "Unknown";
-}
-
-function rawPmStateLabel(label) {
-  if (label === "Safe stop") return "Blocked but safe";
-  return label;
-}
-
 export {
   acquireDomainRunnerLock,
   formatTriggerWakeStatusLine,
   inspectTriggerStatus,
-  renderNextResumeReconciliationReport,
   requeueTriggerWake,
   runOneTriggerWake,
   selectRunnerDomains,

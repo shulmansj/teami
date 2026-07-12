@@ -13,8 +13,8 @@ import {
 export const REPO_CANDIDATE_ARTIFACT_STUB_SCHEMA_VERSION =
   "teami-repo-candidate-artifact-stub/v1";
 
-function readTrustedRepoArtifactJson({ internalCloneDir, ref, relativePath }) {
-  const read = gitShowText({ internalCloneDir, ref, relativePath });
+async function readTrustedRepoArtifactJson({ internalCloneDir, ref, relativePath }) {
+  const read = await gitShowText({ internalCloneDir, ref, relativePath });
   if (!read.ok) return { ok: false, reason: read.reason, detail: read.detail };
   try {
     return { ok: true, artifact: JSON.parse(read.text) };
@@ -23,8 +23,8 @@ function readTrustedRepoArtifactJson({ internalCloneDir, ref, relativePath }) {
   }
 }
 
-function listTrustedRepoArtifactPaths({ internalCloneDir, ref, directory, extension }) {
-  const result = defaultRunGit(["ls-tree", "-r", "--name-only", ref, "--", directory], {
+async function listTrustedRepoArtifactPaths({ internalCloneDir, ref, directory, extension }) {
+  const result = await defaultRunGit(["ls-tree", "-r", "--name-only", ref, "--", directory], {
     cwd: internalCloneDir,
   });
   if (!result.ok) {
@@ -44,13 +44,13 @@ function listTrustedRepoArtifactPaths({ internalCloneDir, ref, directory, extens
   };
 }
 
-export function scanRepoCandidateArtifactStubs({ repoRoot, policy, trustedClone = null }) {
+export async function scanRepoCandidateArtifactStubs({ repoRoot, policy, trustedClone = null }) {
   const stubs = policy.scanner_routing.repo_candidate_artifact_stubs || [];
   const candidates = [];
   const root = path.resolve(repoRoot);
   let trustedRef = null;
   if (trustedClone) {
-    const head = resolveDefaultBranchRef({ internalCloneDir: trustedClone.internalCloneDir });
+    const head = await resolveDefaultBranchRef({ internalCloneDir: trustedClone.internalCloneDir });
     if (!head.ok) {
       candidates.push(setCandidateStatus({
         candidate_key: "repo-artifact-trusted-ref",
@@ -74,7 +74,7 @@ export function scanRepoCandidateArtifactStubs({ repoRoot, policy, trustedClone 
     const extension = descriptor.file_extension || ".candidate.json";
     let entries;
     if (trustedClone) {
-      const listed = listTrustedRepoArtifactPaths({
+      const listed = await listTrustedRepoArtifactPaths({
         internalCloneDir: trustedClone.internalCloneDir,
         ref: trustedRef,
         directory: relativeDir,
@@ -88,20 +88,21 @@ export function scanRepoCandidateArtifactStubs({ repoRoot, policy, trustedClone 
         }, "needs_reconciliation", listed.reason, listed.detail ?? null));
         continue;
       }
-      entries = listed.paths.map((relativePath) => {
-        const read = readTrustedRepoArtifactJson({
+      entries = [];
+      for (const relativePath of listed.paths) {
+        const read = await readTrustedRepoArtifactJson({
           internalCloneDir: trustedClone.internalCloneDir,
           ref: trustedRef,
           relativePath,
         });
-        return {
+        entries.push({
           relativePath,
           filePath: `${trustedRef}:${relativePath}`,
           artifact: read.ok ? read.artifact : null,
           readReason: read.ok ? null : read.reason,
           readDetail: read.ok ? null : read.detail,
-        };
-      });
+        });
+      }
     } else {
       const directory = path.resolve(repoRoot, relativeDir);
       if (!directory.startsWith(`${root}${path.sep}`) && directory !== root) {

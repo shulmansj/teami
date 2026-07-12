@@ -14,6 +14,13 @@ test("matchesStatus rejects same-type statuses when expected has a different id"
     ),
     false,
   );
+  assert.equal(
+    matchesStatus(
+      { id: "status-principal-escalation", name: "Principal Escalation", type: "planned" },
+      { id: "status-planned", name: "Planned", type: "planned" },
+    ),
+    false,
+  );
 });
 
 test("matchesStatus keeps type-only matching only when expected id is absent", () => {
@@ -21,6 +28,13 @@ test("matchesStatus keeps type-only matching only when expected id is absent", (
     matchesStatus(
       { id: "status-actual", name: "In Progress", type: "started" },
       { name: "Any started state", type: "started" },
+    ),
+    true,
+  );
+  assert.equal(
+    matchesStatus(
+      { id: "status-principal-escalation", name: "Principal Escalation", type: "planned" },
+      { name: "Any planned status", type: "planned" },
     ),
     true,
   );

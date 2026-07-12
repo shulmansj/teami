@@ -8,13 +8,7 @@ import test from "node:test";
 
 import { loadLinearConfig } from "../src/config.mjs";
 import {
-  FAILURE_TAXONOMY_VERSION,
-  RUBRIC_VERSION,
-} from "../src/eval-annotation-contract.mjs";
-import {
   createDryRunGitHubTransport,
-  createGitHubPromotionClient,
-  GITHUB_PROMOTION_ENDPOINT_ALLOWLIST,
 } from "../src/github-promotion-client.mjs";
 import {
   ENGINE_VERSION,
@@ -40,7 +34,6 @@ import { ORCHESTRATOR_OUTPUT_SCHEMA_VERSION } from "../../../engine/orchestrator
 import {
   evaluateProcessChangeGate,
 } from "../src/process-change-gate.mjs";
-import { acceptedStateHash } from "../src/promotion-scanner/accepted-baseline.mjs";
 import {
   createPromoteCandidateTestHarness,
   parsePromotionMarkers,
@@ -60,6 +53,19 @@ import { recordTraceStatus } from "../src/trace-status-store.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const config = loadLinearConfig({ repoRoot });
+
+function runtimePromptFromCommand(command) {
+  if (typeof command.stdinInput === "string") return command.stdinInput;
+  const index = command.args.indexOf("-p");
+  if (index >= 0) {
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg;
+  }
+  return command.args.at(-1);
+}
 
 const APP_URL = "http://127.0.0.1:6006";
 const PROJECT_NAME = "teami";
@@ -135,7 +141,9 @@ const DRAFTED_SR_ENG_PROMPT_CONTENT = [
 ].join("\n");
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-step17-e2e-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-step17-e2e-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function recordTestTraceStatus(options) {
@@ -163,7 +171,7 @@ function splitGitLines(stdout) {
 }
 
 function internalCloneDir(root) {
-  return path.join(root, ".teami", "promotion-workspace", "repo");
+  return path.join(root, "promotion-workspace", "repo");
 }
 
 function copyRepoFile(root, relativePath) {
@@ -176,10 +184,6 @@ function sha256File(root, relativePath) {
   return createHash("sha256")
     .update(fs.readFileSync(path.join(root, relativePath)))
     .digest("hex");
-}
-
-function acceptedStateHashForManifestFile(root, relativePath) {
-  return acceptedStateHash(JSON.parse(fs.readFileSync(path.join(root, relativePath), "utf8")));
 }
 
 function seedDecompositionArtifacts(root) {
@@ -218,15 +222,6 @@ function seedDecompositionArtifacts(root) {
     },
   });
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-}
-
-function assertOrderedLayers(body, layers) {
-  let previousIndex = -1;
-  for (const layer of layers) {
-    const currentIndex = body.indexOf(layer);
-    assert.ok(currentIndex > previousIndex, `PR body layer missing or out of order: ${layer}`);
-    previousIndex = currentIndex;
-  }
 }
 
 function assertNoMockFetchSurfaceContains(state, needle) {
@@ -778,7 +773,7 @@ function writeStep18OpportunityRecord(root) {
   const opportunityHash = createHash("sha256")
     .update("step18-sr-eng-grounding-opportunity", "utf8")
     .digest("hex");
-  const registryDir = path.join(root, ".teami", "promotion-candidates");
+  const registryDir = path.join(root, "promotion-candidates");
   fs.mkdirSync(registryDir, { recursive: true });
   fs.writeFileSync(
     path.join(registryDir, `${opportunityHash}.json`),
@@ -871,7 +866,7 @@ function createStep18DraftExperimentImpl() {
 
     const now = options.now();
     const receiptId = "expr-step18-drafted-sr-eng";
-    const receiptPath = path.join(options.repoRoot, ".teami", "experiments", `${receiptId}.json`);
+    const receiptPath = path.join(options.repoRoot, "experiments", `${receiptId}.json`);
     const manifestBytes = fs.readFileSync(path.join(options.repoRoot, PHOENIX_ASSETS_MANIFEST_PATH));
     const workspacePolicyPath = path.join(options.repoRoot, "execution/evals/decomposition/workspace-eval-policy.json");
     const workspacePolicy = JSON.parse(fs.readFileSync(workspacePolicyPath, "utf8"));
@@ -1002,6 +997,7 @@ test("Step 17 offline fixture proves a judge experiment runs but its promotion i
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
+    domainId: TRACE_IDENTITY.domainId,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",
@@ -1206,6 +1202,7 @@ test("Step 17 offline fixture rejects zero-override baseline runs as promotion c
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
+    domainId: TRACE_IDENTITY.domainId,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",
@@ -1280,6 +1277,7 @@ test("Step 17 offline fixture routes runtime-role evidence to an accepted-defaul
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
+    domainId: TRACE_IDENTITY.domainId,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",
@@ -1453,7 +1451,7 @@ test("Step 17 offline fixture routes runtime-role evidence to an accepted-defaul
   assert.equal(acceptedDefaults.roles.pm.runtime, "claude");
   assert.equal(acceptedDefaults.roles.pm.model, "gpt-5.5");
   assert.deepEqual(
-    readPromotionCommitTrailers({ cloneDir, branch: first.branch, runGit: gitAdapter }),
+    await readPromotionCommitTrailers({ cloneDir, branch: first.branch, runGit: gitAdapter }),
     {
       ok: true,
       trailers: {
@@ -1530,6 +1528,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
+    domainId: TRACE_IDENTITY.domainId,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",
@@ -1582,8 +1581,8 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
   const drafterHarness = createImprovementDrafterTestHarness({
     config,
     policyPath: path.join(root, "execution/evals/decomposition/promotion-policy.json"),
-    draftDir: path.join(root, ".teami", "drafts"),
-    registryDir: path.join(root, ".teami", "promotion-candidates"),
+    draftDir: path.join(root, "drafts"),
+    registryDir: path.join(root, "promotion-candidates"),
     githubTransport: drafterGithubTransport,
     resolveRepoIdentity: () => ({
       ok: true,
@@ -1592,7 +1591,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
     }),
     runCommand: async (command) => {
       assert.equal(command.mode, "session_start");
-      const prompt = command.args[command.args.indexOf("-p") + 1];
+      const prompt = runtimePromptFromCommand(command);
       assert.match(prompt, new RegExp(SR_ENG_TARGET_KEY.replaceAll("/", "\\/")));
       assert.match(prompt, /missing_acceptance_criteria/);
       return JSON.stringify({
@@ -1615,7 +1614,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
         prompt_name: "sr_eng_grounding_pass",
         prompt_id: DRAFTED_SR_ENG_PROMPT_ID,
         prompt_version_id: DRAFTED_SR_ENG_PROMPT_VERSION_ID,
-        receipt_path: path.join(root, ".teami", "phoenix-prompt-registrations.json"),
+        receipt_path: path.join(root, "phoenix-prompt-registrations.json"),
         manifest_mutated: false,
       };
     },
@@ -1644,7 +1643,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
   assert.equal(state.writes.promptTags[0].body.name, "teami_promotion_candidate");
 
   const storedDraft = readImprovementDraftReceipt({
-    draftDir: path.join(root, ".teami", "drafts"),
+    draftDir: path.join(root, "drafts"),
     draftId: draft.draft_id,
   });
   assert.equal(storedDraft.exists, true);
@@ -1765,7 +1764,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
   );
 
   assert.deepEqual(
-    readPromotionCommitTrailers({ cloneDir, branch: proposal.branch, runGit: gitAdapter }),
+    await readPromotionCommitTrailers({ cloneDir, branch: proposal.branch, runGit: gitAdapter }),
     {
       ok: true,
       trailers: {

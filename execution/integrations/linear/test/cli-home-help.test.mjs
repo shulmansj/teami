@@ -104,7 +104,7 @@ test("default help is curated: grouped, with zero eval/internal tokens", async (
     const out = `${result.stdout}\n${result.stderr}`;
     assert.equal(result.code, 0, out);
     assert.match(out, /Setup[\s\S]*Run[\s\S]*Manage/);
-    assert.doesNotMatch(out, /eval:|supervisor:|promotion:|draft-improvement|phoenix:/, "no operator/internal tokens in default help");
+    assert.doesNotMatch(out, /eval:|promotion:|draft-improvement|phoenix:/, "no operator/internal tokens in default help");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -122,7 +122,7 @@ test("help --all adds the operator & maintenance section", async (t) => {
     const out = `${result.stdout}\n${result.stderr}`;
     assert.equal(result.code, 0, out);
     assert.match(out, /Operator & maintenance/);
-    assert.match(out, /eval:judge|supervisor:status/);
+    assert.match(out, /eval:judge|promotion:scan/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

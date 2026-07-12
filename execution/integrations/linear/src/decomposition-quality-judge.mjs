@@ -14,6 +14,7 @@ import {
   projectJudgeInputForFixture,
 } from "../../../engine/judge-input-contract.mjs";
 import { detectLowConfidenceReasons } from "./eval-status.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 import { ensurePhoenixReady } from "./local-phoenix-manager.mjs";
 import { createPhoenixTraceAnnotation } from "./phoenix-self-improvement.mjs";
 import { normalizeFailureMode } from "./quality.mjs";
@@ -85,6 +86,9 @@ const PHOENIX_PROMPT_NAME_PATTERN = /^[a-z0-9]([_a-z0-9-]*[a-z0-9])?$/;
 const RAW_OUTPUT_EXCERPT_LIMIT = 2_000;
 const ADVISORY_QUALITY_PREFIX = "Quality check (advisory, non-gating):";
 const ADVISORY_TEXT_LIMIT = 600;
+const OPTIONAL_DECOMPOSITION_JUDGE_FIXTURE_FIELDS = Object.freeze([
+  "project_update_markdown",
+]);
 
 // ---------------------------------------------------------------------------
 // Accepted contract loading. Judge semantics are intentionally preserved by
@@ -208,7 +212,10 @@ export function buildMaintainerSuppliedContext({
 
 export function buildJudgeFixtureInput({ judgeInputs, evalContract = null } = {}) {
   const contract = evalContract || resolveEvalContract(decompositionDefinition, MODULE_REPO_ROOT);
-  return projectJudgeInputForFixture(judgeInputs, contract.judge_input_contract);
+  return withOptionalDecompositionJudgeFixtureFields(
+    projectJudgeInputForFixture(judgeInputs, contract.judge_input_contract),
+    judgeInputs,
+  );
 }
 
 export function buildStoredFixtureJudgeInputs({
@@ -222,17 +229,44 @@ export function buildStoredFixtureJudgeInputs({
   const maintainerSuppliedContext = refreshMaintainerContext
     ? buildMaintainerSuppliedContext({ evalContract: contract })
     : null;
-  return combineStoredJudgeFixtureInput({
+  const built = combineStoredJudgeFixtureInput({
     fixtureInput: fixture?.input,
     contract: contract.judge_input_contract,
     maintainerSuppliedContext,
   });
+  if (!built.ok) return built;
+  return {
+    ...built,
+    inputs: withOptionalDecompositionJudgeInputFields(
+      built.inputs,
+      fixture?.input?.judge_fixture_input,
+    ),
+  };
+}
+
+function withOptionalDecompositionJudgeFixtureFields(result, source) {
+  if (!result.ok) return result;
+  return {
+    ...result,
+    judge_fixture_input: withOptionalDecompositionJudgeInputFields(
+      result.judge_fixture_input,
+      source,
+    ),
+  };
+}
+
+function withOptionalDecompositionJudgeInputFields(target, source) {
+  const next = { ...(target || {}) };
+  for (const field of OPTIONAL_DECOMPOSITION_JUDGE_FIXTURE_FIELDS) {
+    if (Object.hasOwn(source || {}, field)) next[field] = normalizeJudgeInput(source[field]);
+  }
+  return next;
 }
 
 function decompositionJudgeInputCompletenessFailures(inputs, contract) {
   const failures = judgeInputCompletenessFailures(inputs, contract);
   if (
-    ["completed", "paused"].includes(inputs?.terminal_status)
+    ["completed", "failed_closed"].includes(inputs?.terminal_status)
     && typeof inputs?.project_update_markdown !== "string"
   ) {
     failures.push("missing:project_update_markdown");
@@ -316,9 +350,9 @@ export function judgeAnnotationIdentifier({ evaluatorId, model }) {
 
 // ---------------------------------------------------------------------------
 // Input assembly (Model Judge Policy): project intent from the CAPTURED
-// snapshot, terminal status/reason, final issues or pause/discovery
-// artifacts, dependency relation summary, exact authored project update +
-// Open Questions prose, phase-packet summaries, rubric/taxonomy versions.
+// snapshot, terminal status/reason, final issues or pause questions, dependency
+// relation summary, exact authored project update when present, accepted runtime-output
+// summaries, rubric/taxonomy versions.
 // ---------------------------------------------------------------------------
 
 function terminalStateFromArtifact(artifact) {
@@ -331,7 +365,6 @@ function terminalStateFromArtifact(artifact) {
       project_update_markdown: artifact.project_update_markdown ?? null,
       open_questions_markdown: null,
       final_issues: artifact.final_issues || [],
-      discovery_issues: artifact.discovery_issues || [],
     };
   }
   if (artifact.kind === "pause") {
@@ -339,15 +372,16 @@ function terminalStateFromArtifact(artifact) {
       || (artifact.phase_packets || []).findLast((packet) => packet?.status === "pause");
     const reason = pausePacket?.reason || terminalOutput?.reason;
     if (!reason) return { ok: false, cause: "missing_pause_packet" };
+    const terminalStatus = terminalOutput?.outcome === "failed_closed" ? "failed_closed" : "paused";
     return {
       ok: true,
-      terminal_status: terminalOutput?.outcome === "failed_closed" ? "failed_closed" : "paused",
+      terminal_status: terminalStatus,
       terminal_reason: reason,
-      project_update_markdown:
-        pausePacket?.project_update_markdown ?? artifact.project_update_markdown ?? null,
+      project_update_markdown: terminalStatus === "failed_closed"
+        ? pausePacket?.project_update_markdown ?? artifact.project_update_markdown ?? null
+        : null,
       open_questions_markdown: pausePacket?.open_questions_markdown ?? null,
       final_issues: [],
-      discovery_issues: pausePacket?.discovery_issues || artifact.discovery_issues || [],
     };
   }
   return { ok: false, cause: "run_not_terminal", kind: artifact.kind };
@@ -377,19 +411,6 @@ function finalIssueJudgeFields(issue) {
     output: issue?.output,
     acceptanceCriteria: issue?.acceptanceCriteria,
     acceptance_criteria: issue?.acceptance_criteria,
-    depends_on: issue?.depends_on,
-    dependsOn: issue?.dependsOn,
-  });
-}
-
-function discoveryIssueJudgeFields(issue) {
-  return pickDefined({
-    decomposition_key: issue?.decomposition_key,
-    decompositionKey: issue?.decompositionKey,
-    title: issue?.title,
-    body_markdown: issue?.body_markdown,
-    in_session_research: issue?.in_session_research,
-    evidence_gap: issue?.evidence_gap,
     depends_on: issue?.depends_on,
     dependsOn: issue?.dependsOn,
   });
@@ -458,13 +479,11 @@ export function buildJudgeInputs({
   const terminal = terminalStateFromArtifact(artifact);
   if (!terminal.ok) return { ok: false, reason: terminal.cause };
   const finalIssues = (terminal.final_issues || []).map(finalIssueJudgeFields);
-  const discoveryIssues = (terminal.discovery_issues || []).map(discoveryIssueJudgeFields);
   const inputs = {
     project_intent: snapshot.project,
     terminal_status: terminal.terminal_status,
     terminal_reason: terminal.terminal_reason,
     final_issues: finalIssues,
-    discovery_issues: discoveryIssues,
     dependency_relations: dependencyRelationsFromIssues(finalIssues),
     project_update_markdown: terminal.project_update_markdown,
     open_questions_markdown: terminal.open_questions_markdown,
@@ -655,15 +674,28 @@ function oneLineAdvisoryText(value) {
 // to the derived worklist without ever writing workflow state to Phoenix.
 // ---------------------------------------------------------------------------
 
-export function judgeReceiptPath({ runId, repoRoot = process.cwd(), runStoreDir = null } = {}) {
+export function judgeReceiptPath({
+  runId,
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir = null,
+} = {}) {
+  void repoRoot;
   if (!runId || typeof runId !== "string" || !SAFE_RUN_ID_PATTERN.test(runId)) {
     throw new Error(`Invalid run_id for local judge receipt store: ${runId}`);
   }
-  return path.join(runStoreDir || defaultRunStoreDir(repoRoot), `${runId}.judge.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.judge.json`);
 }
 
-export function readJudgeReceipt({ runId, repoRoot = process.cwd(), runStoreDir = null } = {}) {
-  const filePath = judgeReceiptPath({ runId, repoRoot, runStoreDir });
+export function readJudgeReceipt({
+  runId,
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir = null,
+} = {}) {
+  const filePath = resolveReadableJudgeReceiptPath({ runId, repoRoot, home, domainId, runStoreDir });
   if (!fs.existsSync(filePath)) return { ok: true, exists: false, path: filePath, receipt: null };
   try {
     return { ok: true, exists: true, path: filePath, receipt: JSON.parse(fs.readFileSync(filePath, "utf8")) };
@@ -672,9 +704,9 @@ export function readJudgeReceipt({ runId, repoRoot = process.cwd(), runStoreDir 
   }
 }
 
-function appendJudgeAttempt({ runId, repoRoot, runStoreDir, attempt }) {
-  const filePath = judgeReceiptPath({ runId, repoRoot, runStoreDir });
-  const existing = readJudgeReceipt({ runId, repoRoot, runStoreDir });
+function appendJudgeAttempt({ runId, repoRoot, home, domainId, runStoreDir, attempt }) {
+  const filePath = judgeReceiptPath({ runId, repoRoot, home, domainId, runStoreDir });
+  const existing = readJudgeReceipt({ runId, repoRoot, home, domainId, runStoreDir });
   const attempts = Array.isArray(existing.receipt?.attempts)
     ? [...existing.receipt.attempts, attempt]
     : [attempt];
@@ -692,6 +724,20 @@ function appendJudgeAttempt({ runId, repoRoot, runStoreDir, attempt }) {
   fs.writeFileSync(tempPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
   renameWithRetry(tempPath, filePath);
   return filePath;
+}
+
+function resolveReadableJudgeReceiptPath(options = {}) {
+  if (options.runStoreDir || options.domainId) return judgeReceiptPath(options);
+  const home = teamiHomePaths({ home: options.home || resolveTeamiHome() }).home;
+  const direct = path.join(home, "runs", `${options.runId}.judge.json`);
+  if (fs.existsSync(direct)) return direct;
+  const domainsDir = path.join(home, "domains");
+  if (!fs.existsSync(domainsDir)) return direct;
+  for (const domainId of fs.readdirSync(domainsDir)) {
+    const candidate = judgeReceiptPath({ ...options, home, domainId });
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return direct;
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +768,7 @@ function appendJudgeAttempt({ runId, repoRoot, runStoreDir, attempt }) {
 // annotation or deterministic checks: they are report/receipt records only.
 export async function runDecompositionQualityJudge({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   evalRepoRoot = MODULE_REPO_ROOT,
   definition = decompositionDefinition,
   evalContract = null,
@@ -796,6 +843,7 @@ export async function runDecompositionQualityJudge({
 
   const allowedFailureModes = activeEvalContract.allowed_failure_modes;
   let effectiveRunId = runId || artifact?.run_id || null;
+  let effectiveDomainId = artifact?.domain_id || null;
   let built = null;
   if (judgeInputs) {
     const failures = judgeInputCompletenessFailuresForDefinition({
@@ -812,19 +860,25 @@ export async function runDecompositionQualityJudge({
   let resolvedArtifact = artifact;
   if (!resolvedArtifact && runId) {
     try {
-      resolvedArtifact = readRunArtifact({ runId, repoRoot, runStoreDir });
+      resolvedArtifact = readRunArtifact({ runId, repoRoot, home, runStoreDir });
     } catch (error) {
       return notRun("invalid_run_artifact", { detail: error.message });
     }
   }
   if (!resolvedArtifact) return notRun("missing_run_artifact");
   effectiveRunId = resolvedArtifact.run_id || runId;
+  effectiveDomainId = resolvedArtifact.domain_id || null;
 
   // 3. Resolve the captured project snapshot (Model Judge Policy: project
   // intent comes from the captured snapshot; fail closed when missing).
   let resolvedSnapshot = snapshot;
   if (!resolvedSnapshot) {
-    const loaded = loadCapturedProjectSnapshot(effectiveRunId, { repoRoot, runStoreDir });
+    const loaded = loadCapturedProjectSnapshot(effectiveRunId, {
+      repoRoot,
+      home,
+      domainId: effectiveDomainId,
+      runStoreDir,
+    });
     if (!loaded.ok) {
       return notRun(loaded.reason, {
         run_id: effectiveRunId,
@@ -921,6 +975,8 @@ export async function runDecompositionQualityJudge({
       result.receipt_path = appendJudgeAttempt({
         runId: effectiveRunId,
         repoRoot,
+        home,
+        domainId: effectiveDomainId,
         runStoreDir,
         attempt: {
           attempted_at: now(),

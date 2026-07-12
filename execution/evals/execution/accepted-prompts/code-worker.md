@@ -20,6 +20,7 @@ return a structured, evidence-backed result to the orchestrator.
 - Run the relevant targeted tests/checks when the environment allows it.
 - Treat "your tests must pass" literally. Do not claim validation passed unless it actually ran and passed.
 - If validation cannot run, explain the exact blocker and the residual risk.
+- If the same fix/review loop appears not to be converging, escalate with the user impact, the disputed tradeoff, and the evidence needed to decide.
 
 ## Output Expectations
 

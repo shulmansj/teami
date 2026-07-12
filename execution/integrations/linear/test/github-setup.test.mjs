@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { formatCommand } from "../src/cli/operator-output.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import * as githubSetupModule from "../src/github-setup.mjs";
 
@@ -21,9 +22,7 @@ const {
   githubConnectionDoctorChecks,
   githubConnectionStatePath,
   normalizeGitRemoteUrl,
-  parseGitHubRemoteUrl,
   planRemoteLayout,
-  pushAuthForRemoteUrl,
   readGitHubConnectionState,
   resolveBehaviorRepoIdentity,
   resolveGitHubSetupSettings,
@@ -36,7 +35,9 @@ const SHIPPED_SOURCE_URL = "https://github.com/shulmansj/teami";
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-github-setup-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-github-setup-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function runGitOrThrow(args, cwd) {
@@ -511,6 +512,39 @@ test("the local ambient GitHub setup transport uses gh for repo setup and local 
   assert.ok(!JSON.stringify(commandCalls).includes("ghs_setup"));
 });
 
+test("setup transport exposes reconciliation-required mutation timeouts", async () => {
+  const transport = createLocalAmbientGitHubSetupTransport({
+    runCommand: async (command, args) => {
+      if (command === "gh" && args[0] === "auth") {
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      }
+      return {
+        ok: false,
+        status: null,
+        stdout: "",
+        stderr: "[captured failure output redacted: command timed out]",
+        outcome: "reconciliation_required",
+        reconciliationRequired: true,
+        failureCode: null,
+      };
+    },
+  });
+
+  await assert.rejects(
+    () => transport.request({
+      endpointId: "create_repository",
+      owner: "octocat",
+      repo: "teami",
+      params: { visibility: "private" },
+    }),
+    (error) => {
+      assert.equal(error.outcome, "reconciliation_required");
+      assert.equal(error.reconciliationRequired, true);
+      return true;
+    },
+  );
+});
+
 test("setup endpoint allowlist names local ambient auth surfaces and has no merge/admin surface", () => {
   for (const endpoint of GITHUB_SETUP_ENDPOINT_ALLOWLIST) {
     assert.ok(
@@ -660,7 +694,7 @@ test("ssh and https starter remote spellings normalize to the same identity", ()
   assert.equal(plan.upstream.preserved_from, "origin");
 });
 
-test("real remote application rolls back if the final origin/upstream shape is not exact", () => {
+test("real remote application rolls back if the final origin/upstream shape is not exact", async () => {
   const root = initGitRepo(tempRoot(), { remotes: { upstream: STARTER_URL } });
   const planned = planRemoteLayout({
     remotes: [{ name: "upstream", url: STARTER_URL }],
@@ -674,7 +708,7 @@ test("real remote application rolls back if the final origin/upstream shape is n
     }
     return runGitResult(args, options.cwd);
   };
-  const result = applyRemotePlan({
+  const result = await applyRemotePlan({
     repoRoot: root,
     runGit,
     remotePlan: planned,
@@ -1012,7 +1046,7 @@ test("token-shaped tracked content blocks the initial push with a sanitizer repo
   assert.ok(!transport.calls.some((call) => call.endpointId === "push_initial_branch"));
 });
 
-test("security scan seed fixture source does not trip the pre-push sanitizer", () => {
+test("security scan seed fixture source does not trip the pre-push sanitizer", async () => {
   const root = initGitRepo(tempRoot());
   fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
   fs.copyFileSync(
@@ -1020,7 +1054,7 @@ test("security scan seed fixture source does not trip the pre-push sanitizer", (
     path.join(root, "scripts", "security-scan.mjs"),
   );
   runGitOrThrow(["add", "scripts/security-scan.mjs"], root);
-  const scan = scanTrackedTreeForSecrets({ repoRoot: root });
+  const scan = await scanTrackedTreeForSecrets({ repoRoot: root });
   assert.equal(
     scan.ok,
     true,
@@ -1028,31 +1062,31 @@ test("security scan seed fixture source does not trip the pre-push sanitizer", (
   );
 });
 
-test("secret-shaped tracked file NAMES are flagged by the pre-push scan", () => {
+test("secret-shaped tracked file NAMES are flagged by the pre-push scan", async () => {
   const root = initGitRepo(tempRoot());
   fs.writeFileSync(path.join(root, "client_secret.json"), "{}\n");
   runGitOrThrow(["add", "client_secret.json"], root);
-  const scan = scanTrackedTreeForSecrets({ repoRoot: root });
+  const scan = await scanTrackedTreeForSecrets({ repoRoot: root });
   assert.equal(scan.ok, false);
   assert.deepEqual(scan.report.findings, [{ path: "client_secret.json", rule: "secret_shaped_path" }]);
 });
 
-test("binary tracked files are skipped and disclosed in the sanitizer report", () => {
+test("binary tracked files are skipped and disclosed in the sanitizer report", async () => {
   const root = initGitRepo(tempRoot());
   fs.writeFileSync(path.join(root, "blob.bin"), Buffer.from([0, 1, 2, 3, 0, 255]));
   runGitOrThrow(["add", "blob.bin"], root);
-  const scan = scanTrackedTreeForSecrets({ repoRoot: root });
+  const scan = await scanTrackedTreeForSecrets({ repoRoot: root });
   assert.equal(scan.ok, true);
   assert.equal(scan.report.skipped_binary_count, 1);
 });
 
-test("the repo's own tracked tree passes the pre-push secret scan (adopters' initial push stays unblocked)", () => {
+test("the repo's own tracked tree passes the pre-push secret scan (adopters' initial push stays unblocked)", async () => {
   // init pushes the whole tracked tree to the new behavior repo; if the shipped
   // repo itself trips the scanner, EVERY adopter is blocked at the final step.
   // Intentional secret-shaped test vectors must avoid appearing as literal
   // secrets in source (e.g. via string concatenation).
   const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..", "..");
-  const scan = scanTrackedTreeForSecrets({ repoRoot });
+  const scan = await scanTrackedTreeForSecrets({ repoRoot });
   assert.equal(
     scan.ok,
     true,
@@ -1158,8 +1192,7 @@ test("dry-run mode is loudly disclosed: banner, incomplete adoption, and connect
 });
 
 // ---------------------------------------------------------------------------
-// Behavior-repo identity resolution (read by the step 10 controller; the
-// step 12 scanner and step 13 supervisor read the same state file).
+// Behavior-repo identity resolution (read by the setup controller and scanner).
 // ---------------------------------------------------------------------------
 
 test("resolveBehaviorRepoIdentity fails typed on missing, invalid, and unverified state", () => {
@@ -1200,7 +1233,12 @@ test("doctor with no connection state reports the connect-GitHub repair path", a
   const checks = await githubConnectionDoctorChecks({ repoRoot: root });
   assert.equal(checks.length, 1);
   assert.equal(checks[0].ok, false);
-  assert.match(checks[0].message, /run npm run init/);
+  // The repair command renders through formatCommand (context-aware: npx vs repo launcher),
+  // so assert the rendered command exactly instead of a hard-coded launcher literal.
+  assert.ok(
+    checks[0].message.includes(`run ${formatCommand("init")} to create and connect`),
+    checks[0].message,
+  );
   assert.match(checks[0].message, /connect-GitHub repair path/);
 });
 

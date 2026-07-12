@@ -47,6 +47,7 @@ const SUBAGENT_TURN_INVALID_OUTCOME = "subagent_turn_invalid";
 const REPAIR_RAW_OUTPUT_EXCERPT_MAX_CHARS = 2048;
 const MAX_CONSUMED_INPUT_REFS = 256;
 const MAX_ARTIFACT_SET_LINEAGE_TURN_IDS = 256;
+const PRIOR_TURN_AUTHORED_MARKDOWN_MAX_CHARS = 4096;
 const LINEAGE_CONSUMED_REFS_SCOPE = "lineage.consumed_refs";
 const LINEAGE_CONSUMED_REFS_TOO_MANY_REASON = "too_many_lineage_consumed_refs";
 const DEFAULT_SUBAGENT_INSTANCE_KEY = "default";
@@ -146,6 +147,11 @@ export async function runOrchestratorLoop({
   spanSink = null,
 } = {}) {
   const recorder = createRunRecorder({ config });
+  // Terminal-output vocabulary is DECLARED by the function definition: only a
+  // definition that requires the accountability heading gets it enforced here
+  // (same scoping as the integration-side re-validation call sites).
+  const requireAccountabilitySection =
+    definition?.require_project_update_accountability_section === true;
   const runtimeEvidence = {};
   const sessionHandles = {};
   const normalizedAllowedRepoPacket = normalizeAllowedRepoPacket(allowedRepoPacket);
@@ -307,6 +313,7 @@ export async function runOrchestratorLoop({
         lineageSidecar,
         config,
         commitPayload,
+        requireAccountabilitySection,
         orchestratorSessionHandle,
       });
     }
@@ -369,6 +376,7 @@ export async function runOrchestratorLoop({
         lineageSidecar,
         config,
         commitPayload,
+        requireAccountabilitySection,
         orchestratorSessionHandle,
       });
     }
@@ -434,6 +442,7 @@ export async function runOrchestratorLoop({
           lineageSidecar,
           config,
           commitPayload,
+          requireAccountabilitySection,
           orchestratorSessionHandle,
         });
       }
@@ -486,6 +495,7 @@ export async function runOrchestratorLoop({
           lineageSidecar,
           config,
           commitPayload,
+          requireAccountabilitySection,
           orchestratorSessionHandle,
         });
       }
@@ -541,6 +551,7 @@ export async function runOrchestratorLoop({
         producedContentSourceRefs: lastProducedContentSourceRefs,
         config,
         commitPayload,
+        requireAccountabilitySection,
         orchestratorSessionHandle,
       });
     }
@@ -853,6 +864,10 @@ function recordSubagentTurn({
     failure_kind: spawn.failure_kind ?? null,
     failure_code: spawn.failure_code ?? null,
     context_digest: spawn.packet?.context_digest ?? null,
+    open_questions_markdown: priorTurnAuthoredMarkdown(spawn.packet?.open_questions_markdown),
+    ...(priorTurnAuthoredMarkdown(spawn.packet?.technical_explanation_markdown)
+      ? { technical_explanation_markdown: priorTurnAuthoredMarkdown(spawn.packet.technical_explanation_markdown) }
+      : {}),
     source_refs: Array.isArray(spawn.packet?.source_refs) ? [...spawn.packet.source_refs] : [],
   });
 }
@@ -1517,6 +1532,7 @@ function finishOrchestratorRun({
   producedContentSourceRefs = [],
   config = null,
   commitPayload,
+  requireAccountabilitySection = false,
   orchestratorSessionHandle = null,
 }) {
   const output = assembleOrchestratorRunResult({
@@ -1533,7 +1549,7 @@ function finishOrchestratorRun({
     producedContentSourceRefs,
     commitPayload,
   });
-  const validation = validateOrchestratorOutput(output, commitPayload);
+  const validation = validateOrchestratorOutput(output, commitPayload, { requireAccountabilitySection });
   if (!validation.ok) {
     throw new Error(`Orchestrator output failed validation: ${validation.failureReasons.join(", ")}`);
   }
@@ -1605,15 +1621,7 @@ function assembleOrchestratorRunResult({
     });
     Object.assign(terminalOutput, commitTerminalOutput);
   } else if (terminalDecision.outcome === "pause") {
-    terminalOutput.project_update_markdown = markdownWithRunId({
-      markdown: produced.project_update_markdown,
-      runId,
-      fallbackBody: pauseProjectUpdateBody(terminalDecision.reason, produced),
-    });
-    terminalOutput.open_questions_markdown = openQuestionsForPause(terminalDecision.reason, produced);
-    if (Array.isArray(produced.discovery_issues) && produced.discovery_issues.length > 0) {
-      terminalOutput.discovery_issues = produced.discovery_issues;
-    }
+    terminalOutput.open_questions_markdown = questionMarkdownForPause(terminalDecision.reason, produced);
   } else if (terminalDecision.outcome === "failed_closed") {
     terminalOutput.project_update_markdown = markdownWithRunId({
       runId,
@@ -1622,7 +1630,7 @@ function assembleOrchestratorRunResult({
         bounds,
       })),
     });
-    terminalOutput.open_questions_markdown = failedClosedOpenQuestions(terminalDecision.reason);
+    terminalOutput.open_questions_markdown = failedClosedQuestionMarkdown(terminalDecision.reason);
   }
 
   const runResult = {
@@ -1721,7 +1729,7 @@ function failedClosedProjectUpdateBody({ reason, bounds }) {
   return "Decomposition stopped before a safe terminal result was ready because the runtime environment failed a safety check.";
 }
 
-function failedClosedOpenQuestions(reason) {
+function failedClosedQuestionMarkdown(reason) {
   if (reason === "bounds_breach") {
     return "- Should this project be narrowed, or should the orchestrator round limit be raised before retrying decomposition?";
   }
@@ -1764,13 +1772,17 @@ function normalizeResumeFrom(resumeFrom) {
     : null;
   const priorRunId = stringOrNull(resumeFrom.priorRunId);
   const coldReconstruct = resumeFrom.coldReconstruct === true || resumeFrom.mode === "cold_reconstruct";
+  const resumeContext = normalizeResumeContext(resumeFrom.resumeContext || resumeFrom.resume_context || {
+    text: resumeFrom.reviewerNotes,
+    provenance_tag: "af_review_failure_marker",
+  });
   if ((!sessionHandle || !priorRunId) && !coldReconstruct) return null;
   if (!priorRunId) return null;
   return {
     sessionHandle,
     priorRunId,
     ...(coldReconstruct ? { coldReconstruct: true } : {}),
-    reviewerNotes: typeof resumeFrom.reviewerNotes === "string" ? resumeFrom.reviewerNotes : "",
+    resumeContext,
     smokeTests: isRecord(resumeFrom.smokeTests) ? resumeFrom.smokeTests : {},
     runtimeVersion: stringOrNull(resumeFrom.runtimeVersion),
     headSha: stringOrNull(resumeFrom.head_sha || resumeFrom.headSha),
@@ -1788,21 +1800,31 @@ function firstTurnWarmStartForResume(resumeFrom) {
 }
 
 function initialPriorTurnsForResume(resumeFrom) {
-  if (!resumeFrom || typeof resumeFrom.reviewerNotes !== "string" || resumeFrom.reviewerNotes === "") {
+  if (!resumeFrom?.resumeContext?.text) {
     return [];
   }
   return [{
-    action: "review_notes",
-    outcome: "warm_resume_review_notes",
+    action: "resume_context",
+    outcome: "warm_resume_context",
     status: "request_changes",
-    reason: "af_review_failure_marker",
-    context_digest: resumeFrom.reviewerNotes,
-    reviewer_notes: resumeFrom.reviewerNotes,
+    reason: resumeFrom.resumeContext.provenance_tag,
+    context_digest: resumeFrom.resumeContext.text,
+    resume_context: { ...resumeFrom.resumeContext },
     source_refs: [{
-      kind: "github_pull_request_review_marker",
-      id: resumeFrom.headSha || "af-review",
+      kind: "resume_context",
+      id: resumeFrom.headSha || resumeFrom.resumeContext.provenance_tag,
     }],
   }];
+}
+
+function normalizeResumeContext(context) {
+  if (!isRecord(context)) return null;
+  const text = typeof context.text === "string" ? context.text : "";
+  if (text === "") return null;
+  return {
+    text,
+    provenance_tag: stringOrNull(context.provenance_tag || context.provenanceTag) || "resume_context",
+  };
 }
 
 function isWarmContinuationUnavailableError(error) {
@@ -2022,35 +2044,17 @@ function markdownWithRunId({ markdown = null, runId, fallbackBody }) {
   return `run_id: ${runId}\n\n${fallbackBody}`;
 }
 
-// Fallback pause body when the orchestrator's produced content lacked an
-// authored project_update_markdown. Keyed by the terminal pause REASON the
-// orchestrator chose (the control action's reason), not a per-phase packet.
-function pauseProjectUpdateBody(reason, produced) {
-  if (reason === "discovery_needed") {
-    return projectUpdateFallbackBody(
-      "Decomposition paused because technical discovery is needed before safe issue creation.",
-    );
-  }
-  if (reason === "needs_pm_review") {
-    return projectUpdateFallbackBody([
-      "Decomposition paused because a technical constraint affects product scope.",
-      produced?.technical_explanation_markdown || "",
-    ].filter(Boolean).join("\n\n"));
-  }
-  return projectUpdateFallbackBody("Decomposition paused for product questions before issue creation.");
-}
-
 function projectUpdateFallbackBody(summary) {
   return [
     summary,
     "",
     PROJECT_UPDATE_ACCOUNTABILITY_HEADING,
     "- The run stopped before a fully authored project-section accounting was available.",
-    "- Review the open questions, risks, and source refs before retrying decomposition.",
+    "- Review the human-facing questions, risks, and source refs before retrying decomposition.",
   ].join("\n");
 }
 
-function openQuestionsForPause(reason, produced) {
+function questionMarkdownForPause(reason, produced) {
   if (typeof produced?.open_questions_markdown === "string" && produced.open_questions_markdown.trim() !== "") {
     return produced.open_questions_markdown;
   }
@@ -2058,6 +2062,55 @@ function openQuestionsForPause(reason, produced) {
     return "- Should the product scope change to account for this technical constraint, or should decomposition continue within the current constraints?";
   }
   return "- What product decision should be resolved before decomposition continues?";
+}
+
+function priorTurnAuthoredMarkdown(value) {
+  const text = stringOrNull(value);
+  if (!text) return null;
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (normalized.length <= PRIOR_TURN_AUTHORED_MARKDOWN_MAX_CHARS) return normalized;
+  const firstQuestionEnd = firstMarkdownQuestionEnd(normalized);
+  const boundedEnd = markdownBoundaryBefore(normalized, {
+    limit: PRIOR_TURN_AUTHORED_MARKDOWN_MAX_CHARS,
+    minimum: firstQuestionEnd,
+  });
+  return `${normalized.slice(0, boundedEnd).trimEnd()}\n\n[...truncated...]`;
+}
+
+function firstMarkdownQuestionEnd(text) {
+  const bulletPattern = /^(?:[-*+]|\d+[.)])\s+/gm;
+  const first = bulletPattern.exec(text);
+  if (!first) {
+    const questionMark = text.indexOf("?");
+    if (questionMark >= 0) return questionMark + 1;
+    const paragraph = text.search(/\n\s*\n/);
+    return paragraph >= 0 ? paragraph : Math.min(text.length, PRIOR_TURN_AUTHORED_MARKDOWN_MAX_CHARS);
+  }
+  const questionMark = text.indexOf("?", first.index);
+  const second = bulletPattern.exec(text);
+  if (second) return Math.max(second.index, questionMark >= 0 ? questionMark + 1 : second.index);
+  if (questionMark >= 0) return questionMark + 1;
+  return Math.min(text.length, PRIOR_TURN_AUTHORED_MARKDOWN_MAX_CHARS);
+}
+
+function markdownBoundaryBefore(text, { limit, minimum }) {
+  if (text.length <= limit) return text.length;
+  if (minimum >= limit) return Math.min(minimum, text.length);
+  const bounded = text.slice(0, limit);
+  const boundaryPatterns = [
+    /\n\s*\n/g,
+    /\n(?=(?:[-*+]|\d+[.)])\s+)/g,
+    /\n/g,
+  ];
+  for (const pattern of boundaryPatterns) {
+    let match;
+    let last = -1;
+    while ((match = pattern.exec(bounded)) !== null) {
+      if (match.index > minimum) last = match.index;
+    }
+    if (last > minimum) return last;
+  }
+  return limit;
 }
 
 function stringOrFallback(value, fallback) {

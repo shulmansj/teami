@@ -90,12 +90,10 @@ identity. It is NOT re-derived from role membership.
 
 ## Dispatch rule
 
-Every seam that names decomposition resolves through the registry: webhook-inbox routing +
+Every seam that names decomposition resolves through the registry: foreground gateway polling +
 `trigger-registry.mjs` (a thin adapter deriving its table from the registry), `trigger-runner` dispatch
 (`getWorkflowDefinition(...).run`, fail closed), foreground-runner, capability derivation, `config.mjs`
-role-name validation (`getWorkflowDefinition(type).roles`/`.runtime_assignment_roles`). The hosted
-inbox function (`supabase/functions/teami-inbox/index.ts`) stays mirror-pinned; a parity test
-asserts its hardcoded capabilities/workflow_type/wake-key equal the definition.
+role-name validation (`getWorkflowDefinition(type).roles`/`.runtime_assignment_roles`).
 
 ## `checkpoint` is legacy-READ (removal deferred)
 

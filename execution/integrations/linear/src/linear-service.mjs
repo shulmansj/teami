@@ -10,6 +10,7 @@ export {
   isWorkspaceMismatchError,
   repairPathForSetupIncompleteCause,
   resolveLinearSetupWorkspace,
+  setupCompleteDomainForName,
   setupIncompleteDomainForName,
   setupLinearDomain,
   verifyDeclaredWorkspace,
@@ -18,6 +19,7 @@ export {
   doctorDomainRegistry,
   doctorDomainRegistryFromDisk,
   doctorLinear,
+  doctorMergePathGitHubCheck,
 } from "./linear/doctor-service.mjs";
 export { resolveLinearShape } from "./linear/shape-resolver.mjs";
 export {
@@ -28,9 +30,7 @@ export {
   isReadyIssueEligible,
 } from "./workflows/execution/eligibility.mjs";
 export {
-  encodeDiscoveryFindingsAndResume,
   replayPersistedDecompositionRun,
-  resumeProjectAfterQuestions,
   runDecomposition,
 } from "./workflows/decomposition/run-service.mjs";
 export {

@@ -88,7 +88,7 @@ export function acquirePromotionCandidateScannerLock({
     ok: false,
     reason: "scanner_lock_held",
     detail:
-      "another foreground/supervisor scanner owns the promotion-candidates ledger lock; retry after that scan exits or after the stale-lock window.",
+      "another foreground scanner owns the promotion-candidates ledger lock; retry after that scan exits or after the stale-lock window.",
     lock_path: lockPath,
     owner: current,
   };

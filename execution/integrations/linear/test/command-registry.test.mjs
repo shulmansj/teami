@@ -60,7 +60,8 @@ test("buildCommandIndex allows intentional duplicate tokens with the same handle
 test("buildCommandIndex builds the real registry index", () => {
   const index = buildCommandIndex(COMMAND_REGISTRY);
 
-  assert.equal(index.size, 46);
+  assert.equal(index.size, 37);
+  assert.equal(index.has("execution:run"), false);
   assert.equal(index.has("gateway:start"), false);
   assert.equal(index.has("gateway:status"), false);
 });
@@ -68,7 +69,7 @@ test("buildCommandIndex builds the real registry index", () => {
 test("frozen legacy command matrix fixture loads", () => {
   const fixturePath = path.join(import.meta.dirname, "fixtures", "legacy-command-matrix.json");
   const matrix = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
-  assert.equal(matrix.commandTable.length, 43);
+  assert.equal(matrix.commandTable.length, 35);
   assert.ok(Object.keys(matrix.nounVerb).length > 0);
   assert.ok(Object.keys(matrix.bareNounActions).length > 0);
 });

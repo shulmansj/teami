@@ -1,13 +1,18 @@
+import {
+  GITHUB_TOKEN_ENV_NAMES,
+  resolveAmbientGitHubToken,
+  resolveGhCliToken,
+} from "../../git/git-remote-auth.mjs";
+
 export const EXECUTION_PR_HEAD_PREFIX = "af/execution/";
 export const AF_REVIEW_STATUS_CONTEXT = "af-review";
 export const AF_REVIEW_COMMENT_MARKER_EXAMPLE = "Review notes\n\n<!-- af-review:{\"context\":\"af-review\",\"disposition\":\"approved\",\"head_sha\":\"0123456789abcdef0123456789abcdef01234567\",\"run_id\":\"run-123\"} -->";
 
-export const AMBIENT_GITHUB_TOKEN_ENV_NAMES = Object.freeze([
-  "GH_TOKEN",
-  "GITHUB_TOKEN",
-  "GITHUB_ACCESS_TOKEN",
-  "GITHUB_PAT",
-]);
+// Auth is shared with the git push leg (git-remote-auth.mjs) by identity, not
+// by copy, so the REST transport can never accept a different GitHub identity
+// than the one that pushed the branch it operates on.
+export const AMBIENT_GITHUB_TOKEN_ENV_NAMES = GITHUB_TOKEN_ENV_NAMES;
+export { resolveAmbientGitHubToken };
 
 export const GITHUB_EXECUTION_PR_ENDPOINT_ALLOWLIST = Object.freeze([
   Object.freeze({
@@ -25,6 +30,11 @@ export const GITHUB_EXECUTION_PR_ENDPOINT_ALLOWLIST = Object.freeze([
     id: "get_execution_pull_request",
     method: "GET",
     path: "/repos/{owner}/{repo}/pulls/{number}",
+  }),
+  Object.freeze({
+    id: "merge_execution_pull_request",
+    method: "PUT",
+    path: "/repos/{owner}/{repo}/pulls/{number}/merge",
   }),
   Object.freeze({
     id: "get_execution_pull_request_files",
@@ -154,6 +164,18 @@ export function createExecutionPullRequestAdapter({ transport, repoIdentity } = 
     const data = unwrapGitHubData(response);
     if (!data || Array.isArray(data) || typeof data !== "object") {
       throw new Error("github_execution_pr_get_unexpected_response_shape");
+    }
+    return data;
+  }
+
+  async function mergePullRequest({ number, expectedHeadSha } = {}) {
+    const response = await call("merge_execution_pull_request", {
+      number: assertPullRequestNumber(number),
+      expectedHeadSha: assertHeadSha(expectedHeadSha),
+    });
+    const data = unwrapGitHubData(response);
+    if (!data || Array.isArray(data) || typeof data !== "object") {
+      throw new Error("github_execution_pr_merge_unexpected_response_shape");
     }
     return data;
   }
@@ -306,6 +328,7 @@ export function createExecutionPullRequestAdapter({ transport, repoIdentity } = 
     createPullRequest,
     ensurePullRequest,
     getPullRequest,
+    mergePullRequest,
     getPullRequestFiles,
     getCommitStatuses,
     setCommitStatus,
@@ -336,27 +359,46 @@ export function createDefaultExecutionPullRequestAdapter({
   });
 }
 
-// Cross-platform production seam: REST over fetch, no shell and no gh process.
-// Tests can replace the whole transport with an in-memory fake.
+// Cross-platform production seam: REST over fetch. Tests can replace the
+// whole transport with an in-memory fake. Token resolution mirrors the git
+// push leg (git-remote-auth.mjs, the single gh authority): explicit token,
+// then ambient env vars, then `gh auth token` — a gateway started from a
+// shell where gh is logged in but no token env var is exported must reach
+// the PR API with the same identity that just pushed the branch. The gh CLI
+// result is cached per transport (one spawn, not one per request); a failed
+// resolution is deliberately not cached, so `gh auth login` heals a running
+// gateway on its next request. The fallback stays off for a non-default
+// apiBaseUrl: gh holds a real github.com login, and a fixture server must
+// never receive it.
 export function createFetchExecutionPrTransport({
   fetchImpl = globalThis.fetch,
   env = process.env,
   token,
   apiBaseUrl = DEFAULT_GITHUB_API_BASE_URL,
   userAgent = DEFAULT_USER_AGENT,
+  resolveGhToken = resolveGhCliToken,
 } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new Error("github_execution_pr_fetch_required");
   }
-  const resolveToken = typeof token === "function"
-    ? token
-    : () => token || resolveAmbientGitHubToken(env);
+  const ghFallbackAllowed =
+    String(apiBaseUrl || DEFAULT_GITHUB_API_BASE_URL).replace(/\/+$/, "") === DEFAULT_GITHUB_API_BASE_URL;
+  let cachedGhToken = null;
+  const resolveToken = async () => {
+    const explicit = typeof token === "function" ? await token() : token;
+    const ambient = explicit || resolveAmbientGitHubToken(env);
+    if (ambient || !ghFallbackAllowed) return ambient;
+    if (cachedGhToken) return cachedGhToken;
+    const resolved = await resolveGhToken();
+    if (resolved) cachedGhToken = resolved;
+    return resolved;
+  };
 
   return {
     kind: "rest_ambient",
     async request({ endpointId, method, path, owner, repo, params = {} } = {}) {
       assertGitHubExecutionPrEndpointShape({ endpointId, method, path });
-      const authToken = assertNonEmptyString(resolveToken(), "auth_token", {
+      const authToken = assertNonEmptyString(await resolveToken(), "auth_token", {
         error: "github_execution_pr_auth_required",
       });
       const url = githubApiUrlForRequest({
@@ -408,16 +450,6 @@ export function createFetchExecutionPrTransport({
       return { data: payload };
     },
   };
-}
-
-export function resolveAmbientGitHubToken(env = process.env) {
-  for (const name of AMBIENT_GITHUB_TOKEN_ENV_NAMES) {
-    const value = env?.[name];
-    if (typeof value === "string" && value.trim() !== "") {
-      return value.trim();
-    }
-  }
-  return null;
 }
 
 export function validateExecutionBranchRef(ref) {
@@ -536,6 +568,11 @@ function githubApiBodyForRequest({ endpointId, params = {} }) {
       context: assertAfReviewStatusContext(params.context),
       description: assertNonEmptyString(params.description, "status_description"),
       ...(params.target_url == null || params.target_url === "" ? {} : { target_url: assertUrlString(params.target_url, "target_url") }),
+    });
+  }
+  if (endpointId === "merge_execution_pull_request") {
+    return JSON.stringify({
+      sha: assertHeadSha(params.expectedHeadSha),
     });
   }
   if (endpointId === "post_execution_pull_request_comment") {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { DEFAULT_CONFIG_PATH, loadLinearConfig } from "../config.mjs";
 import { readDomainRegistry } from "../domain-registry.mjs";
 import { readGatewayLockLiveness } from "../gateway-loop.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 
 // The four states the home screen (G2/G3) and the read-only `gateway status` (E1) render from.
 export const HOME_STATE = Object.freeze({
@@ -18,7 +19,7 @@ export const HOME_STATE = Object.freeze({
 // without matching on an error message.
 function resolveConfigPath(repoRoot) {
   const configPath = process.env.TEAMI_LINEAR_CONFIG || DEFAULT_CONFIG_PATH;
-  return path.resolve(repoRoot, configPath);
+  return path.isAbsolute(configPath) ? configPath : path.resolve(repoRoot, configPath);
 }
 
 function probeResult(state, evidence) {
@@ -35,7 +36,7 @@ function probeResult(state, evidence) {
 //   active domain + live .teami/gateway.lock       -> listening
 //   active domain + no/stale gateway lock                    -> idle
 //   any parse/validation/read error from config or registry  -> degraded
-export function homeStateProbe({ repoRoot = process.cwd() } = {}) {
+export function homeStateProbe({ repoRoot = process.cwd(), home = resolveTeamiHome(), config = null } = {}) {
   const evidence = {
     hasConfig: false,
     activeDomainId: null,
@@ -43,20 +44,24 @@ export function homeStateProbe({ repoRoot = process.cwd() } = {}) {
   };
 
   // --- config: missing => uninitialized; present-but-bad => degraded ---
-  if (!fs.existsSync(resolveConfigPath(repoRoot))) {
-    return probeResult(HOME_STATE.UNINITIALIZED, evidence);
-  }
-  try {
-    loadLinearConfig({ repoRoot });
+  if (config) {
     evidence.hasConfig = true;
-  } catch {
-    return probeResult(HOME_STATE.DEGRADED, evidence);
+  } else {
+    if (!fs.existsSync(resolveConfigPath(repoRoot))) {
+      return probeResult(HOME_STATE.UNINITIALIZED, evidence);
+    }
+    try {
+      loadLinearConfig({ repoRoot });
+      evidence.hasConfig = true;
+    } catch {
+      return probeResult(HOME_STATE.DEGRADED, evidence);
+    }
   }
 
   // --- domain registry: missing => uninitialized; unreadable => degraded ---
   let registry;
   try {
-    registry = readDomainRegistry({ repoRoot }); // null when the registry file is absent
+    registry = readDomainRegistry({ home }); // null when the registry file is absent
   } catch {
     return probeResult(HOME_STATE.DEGRADED, evidence);
   }
@@ -74,6 +79,6 @@ export function homeStateProbe({ repoRoot = process.cwd() } = {}) {
   // --- gateway lock: live => listening; missing/stale => idle (read-only liveness) ---
   // A lock-read problem is not a corrupt-config; the right next step is still `gateway start`,
   // so it classifies as idle rather than degraded.
-  evidence.lockLive = readGatewayLockLiveness({ repoRoot }).live === true;
+  evidence.lockLive = readGatewayLockLiveness({ home }).live === true;
   return probeResult(evidence.lockLive ? HOME_STATE.LISTENING : HOME_STATE.IDLE, evidence);
 }

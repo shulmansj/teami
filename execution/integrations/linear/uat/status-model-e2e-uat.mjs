@@ -14,9 +14,12 @@ import {
 } from "../src/linear-credential-store.mjs";
 import { redactOAuthSecrets } from "../src/linear-oauth.mjs";
 import { createLinearSetupGraphqlClient } from "../src/linear-setup-auth.mjs";
-import { MERGE_DONE_AUTOMATION_CHECK_NAME, doctorLinear } from "../src/linear/doctor-service.mjs";
+import { doctorLinear } from "../src/linear/doctor-service.mjs";
+import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import { configWithLinearTeam } from "../src/linear/matching-utils.mjs";
 import { initLinear } from "../src/linear/setup-service.mjs";
+
+registerGitRepoResourceKind();
 
 const MODULE_DIR = import.meta.dirname;
 const REPO_ROOT = path.resolve(MODULE_DIR, "..", "..", "..", "..");
@@ -26,7 +29,7 @@ const STATUS_UAT_TOKEN_SET_ENV = "TEAMI_STATUS_UAT_TOKEN_SET";
 const STATUS_UAT_UPDATED_TOKEN_SET_PATH_ENV = "TEAMI_STATUS_UAT_UPDATED_TOKEN_SET_PATH";
 const LEGACY_SPIKE_TOKEN_SET_ENV = "TEAMI_LINEAR_SPIKE_TOKEN_SET";
 const LEGACY_SPIKE_UPDATED_TOKEN_SET_PATH_ENV = "TEAMI_LINEAR_SPIKE_UPDATED_TOKEN_SET_PATH";
-const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "blocked", "done"]);
+const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "needs_principal", "done"]);
 const PROJECT_STATUS_ROLES = Object.freeze(["backlog", "planned", "in_progress", "completed"]);
 const TERMINAL_CANCELED_TYPES = new Set(["canceled", "cancelled"]);
 
@@ -130,8 +133,8 @@ export async function runStatusModelE2eUat(options = parseStatusModelUatArgs()) 
       transitionIssue(context, issueId, "in_progress"));
     await recordStep(report, "transition-in-progress-to-in-review", () =>
       transitionIssue(context, issueId, "in_review"));
-    await recordStep(report, "transition-in-review-to-blocked-with-label", () =>
-      transitionIssueToBlockedWithReason(context, issueId));
+    await recordStep(report, "transition-in-review-to-principal-escalation", () =>
+      transitionIssue(context, issueId, "needs_principal"));
     await recordStep(report, "merge-done-stand-in", () =>
       transitionIssue(context, issueId, "done", { requireCompletedType: true }));
 
@@ -243,11 +246,8 @@ async function verifyProvisionedCache(context) {
 
   const issueLabelNames = [
     context.configForDomain.linear.issue.labels.discovery,
-    context.configForDomain.linear.issue.labels.needs_principal,
   ];
-  const projectLabelNames = [
-    context.configForDomain.linear.project.labels.has_open_questions,
-  ];
+  const projectLabelNames = [];
   const issueLabels = assertNameIdMap(cache.issueLabels, issueLabelNames, "issueLabels");
   const projectLabels = assertNameIdMap(cache.projectLabels, projectLabelNames, "projectLabels");
 
@@ -265,8 +265,7 @@ async function verifyDoctor(context) {
     config: context.configForDomain,
     cache: context.cache,
   });
-  const allowedNonGreen = new Set([MERGE_DONE_AUTOMATION_CHECK_NAME]);
-  const nonGreen = doctor.checks.filter((check) => !check.ok && !allowedNonGreen.has(check.name));
+  const nonGreen = doctor.checks.filter((check) => !check.ok);
   if (nonGreen.length > 0) {
     throw new Error(`Doctor status-model checks failed: ${nonGreen.map((check) => `${check.name}: ${check.message}`).join("; ")}`);
   }
@@ -279,9 +278,7 @@ async function verifyDoctor(context) {
   return {
     healthy: doctor.healthy,
     statusLabelModelHealthy: nonGreen.length === 0,
-    allowedNonGreenChecks: doctor.checks
-      .filter((check) => !check.ok && allowedNonGreen.has(check.name))
-      .map((check) => ({ name: check.name, message: check.message })),
+    allowedNonGreenChecks: [],
     checks: doctor.checks.map((check) => ({
       name: check.name,
       ok: check.ok,
@@ -317,35 +314,6 @@ async function transitionIssue(context, issueId, role, { requireCompletedType = 
     assertCondition(issue.state?.type === "completed", `Expected ${role} to be completed, got ${issue.state?.type || "missing"}.`);
   }
   return { issue: summarizeIssue(issue) };
-}
-
-async function transitionIssueToBlockedWithReason(context, issueId) {
-  const needsPrincipalName = context.configForDomain.linear.issue.labels.needs_principal;
-  const needsPrincipalId = context.cache.issueLabels?.[needsPrincipalName];
-  assertCondition(isNonEmptyString(needsPrincipalId), `Cached issue label ${needsPrincipalName} is missing.`);
-
-  const before = await context.client.getIssue(issueId);
-  const labelIds = uniqueIds([
-    ...(before.labels || []).map((label) => label.id),
-    needsPrincipalId,
-  ]);
-  await context.client.updateIssue(issueId, {
-    stateId: context.cache.issueStatuses.blocked,
-    labelIds,
-  });
-  const issue = await context.client.getIssue(issueId);
-  assertIssueState(issue, context, "blocked");
-  assertCondition(
-    issue.labels?.some((label) => label.id === needsPrincipalId),
-    `Blocked issue does not carry ${needsPrincipalName}.`,
-  );
-  return {
-    issue: summarizeIssue(issue),
-    reasonLabel: {
-      name: needsPrincipalName,
-      id: needsPrincipalId,
-    },
-  };
 }
 
 async function cleanupThrowawayIssue(context, issueId) {
@@ -532,9 +500,7 @@ function requiredDoctorCheckNames(config) {
   return [
     "project status mappings",
     "issue status mappings",
-    `project label ${config.linear.project.labels.has_open_questions}`,
     `issue label ${config.linear.issue.labels.discovery}`,
-    `issue label ${config.linear.issue.labels.needs_principal}`,
   ];
 }
 
@@ -568,10 +534,6 @@ function summarizeError(error) {
 
 function redactOutput(value) {
   return JSON.parse(redactOAuthSecrets(JSON.stringify(value)));
-}
-
-function uniqueIds(values) {
-  return [...new Set(values.filter(isNonEmptyString))];
 }
 
 function isNonEmptyString(value) {

@@ -30,17 +30,6 @@ export const CONTROL_ACTION_KINDS = Object.freeze([
   "terminate",
 ]);
 
-// Fallback whitelist for callers that do not have a workflow definition in
-// scope. The production loop threads definition.invocable_runtime_roles into
-// parseControlAction so the run path is definition-derived without importing a
-// provider registry into this engine module.
-export const ONE_OFF_RUNTIME_ROLES = Object.freeze([
-  "pm",
-  "sr_eng",
-  "judge",
-  "drafter",
-]);
-
 // The terminal outcomes the ORCHESTRATOR itself may emit. `failed_closed` is
 // NOT here: the harness emits it on a bounds/environment breach, never the
 // orchestrator. The allowed (outcome -> reasons) pairs mirror the authored
@@ -51,11 +40,12 @@ export const TERMINATE_OUTCOME_REASONS = AGENT_CHOOSABLE_OUTCOME_REASONS;
 export const TERMINATE_OUTCOMES = Object.freeze(Object.keys(TERMINATE_OUTCOME_REASONS));
 
 // invoke_one_off requires exactly these string fields (all non-empty); a fourth
-// field, runtime_role, is constrained to the injected invocable runtime roles
-// (falling back to ONE_OFF_RUNTIME_ROLES for legacy/direct callers). No other
-// fields are required, and the parser tolerates additional descriptive fields on
-// a one-off (the orchestrator may attach its own latitude metadata) -- the
-// harness sanitizes/persists the one-off reference downstream (Seam 4, I-4).
+// field, runtime_role, is constrained to the caller-injected invocable runtime
+// roles — the CONFIG-derived set of configured runtime assignments (config is
+// the source of truth; there is no code-owned role list). No other fields are
+// required, and the parser tolerates additional descriptive fields on a one-off
+// (the orchestrator may attach its own latitude metadata) -- the harness
+// sanitizes/persists the one-off reference downstream (Seam 4, I-4).
 const ONE_OFF_REQUIRED_STRING_FIELDS = Object.freeze([
   "role_label",
   "task",
@@ -117,7 +107,7 @@ function accept(action) {
 // The normalized action preserves the parsed fields plus its `action` kind, so
 // the loop (I-2b) can switch on `action.action` and read the validated fields
 // directly. Unknown/missing kinds and per-kind field violations reject.
-export function parseControlAction(candidate, { invocableRoles = ONE_OFF_RUNTIME_ROLES } = {}) {
+export function parseControlAction(candidate, { invocableRoles = null } = {}) {
   if (!isRecord(candidate)) {
     return reject(["control_action_not_object"]);
   }
@@ -149,11 +139,15 @@ function parseInvokeLibrary(candidate) {
   });
 }
 
-function parseInvokeOneOff(candidate, { invocableRoles = ONE_OFF_RUNTIME_ROLES } = {}) {
-  const allowedRuntimeRoles = Array.isArray(invocableRoles)
-    ? invocableRoles
-    : ONE_OFF_RUNTIME_ROLES;
+function parseInvokeOneOff(candidate, { invocableRoles = null } = {}) {
+  // No fallback list: the invocable set is the CONFIG-derived runtime
+  // assignments, threaded in by the caller. Absent/empty means no one-off can
+  // be seated — reject with a distinct reason instead of guessing a roster.
+  const allowedRuntimeRoles = Array.isArray(invocableRoles) ? invocableRoles : [];
   const reasons = [];
+  if (allowedRuntimeRoles.length === 0) {
+    reasons.push("invoke_one_off_invocable_roles_unavailable");
+  }
   for (const field of ONE_OFF_REQUIRED_STRING_FIELDS) {
     if (!isNonEmptyString(candidate[field])) {
       reasons.push(`invoke_one_off_missing_${field}`);

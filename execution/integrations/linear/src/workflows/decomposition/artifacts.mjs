@@ -6,7 +6,6 @@ import {
 import {
   normalizeArtifactSetLineage,
 } from "../../../../../engine/produced-identities.mjs";
-import { requireAuthoredMarkdown } from "../../../../../engine/engine-markdown.mjs";
 import {
   DECOMPOSITION_FUNCTION_VERSION,
   DECOMPOSITION_RUN_PAYLOAD_SCHEMA_ID,
@@ -15,10 +14,8 @@ import {
 import { captureProjectSnapshot } from "../../project-snapshot-store.mjs";
 import { writeRunArtifact } from "../../../../../engine/run-store.mjs";
 import { buildRuntimeMetadata } from "../../runtime-adapters.mjs";
-import {
-  STABLE_KEY_PATTERN,
-  matchesStatus,
-} from "../../linear/matching-utils.mjs";
+import { matchesStatus } from "../../linear/matching-utils.mjs";
+import { projectBodyUpdateFromAuthoredOutput } from "./commit-payload.mjs";
 
 // Captures the project context the decomposition run actually saw into the
 // local snapshot store (sibling of the run artifact, gitignored). The future
@@ -31,7 +28,7 @@ import {
 // Capture failures are recorded on the trace but never alter the run outcome,
 // so the live decision path is unchanged; a missing snapshot simply makes
 // rich promotion fail closed later.
-export function captureRunProjectSnapshot({ runId, project, shape, evalMode, repoRoot, runStoreDir, trace }) {
+export function captureRunProjectSnapshot({ runId, project, shape, evalMode, repoRoot, home, domainId, runStoreDir, trace }) {
   if (!runId) {
     recordSpan(trace, "capture_project_snapshot", { ok: false, reason: "missing_run_id_for_snapshot" });
     return null;
@@ -43,6 +40,8 @@ export function captureRunProjectSnapshot({ runId, project, shape, evalMode, rep
       semanticStatus: semanticProjectStatus(project, shape),
       captureSource: evalMode ? "eval_mode_memory_snapshot" : "linear_run_context",
       repoRoot,
+      home,
+      domainId,
       runStoreDir,
     });
     recordSpan(trace, "capture_project_snapshot", {
@@ -73,6 +72,7 @@ export function semanticProjectStatus(project, shape) {
 export function persistRunArtifact({
   artifact,
   repoRoot,
+  home,
   runStoreDir,
   trace,
   returnDurabilityResult = false,
@@ -83,6 +83,8 @@ export function persistRunArtifact({
     {
       runId: artifact.run_id,
       repoRoot,
+      home,
+      domainId: artifact.domain_id,
       runStoreDir,
       returnDurabilityResult,
       payloadValidator,
@@ -117,9 +119,6 @@ export function terminalArtifact({
   const kind = terminalOutput.outcome === "commit" ? "commit" : "pause";
   const runtimeEvidencePackets = packetsFromRuntimeEvidence(runtimeEvidence);
   const artifactSetLineage = normalizeArtifactSetLineage(runResult?.artifact_set_lineage);
-  if (terminalOutput.outcome === "commit" && runtimeEvidencePackets.length === 0) {
-    throw new Error("runtime_evidence_turns_required_for_terminal_metadata");
-  }
   const auditedTerminalOutput = terminalOutputAudit(terminalOutput);
   const artifact = {
     schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
@@ -158,17 +157,20 @@ export function terminalArtifact({
   };
 
   if (terminalOutput.outcome === "commit") {
+    const projectBodyUpdate = projectBodyUpdateFromAuthoredOutput(terminalOutput);
     artifact.final_issues = terminalOutput.final_issues;
     artifact.project_update_markdown = terminalOutput.project_update_markdown;
     artifact.payload.final_issues = terminalOutput.final_issues;
     artifact.payload.project_update_markdown = terminalOutput.project_update_markdown;
+    if (projectBodyUpdate) {
+      artifact.project_body_update = projectBodyUpdate;
+      artifact.payload.project_body_update = projectBodyUpdate;
+    }
   } else {
     artifact.source =
       terminalOutput.outcome === "failed_closed" ? "failed_closed" : "orchestrator_terminal";
     artifact.pause_packet = pausePacketFromTerminalOutput(terminalOutput);
-    artifact.discovery_issues = terminalOutput.discovery_issues || [];
     artifact.payload.pause_packet = artifact.pause_packet;
-    artifact.payload.discovery_issues = artifact.discovery_issues;
   }
 
   return artifact;
@@ -205,7 +207,7 @@ function terminalEvidence(evidence) {
 }
 
 function pausePacketFromTerminalOutput(terminalOutput = {}) {
-  return {
+  const packet = {
     schema_version: terminalOutput.schema_version,
     run_id: terminalOutput.run_id,
     phase: "orchestrator_terminal",
@@ -217,8 +219,11 @@ function pausePacketFromTerminalOutput(terminalOutput = {}) {
     constraints: Array.isArray(terminalOutput.constraints) ? terminalOutput.constraints : [],
     risks: Array.isArray(terminalOutput.risks) ? terminalOutput.risks : [],
     open_questions_markdown: terminalOutput.open_questions_markdown,
-    project_update_markdown: terminalOutput.project_update_markdown,
   };
+  if (terminalOutput.outcome === "failed_closed") {
+    packet.project_update_markdown = terminalOutput.project_update_markdown;
+  }
+  return packet;
 }
 
 function packetsFromRuntimeEvidence(runtimeEvidence = {}) {
@@ -236,13 +241,6 @@ function packetsFromRuntimeEvidence(runtimeEvidence = {}) {
 export function validateResumePacket(packet) {
   const contract = validateResumePacketContract(packet);
   const failureReasons = contract.ok ? [] : [...contract.failureReasons];
-  for (const update of packet?.discovery_issue_updates || []) {
-    if (!(update.issue_id || update.issueId)) failureReasons.push("missing_discovery_issue_id");
-    const discoveryKey = update.discovery_key || update.decompositionKey;
-    if (!discoveryKey) failureReasons.push("missing_discovery_key");
-    else if (!STABLE_KEY_PATTERN.test(discoveryKey)) failureReasons.push("invalid_discovery_key");
-    requireAuthoredMarkdown(update, "body_markdown", failureReasons, { allowBlank: false });
-  }
   return { ok: failureReasons.length === 0, failureReasons: [...new Set(failureReasons)] };
 }
 

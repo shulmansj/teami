@@ -13,11 +13,9 @@ export const DECOMPOSITION_FUNCTION_VERSION = "0.2.0";
 const COMMON_PACKET_ARRAY_FIELDS = ["source_refs", "assumptions", "constraints", "risks"];
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-// The resume-after-questions packet contract. This is the LIVE resume workflow
-// vocabulary (artifacts.mjs validateResumePacket -> resumeProjectAfterQuestions,
-// run-service.mjs), NOT decomposition-phase-router vocabulary: a resume packet
-// marks `phase: "resume"` only as a resume marker. It is intentionally kept when
-// the phase router is retired.
+// Deferred resume packet vocabulary. The live resume path is a fresh
+// decomposition run after the adopter moves the project back to Planned; this
+// contract is kept only for inert resume-kind compatibility.
 export function validateResumePacketContract(packet) {
   const failureReasons = [];
   if (!packet) return { ok: false, failureReasons: ["missing_resume_packet"] };

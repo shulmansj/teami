@@ -19,7 +19,6 @@
 import path from "node:path";
 
 import {
-  ONE_OFF_RUNTIME_ROLES,
   parseControlAction,
 } from "../../../engine/orchestrator-control-action.mjs";
 import {
@@ -34,6 +33,7 @@ import {
   buildSessionStartRuntimeCommand,
   extractRuntimeJsonCandidates,
   extractRuntimeSessionHandle,
+  resolveInvocableRuntimeRoles,
   resolveRoleRuntimeAssignments,
   strictParseSubagentTurn,
 } from "./runtime-adapters.mjs";
@@ -64,10 +64,19 @@ const TURN_OUTPUT_SCHEMA_PATH = path.resolve(
 const RAW_OUTPUT_EXCERPT_MAX_CHARS = 4096;
 const PROCESS_FAILURE_CODES = new Set(["process_failed", "timed_out", "could_not_start", "envelope_too_large"]);
 const PROMPT_UNAVAILABLE_ENVELOPE_BUILD_FAILED_REASON = "prompt_unavailable_envelope_build_failed";
-const DEFAULT_ONE_OFF_RUNTIME_ROLE_PROSE = ONE_OFF_RUNTIME_ROLES.join("|");
 const DEFAULT_ORCHESTRATOR_GOVERNING_BODY =
   "You are the Teami decomposition orchestrator. Decide which subagents to run and when to terminate.";
 export const WARM_CONTINUATION_UNAVAILABLE_CODE = "warm_continuation_unavailable";
+const CONTROL_ACTION_NULL_AS_ABSENT_FIELDS = new Set([
+  "target_key",
+  "instance_id",
+  "role_label",
+  "task",
+  "prompt",
+  "runtime_role",
+  "outcome",
+  "reason",
+]);
 
 function normalizeFirstTurnWarmStart(firstTurnWarmStart) {
   if (!firstTurnWarmStart || typeof firstTurnWarmStart !== "object" || Array.isArray(firstTurnWarmStart)) {
@@ -169,8 +178,11 @@ export async function executeOrchestratorTurn({
 
   const runtime = orchestratorRuntime ?? defaultOrchestratorRuntime;
   const assignment = orchestratorRuntime ? null : resolveOrchestratorRuntimeAssignment(config, definition);
-  const invocableRuntimeRoles = Array.isArray(definition?.invocable_runtime_roles)
-    ? definition.invocable_runtime_roles
+  // One-off seating reads the CONFIG (the configured runtime assignments minus
+  // the driver) — config is the source of truth; the definition carries no
+  // role list of its own.
+  const invocableRuntimeRoles = definition?.workflow_type
+    ? resolveInvocableRuntimeRoles(config, definition)
     : undefined;
 
   const turn = await runtime({
@@ -196,7 +208,7 @@ export async function executeOrchestratorTurn({
     throw new Error("orchestrator_turn_runtime_returned_no_turn");
   }
 
-  const parsed = parseControlAction(turn.controlAction, {
+  const parsed = parseControlAction(normalizeControlActionNullsAsAbsent(turn.controlAction), {
     invocableRoles: invocableRuntimeRoles,
   });
   if (!parsed.ok) {
@@ -212,7 +224,7 @@ export async function executeOrchestratorTurn({
     raw_output: transcriptTextOrNull(turn.raw_output),
     // producedContent rides on the turn RESULT as a sibling of evidence. It is
     // omitted (undefined) when the turn authored nothing this turn.
-    ...(turn.producedContent === undefined
+    ...(turn.producedContent == null
       ? {}
       : { producedContent: turn.producedContent }),
     sessionHandle: turn.sessionHandle ?? sessionHandle ?? null,
@@ -291,13 +303,17 @@ export async function defaultOrchestratorRuntime({
     throw error;
   }
   let output;
+  let outputStderr = "";
   try {
-    output = await runCommand(command, {
+    const commandResult = await runCommand(command, {
       timeoutMs,
       maxOutputBytes,
       cwd,
       envAugment,
+      includeStreams: true,
     });
+    output = runtimeCommandOutput(commandResult);
+    outputStderr = runtimeCommandStderr(commandResult);
   } catch (error) {
     if (usingWarmStart) {
       throw warmContinuationUnavailableError(error.message, {
@@ -318,7 +334,7 @@ export async function defaultOrchestratorRuntime({
   const handleRunId = usingWarmStart ? warmStart.priorRunId : runId;
   const fallbackHandle = usingWarmStart ? warmStart.sessionHandle : sessionHandle;
   const nextHandle =
-    extractRuntimeSessionHandle(output, {
+    extractRuntimeSessionHandle(sessionHandleSearchText(output, outputStderr), {
       role: ORCHESTRATOR_RUNTIME_ROLE,
       runId: handleRunId,
       runtime: assignment.runtime,
@@ -334,6 +350,18 @@ export async function defaultOrchestratorRuntime({
 }
 
 const RUNTIME_TOOL_EVENTS_UNAVAILABLE_REASON = "runtime_tool_event_channel_unavailable";
+
+function normalizeControlActionNullsAsAbsent(candidate) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return candidate;
+  let normalized = null;
+  for (const field of CONTROL_ACTION_NULL_AS_ABSENT_FIELDS) {
+    if (Object.hasOwn(candidate, field) && candidate[field] == null) {
+      normalized ||= { ...candidate };
+      delete normalized[field];
+    }
+  }
+  return normalized || candidate;
+}
 
 // Build the orchestrator's per-turn prompt. The governing prompt BODY is the
 // orchestrator's adopter-tunable system persona (loaded through the recorder at
@@ -356,7 +384,7 @@ export function buildOrchestratorPrompt({
   const allowedRepoPacketBlock = allowedRepoPacketText(allowedRepoPacket);
   const oneOffRuntimeRoleProse = formatOneOffRuntimeRoleProse(invocableRuntimeRoles);
   const factoryContract = buildOrchestratorFactoryContract({ oneOffRuntimeRoleProse });
-  const warmResumeReviewerNotes = warmResumeReviewerNotesFromPriorTurns(priorTurns);
+  const warmResumeContext = warmResumeContextFromPriorTurns(priorTurns);
   const priorTurnDigest = (priorTurns || []).map((turn) => ({
     action: turn?.controlAction?.action ?? turn?.action ?? null,
     target_key: turn?.controlAction?.target_key ?? null,
@@ -367,7 +395,13 @@ export function buildOrchestratorPrompt({
     status: turn?.status ?? null,
     reason: turn?.reason ?? null,
     context_digest: turn?.context_digest ?? null,
-    ...(typeof turn?.reviewer_notes === "string" ? { reviewer_notes: turn.reviewer_notes } : {}),
+    ...(Object.hasOwn(turn || {}, "open_questions_markdown")
+      ? { open_questions_markdown: turn.open_questions_markdown ?? null }
+      : {}),
+    ...(turn?.technical_explanation_markdown
+      ? { technical_explanation_markdown: turn.technical_explanation_markdown }
+      : {}),
+    ...(turn?.resume_context ? { resume_context: turn.resume_context } : {}),
     source_refs: Array.isArray(turn?.source_refs) ? turn.source_refs : [],
   }));
   return [
@@ -396,8 +430,8 @@ export function buildOrchestratorPrompt({
           allowedRepoPacketBlock,
         ]
       : []),
-    ...(warmResumeReviewerNotes
-      ? ["", "Reviewer notes for this warm resume:", warmResumeReviewerNotes]
+    ...(warmResumeContext
+      ? ["", "Resume context for this warm resume:", warmResumeContext]
       : []),
     "",
     "Decisions so far this run:",
@@ -405,13 +439,20 @@ export function buildOrchestratorPrompt({
   ].join("\n");
 }
 
-function warmResumeReviewerNotesFromPriorTurns(priorTurns) {
-  const notes = (priorTurns || [])
-    .filter((turn) => turn?.action === "review_notes" && typeof turn.reviewer_notes === "string")
-    .map((turn) => turn.reviewer_notes)
+function warmResumeContextFromPriorTurns(priorTurns) {
+  const contexts = (priorTurns || [])
+    .map((turn) => {
+      if (turn?.action === "resume_context" && typeof turn.resume_context?.text === "string") {
+        return turn.resume_context.text;
+      }
+      if (turn?.action === "review_notes" && typeof turn.reviewer_notes === "string") {
+        return turn.reviewer_notes;
+      }
+      return null;
+    })
     .filter((text) => text !== "");
-  if (notes.length === 0) return null;
-  return notes.join("\n\n---\n\n");
+  if (contexts.length === 0) return null;
+  return contexts.join("\n\n---\n\n");
 }
 
 function buildOrchestratorFactoryContract({ oneOffRuntimeRoleProse }) {
@@ -427,8 +468,12 @@ function buildOrchestratorFactoryContract({ oneOffRuntimeRoleProse }) {
     "On a non-terminating turn you may omit produced_content or include partial drafting context.",
     "When you terminate with outcome commit, produced_content MUST include:",
     "- final_issues: an array of agent-ready issues, each { decomposition_key, title, issue_body_markdown, depends_on, assignment, output, acceptance_criteria };",
-    "  Optional per final issue: work_type is code|non_code; resource_target is { kind, id, repo_scope? } and currently selects a git_repo resource when authored.",
+    "  Optional per final issue: work_type is code|non_code; resource_target is { kind, id, repo_scope? } and currently selects a git_repo resource when authored; requires_human_review is a boolean.",
     "- project_update_markdown: a project update that includes the line `run_id: <run_id>` and a `## What I did with each part of your project` section.",
+    "- project_body_slots: null unless project comments answer a prior pause question; when they do, include the full canonical planning slots object { problem, audience, desired_outcome, acceptance, scope, constraints, sources, human_decisions } with the answer semantically folded into the right section(s). Fold only what was answered; do not invent unasked intent.",
+    "When you terminate with outcome pause, produced_content MUST include open_questions_markdown: the exact questions to post in the Linear project comment thread.",
+    "If a comment-thread answer is still insufficient to fold faithfully, terminate with outcome pause instead of guessing.",
+    "For pause, do not include project_update_markdown, project_body_slots, follow-up issues, final_issues, or project-body blocker-section prose; the harness posts one comment and moves the project to Principal Escalation.",
     "Author every issue field yourself; the harness rejects the commit if a required field is missing or empty (it never fills them in for you).",
   ].join("\n");
 }
@@ -436,7 +481,7 @@ function buildOrchestratorFactoryContract({ oneOffRuntimeRoleProse }) {
 function formatOneOffRuntimeRoleProse(invocableRuntimeRoles) {
   return Array.isArray(invocableRuntimeRoles) && invocableRuntimeRoles.length > 0
     ? invocableRuntimeRoles.join("|")
-    : DEFAULT_ONE_OFF_RUNTIME_ROLE_PROSE;
+    : "none configured";
 }
 
 function orchestratorProjectSummary(project) {
@@ -444,6 +489,7 @@ function orchestratorProjectSummary(project) {
     id: project?.id ?? null,
     name: project?.name ?? null,
     description: project?.description ?? null,
+    comments: agentVisibleProjectComments(project?.comments),
     content: project?.content ?? null,
     status: project?.status ?? null,
     labels: (project?.labels || []).map((label) => ({ id: label?.id ?? null, name: label?.name ?? null })),
@@ -454,6 +500,14 @@ function orchestratorProjectSummary(project) {
       state: issue?.state ?? null,
     })),
   };
+}
+
+function agentVisibleProjectComments(comments) {
+  return (Array.isArray(comments) ? comments : []).map((comment) => ({
+    author_id: comment?.author_id ?? comment?.user?.id ?? null,
+    body: typeof comment?.body === "string" ? comment.body : "",
+    created_at: comment?.created_at ?? comment?.createdAt ?? null,
+  }));
 }
 
 function allowedRepoPacketText(allowedRepoPacket) {
@@ -550,6 +604,9 @@ export async function executeSubagent({
           allowedRepoPacket,
           priorDigest,
           allowedOutcomes: SUBAGENT_TURN_OUTCOMES,
+          // A write-capable role (the execution worker's workspace-write sandbox)
+          // is a tool-USING role: same JSON turn contract, tools allowed in between.
+          toolUse: assignment.sandbox === "workspace-write",
         });
   } catch (error) {
     const rawOutput = rawOutputExcerpt(error?.message || "subagent invocation envelope could not be built");
@@ -588,6 +645,7 @@ export async function executeSubagent({
       maxOutputBytes,
       cwd,
       envAugment,
+      includeStreams: true,
     });
   } catch (error) {
     const failureCode = PROCESS_FAILURE_CODES.has(error?.failure_code)
@@ -633,7 +691,7 @@ export async function executeSubagent({
   }
   const packet = parsed.packet;
   const nextHandle =
-    extractRuntimeSessionHandle(output, {
+    extractRuntimeSessionHandle(sessionHandleSearchText(output, runtimeCommandStderr(commandResult)), {
       role: runtime_role,
       runId,
       runtime: assignment.runtime,
@@ -668,6 +726,17 @@ function runtimeCommandOutput(commandResult) {
   }
   if (commandResult === undefined || commandResult === null) return "";
   return String(commandResult);
+}
+
+function runtimeCommandStderr(commandResult) {
+  return typeof commandResult?.stderr === "string" ? commandResult.stderr.trim() : "";
+}
+
+// codex >= 0.141.0 prints the session banner (session id:) on stderr while the
+// final message rides stdout; search both when locating the session handle.
+function sessionHandleSearchText(output, stderrText) {
+  const text = typeof output === "string" ? output : "";
+  return stderrText ? `${text}\n${stderrText}` : text;
 }
 
 function enrichErrorWithTranscript(error, { prompt, raw_output: rawOutput } = {}) {

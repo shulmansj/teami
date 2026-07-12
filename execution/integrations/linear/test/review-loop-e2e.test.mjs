@@ -133,14 +133,15 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
           issueId: options.issueId,
           retry: options.retry,
           priorRunId: options.resumeFrom?.priorRunId,
-          reviewerNotes: options.resumeFrom?.reviewerNotes,
+          resumeContext: options.resumeFrom?.resumeContext,
           headSha: options.resumeFrom?.head_sha,
           sessionHandle: options.resumeFrom?.sessionHandle,
         });
         assert.equal(options.retry, true);
         assert.equal(options.resumeFrom?.priorRunId, "run-prior-execution");
         assert.equal(options.resumeFrom?.head_sha, H1);
-        assert.match(options.resumeFrom?.reviewerNotes, /Please add the missing regression proof/);
+        assert.match(options.resumeFrom?.resumeContext?.text, /Please add the missing regression proof/);
+        assert.equal(options.resumeFrom?.resumeContext?.provenance_tag, "af_review_failure_marker");
 
         prAdapter.advanceHead(H2);
         linearClient.setIssueState(ISSUE_ID, "state-in-review");
@@ -196,6 +197,10 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
 
   assert.equal(linearClient.issueStateName(ISSUE_ID), "Todo");
   assert.deepEqual(reviewPackets.map((packet) => packet.pull_request.head_sha), [H1]);
+  // The reviewer verifies acceptance evidence from the PR body, so the packet
+  // must carry the live title/body alongside the diff.
+  assert.equal(reviewPackets[0].pull_request.title, "Implement AF-1");
+  assert.equal(reviewPackets[0].pull_request.body, "Fixture PR");
   assertMarkedReview({ prAdapter, headSha: H1, disposition: "request-changes", statusState: "failure" });
   assertMutationOrder(prAdapter, [
     ["post_comment", H1, "request-changes"],
@@ -232,10 +237,8 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
   await waitForIdle(state, ISSUE_ID);
 
   assert.equal(warmResumeInvocations.length, 1);
-  const reviewerNotesMarker = parseAfReviewCommentMarker(warmResumeInvocations[0].reviewerNotes);
-  assert.equal(reviewerNotesMarker.ok, true);
-  assert.equal(reviewerNotesMarker.marker.head_sha, H1);
-  assert.equal(reviewerNotesMarker.marker.disposition, "request-changes");
+  assert.match(warmResumeInvocations[0].resumeContext.text, new RegExp(`"head_sha":"${H1}"`));
+  assert.match(warmResumeInvocations[0].resumeContext.text, /"disposition":"request-changes"/);
   assert.equal(linearClient.issueStateName(ISSUE_ID), "In Review");
   assert.equal(prAdapter.currentHeadSha(), H2);
   assert.equal(prAdapter.created.length, 1);
@@ -286,7 +289,8 @@ function createMutableLinearClient() {
     { id: "state-in-progress", name: "In Progress", type: "started", teamId: "team-1" },
     { id: "state-ready", name: "Ready", type: "unstarted", teamId: "team-1" },
     { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
-    { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
     { id: "state-done", name: "Done", type: "completed", teamId: "team-1" },
   ];
   const byStateId = new Map(states.map((state) => [state.id, state]));
@@ -793,7 +797,6 @@ function reviewLoopConfig() {
         },
       },
       review: {
-        max_autonomous_fix_rounds: 3,
         roles: {
           reviewer: { runtime: "codex", model: "test-reviewer" },
           orchestrator: { runtime: "codex", model: "test-orchestrator" },
@@ -810,13 +813,15 @@ function reviewLoopConfig() {
       issue: {
         labels: {
           needs_principal: "Needs Principal",
+          human_review: "human-review",
         },
         statuses: {
           backlog: { name: "Backlog", type: "backlog" },
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
           in_review: { name: "In Review", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          human_review: { name: "Principal Review", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
           ready: { name: "Ready" },
         },

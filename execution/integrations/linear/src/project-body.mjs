@@ -6,45 +6,7 @@ Linear project: ${project.name || ""}
 
 This Linear project is the source of truth for product intent.
 Execution issues in this project are downstream work items.
-
-## Open Questions
 `);
-}
-
-export function buildProjectTemplateBody() {
-  return normalizeMarkdown(`
-Linear project: {project_name}
-
-This Linear project is the source of truth for product intent.
-Execution issues in this project are downstream work items.
-
-## Problem Or Opportunity
-
-## Desired Outcome
-
-## Acceptance Evidence
-
-## Scope Boundaries
-
-## Constraints And Decisions
-
-## Open Questions
-`);
-}
-
-export function ensureOpenQuestionsSection(markdown) {
-  if (getSections(markdown, "Open Questions").length > 0) {
-    return markdown;
-  }
-  return normalizeMarkdown(`${markdown.trimEnd()}\n\n## Open Questions\n`);
-}
-
-export function setOpenQuestionsMarkdown(markdown, openQuestionsMarkdown) {
-  return replaceSectionContent(markdown, "Open Questions", openQuestionsMarkdown || "");
-}
-
-export function openQuestionsSectionMarkdown(markdown) {
-  return sectionInnerMarkdown(getRequiredUniqueSection(markdown, "Open Questions").content);
 }
 
 export function getSection(markdown, heading) {
@@ -106,10 +68,6 @@ function sectionContent(content, after) {
   if (normalized === "") return "";
   if (after && !normalized.endsWith("\n")) return `${normalized}\n`;
   return normalized;
-}
-
-function sectionInnerMarkdown(content) {
-  return content || "";
 }
 
 function ensureTrailingLineBreak(markdown) {

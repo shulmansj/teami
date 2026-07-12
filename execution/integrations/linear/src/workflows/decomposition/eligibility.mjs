@@ -1,7 +1,5 @@
 import { recordSpan } from "../../trace.mjs";
 import {
-  discoveryIssuesForProject,
-  isIssueOpen,
   issueHasLabel,
   matchesStatus,
   projectBelongsToTeam,
@@ -18,23 +16,22 @@ export function evaluateEligibilityFromContext({ project, shape, trace }) {
   const blockingConditions = [];
   const projectStatus = project.status || {};
   const belongsToConfiguredTeam = projectBelongsToTeam(project, shape.team.id);
-  const hasOpenQuestionsLabel = project.labels?.some(
-    (label) => label.id === shape.projectLabels.hasOpenQuestions.id,
-  );
-  const discoveryIssues = discoveryIssuesForProject(project, shape);
-  const openDiscoveryIssueCount = discoveryIssues.filter(isIssueOpen).length;
-  const nonDiscoveryIssueCount = (project.issues || []).filter(
+  const priorExecutionIssueCount = (project.issues || []).filter(
     (issue) => !issueHasLabel(issue, shape.issueLabels.discovery.id),
   ).length;
-  const discoveryRoundCount = discoveryIssues.length;
-  const isPlanned = matchesStatus(projectStatus, shape.projectStatuses.planned);
+  const plannedStatus = shape.projectStatuses.planned;
+  const isConfiguredPlanned = Boolean(plannedStatus?.id) && matchesStatus(projectStatus, plannedStatus);
+  const sharesPlannedCategory = Boolean(
+    projectStatus.type &&
+    plannedStatus?.type &&
+    projectStatus.type === plannedStatus.type,
+  );
 
   if (!belongsToConfiguredTeam) blockingConditions.push("project_wrong_team");
-  if (!isPlanned) blockingConditions.push("project_not_planned");
-  if (hasOpenQuestionsLabel) blockingConditions.push("has_open_questions");
-  if (isPlanned && hasOpenQuestionsLabel) blockingConditions.push("status_label_mismatch");
-  if (openDiscoveryIssueCount > 0) blockingConditions.push("open_discovery_issue");
-  if (nonDiscoveryIssueCount > 0) blockingConditions.push("prior_execution_issues");
+  if (!isConfiguredPlanned) {
+    blockingConditions.push(sharesPlannedCategory ? "project_not_configured_planned" : "project_not_planned");
+  }
+  if (priorExecutionIssueCount > 0) blockingConditions.push("prior_execution_issues");
 
   const eligible = blockingConditions.length === 0;
   recordSpan(trace, "eligibility_gate", {
@@ -44,10 +41,7 @@ export function evaluateEligibilityFromContext({ project, shape, trace }) {
     "linear.project_status_id": projectStatus.id || null,
     "linear.project_status_type": projectStatus.type || null,
     "linear.belongs_to_configured_team": belongsToConfiguredTeam,
-    "linear.has_open_questions_label": Boolean(hasOpenQuestionsLabel),
-    "linear.open_discovery_issue_count": openDiscoveryIssueCount,
-    "linear.non_discovery_issue_count": nonDiscoveryIssueCount,
-    "decomposition.discovery_round_count": discoveryRoundCount,
+    "linear.prior_execution_issue_count": priorExecutionIssueCount,
   });
 
   return {
@@ -56,12 +50,8 @@ export function evaluateEligibilityFromContext({ project, shape, trace }) {
     project,
     shape,
     metrics: {
-      hasOpenQuestionsLabel: Boolean(hasOpenQuestionsLabel),
       belongsToConfiguredTeam,
-      openDiscoveryIssueCount,
-      nonDiscoveryIssueCount,
-      discoveryRoundCount,
+      priorExecutionIssueCount,
     },
   };
 }
-

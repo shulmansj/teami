@@ -396,7 +396,8 @@ function createCapturingLinearClient(project) {
         { id: "issue-status-todo", name: "Todo", type: "unstarted" },
         { id: "issue-status-in-progress", name: "In Progress", type: "started" },
         { id: "issue-status-in-review", name: "In Review", type: "started" },
-        { id: "issue-status-blocked", name: "Blocked", type: "started" },
+        { id: "issue-status-human-review", name: "Principal Review", type: "started" },
+        { id: "issue-status-needs-principal", name: "Principal Escalation", type: "started" },
         { id: "issue-status-done", name: "Done", type: "completed" },
       ];
     },
@@ -486,8 +487,18 @@ function linearShape() {
     projectLabels: {
       hasOpenQuestions: { id: "project-label-open-questions", name: "Has Open Questions" },
     },
+    issueStatuses: {
+      backlog: { id: "issue-status-backlog", name: "Backlog", type: "backlog" },
+      todo: { id: "issue-status-todo", name: "Todo", type: "unstarted" },
+      in_progress: { id: "issue-status-in-progress", name: "In Progress", type: "started" },
+      in_review: { id: "issue-status-in-review", name: "In Review", type: "started" },
+      human_review: { id: "issue-status-human-review", name: "Principal Review", type: "started" },
+      needs_principal: { id: "issue-status-needs-principal", name: "Principal Escalation", type: "started" },
+      done: { id: "issue-status-done", name: "Done", type: "completed" },
+    },
     issueLabels: {
       discovery: { id: "issue-label-discovery", name: "Discovery" },
+      human_review: { id: "issue-label-human-review", name: "human-review" },
     },
   };
 }

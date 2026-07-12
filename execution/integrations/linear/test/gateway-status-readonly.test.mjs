@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { runGatewayCommand } from "../src/cli/runner-command.mjs";
+import { teamiHomePaths } from "../src/app-home.mjs";
 import { createCliOutput } from "../src/cli/cli-output.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import {
@@ -41,7 +42,7 @@ function writeActiveRegistry(repoRoot) {
       teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ repoRoot }, registry);
+  writeDomainRegistry({ home: repoRoot }, registry);
 }
 
 function capture() {
@@ -69,7 +70,7 @@ test("adopter `gateway status` is read-only: no poll, replay, or Planned-candida
   const config = loadLinearConfig({ repoRoot });
   const { output, text } = capture();
   await withSavedExitCode(() =>
-    runGatewayCommand({ context: { config, repoRoot, output }, command: "gateway", args: ["status"] }),
+    runGatewayCommand({ context: { config, repoRoot, home: repoRoot, output }, command: "gateway", args: ["status"] }),
   );
   fs.rmSync(repoRoot, { recursive: true, force: true });
 
@@ -84,16 +85,17 @@ test("adopter `gateway status` is read-only: no poll, replay, or Planned-candida
 test("adopter `gateway status` reports Running when a live gateway lock is present", async () => {
   const repoRoot = freshRepoWithConfig();
   writeActiveRegistry(repoRoot);
-  fs.mkdirSync(path.join(repoRoot, ".teami"), { recursive: true });
+  const lockPath = teamiHomePaths({ home: repoRoot }).gatewayLockPath;
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(
-    path.join(repoRoot, ".teami", "gateway.lock"),
+    lockPath,
     `${JSON.stringify({ pid: process.pid, token: "x", created_at: new Date().toISOString() })}\n`,
     "utf8",
   );
   const config = loadLinearConfig({ repoRoot });
   const { output, text } = capture();
   await withSavedExitCode(() =>
-    runGatewayCommand({ context: { config, repoRoot, output }, command: "gateway", args: ["status"] }),
+    runGatewayCommand({ context: { config, repoRoot, home: repoRoot, output }, command: "gateway", args: ["status"] }),
   );
   fs.rmSync(repoRoot, { recursive: true, force: true });
 
@@ -107,7 +109,7 @@ test("`trigger-status` still runs the active one-pass (preserved operator path)"
   const config = loadLinearConfig({ repoRoot });
   const { output, text } = capture();
   await withSavedExitCode(() =>
-    runGatewayCommand({ context: { config, repoRoot, output }, command: "trigger-status", args: [] }),
+    runGatewayCommand({ context: { config, repoRoot, home: repoRoot, output }, command: "trigger-status", args: [] }),
   );
   fs.rmSync(repoRoot, { recursive: true, force: true });
 

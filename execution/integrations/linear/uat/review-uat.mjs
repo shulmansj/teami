@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION } from "../../../engine/orchestra
 import { defaultRunStoreDir, writeRunArtifact } from "../../../engine/run-store.mjs";
 import { branchNameForIssue } from "../../git/git-branch-names.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
+import { runBoundedGit, runBoundedSubprocess } from "../../git/bounded-subprocess.mjs";
 import { readLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import { readDomainRegistry } from "../src/domain-registry.mjs";
@@ -37,9 +38,6 @@ import { createLinearSetupGraphqlClient } from "../src/linear-setup-auth.mjs";
 import {
   issueMatchesInReviewTarget,
 } from "../src/linear/issue-in-review-effect.mjs";
-import {
-  issueMatchesNeedsPrincipalTarget,
-} from "../src/linear/issue-needs-principal-effect.mjs";
 import {
   resolveInReviewIssueStatus,
   resolveIssueStatuses,
@@ -306,6 +304,7 @@ async function prepareLiveReviewUatContext(options) {
     allowRefresh: true,
   }).client;
   await client.verifyAuth();
+  const cache = readLinearCache(domainContext.linear.cachePath);
 
   const issueStatuses = await resolveIssueStatuses(client, config, domain.linear.team_id);
   if (!issueStatuses.ready?.id) {
@@ -318,22 +317,21 @@ async function prepareLiveReviewUatContext(options) {
   if (!inReviewTarget?.id) {
     throw new ReviewUatUserError("Review UAT requires a resolvable In Review issue status.", "in_review_status_missing");
   }
-  const needsPrincipalTarget = await resolveNeedsPrincipalIssueStatus(client, config, domain.linear.team_id);
+  const needsPrincipalTarget = await resolveNeedsPrincipalIssueStatus(client, config, domain.linear.team_id, cache);
   if (!needsPrincipalTarget?.id) {
-    throw new ReviewUatUserError("Review UAT requires a resolvable Needs Principal issue status or label.", "needs_principal_missing");
+    throw new ReviewUatUserError("Review UAT requires a resolvable Needs Principal issue status.", "needs_principal_missing");
   }
 
   const repoIdentity = resourcesToRepoIdentity(domainContext, { resourceId: options.resourceId });
-  assertUatRepoBinding({
+  await assertUatRepoBinding({
     repoRoot,
     repoIdentity,
     expectedRepoName: options.expectedRepoName,
   });
-  assertGhAuthStatus({ repoRoot });
-  const githubToken = resolveGhToken({ repoRoot });
+  await assertGhAuthStatus({ repoRoot });
+  const githubToken = await resolveGhToken({ repoRoot });
   const prAdapter = createPrAdapter({ repoIdentity, githubToken });
   const store = createLocalTriggerStore({ repoRoot });
-  const cache = readLinearCache(domainContext.linear.cachePath);
 
   const context = {
     ...options,
@@ -1097,9 +1095,6 @@ async function reviewGateSnapshot(context, target, { headSha, disposition }) {
 async function waitForIssueTarget(context, issueId, target, label) {
   return waitForValue(async () => {
     const issue = await context.client.getIssueContext(issueId);
-    if (target?.targetType === "label") {
-      return issueMatchesNeedsPrincipalTarget(issue, target) ? issue : null;
-    }
     if (target?.id && issue.state?.id === target.id) return issue;
     if (target?.name && issue.state?.name === target.name) return issue;
     return null;
@@ -1240,7 +1235,7 @@ async function githubApi(context, apiPath, { method = "GET", body = null, allowN
   return payload;
 }
 
-function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
+async function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
   const expectedName = String(expectedRepoName || "").trim();
   if (expectedName && repoIdentity.repo !== expectedName) {
     throw new ReviewUatUserError(
@@ -1251,7 +1246,10 @@ function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
   if (!repoIdentity.default_branch) {
     throw new ReviewUatUserError("Review UAT requires git_repo.default_branch.", "git_repo_binding");
   }
-  const remote = runGit(["remote", "get-url", "origin"], { cwd: repoRoot });
+  const remote = await runGit(["remote", "get-url", "origin"], {
+    cwd: repoRoot,
+    operation: "git_read",
+  });
   if (!remote.ok || !remote.stdout.trim()) {
     throw new ReviewUatUserError("Review UAT requires an origin remote in the bound checkout.", "origin_missing");
   }
@@ -1264,32 +1262,36 @@ function assertUatRepoBinding({ repoRoot, repoIdentity, expectedRepoName }) {
   }
 }
 
-function assertGhAuthStatus({ repoRoot }) {
-  const result = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], {
+async function assertGhAuthStatus({ repoRoot }) {
+  const result = await runBoundedSubprocess({
+    command: "gh",
+    args: ["auth", "status", "--hostname", "github.com"],
+    operation: "gh_auth_read",
     cwd: repoRoot,
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
   });
-  if (result.status !== 0) {
+  if (!result.ok) {
     throw new ReviewUatUserError(
-      `GitHub CLI is not logged in for github.com: ${redactGitHubSecrets(result.stderr || result.stdout || "gh auth status failed")}`,
+      result.timedOut
+        ? "GitHub CLI login verification timed out. Retry after confirming gh auth status in another terminal."
+        : "GitHub CLI is not logged in for github.com. Run gh auth login and retry.",
       "github_auth_status_failed",
     );
   }
 }
 
-function resolveGhToken({ repoRoot }) {
-  const result = spawnSync("gh", ["auth", "token"], {
+async function resolveGhToken({ repoRoot }) {
+  const result = await runBoundedSubprocess({
+    command: "gh",
+    args: ["auth", "token"],
+    operation: "gh_auth_read",
     cwd: repoRoot,
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
   });
   const token = result.stdout?.trim();
-  if (result.status !== 0 || !token) {
+  if (!result.ok || !token) {
     throw new ReviewUatUserError(
-      `GitHub CLI token is unavailable: ${redactGitHubSecrets(result.stderr || result.stdout || "gh auth token failed")}`,
+      result.timedOut
+        ? "GitHub CLI token lookup timed out. Retry after confirming gh auth status in another terminal."
+        : "GitHub CLI token is unavailable. Run gh auth login and retry.",
       "github_auth_token_failed",
     );
   }
@@ -1325,7 +1327,7 @@ async function readLinearTokenSet(credentialStore) {
 }
 
 function latestRunForIssueWorkflow(context, issueId, workflowType) {
-  const state = readLocalTriggerState(localTriggerStorePath(context.repoRoot));
+  const state = readLocalTriggerState(localTriggerStorePath());
   return state.runs
     .filter((run) => run.object_id === issueId && run.workflow_type === workflowType)
     .sort((a, b) => String(a.started_at || "").localeCompare(String(b.started_at || "")))
@@ -1447,20 +1449,13 @@ function sleep(ms) {
   });
 }
 
-function runGit(args, { cwd, env } = {}) {
-  const result = spawnSync("git", args, {
+function runGit(args, { cwd, env, exactEnv = false, operation = null } = {}) {
+  return runBoundedGit(args, {
     cwd,
-    env: env || process.env,
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
+    env,
+    exactEnv,
+    ...(operation ? { operation } : {}),
   });
-  return {
-    ok: result.status === 0,
-    status: result.status,
-    stdout: result.stdout || "",
-    stderr: result.stderr || result.error?.message || "",
-  };
 }
 
 function killChild(child) {

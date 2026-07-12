@@ -13,6 +13,17 @@ import {
   LINEAR_ISSUE_IN_REVIEW_EFFECT_ID,
 } from "../src/workflows/execution/effect-ids.mjs";
 import {
+  GATE_BOUNCE_TO_IN_REVIEW_EFFECT_ID,
+  GATE_BOUNCE_TO_TODO_EFFECT_ID,
+  GATE_INVALIDATE_MOVE_EFFECT_ID,
+  GATE_PARK_MOVE_EFFECT_ID,
+  gateBounceToInReviewEffect,
+  gateBounceToTodoEffect,
+  gateInvalidateMoveEffect,
+  gateParkMoveEffect,
+  verifyGateParkMoveEffect,
+} from "../src/linear/merge-gate-move-effects.mjs";
+import {
   resolveInReviewIssueStatus,
   resolveIssueStatuses,
 } from "../src/linear/shape-resolver.mjs";
@@ -180,7 +191,6 @@ test("execution issue In Review effect runs last and applies the configured stat
       status: "In Review",
       status_id: "state-in-review",
       state_id: "state-in-review",
-      label_id: null,
     });
     assert.equal(result.produced_identities.at(-1).effect_id, LINEAR_ISSUE_IN_REVIEW_EFFECT_ID);
     assert.equal(result.produced_identities.at(-1).identity.status_id, "state-in-review");
@@ -189,7 +199,7 @@ test("execution issue In Review effect runs last and applies the configured stat
   }
 });
 
-test("resolveIssueStatuses resolves the six canonical issue statuses", async () => {
+test("resolveIssueStatuses resolves the seven canonical issue statuses", async () => {
   const statuses = await resolveIssueStatuses({
     async listWorkflowStates(teamId) {
       assert.equal(teamId, "team-1");
@@ -198,15 +208,206 @@ test("resolveIssueStatuses resolves the six canonical issue statuses", async () 
         { id: "state-todo", name: "Todo", type: "unstarted" },
         { id: "state-in-progress", name: "In Progress", type: "started" },
         { id: "state-in-review", name: "In Review", type: "started" },
-        { id: "state-blocked", name: "Blocked", type: "started" },
+        { id: "state-human-review", name: "Principal Review", type: "started" },
+        { id: "state-needs-principal", name: "Principal Escalation", type: "started" },
         { id: "state-done", name: "Done", type: "completed" },
       ];
     },
   }, configWithIssueStatuses(), "team-1");
 
-  assert.deepEqual(Object.keys(statuses), ["backlog", "todo", "in_progress", "in_review", "blocked", "done"]);
+  assert.deepEqual(Object.keys(statuses), ["backlog", "todo", "in_progress", "in_review", "human_review", "needs_principal", "done"]);
   assert.equal(statuses.todo.id, "state-todo");
-  assert.equal(statuses.blocked.id, "state-blocked");
+  assert.equal(statuses.human_review.id, "state-human-review");
+  assert.equal(statuses.needs_principal.id, "state-needs-principal");
+});
+
+test("gate move effects expose the four guarded lifecycle moves", () => {
+  assert.deepEqual([
+    gateParkMoveEffect.id,
+    gateInvalidateMoveEffect.id,
+    gateBounceToInReviewEffect.id,
+    gateBounceToTodoEffect.id,
+  ], [
+    GATE_PARK_MOVE_EFFECT_ID,
+    GATE_INVALIDATE_MOVE_EFFECT_ID,
+    GATE_BOUNCE_TO_IN_REVIEW_EFFECT_ID,
+    GATE_BOUNCE_TO_TODO_EFFECT_ID,
+  ]);
+});
+
+test("gate move effects apply only from their expected source status", async () => {
+  const cases = [
+    {
+      effect: gateParkMoveEffect,
+      effectId: GATE_PARK_MOVE_EFFECT_ID,
+      fromRole: "in_review",
+      toRole: "human_review",
+      expectedStatus: "Principal Review",
+    },
+    {
+      effect: gateInvalidateMoveEffect,
+      effectId: GATE_INVALIDATE_MOVE_EFFECT_ID,
+      fromRole: "human_review",
+      toRole: "in_review",
+      expectedStatus: "In Review",
+    },
+    {
+      effect: gateBounceToInReviewEffect,
+      effectId: GATE_BOUNCE_TO_IN_REVIEW_EFFECT_ID,
+      fromRole: "done",
+      toRole: "in_review",
+      expectedStatus: "In Review",
+    },
+    {
+      effect: gateBounceToTodoEffect,
+      effectId: GATE_BOUNCE_TO_TODO_EFFECT_ID,
+      fromRole: "done",
+      toRole: "todo",
+      expectedStatus: "Todo",
+    },
+  ];
+
+  for (const row of cases) {
+    const issue = gateIssue({ role: row.fromRole });
+    const client = createGateMoveClient({ issue });
+    const result = await applyCommitEffects({
+      effects: [row.effect],
+      ctx: {
+        client,
+        config: configWithIssueStatuses(),
+        issue,
+        shape: gateShape(),
+        runId: `run-${row.effectId}`,
+      },
+    });
+
+    assert.equal(result.outcome, "ok", row.effectId);
+    assert.deepEqual(gateUpdates(client), [{
+      method: "updateIssue",
+      id: "issue-1",
+      input: { stateId: stateForRole(row.toRole).id },
+    }], row.effectId);
+    assert.equal(issue.state.id, stateForRole(row.toRole).id, row.effectId);
+    assert.deepEqual(result.applied, [{
+      id: row.effectId,
+      identity: {
+        linear_issue_id: "issue-1",
+        issue_id: "issue-1",
+        issue_key: "AF-456",
+        target_type: "status",
+        target_id: stateForRole(row.toRole).id,
+        status: row.expectedStatus,
+        status_id: stateForRole(row.toRole).id,
+        state_id: stateForRole(row.toRole).id,
+      },
+    }], row.effectId);
+  }
+});
+
+test("guarded gate move skips as success when the issue already left the source status", async () => {
+  const staleIssue = gateIssue({ role: "in_review" });
+  const liveIssue = gateIssue({ role: "done" });
+  const client = createGateMoveClient({ issue: liveIssue });
+  const trace = { spans: [] };
+  const ctx = {
+    client,
+    config: configWithIssueStatuses(),
+    issue: staleIssue,
+    shape: gateShape(),
+    runId: "run-park-skip",
+  };
+
+  const result = await applyCommitEffects({
+    effects: [gateParkMoveEffect],
+    ctx,
+    trace,
+  });
+
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.pending_effect_id, undefined);
+  assert.equal(result.reason, undefined);
+  assert.deepEqual(result.applied, [{
+    id: GATE_PARK_MOVE_EFFECT_ID,
+    identity: undefined,
+  }]);
+  assert.deepEqual(gateUpdates(client), []);
+  assert.equal(liveIssue.state.id, "state-done");
+  assert.ok(client.events.some((event) => event.method === "getIssue"), "guard must fresh-read Linear");
+  assert.equal(
+    trace.spans.find((span) => span.name === "commit_effect_apply")?.attributes.outcome,
+    "ok",
+  );
+  assert.equal(
+    trace.spans.find((span) => span.name === "commit_effect_verify")?.attributes.outcome,
+    "ok",
+  );
+  assert.deepEqual(await verifyGateParkMoveEffect(ctx), {
+    ok: true,
+    skipped: true,
+    reason: "linear_issue_not_in_review",
+  });
+});
+
+test("guarded gate move fails closed when the expected source role cannot resolve", async () => {
+  const issue = gateIssue({ role: "in_review" });
+  const client = createGateMoveClient({ issue });
+  const result = await applyCommitEffects({
+    effects: [gateParkMoveEffect],
+    ctx: {
+      client,
+      config: configWithIssueStatuses(),
+      issue,
+      shape: {
+        team: { id: "team-1" },
+        issueStatuses: {
+          human_review: stateForRole("human_review"),
+        },
+      },
+      cache: {
+        teamId: "team-1",
+        issueStatuses: {
+          human_review: "state-human-review",
+        },
+      },
+      runId: "run-source-unresolved",
+    },
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.equal(result.pending_effect_id, GATE_PARK_MOVE_EFFECT_ID);
+  assert.match(result.reason, /Cached Linear issue status in_review is missing/);
+  assert.deepEqual(gateUpdates(client), []);
+});
+
+test("guarded gate move fails closed when the target role cannot resolve", async () => {
+  const issue = gateIssue({ role: "in_review" });
+  const client = createGateMoveClient({ issue });
+  const result = await applyCommitEffects({
+    effects: [gateParkMoveEffect],
+    ctx: {
+      client,
+      config: configWithIssueStatuses(),
+      issue,
+      shape: {
+        team: { id: "team-1" },
+        issueStatuses: {
+          in_review: stateForRole("in_review"),
+        },
+      },
+      cache: {
+        teamId: "team-1",
+        issueStatuses: {
+          in_review: "state-in-review",
+        },
+      },
+      runId: "run-target-unresolved",
+    },
+  });
+
+  assert.equal(result.outcome, "failed_closed");
+  assert.equal(result.pending_effect_id, GATE_PARK_MOVE_EFFECT_ID);
+  assert.match(result.reason, /Cached Linear issue status human_review is missing/);
+  assert.deepEqual(gateUpdates(client), []);
 });
 
 function fakeGitEffect(events) {
@@ -237,6 +438,72 @@ function fakeGitEffect(events) {
   };
 }
 
+function gateIssue({ role }) {
+  return {
+    id: "issue-1",
+    identifier: "AF-456",
+    teamId: "team-1",
+    state: stateForRole(role),
+    labels: [],
+  };
+}
+
+function createGateMoveClient({ issue }) {
+  const states = new Map(
+    ["backlog", "todo", "in_progress", "in_review", "human_review", "needs_principal", "done"]
+      .map((role) => [stateForRole(role).id, stateForRole(role)]),
+  );
+  const events = [];
+  return {
+    events,
+    async listWorkflowStates(teamId) {
+      events.push({ method: "listWorkflowStates", teamId });
+      return [...states.values()];
+    },
+    async getIssue(id) {
+      events.push({ method: "getIssue", id });
+      assert.equal(id, issue.id);
+      return issue;
+    },
+    async updateIssue(id, input) {
+      events.push({ method: "updateIssue", id, input });
+      assert.equal(id, issue.id);
+      if (input.stateId) {
+        assert.ok(states.has(input.stateId), `unknown state: ${input.stateId}`);
+        issue.state = states.get(input.stateId);
+      }
+      return issue;
+    },
+  };
+}
+
+function gateUpdates(client) {
+  return client.events.filter((event) => event.method === "updateIssue");
+}
+
+function gateShape() {
+  return {
+    team: { id: "team-1" },
+    issueStatuses: Object.fromEntries(
+      ["backlog", "todo", "in_progress", "in_review", "human_review", "needs_principal", "done"]
+        .map((role) => [role, stateForRole(role)]),
+    ),
+  };
+}
+
+function stateForRole(role) {
+  const states = {
+    backlog: { id: "state-backlog", name: "Backlog", type: "backlog", teamId: "team-1" },
+    todo: { id: "state-todo", name: "Todo", type: "unstarted", teamId: "team-1" },
+    in_progress: { id: "state-in-progress", name: "In Progress", type: "started", teamId: "team-1" },
+    in_review: { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
+    human_review: { id: "state-human-review", name: "Principal Review", type: "started", teamId: "team-1" },
+    needs_principal: { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
+    done: { id: "state-done", name: "Done", type: "completed", teamId: "team-1" },
+  };
+  return { ...states[role] };
+}
+
 function configWithIssueStatuses() {
   return {
     linear: {
@@ -244,12 +511,14 @@ function configWithIssueStatuses() {
         labels: {
           discovery: "Discovery",
           needs_principal: "Needs Principal",
+          human_review: "human-review",
         },
         statuses: {
           backlog: { name: "Backlog", type: "backlog" },
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          human_review: { name: "Principal Review", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
           in_review: { name: "In Review", type: "started" },
         },

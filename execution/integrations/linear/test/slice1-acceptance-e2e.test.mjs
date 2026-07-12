@@ -25,7 +25,7 @@ import {
 } from "../src/gateway-loop.mjs";
 import * as triggerIdempotency from "../src/trigger-idempotency.mjs";
 import {
-  runTriggeredExecution,
+  runTriggeredExecutionForTest as runTriggeredExecution,
   runTriggeredReview,
 } from "../src/trigger-runner.mjs";
 import { renderResourceTargetBlock } from "../src/resource-target.mjs";
@@ -68,7 +68,7 @@ test("Slice-1 rows 1, 5, 6: one-repo default backfills, runs from a fresh clone,
   });
 
   assert.equal(execution.dispatch.action, "fresh");
-  assert.equal(execution.completion.status, "completed");
+  assert.equal(execution.completion.status, "completed", JSON.stringify(execution.completion, null, 2));
   assert.ok(execution.turns.length > 0, "execution should run at least one orchestrator turn");
   assert.equal(fixture.linearClient.issueStateName(issue.id), "In Review");
   assert.deepEqual(
@@ -302,6 +302,7 @@ test("Slice-1 row 7: deleting local run state still cold-reconstructs a revision
     runTriggeredExecutionFn: (options) =>
       runTriggeredExecution({
         ...options,
+        executionReadiness: () => ({ ok: true }),
         orchestratorTurnExecutor: async (input) => {
           coldTurns.push(input);
           return writeExecutionFixtureChange(input, { suffix: "revision" });
@@ -313,7 +314,8 @@ test("Slice-1 row 7: deleting local run state still cold-reconstructs a revision
   assert.equal(cold.resume_status, "committed");
   assert.equal(coldTurns.length, 1);
   assert.equal(coldTurns[0].firstTurnWarmStart, null);
-  assert.equal(coldTurns[0].priorTurns[0].reviewer_notes.includes("Please add the revision proof"), true);
+  assert.equal(coldTurns[0].priorTurns[0].resume_context.text.includes("Please add the revision proof"), true);
+  assert.equal(coldTurns[0].priorTurns[0].reason, "af_review_failure_marker");
   assert.equal(adapter.created.length, 1, "cold revision should reuse the existing PR");
   const secondIdentity = onlyGithubPrIdentity(cold.result.artifact).identity;
   assert.equal(secondIdentity.pull_request_number, firstIdentity.pull_request_number);
@@ -456,10 +458,10 @@ test("Slice-1 row 10: a still-red retry after one remediation cycle escalates to
   assert.equal(result.result.reason, "remediation_retry_cap_exceeded");
   assert.deepEqual(result.result.applied.map((effect) => effect.id), [ISSUE_NEEDS_PRINCIPAL_EFFECT_ID]);
   assert.equal(fixture.linearClient.createdIssues.length, 0);
-  assert.equal(fixture.linearClient.issueStateName(issue.id), "Blocked");
+  assert.equal(fixture.linearClient.issueStateName(issue.id), "Principal Escalation");
   assert.equal(
     fixture.linearClient.labelsForIssue(issue.id).some((label) => label.name === "Needs Principal"),
-    true,
+    false,
   );
   assert.deepEqual(lifecycleAttributes(result.result.trace), {
     original_issue_id: issue.id,
@@ -512,10 +514,10 @@ test("Slice-1 row 10 regression: a canceled remediation unblocks polling and cou
   assert.equal(result.runner.result.reason, "remediation_retry_cap_exceeded");
   assert.deepEqual(result.runner.result.applied.map((effect) => effect.id), [ISSUE_NEEDS_PRINCIPAL_EFFECT_ID]);
   assert.equal(fixture.linearClient.createdIssues.length, 0);
-  assert.equal(fixture.linearClient.issueStateName(issue.id), "Blocked");
+  assert.equal(fixture.linearClient.issueStateName(issue.id), "Principal Escalation");
   assert.equal(
     fixture.linearClient.labelsForIssue(issue.id).some((label) => label.name === "Needs Principal"),
-    true,
+    false,
   );
   assert.deepEqual(lifecycleAttributes(result.runner.result.trace), {
     original_issue_id: issue.id,
@@ -695,6 +697,7 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
       resumeFrom = null,
     }) {
       return {
+        executionReadiness: () => ({ ok: true }),
         issueId,
         retry,
         store,
@@ -742,6 +745,7 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
           runTriggeredExecutionFn: async (options) => {
             const result = await runTriggeredExecution({
               ...options,
+              executionReadiness: () => ({ ok: true }),
               orchestratorTurnExecutor: async (input) => {
                 turns.push({
                   runId: input.runId,
@@ -762,6 +766,7 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
       const dispatch = await processReadyIssue({
         config,
         repoRoot: tempRoot,
+        home: tempRoot,
         runStoreDir,
         registry,
         domain,
@@ -848,6 +853,7 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
       const dispatch = await processReviewIssue({
         config,
         repoRoot: tempRoot,
+        home: tempRoot,
         runStoreDir,
         registry,
         domain,
@@ -887,6 +893,7 @@ function createMutableLinearClient(issueContexts) {
   const createdIssues = [];
   const relations = [];
   const issueUpdates = [];
+  const issueComments = [];
   const executionRuns = [];
   const states = new Map(workflowStates().map((state) => [state.id, state]));
   const labels = new Map([
@@ -905,6 +912,23 @@ function createMutableLinearClient(issueContexts) {
     createdIssues,
     relations,
     issueUpdates,
+    issueComments,
+    async listIssueComments(issueId) {
+      return issueComments
+        .filter((comment) => comment.issueId === issueId)
+        .map((comment) => ({ ...comment, user: { ...comment.user } }));
+    },
+    async createIssueComment(issueId, body) {
+      const comment = {
+        id: `linear-comment-${issueComments.length + 1}`,
+        comment_id: `linear-comment-${issueComments.length + 1}`,
+        issueId,
+        body,
+        user: { id: "app-viewer-1" },
+      };
+      issueComments.push(comment);
+      return { ...comment, user: { ...comment.user } };
+    },
     rememberExecutionRun(run) {
       if (!run || run.workflow_type !== "execution") return;
       const existing = executionRuns.find((candidate) => candidate.run_id === run.run_id);
@@ -1584,7 +1608,6 @@ function acceptanceConfig() {
         },
       },
       review: {
-        max_autonomous_fix_rounds: 3,
         roles: {
           reviewer: { runtime: "codex", model: "test-reviewer" },
           orchestrator: { runtime: "codex", model: "test-orchestrator" },
@@ -1611,13 +1634,15 @@ function acceptanceConfig() {
           discovery: "Discovery",
           work_type_code: "Code",
           needs_principal: "Needs Principal",
+          human_review: "human-review",
         },
         statuses: {
           backlog: { name: "Backlog", type: "backlog" },
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
           in_review: { name: "In Review", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          human_review: { name: "Principal Review", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
         },
       },
@@ -1628,12 +1653,14 @@ function acceptanceConfig() {
 function writeAcceptanceLinearCache(cachePath) {
   const cache = {
     teamId: "team-1",
+    app_identity_id: "app-viewer-1",
     issueStatuses: {
       backlog: "state-backlog",
       todo: "state-todo",
       in_progress: "state-in-progress",
       in_review: "state-in-review",
-      blocked: "state-blocked",
+      human_review: "state-human-review",
+      needs_principal: "state-needs-principal",
       done: "state-done",
     },
     projectStatuses: {
@@ -1646,6 +1673,7 @@ function writeAcceptanceLinearCache(cachePath) {
       Code: "label-code",
       "Needs Principal": "label-needs-principal",
       needs_principal: "label-needs-principal",
+      "human-review": "label-human-review",
     },
   };
   writeLinearCache(cachePath, cache);
@@ -1658,7 +1686,9 @@ function workflowStates() {
     { id: "state-todo", name: "Todo", type: "unstarted", teamId: "team-1" },
     { id: "state-in-progress", name: "In Progress", type: "started", teamId: "team-1" },
     { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
-    { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    { id: "state-human-review", name: "Principal Review", type: "started", teamId: "team-1" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
     { id: "state-done", name: "Done", type: "completed", teamId: "team-1" },
     { id: "state-canceled", name: "Canceled", type: "canceled", teamId: "team-1" },
   ];
@@ -1825,7 +1855,7 @@ function redPreflightVerdict({
 function onlyGithubPrIdentity(artifact) {
   const identities = (artifact?.produced_identities || [])
     .filter((entry) => entry.resource_kind === "github_pull_request");
-  assert.equal(identities.length, 1);
+  assert.equal(identities.length, 1, JSON.stringify(artifact, null, 2));
   return identities[0];
 }
 
@@ -1836,9 +1866,10 @@ function lifecycleAttributes(trace) {
 }
 
 async function waitForIdle(state, issueId) {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
     if (!state.inFlight.has(issueId)) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`issue remained in-flight: ${issueId}`);
 }

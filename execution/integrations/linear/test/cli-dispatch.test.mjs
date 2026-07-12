@@ -26,7 +26,6 @@ const DISPATCH_CASES = Object.freeze([
   { command: "eval:emit-checks", args: [], expected: /Teami [·-] eval emit-checks[\s\S]*[✗×x] Usage: npm run eval:emit-checks/ },
   { command: "eval:gate", args: [], expected: /Teami [·-] eval gate[\s\S]*[✗×x] Usage: npm run eval:gate/ },
   { command: "eval:judge", args: [], expected: /Teami [·-] eval judge[\s\S]*[✗×x] Usage: npm run eval:judge/ },
-  { command: "execution:run", args: [], expected: /Teami [·-] execution run[\s\S]*[✗×x] Usage: .*teami(?:\.cmd)? execution run --issue/ },
   { command: "review:run", args: [], expected: /Teami [·-] review run[\s\S]*[✗×x] Usage: .*teami(?:\.cmd)? review run --issue/ },
   { command: "eval:register-judge-prompt", args: [], expected: /Teami [·-] eval register judge prompt[\s\S]*[✗×x] Prompt registration failed/ },
   { command: "eval:register-prompt", args: [], expected: /Teami [·-] eval register prompt[\s\S]*[✗×x] Usage: npm run eval:register-prompt/ },
@@ -49,14 +48,6 @@ const DISPATCH_CASES = Object.freeze([
   { command: "reset", args: [], expected: /[✓√+] Reset complete\./ },
   { command: "runner", args: [], expected: /Teami [·-] gateway[\s\S]*[✗×x] Gateway could not start[\s\S]*no_active_domains:/ },
   { command: "runtime-smoke", args: [], expected: /Teami [·-] runtime smoke[\s\S]*[✗×x] Runtime smoke (?:could not run|found runtime checks that need repair)/ },
-  { command: "supervisor", args: ["--max-iterations", "0"], expected: /Teami [·-] supervisor run[\s\S]*[✗×x] Supervisor run needs attention[\s\S]*preflight checks need attention/ },
-  { command: "supervisor:disable", args: [], expected: /Teami [·-] supervisor disable[\s\S]*[✓+] Supervisor disabled\./ },
-  { command: "supervisor:enable", args: [], expected: /Teami [·-] supervisor enable[\s\S]*[✓+] Supervisor enabled\./ },
-  { command: "supervisor:reconcile", args: [], expected: /Teami [·-] supervisor reconcile[\s\S]*Next resume[\s\S]*[✓+] No stalled resume work needs intervention\./ },
-  { command: "supervisor:register", args: [], expected: /Teami [·-] supervisor register[\s\S]*[✗×x] Supervisor registration requires explicit consent/ },
-  { command: "supervisor:run", args: ["--max-iterations", "0"], expected: /Teami [·-] supervisor run[\s\S]*[✗×x] Supervisor run needs attention[\s\S]*preflight checks need attention/ },
-  { command: "supervisor:status", args: [], expected: /Teami [·-] supervisor status[\s\S]*[✗×x] Supervisor status needs attention[\s\S]*missing_local_supervisor_registration/ },
-  { command: "supervisor:unregister", args: [], expected: /Teami [·-] supervisor unregister[\s\S]*[✓+] Supervisor local state cleaned up\.[\s\S]*(?:Already clean: local supervisor|Real OS login\/autostart deregistration)/ },
   { command: "trigger-status", args: [], expected: /Teami [·-] gateway status[\s\S]*[✗×x] Gateway status could not be read[\s\S]*no_active_domains:/ },
   { command: "uninstall", args: [], expected: /[✓√+] Uninstall complete\./ },
   { command: "worklist", args: [], expected: /Teami [·-] worklist[\s\S]*Behavior proposal decisions[\s\S]*Repair and setup blockers[\s\S]*Local evidence[\s\S]*Local evidence status could not be read/ },
@@ -74,8 +65,6 @@ const HELP_CASES = Object.freeze([
   { command: "gateway", args: ["status", "--help"], expected: /teami(?:\.cmd)? gateway \[status\]/ },
   // phoenix:status is now an adopter noun-verb: its --help shows the space form (colon still resolves).
   { command: "phoenix:status", args: ["--help"], expected: /teami(?:\.cmd)? phoenix status/ },
-  // operator colon commands keep their colon form in --help.
-  { command: "supervisor:run", args: ["--help"], expected: /teami(?:\.cmd)? supervisor:run/ },
   // The default surface is curated grouped help, not the old command wall.
   { command: "--help", args: [], expected: /Setup[\s\S]*Run[\s\S]*Manage/ },
   { command: "help", args: [], expected: /Setup[\s\S]*Run[\s\S]*Manage/ },
@@ -144,6 +133,7 @@ test("CLI help flags do not load config or enter command side effects", async (t
 
 async function runCliDispatch({ command, args }) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-cli-dispatch-"));
+  const home = path.join(tempRoot, "teami-home");
   const configPath = writeDispatchConfig(tempRoot);
   return new Promise((resolve) => {
     let child;
@@ -153,6 +143,7 @@ async function runCliDispatch({ command, args }) {
         env: {
           ...process.env,
           FACTORY_REPO_ROOT: tempRoot,
+          TEAMI_HOME: home,
           TEAMI_LINEAR_CONFIG: configPath,
           TEAMI_PHOENIX_URL: "http://not-loopback.invalid:6006",
           NO_COLOR: "1",
@@ -212,6 +203,7 @@ async function runCliDispatch({ command, args }) {
 
 async function runCliDispatchWithoutConfig({ command, args }) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-cli-help-"));
+  const home = path.join(tempRoot, "teami-home");
   return new Promise((resolve) => {
     let child;
     try {
@@ -220,6 +212,7 @@ async function runCliDispatchWithoutConfig({ command, args }) {
         env: {
           ...process.env,
           FACTORY_REPO_ROOT: tempRoot,
+          TEAMI_HOME: home,
           TEAMI_LINEAR_CONFIG: path.join(tempRoot, "missing-config.json"),
           NO_COLOR: "1",
         },

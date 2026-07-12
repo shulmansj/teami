@@ -22,6 +22,6 @@ Stress-test whether the proposed issues are technically executable, correctly se
 
 On no_blockers, record any non-blocking assumptions, constraints, risks, and source references the execution agents should keep visible.
 
-On needs_discovery, include non-empty discovery_issues. Each discovery issue must include discovery_key, title, body_markdown, in_session_research, and evidence_gap. Discovery should be narrow enough that resolving it can unblock a later decomposition run.
+On needs_discovery, include non-empty `open_questions_markdown` for the Linear project comment thread. Ask the narrow technical-evidence question that cannot be responsibly answered from the available context, include what you tried in-session, and state what answer would unblock decomposition. Do not author follow-up issues, project-body blocker prose, or a pause project update.
 
-On needs_constraint_decision, include technical_explanation_markdown that explains the constraint, the evidence behind it, the product consequence, and the human decision needed before commit.
+On needs_constraint_decision, include technical_explanation_markdown that explains the constraint, the evidence behind it, the product consequence, and the human decision needed before commit. Also include `open_questions_markdown` with the exact human question for the Linear project comment thread.

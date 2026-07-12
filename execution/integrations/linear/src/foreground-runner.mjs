@@ -1,7 +1,10 @@
 import { readLinearCache } from "./cache.mjs";
 import { createLinearSetupGraphqlClient } from "./linear-setup-auth.mjs";
 import { createLocalPhoenixTraceSink } from "./local-phoenix-trace-sink.mjs";
-import { createLocalTriggerStore } from "./local-trigger-store.mjs";
+import {
+  createLocalTriggerStore,
+  recoverLocalMutationReconciliation,
+} from "./local-trigger-store.mjs";
 import {
   readRuntimeSmokeCache,
   runtimeSmokeCachePath,
@@ -9,12 +12,14 @@ import {
 } from "./runtime-smoke.mjs";
 import { createProcessRuntimeExecutor, runTriggeredWorkflow } from "./trigger-runner.mjs";
 import { DECOMPOSITION_REQUIRED_CAPABILITIES } from "./workflows/decomposition/definition.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
 
 const DEFAULT_LOCAL_LEASE_DURATION_MS = 5 * 60 * 1000;
 
 export async function runForegroundTriggerRunnerOnce({
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   credentialStore,
   cachePath,
   domainContext = null,
@@ -23,10 +28,12 @@ export async function runForegroundTriggerRunnerOnce({
   createTraceSink = createLocalPhoenixTraceSink,
   runTriggeredWorkflowFn = null,
   runTriggeredDecompositionFn = null,
+  recoverMutationState = recoverLocalMutationReconciliation,
 } = {}) {
   const cache = readLinearCache(cachePath);
-  const store = createLocalTriggerStore({ repoRoot });
-  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
+  recoverMutationState({ repoRoot, home });
+  const store = createLocalTriggerStore({ repoRoot, home });
+  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
   const runtimeExecutor = createProcessRuntimeExecutor({
     smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
     repoRoot,
@@ -50,6 +57,7 @@ export async function runForegroundTriggerRunnerOnce({
       cache,
       runtimeExecutor,
       repoRoot,
+      home,
       leaseDurationMs: config?.runner?.lease_duration_ms || DEFAULT_LOCAL_LEASE_DURATION_MS,
       runnerVersion: process.version,
       capabilities: config?.runner?.required_capabilities || DECOMPOSITION_REQUIRED_CAPABILITIES,

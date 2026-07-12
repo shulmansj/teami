@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { defaultRunStoreDir, renameWithRetry } from "../../../engine/run-store.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
 
 // Local, gitignored plumbing for the future rich dataset promotion step.
 // A decomposition run captures the exact Linear project context it ran against
@@ -25,7 +26,14 @@ const SUPPORTED_PROJECT_SNAPSHOT_SCHEMA_VERSIONS = new Set([PROJECT_SNAPSHOT_SCH
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const SNAPSHOT_HASH_PATTERN = /^[a-f0-9]{64}$/;
 
-export function projectSnapshotPath({ runId, repoRoot = process.cwd(), runStoreDir } = {}) {
+export function projectSnapshotPath({
+  runId,
+  repoRoot = null,
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir,
+} = {}) {
+  void repoRoot;
   if (!runId || typeof runId !== "string") {
     throw new Error("run_id is required for the local project snapshot store.");
   }
@@ -34,7 +42,7 @@ export function projectSnapshotPath({ runId, repoRoot = process.cwd(), runStoreD
   }
   // Same custody directory as run artifacts. `<runId>.snapshot.json` cannot
   // collide with another run's `<runId>.json` because run ids cannot contain dots.
-  return path.join(runStoreDir || defaultRunStoreDir(repoRoot), `${runId}.snapshot.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.snapshot.json`);
 }
 
 // Deterministic JSON serialization (recursively sorted object keys) so the
@@ -63,6 +71,9 @@ export function projectSnapshotProjection({ project = {}, semanticStatus = null 
     id: project.id || null,
     name: project.name || null,
     description: typeof project.description === "string" ? project.description : null,
+    ...(Array.isArray(project.comments)
+      ? { comments: project.comments.map(agentVisibleProjectComment) }
+      : {}),
     content: typeof project.content === "string" ? project.content : "",
     status: semanticStatus || project.status?.name || project.status?.type || null,
     labels: (project.labels || []).map((label) => ({
@@ -85,6 +96,14 @@ export function projectSnapshotProjection({ project = {}, semanticStatus = null 
         name: label?.name ?? null,
       })),
     })),
+  };
+}
+
+function agentVisibleProjectComment(comment) {
+  return {
+    author_id: comment?.author_id ?? comment?.user?.id ?? null,
+    body: typeof comment?.body === "string" ? comment.body : "",
+    created_at: comment?.created_at ?? comment?.createdAt ?? null,
   };
 }
 
@@ -183,10 +202,12 @@ export function captureProjectSnapshot({
   captureSource = "linear_run_context",
   capturedAt = new Date().toISOString(),
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  domainId = null,
   runStoreDir = null,
 } = {}) {
   const snapshot = buildProjectSnapshot({ runId, project, semanticStatus, captureSource, capturedAt });
-  const filePath = writeProjectSnapshot({ runId, repoRoot, runStoreDir }, snapshot);
+  const filePath = writeProjectSnapshot({ runId, repoRoot, home, domainId, runStoreDir }, snapshot);
   return { snapshot, path: filePath };
 }
 
@@ -194,10 +215,15 @@ export function captureProjectSnapshot({
 // snapshot store; there is intentionally no live-Linear fallback of any kind
 // (docs/operating-model.md#state-model: rich promotion fails closed on a
 // missing snapshot).
-export function loadCapturedProjectSnapshot(runId, { repoRoot = process.cwd(), runStoreDir = null } = {}) {
+export function loadCapturedProjectSnapshot(runId, {
+  repoRoot = null,
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir = null,
+} = {}) {
   let filePath;
   try {
-    filePath = projectSnapshotPath({ runId, repoRoot, runStoreDir });
+    filePath = projectSnapshotPath({ runId, repoRoot, home, domainId, runStoreDir });
   } catch (error) {
     return { ok: false, reason: "invalid_run_id", run_id: runId ?? null, error: error.message };
   }

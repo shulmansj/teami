@@ -1,8 +1,5 @@
 import { emptyDomainRegistry } from "../domain-registry.mjs";
 import { behaviorRepoIdForRepoRoot } from "../domain-resolver.mjs";
-import { buildProjectTemplateBody } from "../project-body.mjs";
-import { STABLE_KEY_PATTERN } from "../../../../engine/stable-key-pattern.mjs";
-
 export { STABLE_KEY_PATTERN } from "../../../../engine/stable-key-pattern.mjs";
 
 export const CLOSED_ISSUE_TYPES = new Set(["completed", "canceled", "cancelled"]);
@@ -46,19 +43,6 @@ export function workspaceLabel(workspace = {}) {
   return normalized.name || normalized.id || workspace.workspaceName || workspace.workspaceId || workspace.value || "unknown";
 }
 
-export function discoveryIssuesForProject(project, shape) {
-  return (project.issues || []).filter((issue) => issueHasLabel(issue, shape.issueLabels.discovery.id));
-}
-
-export function discoveryIssueKey(discoveryIssue) {
-  return (
-    discoveryIssue.discovery_key ||
-    discoveryIssue.decomposition_key ||
-    discoveryIssue.decompositionKey ||
-    discoveryIssue.discoveryKey
-  );
-}
-
 export function issueKey(issue) {
   return issue.decomposition_key || issue.decompositionKey;
 }
@@ -98,17 +82,28 @@ export function matchesStatus(actual, expected) {
   return actual.type && expected.type && actual.type === expected.type;
 }
 
+// Role-keyed label accessors: the role is the stable semantic identity the
+// canonical label metadata is keyed by; the name is the adopter-configured
+// display name in the Linear workspace.
+export function projectLabelRoles(config) {
+  return [];
+}
+
+export function issueLabelRoles(config) {
+  return [
+    { role: "discovery", name: config.linear.issue.labels.discovery },
+    { role: "human_review", name: config.linear.issue.labels.human_review },
+    { role: "work_type_code", name: config.linear.issue.labels.work_type_code },
+    { role: "work_type_non_code", name: config.linear.issue.labels.work_type_non_code },
+  ].filter((entry) => Boolean(entry.name));
+}
+
 export function projectLabelNames(config) {
-  return [config.linear.project.labels.has_open_questions];
+  return projectLabelRoles(config).map((entry) => entry.name);
 }
 
 export function issueLabelNames(config) {
-  return [
-    config.linear.issue.labels.discovery,
-    config.linear.issue.labels.needs_principal,
-    config.linear.issue.labels.work_type_code,
-    config.linear.issue.labels.work_type_non_code,
-  ].filter(Boolean);
+  return issueLabelRoles(config).map((entry) => entry.name);
 }
 
 export function configWithLinearTeam(config, team) {
@@ -174,7 +169,8 @@ export function domainNameMatchesRegistryDomain(domain, requestedName, requested
   if (!domain) return false;
   if (domain.adopter_provided_name && equalsFolded(domain.adopter_provided_name, requestedName)) return true;
   if (domain.linear?.team_name && equalsFolded(domain.linear.team_name, requestedName)) return true;
-  return Boolean(domain.status === "setup_incomplete" && requestedSlug && domain.id === requestedSlug);
+  if (domain.id && equalsFolded(domain.id, requestedName)) return true;
+  return Boolean(requestedSlug && domain.id === requestedSlug);
 }
 
 export function workspaceMismatchError({ granted, declared, detail, domains = [] } = {}) {
@@ -230,27 +226,6 @@ export function normalizedErrors(payload) {
   return [{ message: String(payload || "unknown teamCreate error") }];
 }
 
-export function projectTemplateData() {
-  return {
-    content: buildProjectTemplateBody(),
-  };
-}
-
-function templateBody(template) {
-  return template.templateData?.content || template.content || template.description || "";
-}
-
-export function templateHasRequiredBody(template) {
-  const body = templateBody(template);
-  const openQuestions = /^## Open Questions[ \t]*\n([\s\S]*?)(?=^##\s|\s*$)/m.exec(body);
-  return (
-    body.includes("## Open Questions") &&
-    openQuestions?.[1].trim() === "" &&
-    !openQuestions?.[1].includes("None.") &&
-    !body.includes("## Discovery Findings")
-  );
-}
-
 export function uniqueOrThrow(matches, label) {
   if (matches.length !== 1) {
     throw new Error(`Expected exactly one ${label}, found ${matches.length}.`);
@@ -286,14 +261,6 @@ export async function validateCache(client, cache) {
       name: "cache teamId",
       ok: teams.some((team) => team.id === cache.teamId),
       message: `teamId ${cache.teamId}`,
-    });
-  }
-  if (cache.projectTemplateId) {
-    const templates = await client.findTemplatesByName("", "project");
-    checks.push({
-      name: "cache projectTemplateId",
-      ok: templates.some((template) => template.id === cache.projectTemplateId),
-      message: `projectTemplateId ${cache.projectTemplateId}`,
     });
   }
   return checks;

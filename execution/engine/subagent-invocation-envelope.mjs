@@ -5,6 +5,11 @@ const ENVELOPE_HARD_MAX_BYTES = 120 * 1024;
 const TRUNCATION_MARKER = "[...truncated...]";
 const DISCIPLINE_LINE =
   "Use ONLY the inlined project context and prior-turn digest; emit EXACTLY one JSON object matching the schema and nothing else — no prose; do not call tools.";
+// Write-capable roles (the execution worker) work INSIDE the contained per-run
+// clone: they must read files, edit files, and run validation there. Only the
+// FINAL message stays bound to the JSON turn contract.
+const TOOL_USE_DISCIPLINE_LINE =
+  "Your working directory is the target repository clone: read the files you need, make the scoped edits, and run the relevant validation commands there. When you are done, your FINAL message must be EXACTLY one JSON object matching the schema and nothing else — no prose after it.";
 
 export function buildSubagentInvocationEnvelope({
   body,
@@ -15,6 +20,7 @@ export function buildSubagentInvocationEnvelope({
   allowedRepoPacket = [],
   priorDigest,
   allowedOutcomes,
+  toolUse = false,
 } = {}) {
   const roleLine = valueText(role).trim();
   const projectBlock = truncateUtf8Text(
@@ -62,9 +68,9 @@ export function buildSubagentInvocationEnvelope({
     "  assumptions: array of strings (may be empty)",
     "  constraints: array of strings (may be empty)",
     "  risks: array of strings (may be empty)",
-    "Include any role-specific fields your guidance calls for (e.g. final_issues, discovery_issues); do not add unrelated top-level fields.",
+    "Include any role-specific fields your guidance calls for (e.g. final_issues, open_questions_markdown); do not add unrelated top-level fields.",
     "",
-    DISCIPLINE_LINE,
+    toolUse === true ? TOOL_USE_DISCIPLINE_LINE : DISCIPLINE_LINE,
   ];
 
   const envelope = parts.join("\n");
@@ -94,6 +100,7 @@ function orchestratorProjectSummary(project) {
     id: project?.id ?? null,
     name: project?.name ?? null,
     description: project?.description ?? null,
+    comments: agentVisibleProjectComments(project?.comments),
     content: project?.content ?? null,
     status: project?.status ?? null,
     labels: (project?.labels || []).map((label) => ({
@@ -107,6 +114,14 @@ function orchestratorProjectSummary(project) {
       state: issue?.state ?? null,
     })),
   };
+}
+
+function agentVisibleProjectComments(comments) {
+  return (Array.isArray(comments) ? comments : []).map((comment) => ({
+    author_id: comment?.author_id ?? comment?.user?.id ?? null,
+    body: typeof comment?.body === "string" ? comment.body : "",
+    created_at: comment?.created_at ?? comment?.createdAt ?? null,
+  }));
 }
 
 function formatAllowedOutcomes(allowedOutcomes) {

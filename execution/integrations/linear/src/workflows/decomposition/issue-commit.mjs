@@ -89,8 +89,10 @@ function renderExecutionIssueBody({ decompositionKey, issue }) {
 }
 
 function workTypeLabelIds(issue, shape) {
-  const label = workTypeLabel(issue?.work_type, shape);
-  return label?.id ? [label.id] : [];
+  return [
+    workTypeLabel(issue?.work_type, shape)?.id,
+    issue?.requires_human_review === true ? shape?.issueLabels?.human_review?.id : null,
+  ].filter(Boolean);
 }
 
 function workTypeLabel(workType, shape) {

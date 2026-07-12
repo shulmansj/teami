@@ -38,6 +38,19 @@ import {
 // Generic accepted-prompt section names for the snapshot fixture below. The
 // phase-runtime-prompt required-section contract is retired, so a drafted
 // accepted prompt is a free-form persona body — any sections compose.
+function runtimePromptFromCommand(command) {
+  if (typeof command.stdinInput === "string") return command.stdinInput;
+  const index = command.args.indexOf("-p");
+  if (index >= 0) {
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg;
+  }
+  return command.args.at(-1);
+}
+
 const ACCEPTED_PROMPT_FIXTURE_SECTIONS = ["Persona", "Instructions", "Output contract"];
 
 const repoCheckout = path.resolve(import.meta.dirname, "../../../..");
@@ -1492,7 +1505,7 @@ test("hostile opportunity drops invalid taxonomy ids and foreign Phoenix links b
     targetKey: null,
     failureModeIds: [],
     runCommand: async (command) => {
-      prompt = command.args[command.args.indexOf("-p") + 1];
+      prompt = runtimePromptFromCommand(command);
       return validDraftJson();
     },
   });
@@ -1566,6 +1579,9 @@ function makeTempRepo({
   maxDrafts = 2,
 } = {}) {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "improvement-drafter-"));
+  // Engine state now lives under the per-user home; isolate it to this temp dir
+  // (was implicitly writing to the real home before the F2b relocation).
+  process.env.TEAMI_HOME = repoRoot;
   const snapshotRel = "execution/evals/decomposition/accepted-prompts/sr-eng-grounding-pass.md";
   const snapshotPath = path.join(repoRoot, ...snapshotRel.split("/"));
   fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });

@@ -2,13 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { getResourceKind } from "../../../engine/resource-registry.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
 export const DOMAIN_REGISTRY_SCHEMA_VERSION_V1 = "teami-domain-registry/v1";
 export const DOMAIN_REGISTRY_SCHEMA_VERSION = "teami-domain-registry/v2";
 export const DOMAIN_REGISTRY_SCHEMA_VERSIONS_SUPPORTED_FOR_MIGRATION = Object.freeze([
   DOMAIN_REGISTRY_SCHEMA_VERSION_V1,
 ]);
-export const DOMAIN_REGISTRY_RELATIVE_PATH = path.join(".teami", "domains.json");
+export const DOMAIN_REGISTRY_RELATIVE_PATH = "domains.json";
 export const DOMAIN_LIFECYCLE_STATES = Object.freeze([
   "setup_incomplete",
   "active",
@@ -56,18 +57,22 @@ const LINEAR_KEYS = new Set([
 ]);
 const RESOURCE_KEYS = new Set(["id", "kind", "role", "binding"]);
 
-export function domainRegistryPath(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, DOMAIN_REGISTRY_RELATIVE_PATH);
+export function domainRegistryPath(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, DOMAIN_REGISTRY_RELATIVE_PATH);
 }
 
 export function domainCacheRelativePath(domainId) {
   assertDomainId(domainId, "domain_id");
-  return path.join(".teami", "domains", domainId, "linear.json").replace(/\\/g, "/");
+  return path.join("domains", domainId, "linear.json").replace(/\\/g, "/");
 }
 
-export function domainCachePath({ repoRoot = process.cwd(), domainId, cachePath = null } = {}) {
+export function domainCachePath({ home = resolveTeamiHome(), domainId, cachePath = null } = {}) {
   const relativePath = cachePath || domainCacheRelativePath(domainId);
-  return path.resolve(repoRoot, relativePath);
+  if (path.isAbsolute(relativePath)) return path.normalize(relativePath);
+  return path.resolve(
+    teamiHomePaths({ home, domainId }).home,
+    stripLegacyTeamiPrefix(relativePath),
+  );
 }
 
 export function emptyDomainRegistry() {
@@ -77,7 +82,7 @@ export function emptyDomainRegistry() {
   };
 }
 
-export function readDomainRegistry({ repoRoot = process.cwd(), registryPath = domainRegistryPath(repoRoot) } = {}) {
+export function readDomainRegistry({ home = resolveTeamiHome(), registryPath = domainRegistryPath(home) } = {}) {
   if (!fs.existsSync(registryPath)) return null;
   const registry = migrateDomainRegistry(JSON.parse(fs.readFileSync(registryPath, "utf8")));
   validateDomainRegistry(registry);
@@ -86,16 +91,18 @@ export function readDomainRegistry({ repoRoot = process.cwd(), registryPath = do
 
 export function migrateDomainRegistry(registry) {
   if (!registry || typeof registry !== "object" || Array.isArray(registry)) return registry;
-  if (registry.schema_version === DOMAIN_REGISTRY_SCHEMA_VERSION) return registry;
+  if (registry.schema_version === DOMAIN_REGISTRY_SCHEMA_VERSION) {
+    return migrateDomainCachePaths(registry);
+  }
   // Future structural registry transforms belong here so reads have one migration path.
   if (DOMAIN_REGISTRY_SCHEMA_VERSIONS_SUPPORTED_FOR_MIGRATION.includes(registry.schema_version)) {
-    return { ...registry, schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION };
+    return migrateDomainCachePaths({ ...registry, schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION });
   }
   return registry;
 }
 
 export function writeDomainRegistry(
-  { repoRoot = process.cwd(), registryPath = domainRegistryPath(repoRoot) } = {},
+  { home = resolveTeamiHome(), registryPath = domainRegistryPath(home) } = {},
   registry,
 ) {
   validateDomainRegistry(registry);
@@ -107,16 +114,16 @@ export function writeDomainRegistry(
   fs.writeFileSync(tempPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
   validateDomainRegistry(JSON.parse(fs.readFileSync(tempPath, "utf8")));
   renameWithRetry(tempPath, registryPath);
-  const readBack = readDomainRegistry({ repoRoot, registryPath });
+  const readBack = readDomainRegistry({ home, registryPath });
   if (JSON.stringify(readBack) !== JSON.stringify(registry)) {
     throw new Error("Domain registry read-back validation failed.");
   }
   return registryPath;
 }
 
-export function removeDomainRegistryState({ repoRoot = process.cwd() } = {}) {
-  const registryPath = domainRegistryPath(repoRoot);
-  const domainsDir = path.resolve(repoRoot, ".teami", "domains");
+export function removeDomainRegistryState({ home = resolveTeamiHome() } = {}) {
+  const registryPath = domainRegistryPath(home);
+  const domainsDir = path.join(teamiHomePaths({ home }).home, "domains");
   const removed = {
     registryPath,
     domainsDir,
@@ -364,6 +371,28 @@ function assertAllowedKeys(value, allowedKeys, label) {
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function migrateDomainCachePaths(registry) {
+  const next = structuredClone(registry);
+  if (!Array.isArray(next.domains)) return next;
+  for (const domain of next.domains) {
+    if (!domain?.linear || !isNonEmptyString(domain.id)) continue;
+    const legacy = path.join(".teami", "domains", domain.id, "linear.json").replace(/\\/g, "/");
+    if (domain.linear.cache_path === legacy) {
+      domain.linear.cache_path = domainCacheRelativePath(domain.id);
+    }
+  }
+  return next;
+}
+
+function stripLegacyTeamiPrefix(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/");
+  return normalized === ".teami"
+    ? "."
+    : normalized.startsWith(".teami/")
+      ? normalized.slice(".teami/".length)
+      : normalized;
 }
 
 function renameWithRetry(tempPath, filePath) {

@@ -6,6 +6,7 @@ import {
   defaultExperimentReceiptDir,
   deriveExperimentReceiptState,
 } from "../phoenix-experiment.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 import { SCANNER_MANAGED_RECEIPT_INTENT } from "../promotion-policy.mjs";
 import {
   normalizeOrigin,
@@ -105,8 +106,9 @@ export async function resolvePhoenixReady({
   }
 }
 
-export function loadReceiptCandidates({ repoRoot, receiptDir = null }) {
-  const dir = receiptDir || defaultExperimentReceiptDir(repoRoot);
+export function loadReceiptCandidates({ repoRoot, home = resolveTeamiHome(), receiptDir = null }) {
+  void repoRoot;
+  const dir = receiptDir || defaultExperimentReceiptDir(home);
   if (!fs.existsSync(dir)) return { receipt_dir: dir, candidates: [] };
   const candidates = [];
   const names = fs.readdirSync(dir).filter((name) => name.endsWith(".json")).sort();

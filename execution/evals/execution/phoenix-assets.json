@@ -19,7 +19,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/execution/accepted-prompts/code-worker.md",
-      "snapshot_sha256": "3d0a38fa5118de12552921ebf4c1cc957c9f1fba6937d38e4ed62aa85546b6ea",
+      "snapshot_sha256": "86ef17718f0c44986064c70f3256d7f299ddea4371c1a466529fef659ceae7c6",
       "prompt_version": "unpinned-initial"
     },
     {

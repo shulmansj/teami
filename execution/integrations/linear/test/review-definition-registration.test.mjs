@@ -17,10 +17,12 @@ import {
   validateWorkflowDefinition,
 } from "../../../engine/workflow-registry.mjs";
 import { ISSUE_NEEDS_PRINCIPAL_EFFECT_ID } from "../src/linear/issue-needs-principal-effect.mjs";
+import { LINEAR_ISSUE_DONE_EFFECT_ID } from "../src/linear/issue-done-effect.mjs";
 import { LINEAR_ISSUE_READY_EFFECT_ID } from "../src/linear/issue-ready-effect.mjs";
 import {
   GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+  LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
 } from "../src/workflows/review/effect-ids.mjs";
 import {
   REVIEW_FUNCTION_VERSION,
@@ -67,7 +69,9 @@ test("review definition validates S7 payloads and declares the S4/S5 effect supe
     assert.equal(definition.input_status, "In Review");
     assert.equal(Object.hasOwn(definition, "output_status"), false);
     assert.deepEqual(definition.roles, ["reviewer", "orchestrator"]);
-    assert.deepEqual(definition.invocable_runtime_roles, ["reviewer"]);
+    // One-off seats are config-derived (configured runtime assignments minus
+    // the driver) — the definition carries no role list.
+    assert.equal(definition.invocable_runtime_roles, undefined);
     assert.deepEqual(definition.runtime_assignment_roles, ["reviewer", "orchestrator"]);
     assert.deepEqual(definition.engine_owned_evaluator_roles, ["review_quality_judge"]);
     assert.equal(definition.driver, "orchestrator");
@@ -75,12 +79,20 @@ test("review definition validates S7 payloads and declares the S4/S5 effect supe
     assert.deepEqual(definition.commit_effects.map((effect) => effect.id), [
       GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
       GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
+      LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
       LINEAR_ISSUE_READY_EFFECT_ID,
       ISSUE_NEEDS_PRINCIPAL_EFFECT_ID,
+      LINEAR_ISSUE_DONE_EFFECT_ID,
     ]);
     assert.equal(
       hasProducedIdentityProjector(
         definition.commit_effects.find((effect) => effect.id === GITHUB_AF_REVIEW_STATUS_EFFECT_ID),
+      ),
+      true,
+    );
+    assert.equal(
+      hasProducedIdentityProjector(
+        definition.commit_effects.find((effect) => effect.id === LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID),
       ),
       true,
     );
@@ -100,32 +112,57 @@ test("review definition validates S7 payloads and declares the S4/S5 effect supe
           head_sha: HEAD_SHA,
           state: "success",
         },
+      }, {
+        id: LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+        identity: {
+          issue_id: "issue-1",
+          head_sha: HEAD_SHA,
+          comment_id: "comment-1",
+        },
       }],
     });
-    assert.deepEqual(projected, [{
-      effect_id: GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
-      provider: "github",
-      resource_kind: "github_commit_status",
-      target_ids: [`acme/product@${HEAD_SHA}:af-review`],
-      identity: {
-        owner: "acme",
-        repo: "product",
-        head_sha: HEAD_SHA,
-        context: "af-review",
-        state: "success",
+    assert.deepEqual(projected, [
+      {
+        effect_id: GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
+        provider: "github",
+        resource_kind: "github_commit_status",
+        target_ids: [`acme/product@${HEAD_SHA}:af-review`],
+        identity: {
+          owner: "acme",
+          repo: "product",
+          head_sha: HEAD_SHA,
+          context: "af-review",
+          state: "success",
+        },
       },
-    }]);
+      {
+        effect_id: LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+        provider: "linear",
+        resource_kind: "linear_issue_comment",
+        target_ids: [
+          "comment-1",
+          `issue-1@${HEAD_SHA}:human_review_briefing`,
+        ],
+        identity: {
+          issue_id: "issue-1",
+          head_sha: HEAD_SHA,
+          comment_id: "comment-1",
+        },
+      },
+    ]);
 
     const assembled = definition.commitPayload.assembleCommitPayload({
       disposition: "approve",
       body: "Approve. The diff is ready to ship.",
       reviewedHeadSha: HEAD_SHA,
+      humanBriefing: "Review the shipped behavior in Linear before accepting.",
       comments: [{ path: "src/app.js", body: "Optional inline note." }],
     });
     assert.deepEqual(assembled, {
       disposition: "approve",
       body: "Approve. The diff is ready to ship.",
       reviewed_head_sha: HEAD_SHA,
+      human_briefing: "Review the shipped behavior in Linear before accepting.",
       comments: [{ path: "src/app.js", body: "Optional inline note." }],
     });
     assert.deepEqual(definition.commitPayload.validateCommitPayload(assembled), {

@@ -2,13 +2,21 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import http from "node:http";
 
+import {
+  LINEAR_OAUTH_CALLBACK,
+  isLinearOAuthCallbackPort,
+} from "./config.mjs";
 import { redactGitHubSecrets } from "./github-secret-hygiene.mjs";
+import { formatCommand } from "./cli/operator-output.mjs";
 
 const DEFAULT_AUTHORIZATION_ENDPOINT = "https://linear.app/oauth/authorize";
 const DEFAULT_TOKEN_ENDPOINT = "https://api.linear.app/oauth/token";
 const DEFAULT_CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_CALLBACK_WAIT_HINT_MS = 30 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 1000;
 const TOKEN_EXPIRY_SKEW_MS = 60 * 1000;
+export const LINEAR_OAUTH_WAIT_ESCAPED_CODE = "linear_oauth_wait_escaped";
+export const OAUTH_CALLBACK_LISTENER = LINEAR_OAUTH_CALLBACK;
 
 export function generatePkcePair({ randomBytes = crypto.randomBytes } = {}) {
   const verifier = base64Url(randomBytes(32));
@@ -16,12 +24,19 @@ export function generatePkcePair({ randomBytes = crypto.randomBytes } = {}) {
   return { verifier, challenge, method: "S256" };
 }
 
+// prompt defaults to NONE deliberately: when the app is already authorized for the workspace,
+// Linear auto-redirects straight back with a code (documented behavior) — instant, no browser
+// interaction. Forcing prompt=consent on an already-installed actor=app app can instead land the
+// user on Linear's "already installed / Manage" page, which never redirects — a dead end the CLI
+// can only time out of. Paths that genuinely need the consent screen (the "type R to reopen and
+// use the workspace dropdown" affordance, workspace-mismatch retries, the one-shot admin grant)
+// pass prompt: "consent" explicitly.
 export function buildAuthorizationUrl({
   config,
   pkce,
   state,
   authorizationEndpoint = DEFAULT_AUTHORIZATION_ENDPOINT,
-  prompt = "consent",
+  prompt = null,
 } = {}) {
   const oauth = requiredOAuthConfig(config);
   if (!pkce?.challenge) throw new Error("PKCE code challenge is required.");
@@ -104,8 +119,11 @@ export function createLinearOAuthTokenProvider({
   authorize = authorizeWithBrowser,
   now = () => Date.now(),
   onProgress = null,
+  onAuthorizationUrl = null,
   openBrowser = openSystemBrowser,
   deferTokenPersistence = false,
+  prompt = null,
+  waitEscape = null,
 } = {}) {
   if (!credentialStore) throw new Error("Linear OAuth credential store is required.");
   let cachedTokenSet = null;
@@ -134,7 +152,7 @@ export function createLinearOAuthTokenProvider({
 
     if (storedTokenSet?.refreshToken) {
       if (!allowRefresh) {
-        throw new Error("Linear OAuth access token is expired or unavailable; run npm run init.");
+        throw new Error(`Linear OAuth access token is expired or unavailable; run ${formatCommand("init")}.`);
       }
       const refreshed = await refreshOAuthToken({
         config,
@@ -148,11 +166,19 @@ export function createLinearOAuthTokenProvider({
     }
 
     if (!allowBrowserAuth) {
-      throw new Error("Linear OAuth authorization is missing; run npm run init.");
+      throw new Error(`Linear OAuth authorization is missing; run ${formatCommand("init")}.`);
     }
 
     onProgress?.("Opening Linear authorization in your browser...");
-    const authorized = await authorize({ config, fetchImpl, openBrowser, onProgress });
+    const authorized = await authorize({
+      config,
+      fetchImpl,
+      openBrowser,
+      onProgress,
+      onAuthorizationUrl,
+      prompt,
+      waitEscape,
+    });
     cachedTokenSet = tokenResponseToStoredTokenSet(authorized, now());
     provider.lastTokenSource = "browser";
     await persistResolvedTokenSet(cachedTokenSet);
@@ -204,7 +230,11 @@ export async function authorizeWithBrowser({
   fetchImpl = globalThis.fetch,
   openBrowser = openSystemBrowser,
   onProgress = null,
+  onAuthorizationUrl = null,
+  prompt = null,
   timeoutMs = DEFAULT_CALLBACK_TIMEOUT_MS,
+  callbackWaitHintMs = DEFAULT_CALLBACK_WAIT_HINT_MS,
+  waitEscape = null,
 } = {}) {
   const oauth = requiredOAuthConfig(config);
   const redirectUri = parseCallbackRedirectUri(oauth.redirect_uri);
@@ -216,22 +246,185 @@ export async function authorizeWithBrowser({
     timeoutMs,
   });
   callbackServer.waitForCode.catch(() => {});
+  const callbackConfig = configWithOAuthRedirectUri(config, callbackServer.redirectUri.toString());
 
   try {
-    const authorizationUrl = buildAuthorizationUrl({ config, pkce, state });
+    const authorizationUrl = buildAuthorizationUrl({ config: callbackConfig, pkce, state, prompt });
+    onAuthorizationUrl?.(authorizationUrl.toString());
     onProgress?.(`If the browser does not open, paste this Linear authorization URL: ${authorizationUrl.toString()}`);
     await openBrowser(authorizationUrl.toString());
+    // No dead air: the moment the wait begins, state every plausible browser outcome and the
+    // exact action for each. A user staring at Linear's "already installed" page must not sit
+    // through a silent timer wondering whether setup is broken — the fork is disclosed up front
+    // and the press-Enter escape (when interactive) is live from second zero. The timer below is
+    // only a gentle reminder, never the first disclosure.
     onProgress?.("Waiting for Linear authorization callback...");
-    const code = await callbackServer.waitForCode;
-    return exchangeAuthorizationCode({
-      config,
-      code,
-      codeVerifier: pkce.verifier,
-      fetchImpl,
+    onProgress?.("-> If Linear asks you to authorize: approve, and setup continues automatically.");
+    onProgress?.(
+      typeof waitEscape === "function"
+        ? "-> If Linear shows 'Teami already installed': that page will not redirect. Click Manage there (or open Linear Settings -> Applications) and remove Teami's access, then press Enter here to reopen a fresh sign-in."
+        : "-> If Linear shows 'Teami already installed': that page will not redirect. Click Manage there (or open Linear Settings -> Applications) and remove Teami's access, then re-run setup.",
+    );
+    let callbackWaitHintTimer = null;
+    let authorizationSettled = false;
+    let waitEscapeCancel = null;
+    let waitEscapeCancelCalled = false;
+    let resolveWaitEscaped;
+    const waitEscaped = new Promise((resolve) => {
+      resolveWaitEscaped = resolve;
     });
+    const cancelWaitEscape = () => {
+      if (!waitEscapeCancel || waitEscapeCancelCalled) return;
+      waitEscapeCancelCalled = true;
+      try {
+        waitEscapeCancel();
+      } catch {
+        // Best-effort cleanup only. OAuth outcome should be driven by Linear's callback.
+      }
+    };
+    const markWaitEscaped = () => {
+      if (!authorizationSettled) resolveWaitEscaped({ type: "wait_escape" });
+    };
+    const attachWaitEscapeSession = (session) => {
+      if (!session) return;
+      if (typeof session.then === "function") {
+        session.then((value) => {
+          if (value && typeof value === "object" && ("promise" in value || "cancel" in value)) {
+            attachWaitEscapeSession(value);
+            return;
+          }
+          markWaitEscaped();
+        }, () => {});
+        return;
+      }
+      if (typeof session.cancel === "function") {
+        waitEscapeCancel = session.cancel;
+        if (authorizationSettled) cancelWaitEscape();
+      }
+      Promise.resolve(session.promise).then(markWaitEscaped, () => {});
+    };
+    const startWaitEscape = () => {
+      if (typeof waitEscape !== "function") return;
+      try {
+        attachWaitEscapeSession(waitEscape());
+      } catch {
+        // The escape hook is an interactive affordance. If it fails, keep waiting for Linear.
+      }
+    };
+    try {
+      startWaitEscape();
+      if (typeof onProgress === "function" && Number.isFinite(callbackWaitHintMs) && callbackWaitHintMs >= 0) {
+        callbackWaitHintTimer = setTimeout(() => {
+          onProgress(
+            "Still waiting for Linear — the two options above still apply.",
+          );
+        }, callbackWaitHintMs);
+        callbackWaitHintTimer.unref?.();
+      }
+      const waitResult = await Promise.race([
+        callbackServer.waitForCode.then((code) => ({ type: "callback", code })),
+        waitEscaped,
+      ]);
+      authorizationSettled = true;
+      if (waitResult?.type === "wait_escape") {
+        throw linearOAuthWaitEscapedError();
+      }
+      cancelWaitEscape();
+      const code = waitResult.code;
+      return exchangeAuthorizationCode({
+        config: callbackConfig,
+        code,
+        codeVerifier: pkce.verifier,
+        fetchImpl,
+      });
+    } finally {
+      authorizationSettled = true;
+      if (callbackWaitHintTimer) clearTimeout(callbackWaitHintTimer);
+      cancelWaitEscape();
+    }
   } finally {
     await callbackServer.close();
   }
+}
+
+// Starts the exact same browser/callback implementation used by the blocking CLI surface, but
+// exposes the live URL before the callback completes. No OAuth code, PKCE verifier, or token is
+// returned until waitForToken() resolves, and callers must keep this in process memory only.
+export async function startLinearBrowserAuthorizationSession({
+  config,
+  fetchImpl = globalThis.fetch,
+  openBrowser = openSystemBrowser,
+  onProgress = null,
+  onAuthorizationUrl = null,
+  prompt = null,
+  timeoutMs = DEFAULT_CALLBACK_TIMEOUT_MS,
+  callbackWaitHintMs = DEFAULT_CALLBACK_WAIT_HINT_MS,
+  now = () => Date.now(),
+} = {}) {
+  let settleStarted;
+  let rejectStarted;
+  let settleClose;
+  let closed = false;
+  let started = false;
+  let browser = { opened: null, reason: null };
+  const startedPromise = new Promise((resolve, reject) => {
+    settleStarted = resolve;
+    rejectStarted = reject;
+  });
+  const closePromise = new Promise((resolve) => {
+    settleClose = resolve;
+  });
+
+  const tokenPromise = authorizeWithBrowser({
+    config,
+    fetchImpl,
+    onProgress,
+    onAuthorizationUrl: (url) => {
+      onAuthorizationUrl?.(url);
+    },
+    prompt,
+    timeoutMs,
+    callbackWaitHintMs,
+    waitEscape: () => ({
+      promise: closePromise,
+      cancel() {},
+    }),
+    openBrowser: async (url) => {
+      try {
+        await openBrowser(url);
+        browser = { opened: true, reason: null };
+      } catch (error) {
+        // Keep the callback listener alive: the returned manual URL is the recovery path.
+        browser = {
+          opened: false,
+          reason: redactOAuthSecrets(error?.message || String(error)),
+        };
+      }
+      started = true;
+      settleStarted({ authorizationUrl: url });
+    },
+  });
+  tokenPromise.catch((error) => {
+    if (!started) rejectStarted(error);
+  });
+
+  const { authorizationUrl } = await startedPromise;
+  const expiresAt = new Date(now() + timeoutMs).toISOString();
+  return Object.freeze({
+    authorizationUrl,
+    expiresAt,
+    get browser() {
+      return Object.freeze({ ...browser });
+    },
+    waitForToken: () => tokenPromise,
+    async close() {
+      if (closed) return false;
+      closed = true;
+      settleClose();
+      await tokenPromise.catch(() => {});
+      return true;
+    },
+  });
 }
 
 export function parseGrantedScopes(scope) {
@@ -378,12 +571,9 @@ async function startOAuthCallbackServer({ redirectUri, expectedState, timeoutMs 
   let settled = false;
   let settleCode;
   let settleError;
-  const waitForCode = new Promise((resolve, reject) => {
-    settleCode = resolve;
-    settleError = reject;
-  });
+  let activeRedirectUri = redirectUri;
 
-  const server = http.createServer((request, response) => {
+  const requestListener = (request, response) => {
     const finish = (status, html) => {
       response.writeHead(status, { "content-type": "text/html; charset=utf-8" });
       response.end(html);
@@ -400,8 +590,8 @@ async function startOAuthCallbackServer({ redirectUri, expectedState, timeoutMs 
         return;
       }
 
-      const callback = new URL(request.url, redirectUri.origin);
-      if (callback.pathname !== redirectUri.pathname) {
+      const callback = new URL(request.url, activeRedirectUri.origin);
+      if (callback.pathname !== activeRedirectUri.pathname) {
         finish(404, oauthCallbackPage({
           status: "failed",
           title: "Linear authorization failed",
@@ -465,36 +655,32 @@ async function startOAuthCallbackServer({ redirectUri, expectedState, timeoutMs 
       }));
       rejectCallback(new Error("Linear OAuth callback could not be processed."));
     }
+  };
+
+  const listenResult = await listenOnAvailableCallbackPort({ redirectUri, requestListener });
+  const server = listenResult.server;
+  activeRedirectUri = listenResult.redirectUri;
+  const waitForCode = new Promise((resolve, reject) => {
+    settleCode = resolve;
+    settleError = reject;
   });
 
   const timer = setTimeout(() => {
-    rejectCallback(new Error("Timed out waiting for Linear OAuth authorization callback."));
+    rejectCallback(linearOAuthCallbackTimeoutError());
     server.close();
   }, timeoutMs);
 
   server.on("close", () => {
     clearTimeout(timer);
   });
-
-  await new Promise((resolve, reject) => {
-    const onError = (error) => {
-      const cleanError = callbackServerError(error);
-      rejectCallback(cleanError);
-      reject(cleanError);
-    };
-    server.once("error", onError);
-    server.once("listening", () => {
-      server.off("error", onError);
-      server.on("error", (error) => rejectCallback(callbackServerError(error)));
-      resolve();
-    });
-    server.listen(Number(redirectUri.port), "127.0.0.1");
-  });
+  server.on("error", (error) => rejectCallback(callbackServerError(error)));
 
   return {
+    redirectUri: activeRedirectUri,
     waitForCode,
     async close() {
       clearTimeout(timer);
+      if (!server.listening) return;
       await new Promise((resolve) => server.close(() => resolve()));
     },
   };
@@ -514,22 +700,131 @@ async function startOAuthCallbackServer({ redirectUri, expectedState, timeoutMs 
   }
 }
 
+export function isLinearOAuthWaitEscapedError(error) {
+  return error?.code === LINEAR_OAUTH_WAIT_ESCAPED_CODE;
+}
+
+function linearOAuthWaitEscapedError() {
+  const error = new Error("Linear OAuth authorization wait was escaped; reopen the browser authorization.");
+  error.code = LINEAR_OAUTH_WAIT_ESCAPED_CODE;
+  return error;
+}
+
+function linearOAuthCallbackTimeoutError() {
+  const firewallHint = oauthFirewallHint();
+  return new Error(
+    "Timed out waiting for Linear OAuth authorization callback. " +
+      "Linear never sent the browser callback to Teami's local listener. " +
+      "This most commonly happens when the browser shows 'Teami already installed' instead of an authorize screen; that Linear management page does not redirect back to Teami. " +
+      `Revoke Teami under Linear Settings -> Applications, then re-run ${formatCommand("init")}.` +
+      (firewallHint ? ` ${firewallHint}` : ""),
+  );
+}
+
+async function listenOnAvailableCallbackPort({ redirectUri, requestListener }) {
+  const preferredPort = Number(redirectUri.port);
+  const candidatePorts = oauthCallbackPortCandidates(preferredPort);
+  let lastInUseError = null;
+
+  for (const port of candidatePorts) {
+    const server = http.createServer(requestListener);
+    try {
+      await listenOnCallbackPort(server, port);
+      return { server, redirectUri: callbackRedirectUriForPort(redirectUri, port) };
+    } catch (error) {
+      server.removeAllListeners();
+      if (error.code === "EADDRINUSE") {
+        lastInUseError = error;
+        continue;
+      }
+      throw callbackServerError(error);
+    }
+  }
+
+  throw callbackPortRangeUnavailableError(lastInUseError);
+}
+
+function listenOnCallbackPort(server, port) {
+  return new Promise((resolve, reject) => {
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onListening = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      server.off("error", onError);
+      server.off("listening", onListening);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, LINEAR_OAUTH_CALLBACK.host);
+  });
+}
+
+function oauthCallbackPortCandidates(preferredPort) {
+  const { start, end } = LINEAR_OAUTH_CALLBACK.portRange;
+  const ports = [];
+  if (isLinearOAuthCallbackPort(preferredPort)) ports.push(preferredPort);
+  for (let port = start; port <= end; port += 1) {
+    if (!ports.includes(port)) ports.push(port);
+  }
+  return ports;
+}
+
+function callbackRedirectUriForPort(redirectUri, port) {
+  const url = new URL(redirectUri.toString());
+  url.port = String(port);
+  return url;
+}
+
 function callbackServerError(error) {
   if (error.code === "EADDRINUSE") {
-    return new Error("Linear OAuth callback port 8723 is already in use; free that port and rerun npm run init.");
+    return callbackPortRangeUnavailableError(error);
   }
   return new Error(`Linear OAuth callback server failed: ${redactOAuthSecrets(error.message)}`);
 }
 
+function callbackPortRangeUnavailableError(cause = null) {
+  const { start, end } = LINEAR_OAUTH_CALLBACK.portRange;
+  const label = start === end ? String(start) : `${start}-${end}`;
+  const detail = cause?.code ? ` (${cause.code})` : "";
+  return new Error(`Linear OAuth callback ports ${label} are already in use${detail}; close another local setup and rerun ${formatCommand("init")}.`);
+}
+
 function parseCallbackRedirectUri(redirectUri) {
   const url = new URL(redirectUri);
-  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1") {
-    throw new Error("Linear OAuth callback must bind to http://127.0.0.1.");
+  if (url.protocol !== "http:" || url.hostname !== LINEAR_OAUTH_CALLBACK.host) {
+    throw new Error(`Linear OAuth callback must bind to http://${LINEAR_OAUTH_CALLBACK.host}.`);
   }
-  if (url.port !== "8723") {
-    throw new Error("Linear OAuth callback must use registered port 8723.");
+  if (!isLinearOAuthCallbackPort(url.port) || url.pathname !== LINEAR_OAUTH_CALLBACK.pathname) {
+    const { start, end } = LINEAR_OAUTH_CALLBACK.portRange;
+    const label = start === end ? String(start) : `${start}-${end}`;
+    throw new Error(`Linear OAuth callback must use ${LINEAR_OAUTH_CALLBACK.pathname} on registered port ${label}.`);
   }
   return url;
+}
+
+function configWithOAuthRedirectUri(config, redirectUri) {
+  return {
+    ...config,
+    linear: {
+      ...config?.linear,
+      oauth: {
+        ...config?.linear?.oauth,
+        redirect_uri: redirectUri,
+      },
+    },
+  };
+}
+
+export function oauthFirewallHint({ platform = process.platform } = {}) {
+  if (platform !== "win32") return null;
+  const { start, end } = LINEAR_OAUTH_CALLBACK.portRange;
+  const portLabel = start === end ? String(start) : `${start}-${end}`;
+  return `Windows may show a Defender Firewall prompt the first time Teami opens the Linear sign-in callback. Allow private networks for Node.js; Teami only listens on ${LINEAR_OAUTH_CALLBACK.host} ports ${portLabel} so your browser can return the authorization code to this terminal.`;
 }
 
 function oauthCallbackPage({ status, title, heading, body, next = "" } = {}) {

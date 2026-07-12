@@ -71,7 +71,9 @@ function evalDomainContext() {
 }
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-eval-cli-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-eval-cli-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function projectUpdateMarkdownForRun(runId, summary = "Decomposition completed.") {
@@ -100,7 +102,12 @@ function validExample({ projectId = "project-eval-1" } = {}) {
     id: projectId,
     name: "Customer onboarding pilot",
     description: null,
-    content: "## Goal\n\nDecompose the onboarding pilot.\n\n## Open Questions\n",
+    comments: [{
+      author_id: "user-founder-1",
+      body: "Answer: prioritize the pilot workspace before billing polish.",
+      created_at: "2026-06-29T10:02:00.000Z",
+    }],
+    content: "## Goal\n\nDecompose the onboarding pilot.\n",
     status: "planned",
     labels: [],
     existing_issues: [],
@@ -467,6 +474,28 @@ test("eval:decomposition runs the orchestrator loop over a memory example and re
   assert.ok(formatEvalRunReport(result).some((line) => line.includes("non-mutating")));
 });
 
+test("eval snapshot client resolves attention status without fabricating the retired project label", async () => {
+  const project = {
+    ...validExample().input.project,
+    status: "needs_principal",
+    labels: [],
+  };
+
+  const { client, cache, shape } = createSnapshotEvalLinearClient({ config, project });
+  const context = await client.getProjectContext(project.id);
+
+  assert.equal(context.status.id, "eval-status-needs_principal");
+  assert.deepEqual(context.comments, project.comments);
+  assert.equal(cache.projectStatuses.needs_principal, "eval-status-needs_principal");
+  assert.equal(shape.attentionStatusId, "eval-status-needs_principal");
+  assert.deepEqual(shape.projectContext.comments, project.comments);
+  assert.equal(Object.hasOwn(cache, "projectLabels"), false);
+  assert.deepEqual(
+    await client.findProjectLabelsByName("Has Open Questions"),
+    [],
+  );
+});
+
 test("pause-path eval run returns the pause artifact with authored prose and no mutation", async () => {
   const root = tempRoot();
   copyAcceptedPromptAssets(root);
@@ -765,7 +794,7 @@ test("--run fails closed on a missing captured snapshot and loads a present one"
   const projectContext = {
     id: "project-eval-1",
     name: "Customer onboarding pilot",
-    content: "## Goal\n\nDecompose.\n\n## Open Questions\n",
+    content: "## Goal\n\nDecompose.\n",
     labels: [],
     issues: [],
   };
@@ -1268,6 +1297,21 @@ test("input selection requires exactly one source", async () => {
   const datasetWithoutId = await resolveDecompositionEvalInput({ datasetName: "ds" });
   assert.equal(datasetWithoutId.ok, false);
   assert.equal(datasetWithoutId.reason, "invalid_input_selection");
+});
+
+test("example input normalization preserves project comments", async () => {
+  const root = tempRoot();
+  const example = validExample();
+  const examplePath = writeExampleFile(root, example);
+
+  const resolved = await resolveDecompositionEvalInput({
+    repoRoot: root,
+    examplePath,
+  });
+
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.mode, "example");
+  assert.deepEqual(resolved.project.comments, example.input.project.comments);
 });
 
 test("eval:decomposition is wired as a first-class CLI task", () => {

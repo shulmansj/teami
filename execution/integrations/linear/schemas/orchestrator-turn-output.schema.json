@@ -4,66 +4,116 @@
   "title": "decomposition orchestrator turn output",
   "description": "Structured-output generation schema for ONE orchestrator decision turn's full output envelope. The orchestrator emits { control_action, produced_content? }: control_action is the exactly-one control action that drives the run (the same shape as orchestrator-control-action.schema.json), and produced_content is a SIBLING object carrying the turn's authored draft (NOT a control-action field, so the control envelope stays minimal — terminate remains exactly {action,outcome,reason}). The harness validates ONLY the control envelope (orchestrator-control-action.mjs parseControlAction is the contract of record); produced_content is the orchestrator's free authored output, gated only at the single commit. On terminate with outcome commit, produced_content MUST carry final_issues + project_update_markdown; this schema keeps those optional at generation time so non-terminating turns and pause/failed_closed terminals validate.",
   "type": "object",
-  "required": ["control_action"],
+  "additionalProperties": false,
+  "required": ["control_action", "produced_content"],
   "properties": {
     "control_action": {
       "type": "object",
-      "required": ["action"],
-      "description": "The exactly-one control action for this turn. invoke_library (run a named library subagent), invoke_one_off (run an improvised inline subagent), or terminate (end the run). parseControlAction enforces the per-action field + enum rules (the one-off runtime_role whitelist and the terminate outcome/reason pairs); terminate is exactly {action,outcome,reason} with no extra fields.",
+      "additionalProperties": false,
+      "required": ["action", "target_key", "instance_id", "role_label", "task", "prompt", "runtime_role", "outcome", "reason"],
+      "description": "The exactly-one control action for this turn. invoke_library (run a named library subagent), invoke_one_off (run an improvised inline subagent), or terminate (end the run). parseControlAction enforces the per-action field + enum rules (the config-derived one-off runtime_role set and the terminate outcome/reason pairs); terminate is exactly {action,outcome,reason} with no extra fields.",
       "properties": {
         "action": {
+          "type": "string",
           "enum": ["invoke_library", "invoke_one_off", "terminate"]
         },
         "target_key": {
-          "type": "string",
+          "type": ["string", "null"],
           "minLength": 1,
           "description": "invoke_library only: the accepted-prompt manifest target_key of the library subagent to run."
         },
         "instance_id": {
-          "type": "string",
+          "type": ["string", "null"],
           "minLength": 1,
           "pattern": "^[A-Za-z0-9:_-]+(#[A-Za-z0-9:_-]+)?$",
           "description": "invoke_library/invoke_one_off optional: subagent instance address. Omit for the role's default instance; supply a fresh safe id to spawn a non-default same-role instance; reuse a prior resolved instance_id to continue it."
         },
         "role_label": {
-          "type": "string",
+          "type": ["string", "null"],
           "minLength": 1,
           "description": "invoke_one_off only: a short human label for the improvised subagent's perspective."
         },
         "task": {
-          "type": "string",
+          "type": ["string", "null"],
           "minLength": 1,
           "description": "invoke_one_off only: what the one-off subagent should do."
         },
         "prompt": {
-          "type": "string",
+          "type": ["string", "null"],
           "minLength": 1,
           "description": "invoke_one_off only: the full system prompt body for the improvised subagent."
         },
         "runtime_role": {
-          "enum": ["pm", "sr_eng", "judge", "drafter"],
-          "description": "invoke_one_off only: which invocable runtime role the one-off runs on. The orchestrator's own 'orchestrator' role is the driver and is never a one-off target."
+          "type": ["string", "null"],
+          "description": "invoke_one_off only: which invocable runtime role the one-off runs on. The invocable set is CONFIG-derived (the workflow's configured runtime assignments minus the driver) and enforced locally by parseControlAction; the schema pins no role list. The orchestrator's own driver role is never a one-off target."
         },
         "outcome": {
-          "enum": ["commit", "pause"],
+          "type": ["string", "null"],
+          "enum": ["commit", "pause", null],
           "description": "terminate only: the terminal outcome the orchestrator chose. failed_closed is NOT here — the harness emits it on a bounds/environment breach."
         },
         "reason": {
-          "type": "string",
+          "type": ["string", "null"],
           "minLength": 1,
           "description": "terminate only: the terminal reason (commit -> synthesis_complete; pause -> product_questions | discovery_needed | needs_pm_review)."
         }
       }
     },
     "produced_content": {
-      "type": "object",
-      "description": "The turn's authored draft — a SIBLING of control_action, never a control-action field. On terminate(commit) this MUST include final_issues + project_update_markdown (the run_id line + the '## What I did with each part of your project' section). Every field is optional at generation time so non-terminating turns and pause/failed_closed terminals validate; the single commit floor (validateOrchestratorOutput) is the real enforcement.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["final_issues", "project_update_markdown", "project_body_slots", "context_digest", "source_refs", "assumptions", "constraints", "risks", "open_questions_markdown", "discovery_issues", "pr_title", "pr_body", "linear_issue_id", "disposition", "review_body", "reviewed_head_sha", "human_briefing", "comments"],
+      "description": "The turn's authored draft — a SIBLING of control_action, never a control-action field. On a DECOMPOSITION terminate(commit) this MUST include final_issues + project_update_markdown (the run_id line + the '## What I did with each part of your project' section); on an EXECUTION terminate(commit) it MUST include pr_title + pr_body + linear_issue_id; on a REVIEW terminate(commit) it MUST include disposition + review_body + reviewed_head_sha (human_briefing when the issue is gate-flagged). Every field is null at generation time when unused so non-terminating turns and pause/failed_closed terminals validate; each function's commit-payload validator is the real enforcement.",
       "properties": {
-        "final_issues": {
-          "type": "array",
-          "description": "terminate(commit) only: the agent-ready issue set. Each issue carries decomposition_key, title, issue_body_markdown, depends_on, assignment, output, acceptance_criteria, plus optional work_type and resource_target.",
+        "disposition": {
+          "type": ["string", "null"],
+          "description": "REVIEW terminate(commit) only: the review disposition (e.g. approve, request_changes)."
+        },
+        "review_body": {
+          "type": ["string", "null"],
+          "description": "REVIEW terminate(commit) only: the PR review body."
+        },
+        "reviewed_head_sha": {
+          "type": ["string", "null"],
+          "description": "REVIEW terminate(commit) only: the exact head sha the review examined."
+        },
+        "human_briefing": {
+          "type": ["string", "null"],
+          "description": "REVIEW approve-when-flagged only: the orientation briefing posted to the Linear issue for the human review gate."
+        },
+        "comments": {
+          "type": ["array", "null"],
           "items": {
             "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "line", "body"],
+            "properties": {
+              "path": { "type": ["string", "null"] },
+              "line": { "type": ["integer", "null"] },
+              "body": { "type": ["string", "null"] }
+            }
+          },
+          "description": "REVIEW terminate(commit) only: optional inline PR review comments."
+        },
+        "pr_title": {
+          "type": ["string", "null"],
+          "description": "EXECUTION terminate(commit) only: the pull request title."
+        },
+        "pr_body": {
+          "type": ["string", "null"],
+          "description": "EXECUTION terminate(commit) only: the pull request body (what changed, how it was validated, residual risk)."
+        },
+        "linear_issue_id": {
+          "type": ["string", "null"],
+          "description": "EXECUTION terminate(commit) only: the Linear issue id this PR implements."
+        },
+        "final_issues": {
+          "type": ["array", "null"],
+          "description": "terminate(commit) only: the agent-ready issue set. Each issue carries decomposition_key, title, issue_body_markdown, depends_on, assignment, output, acceptance_criteria, plus optional work_type, requires_human_review, and resource_target.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["decomposition_key", "title", "issue_body_markdown", "depends_on", "assignment", "output", "acceptance_criteria", "work_type", "requires_human_review", "resource_target"],
             "properties": {
               "decomposition_key": {
                 "type": "string",
@@ -82,57 +132,94 @@
                 "items": { "type": "string" }
               },
               "work_type": {
-                "type": "string",
-                "enum": ["code", "non_code"],
+                "type": ["string", "null"],
+                "enum": ["code", "non_code", null],
                 "description": "Optional Linear work-type label value."
               },
+              "requires_human_review": {
+                "type": ["boolean", "null"],
+                "description": "Optional flag that applies the configured human-review issue label when true."
+              },
               "resource_target": {
-                "type": "object",
+                "type": ["object", "null"],
                 "additionalProperties": false,
-                "required": ["kind", "id"],
+                "required": ["kind", "id", "repo_scope"],
                 "description": "Optional AF-owned execution resource selector for this issue.",
                 "properties": {
                   "kind": { "type": "string", "minLength": 1 },
                   "id": { "type": "string", "minLength": 1 },
-                  "repo_scope": { "type": "string", "minLength": 1 }
+                  "repo_scope": { "type": ["string", "null"], "minLength": 1 }
                 }
               }
             }
           }
         },
         "project_update_markdown": {
-          "type": "string",
+          "type": ["string", "null"],
           "description": "The project-level update posted on commit/pause/failed_closed. On commit it must include the run_id line and the '## What I did with each part of your project' accountability section."
         },
+        "project_body_slots": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["problem", "audience", "desired_outcome", "acceptance", "scope", "constraints", "sources", "human_decisions"],
+          "description": "DECOMPOSITION resume commit only: the full canonical planning-body slots after semantically folding answered pause comments into the project body. Null when no body update is needed.",
+          "properties": {
+            "problem": { "type": ["string", "null"] },
+            "audience": { "type": ["string", "null"] },
+            "desired_outcome": { "type": ["string", "null"] },
+            "acceptance": { "type": ["string", "null"] },
+            "scope": { "type": ["string", "null"] },
+            "constraints": { "type": ["string", "null"] },
+            "sources": { "type": ["string", "null"] },
+            "human_decisions": { "type": ["string", "null"] }
+          }
+        },
         "context_digest": {
-          "type": "string",
+          "type": ["string", "null"],
           "description": "A short prose digest of the project intent + constraints the orchestrator grounded the decomposition on."
         },
         "source_refs": {
-          "type": "array",
-          "items": { "type": "object" },
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id"],
+            "properties": {
+              "kind": { "type": ["string", "null"] },
+              "id": { "type": ["string", "null"] }
+            }
+          },
           "description": "The references the decomposition drew on (e.g. { kind: 'linear_project', id }})."
         },
         "assumptions": {
-          "type": "array",
+          "type": ["array", "null"],
           "items": { "type": "string" }
         },
         "constraints": {
-          "type": "array",
+          "type": ["array", "null"],
           "items": { "type": "string" }
         },
         "risks": {
-          "type": "array",
+          "type": ["array", "null"],
           "items": { "type": "string" }
         },
         "open_questions_markdown": {
-          "type": "string",
-          "description": "pause/failed_closed only: the open questions the human should resolve before decomposition continues."
+          "type": ["string", "null"],
+          "description": "pause/failed_closed only: the questions the human should resolve before decomposition continues."
         },
         "discovery_issues": {
-          "type": "array",
-          "items": { "type": "object" },
-          "description": "pause(discovery_needed) only: improvised discovery issues to create instead of a full agent-ready set."
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["discovery_key", "title", "issue_body_markdown"],
+            "properties": {
+              "discovery_key": { "type": ["string", "null"] },
+              "title": { "type": ["string", "null"] },
+              "issue_body_markdown": { "type": ["string", "null"] }
+            }
+          },
+          "description": "Unused for decomposition pause; ask in open_questions_markdown for the project comment thread instead."
         }
       }
     }

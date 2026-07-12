@@ -11,8 +11,8 @@ import {
 } from "./ledger-store.mjs";
 import { DECOMPOSITION_EVAL_PATHS } from "../workflows/decomposition/eval-paths.mjs";
 
-export function gitShowText({ internalCloneDir, ref, relativePath }) {
-  const result = defaultRunGit(["show", `${ref}:${relativePath}`], { cwd: internalCloneDir });
+export async function gitShowText({ internalCloneDir, ref, relativePath }) {
+  const result = await defaultRunGit(["show", `${ref}:${relativePath}`], { cwd: internalCloneDir });
   if (!result.ok) {
     return {
       ok: false,
@@ -108,10 +108,10 @@ function parsePhoenixAssetsManifest({ text, source }) {
   }
 }
 
-export function readPhoenixAssetsManifestFromTrustedClone({ internalCloneDir } = {}) {
-  const head = resolveDefaultBranchRef({ internalCloneDir });
+export async function readPhoenixAssetsManifestFromTrustedClone({ internalCloneDir } = {}) {
+  const head = await resolveDefaultBranchRef({ internalCloneDir });
   if (!head.ok) return head;
-  const manifestRead = gitShowText({
+  const manifestRead = await gitShowText({
     internalCloneDir,
     ref: head.ref,
     relativePath: DECOMPOSITION_EVAL_PATHS.manifest,
@@ -150,18 +150,20 @@ export function readPhoenixAssetsManifestFromActiveCheckout({
   }
 }
 
-export function deriveLaunchBaselineFromTrustedClone({ internalCloneDir, candidateTargetKey = DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY } = {}) {
-  const manifestRead = readPhoenixAssetsManifestFromTrustedClone({ internalCloneDir });
+export async function deriveLaunchBaselineFromTrustedClone({ internalCloneDir, candidateTargetKey = DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY } = {}) {
+  const manifestRead = await readPhoenixAssetsManifestFromTrustedClone({ internalCloneDir });
   if (!manifestRead.ok) return manifestRead;
+  const referencedPath = trustedBaselineArtifactPath(manifestRead.manifest, candidateTargetKey);
+  const artifactRead = referencedPath
+    ? await gitShowText({ internalCloneDir, ref: manifestRead.headRef, relativePath: referencedPath })
+    : null;
   const resolution = resolveAcceptedBaseline({
     manifest: manifestRead.manifest,
     manifestBytes: manifestRead.manifestText,
     candidateTargetKey,
-    readArtifactBytes: (relativePath) => gitShowText({
-      internalCloneDir,
-      ref: manifestRead.headRef,
-      relativePath,
-    }),
+    readArtifactBytes: (relativePath) => relativePath === referencedPath
+      ? artifactRead
+      : { ok: false, reason: "accepted_artifact_unavailable", detail: relativePath },
   });
   if (!resolution.ok) {
     return mapTrustedCloneResolutionFailure(resolution, candidateTargetKey, manifestRead.headRef);
@@ -180,12 +182,22 @@ export function deriveLaunchBaselineFromTrustedClone({ internalCloneDir, candida
   };
 }
 
+function trustedBaselineArtifactPath(manifest, candidateTargetKey) {
+  const prompt = (manifest?.prompts || []).find((entry) =>
+    entry?.target_key === candidateTargetKey
+      || (candidateTargetKey === DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY
+        && entry?.role === "decomposition_quality_judge"));
+  if (prompt?.snapshot_path) return String(prompt.snapshot_path).replaceAll("\\", "/");
+  const rule = (manifest?.rules || []).find((entry) => entry?.target_key === candidateTargetKey);
+  if (rule?.artifact_path) return String(rule.artifact_path).replaceAll("\\", "/");
+  return null;
+}
+
 export function deriveLaunchBaselineFromActiveManifest({
   repoRoot = process.cwd(),
   candidateTargetKey = DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY,
 } = {}) {
   const resolvedRoot = path.resolve(repoRoot);
-  const manifestPath = path.join(resolvedRoot, DECOMPOSITION_EVAL_PATHS.manifest);
   const manifestRead = readPhoenixAssetsManifestFromActiveCheckout({ repoRoot });
   if (!manifestRead.ok) return manifestRead;
   if (manifestRead.manifestText === null) {

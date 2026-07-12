@@ -100,8 +100,6 @@ const JUDGE_TARGET_KEY = "prompt/decomposition/decomposition_quality_judge";
 const JUDGE_MANIFEST_ENTRY = manifest.prompts.find(
   (entry) => entry.target_key === JUDGE_TARGET_KEY,
 );
-const JUDGE_BASELINE_ID = JUDGE_MANIFEST_ENTRY?.accepted_prompt_version_id
-  || `sha256:${JUDGE_MANIFEST_ENTRY?.snapshot_sha256}`;
 // The default agent-behavior target is the adopter-owned sr_eng grounding prompt.
 // The judge is the maintainer-owned evaluator, excluded from adopter
 // self-improvement admission/promotion; judge-negative coverage is explicit.
@@ -216,7 +214,9 @@ const T3 = "d".repeat(31) + "3";
 const readyUp = async () => ({ ok: true, appUrl: "http://127.0.0.1:6006", projectName: "teami" });
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-promote-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-promote-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function runGitOrThrow(args, cwd) {
@@ -241,7 +241,7 @@ function writeVerifiedGitHubState(root, {
   realPushEnabled = false,
   pushAuth = "https",
 } = {}) {
-  const filePath = path.join(root, ".teami", "github-connection.json");
+  const filePath = path.join(root, "github-connection.json");
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify({
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -331,11 +331,6 @@ function manifestWithAdditionalPromptTarget({
   };
 }
 
-function writeTrustedManifest(root, manifestContent) {
-  const manifestPath = path.join(root, "execution", "evals", "decomposition", "phoenix-assets.json");
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifestContent, null, 2)}\n`);
-}
-
 function manifestWithDefaultAgentBehaviorPin({
   content = DEFAULT_AGENT_BEHAVIOR_CANDIDATE_PROMPT,
   promptVersionId = "PV1",
@@ -422,8 +417,8 @@ function amendTipPromotionMessage(cloneDir, subject, trailerParagraph = null) {
 function reconcileRegistryCommitShaToTip(cloneDir) {
   const branch = runGitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], cloneDir).stdout.trim();
   const tipSha = runGitOrThrow(["rev-parse", "HEAD"], cloneDir).stdout.trim();
-  // cloneDir is <root>/.teami/promotion-workspace/repo.
-  const root = path.resolve(cloneDir, "..", "..", "..");
+  // cloneDir is <root>/promotion-workspace/repo.
+  const root = path.resolve(cloneDir, "..", "..");
   const registryDir = defaultPromotionRegistryDir(root);
   if (!fs.existsSync(registryDir)) return;
   for (const entry of fs.readdirSync(registryDir)) {
@@ -630,7 +625,7 @@ function writeReceiptFixture(root, {
   draftedBy = null,
   amendments = [],
 } = {}) {
-  const dir = path.join(root, ".teami", "experiments");
+  const dir = path.join(root, "experiments");
   fs.mkdirSync(dir, { recursive: true });
   const receipt = {
     schema_version: "teami-managed-experiment-receipt/v1",
@@ -1385,7 +1380,7 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
   assert.ok(result.commit_sha);
 
   // The commit is attributed to the bot identity placeholder, never the adopter.
-  const workspaceClone = path.join(root, ".teami", "promotion-workspace", "repo");
+  const workspaceClone = path.join(root, "promotion-workspace", "repo");
   const author = runGitOrThrow(["log", "-1", "--format=%an <%ae>"], workspaceClone).stdout.trim();
   assert.equal(author, "teami[bot] (placeholder) <teami-bot@placeholder.invalid>");
   const commitBody = runGitOrThrow(["log", "-1", "--pretty=%B"], workspaceClone).stdout.replace(/\r\n/g, "\n");
@@ -1402,7 +1397,7 @@ test("route_to_hitl: internal branch + bot commit + dry-equivalent PR with a com
     }),
   );
   assert.deepEqual(
-    readPromotionCommitTrailers({ cloneDir: workspaceClone, branch: "HEAD" }),
+    await readPromotionCommitTrailers({ cloneDir: workspaceClone, branch: "HEAD" }),
     {
       ok: true,
       trailers: {
@@ -1930,13 +1925,13 @@ test("fail-closed guard allows manifest-declared agent prompt repins through PR 
   assert.equal(githubTransport.created.length, 1);
 
   const cloneDir = path.join(defaultPromotionWorkspaceDir(root), "repo");
-  const committedPrompt = readFileFromBranch({
+  const committedPrompt = await readFileFromBranch({
     cloneDir,
     branch: result.branch,
     relativePath: PM_SYNTHESIS_MANIFEST_ENTRY.snapshot_path,
   });
   assert.match(committedPrompt, /Prioritize user impact and rollout sequencing/);
-  const committedManifest = readFileFromBranch({
+  const committedManifest = await readFileFromBranch({
     cloneDir,
     branch: result.branch,
     relativePath: "execution/evals/decomposition/phoenix-assets.json",
@@ -2227,7 +2222,7 @@ test("controller boundary blocks non-agent-behavior targets before proposal work
   assert.deepEqual(githubTransport.calls, []);
   assert.equal(result.branch, undefined);
   assert.equal(
-    fs.existsSync(path.join(root, ".teami", "promotion-workspace", "repo", ".git")),
+    fs.existsSync(path.join(root, "promotion-workspace", "repo", ".git")),
     false,
     "target-boundary assertion must not create a promotion branch workspace",
   );
@@ -2294,7 +2289,7 @@ test("hostile materializer output containing proposals paths is refused before c
   assert.equal(result.terminal, true);
   assert.equal(githubTransport.created.length, 0);
   assert.equal(
-    fs.existsSync(path.join(root, ".teami", "promotion-workspace", "repo", ".git")),
+    fs.existsSync(path.join(root, "promotion-workspace", "repo", ".git")),
     false,
     "controller validation must reject hostile proposal paths before checkout/commit",
   );
@@ -2638,7 +2633,7 @@ function validPromotionPolicy(overrides = {}) {
   };
 }
 
-test("trusted policy read: user_invoked reads the active checkout; unattended requires the internal clone and reads default-branch HEAD", () => {
+test("trusted policy read: user_invoked reads the active checkout; unattended requires the internal clone and reads default-branch HEAD", async () => {
   const root = tempRoot();
   initGitRepo(root);
   const policyDir = path.join(root, "execution", "evals", "decomposition");
@@ -2652,17 +2647,17 @@ test("trusted policy read: user_invoked reads the active checkout; unattended re
   );
 
   // Unattended without an internal clone fails closed.
-  const noClone = resolveTrustedPolicyRead({ mode: "unattended", internalCloneDir: path.join(root, "nope") });
+  const noClone = await resolveTrustedPolicyRead({ mode: "unattended", internalCloneDir: path.join(root, "nope") });
   assert.equal(noClone.ok, false);
   assert.equal(noClone.reason, "trusted_policy_read_requires_internal_clone");
 
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
 
   // Dirty the ACTIVE checkout's policy (uncommitted): the unattended read
   // must keep returning the committed bytes from origin default-branch HEAD.
   fs.writeFileSync(policyPath, `${JSON.stringify(validPromotionPolicy({ disabled: true }), null, 2)}\n`);
-  const unattended = resolveTrustedPolicyRead({
+  const unattended = await resolveTrustedPolicyRead({
     mode: "unattended",
     internalCloneDir: workspace.cloneDir,
   });
@@ -2670,7 +2665,7 @@ test("trusted policy read: user_invoked reads the active checkout; unattended re
   assert.equal(unattended.read_path, "unattended_internal_clone_default_branch_head");
   assert.equal(unattended.policy.disabled, false, "unattended read must come from committed HEAD, not the dirty checkout");
 
-  const userInvoked = resolveTrustedPolicyRead({ mode: "user_invoked", policyPath });
+  const userInvoked = await resolveTrustedPolicyRead({ mode: "user_invoked", policyPath });
   assert.equal(userInvoked.ok, true);
   assert.equal(userInvoked.read_path, "user_invoked_active_checkout");
   assert.equal(userInvoked.policy.disabled, true, "the explicit user path reads the active checkout");
@@ -3574,7 +3569,7 @@ test("valid markers on non-controller PRs are ignored for reuse, rejection, budg
 test("a dirty internal workspace blocks drafting (retryable)", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   fs.writeFileSync(path.join(workspace.cloneDir, "README.md"), "dirtied\n");
   const { result } = await runController({ root, fixture: passFixture() });
@@ -3583,13 +3578,13 @@ test("a dirty internal workspace blocks drafting (retryable)", async () => {
   assert.equal(result.terminal, false);
 });
 
-test("any diff touching .github/workflows/** is blocked BEFORE commit", () => {
+test("any diff touching .github/workflows/** is blocked BEFORE commit", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   const beforeHead = runGitOrThrow(["rev-parse", "HEAD"], workspace.cloneDir).stdout.trim();
-  const blocked = commitPromotionDraft({
+  const blocked = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: {
       "execution/evals/decomposition/proposals/prop-x.md": "proposal",
@@ -3610,12 +3605,12 @@ test("any diff touching .github/workflows/** is blocked BEFORE commit", () => {
 // rename SOURCE and DESTINATION, and symlinks under .github/**.
 // ---------------------------------------------------------------------------
 
-test("the workflows block is case-insensitive (Windows same-effective-path)", () => {
+test("the workflows block is case-insensitive (Windows same-effective-path)", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
-  const blocked = commitPromotionDraft({
+  const blocked = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: {
       "execution/evals/decomposition/proposals/prop-x.md": "proposal",
@@ -3629,7 +3624,7 @@ test("the workflows block is case-insensitive (Windows same-effective-path)", ()
   assert.deepEqual(blocked.blocked_paths, [".GITHUB/Workflows/evil.yml"]);
 });
 
-test("a staged rename FROM .github/workflows is blocked (source path checked)", () => {
+test("a staged rename FROM .github/workflows is blocked (source path checked)", async () => {
   const root = tempRoot();
   initGitRepo(root);
   fs.mkdirSync(path.join(root, ".github", "workflows"), { recursive: true });
@@ -3639,10 +3634,10 @@ test("a staged rename FROM .github/workflows is blocked (source path checked)", 
     ["-c", "user.name=fixture", "-c", "user.email=fixture@test.invalid", "commit", "-m", "wf"],
     root,
   );
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   runGitOrThrow(["mv", ".github/workflows/ci.yml", "moved-out-of-workflows.yml"], workspace.cloneDir);
-  const blocked = commitPromotionDraft({
+  const blocked = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: { "execution/evals/decomposition/proposals/prop-x.md": "proposal" },
     message: "rename rides along",
@@ -3656,7 +3651,7 @@ test("a staged rename FROM .github/workflows is blocked (source path checked)", 
   );
 });
 
-test("a staged rename INTO .github/workflows (case-variant) is blocked (destination path checked)", () => {
+test("a staged rename INTO .github/workflows (case-variant) is blocked (destination path checked)", async () => {
   const root = tempRoot();
   initGitRepo(root);
   fs.writeFileSync(path.join(root, "harmless.yml"), "on: push\njobs: {}\n");
@@ -3665,11 +3660,11 @@ test("a staged rename INTO .github/workflows (case-variant) is blocked (destinat
     ["-c", "user.name=fixture", "-c", "user.email=fixture@test.invalid", "commit", "-m", "seed"],
     root,
   );
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   fs.mkdirSync(path.join(workspace.cloneDir, ".github", "Workflows"), { recursive: true });
   runGitOrThrow(["mv", "harmless.yml", ".github/Workflows/evil.yml"], workspace.cloneDir);
-  const blocked = commitPromotionDraft({
+  const blocked = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: { "execution/evals/decomposition/proposals/prop-x.md": "proposal" },
     message: "rename rides along",
@@ -3683,10 +3678,10 @@ test("a staged rename INTO .github/workflows (case-variant) is blocked (destinat
   );
 });
 
-test("a staged symlink under .github/** is blocked (mode 120000 in the raw diff)", () => {
+test("a staged symlink under .github/** is blocked (mode 120000 in the raw diff)", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   // Stage a symlink via git plumbing (no OS symlink privileges needed): a
   // 120000-mode index entry pointing at the workflows directory.
@@ -3700,7 +3695,7 @@ test("a staged symlink under .github/** is blocked (mode 120000 in the raw diff)
     ["update-index", "--add", "--cacheinfo", `120000,${blob.stdout.trim()},.github/evil-link`],
     workspace.cloneDir,
   );
-  const blocked = commitPromotionDraft({
+  const blocked = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: { "execution/evals/decomposition/proposals/prop-x.md": "proposal" },
     message: "symlink rides along",
@@ -3809,13 +3804,13 @@ test("allowedPromotionArtifactPaths derives the target's snapshot/artifact + man
   );
 });
 
-test("commitPromotionDraft blocks a staged path OUTSIDE the target's allowed set and resets the index", () => {
+test("commitPromotionDraft blocks a staged path OUTSIDE the target's allowed set and resets the index", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   const beforeHead = runGitOrThrow(["rev-parse", "HEAD"], workspace.cloneDir).stdout.trim();
-  const blocked = commitPromotionDraft({
+  const blocked = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: {
       // In-set artifact (legitimate)...
@@ -3850,7 +3845,7 @@ test("commitPromotionDraft blocks a staged path OUTSIDE the target's allowed set
   );
 });
 
-test("commitPromotionDraft blocks a rename DESTINATION outside the target's allowed set", () => {
+test("commitPromotionDraft blocks a rename DESTINATION outside the target's allowed set", async () => {
   const root = tempRoot();
   initGitRepo(root);
   fs.writeFileSync(path.join(root, "in-scope.md"), "seed\n");
@@ -3859,13 +3854,13 @@ test("commitPromotionDraft blocks a rename DESTINATION outside the target's allo
     ["-c", "user.name=fixture", "-c", "user.email=fixture@test.invalid", "commit", "-m", "seed-rename"],
     root,
   );
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   // Stage a rename that moves a tracked file to an out-of-set destination
   // (git mv does not create parent dirs, so make the destination dir first).
   fs.mkdirSync(path.join(workspace.cloneDir, "docs"), { recursive: true });
   runGitOrThrow(["mv", "in-scope.md", "docs/leaked-out-of-scope.md"], workspace.cloneDir);
-  const blocked = commitPromotionDraft({
+  const blocked = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: { [ALLOWLIST_TARGET.snapshot_path]: "updated grounding prompt\n" },
     message: "rename rides along",
@@ -3885,13 +3880,13 @@ test("commitPromotionDraft blocks a rename DESTINATION outside the target's allo
   );
 });
 
-test("commitPromotionDraft commits when ONLY the target's own asset + manifest are staged", () => {
+test("commitPromotionDraft commits when ONLY the target's own asset + manifest are staged", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   const beforeHead = runGitOrThrow(["rev-parse", "HEAD"], workspace.cloneDir).stdout.trim();
-  const commit = commitPromotionDraft({
+  const commit = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: {
       [ALLOWLIST_TARGET.snapshot_path]: "updated grounding prompt\n",
@@ -3913,12 +3908,12 @@ test("commitPromotionDraft commits when ONLY the target's own asset + manifest a
   );
 });
 
-test("commitPromotionDraft leaves the allowlist disabled when allowedPaths is omitted", () => {
+test("commitPromotionDraft leaves the allowlist disabled when allowedPaths is omitted", async () => {
   // Back-compat: unit callers that exercise other facets pass no allowedPaths,
   // so an out-of-set proposal path still commits (only the workflows block runs).
   const root = tempRoot();
   initGitRepo(root);
-  const commit = commitPromotionDraft({
+  const commit = await commitPromotionDraft({
     cloneDir: root,
     files: { "execution/evals/decomposition/proposals/prop-x.md": "proposal body\n" },
     message: "no allowlist supplied",
@@ -3927,10 +3922,10 @@ test("commitPromotionDraft leaves the allowlist disabled when allowedPaths is om
   assert.equal(commit.ok, true, JSON.stringify(commit));
 });
 
-test("verifyPromotionBranchEnvelope fails closed when the branch tip != the recorded commit_sha", () => {
+test("verifyPromotionBranchEnvelope fails closed when the branch tip != the recorded commit_sha", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const workspace = ensurePromotionWorkspace({ repoRoot: root });
+  const workspace = await ensurePromotionWorkspace({ repoRoot: root });
   assert.equal(workspace.ok, true);
   const facts = validPromotionTrailerFacts();
   const branch = promotionBranchName({
@@ -3938,7 +3933,7 @@ test("verifyPromotionBranchEnvelope fails closed when the branch tip != the reco
     envelopeHash: facts.normalizedEnvelopeHash,
   });
   runGitOrThrow(["checkout", "-b", branch, "origin/main"], workspace.cloneDir);
-  const commit = commitPromotionDraft({
+  const commit = await commitPromotionDraft({
     cloneDir: workspace.cloneDir,
     files: { [ALLOWLIST_TARGET.snapshot_path]: "updated grounding prompt\n" },
     message: `promotion proposal ${facts.proposalInstanceId} for ${facts.candidateTargetKey}`,
@@ -3949,7 +3944,7 @@ test("verifyPromotionBranchEnvelope fails closed when the branch tip != the reco
   const recordedSha = commit.commit_sha;
 
   // Matching tip + recorded SHA: verified.
-  const matched = verifyPromotionBranchEnvelope({
+  const matched = await verifyPromotionBranchEnvelope({
     cloneDir: workspace.cloneDir,
     branch,
     envelopeHash: facts.normalizedEnvelopeHash,
@@ -3975,7 +3970,7 @@ test("verifyPromotionBranchEnvelope fails closed when the branch tip != the reco
   const movedSha = runGitOrThrow(["rev-parse", branch], workspace.cloneDir).stdout.trim();
   assert.notEqual(movedSha, recordedSha);
 
-  const mismatch = verifyPromotionBranchEnvelope({
+  const mismatch = await verifyPromotionBranchEnvelope({
     cloneDir: workspace.cloneDir,
     branch,
     envelopeHash: facts.normalizedEnvelopeHash,
@@ -3992,7 +3987,7 @@ test("verifyPromotionBranchEnvelope fails closed when the branch tip != the reco
   // Guard: with NO recorded SHA (pre-field envelopes), the tip check is skipped
   // and verification falls through to the trailer/document path (still verified
   // because the trailers on the moved tip still match the envelope).
-  const noRecordedSha = verifyPromotionBranchEnvelope({
+  const noRecordedSha = await verifyPromotionBranchEnvelope({
     cloneDir: workspace.cloneDir,
     branch,
     envelopeHash: facts.normalizedEnvelopeHash,
@@ -4004,10 +3999,10 @@ test("verifyPromotionBranchEnvelope fails closed when the branch tip != the reco
   assert.equal(noRecordedSha.verified, true, JSON.stringify(noRecordedSha));
 });
 
-test("real promotion branch push uses ambient git auth with scrubbed HTTPS env", () => {
+test("real promotion branch push uses ambient git auth with scrubbed HTTPS env", async () => {
   const calls = [];
   const token = ["gh", "s_", "sensitive_installation_token"].join("");
-  const result = pushPromotionBranchWithAmbientAuth({
+  const result = await pushPromotionBranchWithAmbientAuth({
     cloneDir: "C:\\tmp\\promotion-workspace",
     owner: "state-owner",
     repo: "teami",
@@ -4048,7 +4043,7 @@ test("real promotion branch push uses ambient git auth with scrubbed HTTPS env",
   assert.ok(!JSON.stringify(calls[1].args).includes("ghs_sensitive"));
 });
 
-test("promotion branch push rejects default, protected, tag, and arbitrary refs before git", () => {
+test("promotion branch push rejects default, protected, tag, and arbitrary refs before git", async () => {
   const blockedBranches = [
     "main",
     "release/v1",
@@ -4059,7 +4054,7 @@ test("promotion branch push rejects default, protected, tag, and arbitrary refs 
   ];
   for (const branch of blockedBranches) {
     let gitCalled = false;
-    const result = pushPromotionBranchWithAmbientAuth({
+    const result = await pushPromotionBranchWithAmbientAuth({
       cloneDir: "C:\\tmp\\promotion-workspace",
       owner: "state-owner",
       repo: "teami",
@@ -4078,9 +4073,9 @@ test("promotion branch push rejects default, protected, tag, and arbitrary refs 
   );
 });
 
-test("real promotion branch push uses configured SSH remote and preserves SSH_AUTH_SOCK", () => {
+test("real promotion branch push uses configured SSH remote and preserves SSH_AUTH_SOCK", async () => {
   const calls = [];
-  const result = pushPromotionBranchWithAmbientAuth({
+  const result = await pushPromotionBranchWithAmbientAuth({
     cloneDir: "/tmp/promotion-workspace",
     owner: "state-owner",
     repo: "teami",
@@ -4114,11 +4109,11 @@ test("real promotion branch push uses configured SSH remote and preserves SSH_AU
   assert.equal(calls[1].options.env.SSH_AUTH_SOCK, "/tmp/ssh-agent.sock");
 });
 
-test("promotion commit trailers write/read round-trip, including CRLF trailer lines", () => {
+test("promotion commit trailers write/read round-trip, including CRLF trailer lines", async () => {
   const root = tempRoot();
   initGitRepo(root);
   const facts = validPromotionTrailerFacts();
-  const commit = commitPromotionDraft({
+  const commit = await commitPromotionDraft({
     cloneDir: root,
     files: { "proposal.md": "proposal body\n" },
     message: "round trip trailer commit",
@@ -4126,7 +4121,7 @@ test("promotion commit trailers write/read round-trip, including CRLF trailer li
   });
   assert.equal(commit.ok, true);
   assert.deepEqual(
-    readPromotionCommitTrailers({ cloneDir: root, branch: "HEAD" }),
+    await readPromotionCommitTrailers({ cloneDir: root, branch: "HEAD" }),
     {
       ok: true,
       trailers: {
@@ -4152,7 +4147,7 @@ test("promotion commit trailers write/read round-trip, including CRLF trailer li
     root,
   );
   assert.deepEqual(
-    readPromotionCommitTrailers({ cloneDir: root, branch: "HEAD" }),
+    await readPromotionCommitTrailers({ cloneDir: root, branch: "HEAD" }),
     {
       ok: true,
       trailers: {
@@ -4164,11 +4159,11 @@ test("promotion commit trailers write/read round-trip, including CRLF trailer li
   );
 });
 
-test("commitPromotionDraft refuses malformed trailer inputs without creating a commit", () => {
+test("commitPromotionDraft refuses malformed trailer inputs without creating a commit", async () => {
   const root = tempRoot();
   initGitRepo(root);
   const beforeHead = runGitOrThrow(["rev-parse", "HEAD"], root).stdout.trim();
-  const result = commitPromotionDraft({
+  const result = await commitPromotionDraft({
     cloneDir: root,
     files: { "proposal.md": "proposal body\n" },
     message: "bad trailer input",
@@ -4181,12 +4176,12 @@ test("commitPromotionDraft refuses malformed trailer inputs without creating a c
   assert.equal(runGitOrThrow(["status", "--porcelain"], root).stdout.trim(), "");
 });
 
-test("commitPromotionDraft rejects draft paths that escape the workspace before any write", () => {
+test("commitPromotionDraft rejects draft paths that escape the workspace before any write", async () => {
   for (const offender of ["../escape.md", "/tmp/escape.md", "C:\\temp\\escape.md"]) {
     const root = tempRoot();
     initGitRepo(root);
     const safePath = "execution/evals/decomposition/proposals/prop-safe.md";
-    const result = commitPromotionDraft({
+    const result = await commitPromotionDraft({
       cloneDir: root,
       files: {
         [safePath]: "safe proposal\n",
@@ -4203,11 +4198,11 @@ test("commitPromotionDraft rejects draft paths that escape the workspace before 
   }
 });
 
-test("commitPromotionDraft accepts valid nested draft paths inside the workspace", () => {
+test("commitPromotionDraft accepts valid nested draft paths inside the workspace", async () => {
   const root = tempRoot();
   initGitRepo(root);
   const facts = validPromotionTrailerFacts();
-  const result = commitPromotionDraft({
+  const result = await commitPromotionDraft({
     cloneDir: root,
     files: { "execution/evals/decomposition/proposals/nested/prop-x.md": "nested proposal\n" },
     message: "nested draft path",
@@ -4221,13 +4216,13 @@ test("commitPromotionDraft accepts valid nested draft paths inside the workspace
   );
 });
 
-test("commitPromotionDraft rejects draft paths through a symlinked ancestor before writing", () => {
+test("commitPromotionDraft rejects draft paths through a symlinked ancestor before writing", async () => {
   const root = tempRoot();
   initGitRepo(root);
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "promotion-draft-outside-"));
   const linkPath = path.join(root, "linked-outside");
   fs.symlinkSync(outside, linkPath, process.platform === "win32" ? "junction" : "dir");
-  const result = commitPromotionDraft({
+  const result = await commitPromotionDraft({
     cloneDir: root,
     files: { "linked-outside/escape.md": "must not be written\n" },
     message: "symlink ancestor escape",
@@ -4420,7 +4415,7 @@ test("an existing branch carrying a different envelope is refused, never overwri
   assert.equal(first.result.outcome, "route_to_hitl");
   // Rewrite the committed promotion trailers on the branch to a different
   // envelope (simulating a corrupted/foreign branch), keep the registry row.
-  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, "promotion-workspace", "repo");
   runGitOrThrow(["checkout", first.result.branch], cloneDir);
   amendTipPromotionMessage(
     cloneDir,
@@ -4494,10 +4489,10 @@ test("an old-style committed branch without trailers resumes via proposal-docume
   assert.equal(first.result.reason, "github_pr_creation_failed");
   const { branch, proposalRelativePath } = promotionBranchFacts(first.result);
 
-  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, "promotion-workspace", "repo");
   writeOldStyleProposalDocument({ cloneDir, branch, result: first.result });
   assert.deepEqual(
-    readPromotionCommitTrailers({ cloneDir, branch: "HEAD" }),
+    await readPromotionCommitTrailers({ cloneDir, branch: "HEAD" }),
     { ok: false, reason: "trailers_absent" },
   );
 
@@ -4530,9 +4525,9 @@ test("a trailer mismatch refuses the branch without consulting a matching propos
   assert.equal(first.result.outcome, "blocked");
   assert.equal(first.result.reason, "github_pr_creation_failed");
   const { branch } = promotionBranchFacts(first.result);
-  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, "promotion-workspace", "repo");
   const proposalRelativePath = writeOldStyleProposalDocument({ cloneDir, branch, result: first.result });
-  const committedDoc = readFileFromBranch({
+  const committedDoc = await readFileFromBranch({
     cloneDir,
     branch,
     relativePath: proposalRelativePath,
@@ -4584,7 +4579,7 @@ test("malformed promotion trailers refuse the branch instead of falling back as 
   assert.equal(first.result.reason, "github_pr_creation_failed");
   const { branch, proposalRelativePath } = promotionBranchFacts(first.result);
 
-  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, "promotion-workspace", "repo");
   runGitOrThrow(["checkout", branch], cloneDir);
   amendTipPromotionMessage(
     cloneDir,
@@ -4637,7 +4632,7 @@ test("a crash after commit but before PR resumes by creating the PR without re-d
   assert.equal(second.result.outcome, "route_to_hitl");
   assert.equal(transport.created.length, 1);
   // Exactly one commit beyond the base branch: drafting did not repeat.
-  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, "promotion-workspace", "repo");
   const commits = runGitOrThrow(
     ["rev-list", "--count", `origin/main..${second.result.branch}`],
     cloneDir,
@@ -4676,13 +4671,13 @@ test("a failed Phoenix outcome write leaves the repo authoritative with phoenix_
     parsePromotionMarkers(repairUpdate.params.body)[0].repair_state,
     "phoenix_audit_retry_needed",
   );
-  const cloneDir = path.join(root, ".teami", "promotion-workspace", "repo");
+  const cloneDir = path.join(root, "promotion-workspace", "repo");
   const commits = runGitOrThrow(
     ["rev-list", "--count", `origin/main..${first.result.branch}`],
     cloneDir,
   ).stdout.trim();
   assert.equal(commits, "1", "outcome-write repair must not create a second commit");
-  const committedDoc = readFileFromBranch({
+  const committedDoc = await readFileFromBranch({
     cloneDir,
     branch: first.result.branch,
     relativePath: promotionBranchFacts(first.result).proposalRelativePath,
@@ -5002,7 +4997,7 @@ test("escapeGitHubMarkdownProse neutralizes mentions, autolinks, and link syntax
 test("controller resolves the behavior-repo identity from the local GitHub connection state", async () => {
   const root = tempRoot();
   initGitRepo(root);
-  const stateDir = path.join(root, ".teami");
+  const stateDir = root;
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
     path.join(stateDir, "github-connection.json"),
@@ -5117,7 +5112,7 @@ test("controller real local-ambient mode pushes the promotion branch with scrubb
     "git@github.com:factory-owner/behavior-rules.git",
     `${result.push.ref}:${result.push.ref}`,
   ]);
-  assert.equal(pushCall.options.cwd, path.join(root, ".teami", "promotion-workspace", "repo"));
+  assert.equal(pushCall.options.cwd, path.join(root, "promotion-workspace", "repo"));
   assert.equal(pushCall.options.exactEnv, true);
   assert.equal(pushCall.options.env.GIT_TERMINAL_PROMPT, "0");
   assert.equal(pushCall.options.env.GH_TOKEN, undefined);

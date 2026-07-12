@@ -90,6 +90,36 @@ test("executeOrchestratorTurn omits producedContent when the turn authored nothi
   assert.equal(turn.controlAction.outcome, "pause");
 });
 
+test("executeOrchestratorTurn treats strict-schema null control fields as absent", async () => {
+  const turn = await executeOrchestratorTurn({
+    runId: "run-1",
+    project: {},
+    roster: createOrchestratorRoster(),
+    bounds: {},
+    orchestratorRuntime: async () => ({
+      controlAction: {
+        action: "terminate",
+        target_key: null,
+        instance_id: null,
+        role_label: null,
+        task: null,
+        prompt: null,
+        runtime_role: null,
+        outcome: "pause",
+        reason: "product_questions",
+      },
+      producedContent: null,
+    }),
+  });
+
+  assert.deepEqual(turn.controlAction, {
+    action: "terminate",
+    outcome: "pause",
+    reason: "product_questions",
+  });
+  assert.equal(Object.hasOwn(turn, "producedContent"), false);
+});
+
 test("executeOrchestratorTurn rejects an invalid control action from the runtime and surfaces a bounded transcript", async () => {
   const longPrompt = "orchestrator prompt ".repeat(400);
   const longRawOutput = "orchestrator raw output ".repeat(400);
@@ -179,7 +209,14 @@ test("buildOrchestratorPrompt keeps the factory contract code-owned outside the 
     "produced_content is a SIBLING of control_action (NOT a field inside it).",
     "When you terminate with outcome commit, produced_content MUST include:",
     "- final_issues: an array of agent-ready issues, each { decomposition_key, title, issue_body_markdown, depends_on, assignment, output, acceptance_criteria };",
+    "requires_human_review is a boolean",
     "- project_update_markdown: a project update that includes the line `run_id: <run_id>`",
+    "- project_body_slots: null unless project comments answer a prior pause question",
+    "Fold only what was answered; do not invent unasked intent.",
+    "When you terminate with outcome pause, produced_content MUST include open_questions_markdown",
+    "If a comment-thread answer is still insufficient to fold faithfully",
+    "Linear project comment thread",
+    "do not include project_update_markdown, project_body_slots, follow-up issues, final_issues",
   ];
 
   for (const prompt of [tunedPrompt, emptyGovernancePrompt]) {

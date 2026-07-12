@@ -1,5 +1,4 @@
 import { readLinearCache } from "../cache.mjs";
-import { issueHasLabel } from "./matching-utils.mjs";
 import {
   needsPrincipalIssueTargetFromParts,
   resolveNeedsPrincipalIssueStatus,
@@ -73,18 +72,13 @@ export async function applyIssueNeedsPrincipalEscalationEffect(ctx = {}) {
   });
 
   const target = resolved.target;
-  const input = await issueNeedsPrincipalUpdateInput({ ctx, target });
+  const input = issueNeedsPrincipalUpdateInput({ target });
   const issue = await ctx.client.updateIssue(issueId, input);
   const identity = issueNeedsPrincipalIdentity({ issue, issueId, target });
-  ctx.issueNeedsPrincipalAppliedIdentity = identity;
   return { ok: true, identity };
 }
 
 export async function verifyIssueNeedsPrincipalEscalationEffect(ctx = {}) {
-  if (ctx.issueNeedsPrincipalAppliedIdentity) {
-    return { ok: true, identity: ctx.issueNeedsPrincipalAppliedIdentity };
-  }
-
   const issueId = issueIdFromEscalationContext(ctx);
   if (!issueId) return { ok: false, terminal: true, reason: "linear_issue_id_missing" };
 
@@ -117,10 +111,7 @@ export async function resolveNeedsPrincipalIssueTarget({
   cache = null,
 } = {}) {
   const shapeTarget = normalizeNeedsPrincipalIssueTarget(
-    needsPrincipalIssueTargetFromParts(
-      shape?.issueStatuses?.blocked,
-      shape?.issueLabels?.needs_principal,
-    ),
+    needsPrincipalIssueTargetFromParts(shape?.issueStatuses?.needs_principal),
   );
   if (shapeTarget) return shapeTarget;
   if (!client || !config) return null;
@@ -140,7 +131,6 @@ export function needsPrincipalIssuesBacklogFilter({ target, teamId = null } = {}
   const clauses = [];
   if (teamId) clauses.push({ team: { id: { eq: teamId } } });
   clauses.push({ state: { id: { eq: normalizedTarget.stateId } } });
-  clauses.push({ labels: { id: { eq: normalizedTarget.labelId } } });
   return { and: clauses };
 }
 
@@ -173,10 +163,7 @@ export async function listNeedsPrincipalIssuesForPrincipal({
 export function issueMatchesNeedsPrincipalTarget(issue, target) {
   const normalizedTarget = normalizeNeedsPrincipalIssueTarget(target);
   if (!issue || !normalizedTarget) return false;
-  return (
-    issue.state?.id === normalizedTarget.stateId &&
-    issueHasLabel(issue, normalizedTarget.labelId)
-  );
+  return issue.state?.id === normalizedTarget.stateId;
 }
 
 export function issueIdFromEscalationContext(ctx = {}) {
@@ -209,54 +196,49 @@ export function normalizeNeedsPrincipalIssueTarget(target) {
     target.state?.id,
     targetLooksLikeStatus ? target.id : null,
   ]);
-  const labelId = firstNonEmptyString([
-    target.labelId,
-    target.label_id,
-    target.reasonLabelId,
-    target.reason_label_id,
-    target.label?.id,
-  ]);
-  if (!stateId || !labelId) return null;
+  if (!stateId) return null;
+  const statusTarget = { ...target };
+  delete statusTarget.labelId;
+  delete statusTarget.label_id;
+  delete statusTarget.reasonLabelId;
+  delete statusTarget.reason_label_id;
+  delete statusTarget.label;
   return {
-    ...target,
+    ...statusTarget,
     id: stateId,
     targetType: "status",
     targetId: stateId,
     stateId,
     statusId: stateId,
-    labelId,
     state: target.state || {
       id: stateId,
       name: target.name || null,
       type: target.type || null,
       resolution: target.resolution || null,
     },
-    label: target.label || { id: labelId },
   };
 }
 
-async function issueNeedsPrincipalUpdateInput({ ctx, target }) {
+function issueNeedsPrincipalUpdateInput({ target }) {
   const normalizedTarget = normalizeNeedsPrincipalIssueTarget(target);
-  const issue = await readIssueFromContext(ctx);
-  if (!issue) {
-    throw new Error("linear_issue_missing");
-  }
-  const labelIds = new Set((issue.labels || []).map((label) => label.id).filter(Boolean));
-  labelIds.add(normalizedTarget.labelId);
-  return { stateId: normalizedTarget.stateId, labelIds: [...labelIds] };
+  return { stateId: normalizedTarget.stateId };
 }
 
 async function readIssueFromContext(ctx = {}) {
   const issueId = issueIdFromEscalationContext(ctx);
   if (!issueId) return null;
-  for (const issue of [ctx.issue, ctx.linearIssue, ctx.targetIssue]) {
-    if (issue?.id === issueId) return issue;
-  }
+  // Fresh read first: ctx snapshots can be poll candidates whose status changed
+  // after selection; probe and verify compare the provider state.
   if (typeof ctx.client?.getIssue === "function") {
-    return ctx.client.getIssue(issueId);
+    const issue = await ctx.client.getIssue(issueId);
+    if (issue) return issue;
   }
   if (typeof ctx.client?.getIssueContext === "function") {
-    return ctx.client.getIssueContext(issueId);
+    const issue = await ctx.client.getIssueContext(issueId);
+    if (issue) return issue;
+  }
+  for (const issue of [ctx.issue, ctx.linearIssue, ctx.targetIssue]) {
+    if (issue?.id === issueId) return issue;
   }
   return null;
 }
@@ -291,7 +273,6 @@ function issueNeedsPrincipalIdentity({ issue, issueId, target }) {
     target_type: normalizedTarget?.targetType || null,
     target_id: normalizedTarget?.stateId || null,
     state_id: normalizedTarget?.stateId || issue?.state?.id || null,
-    label_id: normalizedTarget?.labelId || null,
   };
 }
 

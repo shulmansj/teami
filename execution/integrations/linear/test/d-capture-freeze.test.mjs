@@ -26,7 +26,9 @@ const TRACE_ID = "0af7651916cd43dd8448eb211c80319c";
 const policy = loadWorkspaceEvalPolicy();
 
 function tempRepoRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-d-capture-${label}-`));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `teami-d-capture-${label}-`));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function sampleProject() {
@@ -130,6 +132,7 @@ function setUpPromotableRun({ repoRoot, runId, artifact = commitArtifact(runId) 
   captureProjectSnapshot({
     repoRoot,
     runId,
+    domainId: artifact.domain_id,
     project: sampleProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T00:00:01.000Z",
@@ -280,7 +283,10 @@ test("D-capture resolves HUMAN annotations at save time and does not rewrite the
   assert.equal(second.ok, false);
   assert.equal(second.state, "duplicate_changed_content");
   assert.notEqual(second.new_content_hash, first.example_content_hash);
-  const receipt = JSON.parse(fs.readFileSync(promotionReceiptPath({ repoRoot, runId }), "utf8"));
+  const receipt = JSON.parse(fs.readFileSync(
+    promotionReceiptPath({ repoRoot, runId, domainId: "support-ops" }),
+    "utf8",
+  ));
   assert.equal(receipt.datasets[0].promotions.length, 1);
   assert.equal(receipt.datasets[0].promotions[0].example_content_hash, first.example_content_hash);
 });
@@ -310,5 +316,5 @@ test("D-capture refuses non-HUMAN annotations as tuning labels", async () => {
   assert.equal(result.state, "cannot_promote");
   assert.equal(result.reason, "human_fixture_label_requires_human_annotation");
   assert.equal(calls.some((call) => call.url.includes("/v1/datasets/upload")), false);
-  assert.equal(fs.existsSync(promotionReceiptPath({ repoRoot, runId })), false);
+  assert.equal(fs.existsSync(promotionReceiptPath({ repoRoot, runId, domainId: "support-ops" })), false);
 });

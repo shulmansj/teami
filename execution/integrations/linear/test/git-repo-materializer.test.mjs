@@ -139,6 +139,24 @@ test("git_repo materialize uses ambient remote clone then contained scrubbed che
   assert.equal(result.handle.envAugment.GIT_CONFIG_NOSYSTEM, "1");
   assert.equal(result.handle.envAugment.GIT_TERMINAL_PROMPT, "0");
   assert.ok(result.handle.envAugment.GIT_CONFIG_GLOBAL.endsWith("gitconfig"));
+
+  const runTempDir = result.handle.envAugment.TMPDIR;
+  assert.ok(runTempDir, "engine-owned per-run temp dir expected on the worker env");
+  assert.equal(result.handle.envAugment.TMP, runTempDir);
+  assert.equal(result.handle.envAugment.TEMP, runTempDir);
+  assert.equal(pathInside(runTempDir, path.dirname(result.handle.workingDir)), true);
+  assert.equal(pathInside(runTempDir, result.handle.workingDir), false);
+  assert.ok(fs.existsSync(runTempDir), "per-run temp dir is created with the run workspace");
+
+  const localAppData = result.handle.envAugment.LOCALAPPDATA;
+  assert.ok(localAppData, "engine-owned per-run LOCALAPPDATA expected on the worker env");
+  assert.equal(localAppData, path.join(result.handle.envAugment.HOME, "AppData", "Local"));
+  assert.equal(result.handle.envAugment.APPDATA, path.join(result.handle.envAugment.HOME, "AppData", "Roaming"));
+  assert.equal(pathInside(localAppData, path.dirname(result.handle.workingDir)), true);
+  assert.equal(pathInside(localAppData, result.handle.workingDir), false);
+  assert.equal(pathInside(result.handle.envAugment.APPDATA, result.handle.workingDir), false);
+  assert.ok(fs.existsSync(localAppData), "per-run LOCALAPPDATA dir is created with the run workspace");
+  assert.ok(fs.existsSync(result.handle.envAugment.APPDATA), "per-run APPDATA dir is created with the run workspace");
   assert.equal(Object.hasOwn(result.handle.envAugment, "GH_TOKEN"), false);
   assert.equal(Object.hasOwn(result.handle.envAugment, "GITHUB_TOKEN"), false);
   assert.equal(Object.hasOwn(result.handle.envAugment, "GIT_ASKPASS"), false);
@@ -205,6 +223,8 @@ test("git_repo materialize clones from a local fake remote, leaves adopter check
   );
 
   const workerEnv = workerGitEnv(materialized.handle.envAugment);
+  assert.equal(workerEnv.LOCALAPPDATA, materialized.handle.envAugment.LOCALAPPDATA);
+  assert.equal(workerEnv.APPDATA, materialized.handle.envAugment.APPDATA);
   assert.equal(git(["rev-parse", "HEAD"], { cwd: materialized.handle.workingDir, env: workerEnv }).stdout.trim(), fixture.baseSha);
   assert.equal(fs.readFileSync(path.join(materialized.handle.workingDir, "README.md"), "utf8"), "# product\n");
   assert.equal(fs.existsSync(path.join(materialized.handle.workingDir, "scratch.txt")), false);
@@ -306,6 +326,134 @@ test("git_repo materialize re-clones and checks out the durable issue branch fro
   assert.equal(pathInside(materialized.handle.workingDir, fixture.source), false);
 });
 
+test("git_repo materialize resumes on a branch head that descends from the factory's recorded head", async (t) => {
+  if (!gitAvailable(t)) return;
+  resetResourceRegistry();
+  registerGitRepoResourceKind();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-git-descend-"));
+  const runId = uniqueRunId("descend");
+  let materialized = null;
+  t.after(async () => {
+    try {
+      if (materialized) await materialized.teardown();
+    } finally {
+      cleanupRunDir(runId);
+      resetResourceRegistry();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const fixture = createRemoteBackedSourceRepo({ root });
+  const branch = branchNameForIssue("AF-1");
+  const branchWriter = path.join(root, "branch-writer");
+  git(["clone", "--branch", "main", fixture.remote, branchWriter]);
+  git(["config", "user.name", "Fixture Author"], { cwd: branchWriter });
+  git(["config", "user.email", "fixture@example.invalid"], { cwd: branchWriter });
+  git(["checkout", "-b", branch], { cwd: branchWriter });
+  fs.writeFileSync(path.join(branchWriter, "fix.txt"), "factory content\n", "utf8");
+  git(["add", "fix.txt"], { cwd: branchWriter });
+  git(["commit", "-m", "factory execution"], { cwd: branchWriter });
+  git(["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: branchWriter });
+  const factoryHead = git(["rev-parse", "HEAD"], { cwd: branchWriter }).stdout.trim();
+  const factoryTree = git(["rev-parse", "HEAD^{tree}"], { cwd: branchWriter }).stdout.trim();
+
+  fs.writeFileSync(path.join(branchWriter, "cleanup.txt"), "principal cleanup\n", "utf8");
+  git(["add", "cleanup.txt"], { cwd: branchWriter });
+  git(["commit", "-m", "principal cleanup"], { cwd: branchWriter });
+  git(["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: branchWriter });
+  const cleanedHead = git(["rev-parse", "HEAD"], { cwd: branchWriter }).stdout.trim();
+
+  materialized = await getResourceKind("git_repo").materialize(
+    gitRepoResource(),
+    {
+      runId,
+      gitRemoteUrlOverride: fileUrl(fixture.remote),
+      issue: { id: "issue-1", identifier: "AF-1" },
+      issueIdentifier: "AF-1",
+      pendingGitIntent: {
+        runId: "run_previous",
+        git: {
+          resource_id: "repo-1",
+          owner: "acme",
+          repo: "app",
+          branch,
+          base_sha: fixture.baseSha,
+          head_sha: factoryHead,
+          tree_sha: factoryTree,
+        },
+      },
+    },
+  );
+
+  const workerEnv = workerGitEnv(materialized.handle.envAugment);
+  assert.equal(git(["rev-parse", "HEAD"], { cwd: materialized.handle.workingDir, env: workerEnv }).stdout.trim(), cleanedHead);
+  assert.equal(fs.readFileSync(path.join(materialized.handle.workingDir, "fix.txt"), "utf8"), "factory content\n");
+  assert.equal(fs.readFileSync(path.join(materialized.handle.workingDir, "cleanup.txt"), "utf8"), "principal cleanup\n");
+  assert.equal(git(["branch", "--show-current"], { cwd: materialized.handle.workingDir, env: workerEnv }).stdout.trim(), branch);
+  assert.equal(
+    git(["merge-base", "--is-ancestor", factoryHead, "HEAD"], { cwd: materialized.handle.workingDir, env: workerEnv }).ok,
+    true,
+    "the factory's recorded head must remain in the resumed history",
+  );
+});
+
+test("git_repo materialize fails closed when the factory's recorded head was rewritten away", async (t) => {
+  if (!gitAvailable(t)) return;
+  resetResourceRegistry();
+  registerGitRepoResourceKind();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-git-rewritten-"));
+  const runId = uniqueRunId("rewritten");
+  t.after(() => {
+    cleanupRunDir(runId);
+    resetResourceRegistry();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const fixture = createRemoteBackedSourceRepo({ root });
+  const branch = branchNameForIssue("AF-1");
+  const branchWriter = path.join(root, "branch-writer");
+  git(["clone", "--branch", "main", fixture.remote, branchWriter]);
+  git(["config", "user.name", "Fixture Author"], { cwd: branchWriter });
+  git(["config", "user.email", "fixture@example.invalid"], { cwd: branchWriter });
+  git(["checkout", "-b", branch], { cwd: branchWriter });
+  fs.writeFileSync(path.join(branchWriter, "fix.txt"), "factory content\n", "utf8");
+  git(["add", "fix.txt"], { cwd: branchWriter });
+  git(["commit", "-m", "factory execution"], { cwd: branchWriter });
+  git(["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: branchWriter });
+  const factoryHead = git(["rev-parse", "HEAD"], { cwd: branchWriter }).stdout.trim();
+  const factoryTree = git(["rev-parse", "HEAD^{tree}"], { cwd: branchWriter }).stdout.trim();
+
+  fs.writeFileSync(path.join(branchWriter, "fix.txt"), "rewritten content\n", "utf8");
+  git(["add", "fix.txt"], { cwd: branchWriter });
+  git(["commit", "--amend", "-m", "rewritten execution"], { cwd: branchWriter });
+  git(["push", "--force", "origin", `HEAD:refs/heads/${branch}`], { cwd: branchWriter });
+
+  await assert.rejects(
+    () => getResourceKind("git_repo").materialize(
+      gitRepoResource(),
+      {
+        runId,
+        gitRemoteUrlOverride: fileUrl(fixture.remote),
+        issue: { id: "issue-1", identifier: "AF-1" },
+        issueIdentifier: "AF-1",
+        pendingGitIntent: {
+          runId: "run_previous",
+          git: {
+            resource_id: "repo-1",
+            owner: "acme",
+            repo: "app",
+            branch,
+            base_sha: fixture.baseSha,
+            head_sha: factoryHead,
+            tree_sha: factoryTree,
+          },
+        },
+      },
+    ),
+    /git_repo_remote_branch_not_owned/,
+  );
+});
+
 test("git_repo teardown is idempotent and removes the clone directory", async (t) => {
   resetResourceRegistry();
   const runId = uniqueRunId("teardown");
@@ -334,6 +482,9 @@ test("git_repo teardown is idempotent and removes the clone directory", async (t
 
   assert.equal(calls.some((call) => call.args[0] === "worktree"), false);
   assert.equal(fs.existsSync(runDir), false);
+  assert.equal(fs.existsSync(result.handle.envAugment.TMPDIR), false);
+  assert.equal(fs.existsSync(result.handle.envAugment.LOCALAPPDATA), false);
+  assert.equal(fs.existsSync(result.handle.envAugment.APPDATA), false);
 });
 
 test("git_repo materialize cleans up if a post-clone step fails", async (t) => {
@@ -585,6 +736,8 @@ function workerGitEnv(envAugment, hostileEnv = {}) {
       GIT_ASKPASS: "hostile-askpass",
       SSH_ASKPASS: "hostile-ssh-askpass",
       SSH_AUTH_SOCK: "hostile-ssh-agent",
+      LOCALAPPDATA: "hostile-local-appdata",
+      APPDATA: "hostile-roaming-appdata",
       ...hostileEnv,
     }),
     ...envAugment,

@@ -23,6 +23,7 @@ import { runTriggeredReview } from "../src/trigger-runner.mjs";
 import {
   GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
   GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+  LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
 } from "../src/workflows/review/effect-ids.mjs";
 import { ISSUE_NEEDS_PRINCIPAL_EFFECT_ID } from "../src/linear/issue-needs-principal-effect.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
@@ -331,6 +332,54 @@ test("runTriggeredReview assembles issue and PR diff, runs review, and writes af
   );
 });
 
+test("runTriggeredReview posts a Linear human-review briefing from a fresh gate-label read", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-review-briefing-"));
+  writeReviewAcceptedPromptFixture(tempRoot);
+  const prAdapter = createReviewPrAdapter();
+  const linearClient = createMutableReviewLinearClient();
+
+  const result = await runTriggeredReview(reviewRunOptions({
+    repoRoot: tempRoot,
+    prAdapter,
+    linearClient,
+    orchestratorTurnExecutor: async () => {
+      linearClient.addIssueLabel("label-human-review", "human-review");
+      return {
+        controlAction: { action: "terminate", outcome: "commit", reason: "synthesis_complete" },
+        producedContent: {
+          disposition: "approve",
+          body: "Approved. The diff implements the issue.",
+          human_briefing: "Review the checkout workflow in Linear and accept only if the happy path is visible.",
+          reviewed_head_sha: HEAD_SHA,
+          source_refs: [{ kind: "github_pull_request", id: "acme/product#7" }],
+          assumptions: [],
+          constraints: [],
+          risks: [],
+        },
+      };
+    },
+  }));
+
+  assert.equal(result.status, "completed", JSON.stringify(result, errorJsonReplacer, 2));
+  assert.deepEqual(
+    result.result.applied.map((entry) => entry.id),
+    [
+      GITHUB_PR_REVIEW_COMMENT_EFFECT_ID,
+      GITHUB_AF_REVIEW_STATUS_EFFECT_ID,
+      LINEAR_HUMAN_REVIEW_BRIEFING_EFFECT_ID,
+    ],
+  );
+  assert.equal(prAdapter.statuses.at(-1).state, "success");
+  assert.equal(linearClient.comments.length, 1);
+  assert.equal(
+    linearClient.comments[0].body,
+    "Review the checkout workflow in Linear and accept only if the happy path is visible.",
+  );
+  const gateSpan = result.result.trace.spans.find((span) => span.name === "human_review_gate_label_fresh_read");
+  assert.equal(gateSpan?.attributes?.selected, true);
+  assert.equal(result.result.artifact.payload.human_briefing, "Review the checkout workflow in Linear and accept only if the happy path is visible.");
+});
+
 test("runTriggeredReview turns malformed S7 output into an escalation commit", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-review-malformed-"));
   writeReviewAcceptedPromptFixture(tempRoot);
@@ -361,7 +410,11 @@ test("runTriggeredReview turns malformed S7 output into an escalation commit", a
   assert.equal(prAdapter.statuses.at(-1).state, "failure");
   assert.match(prAdapter.comments.at(-1).body, /review_payload_invalid/);
   assert.match(prAdapter.comments.at(-1).body, /"disposition":"escalate"/);
-  assert.equal(linearClient.issueStateName("issue-1"), "Blocked");
+  assert.equal(linearClient.comments.length, 1);
+  assert.match(linearClient.comments[0].body, /review_payload_invalid/);
+  assert.match(linearClient.comments[0].body, /move this issue back to In Review/);
+  assert.doesNotMatch(linearClient.comments[0].body, /af-review/);
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
   assert.deepEqual(
     result.result.applied.map((entry) => entry.id),
     [
@@ -370,6 +423,45 @@ test("runTriggeredReview turns malformed S7 output into an escalation commit", a
       ISSUE_NEEDS_PRINCIPAL_EFFECT_ID,
     ],
   );
+});
+
+test("runTriggeredReview labels a valid non-commit terminal as review_not_completed, not a payload defect", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-review-pause-"));
+  writeReviewAcceptedPromptFixture(tempRoot);
+  const prAdapter = createReviewPrAdapter();
+  const linearClient = createMutableReviewLinearClient();
+
+  const result = await runTriggeredReview(reviewRunOptions({
+    repoRoot: tempRoot,
+    prAdapter,
+    linearClient,
+    orchestratorTurnExecutor: async (turnInput) => ({
+      controlAction: { action: "terminate", outcome: "pause", reason: "discovery_needed" },
+      producedContent: {
+        context_digest: "Review paused: the packet lacks required acceptance evidence.",
+        source_refs: [],
+        assumptions: [],
+        constraints: [],
+        risks: [],
+        project_update_markdown: `run_id: ${turnInput.runId}\n\nPaused the review pending acceptance evidence.`,
+        open_questions_markdown: "Please provide the verbatim validation evidence for this PR.",
+      },
+    }),
+  }));
+
+  assert.equal(result.status, "completed", JSON.stringify(result, errorJsonReplacer, 2));
+  assert.equal(result.result.status, "completed");
+  assert.equal(prAdapter.statuses.at(-1).state, "failure");
+  const commentBody = prAdapter.comments.at(-1).body;
+  assert.match(commentBody, /review_not_completed/);
+  assert.match(commentBody, /review_terminal_outcome_pause:discovery_needed/);
+  assert.match(commentBody, /Please provide the verbatim validation evidence for this PR\./);
+  assert.doesNotMatch(commentBody, /reviewed_head_sha_mismatch/);
+  assert.match(commentBody, /"disposition":"escalate"/);
+  assert.equal(linearClient.comments.length, 1);
+  assert.match(linearClient.comments[0].body, /review_not_completed/);
+  assert.match(linearClient.comments[0].body, /Please provide the verbatim validation evidence for this PR\./);
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
 });
 
 test("runTriggeredReview escalates incomplete PR diffs without invoking the reviewer", async () => {
@@ -397,7 +489,10 @@ test("runTriggeredReview escalates incomplete PR diffs without invoking the revi
   assert.equal(result.result.status, "completed");
   assert.equal(prAdapter.statuses.at(-1).state, "failure");
   assert.match(prAdapter.comments.at(-1).body, /diff_incomplete/);
-  assert.equal(linearClient.issueStateName("issue-1"), "Blocked");
+  assert.equal(linearClient.comments.length, 1);
+  assert.match(linearClient.comments[0].body, /diff_incomplete/);
+  assert.match(linearClient.comments[0].body, /move this issue back to In Review/);
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
 });
 
 test("runTriggeredReview preflight no-PR escalation applies only the Linear route", async () => {
@@ -427,8 +522,11 @@ test("runTriggeredReview preflight no-PR escalation applies only the Linear rout
   assert.deepEqual(result.result.applied.map((entry) => entry.id), [ISSUE_NEEDS_PRINCIPAL_EFFECT_ID]);
   assert.equal(prAdapter.comments.length, 0);
   assert.equal(prAdapter.statuses.length, 0);
+  assert.equal(linearClient.comments.length, 1);
+  assert.match(linearClient.comments[0].body, /review_pr_closed/);
+  assert.match(linearClient.comments[0].body, /move this issue back to In Review/);
   assert.equal(result.result.artifact.payload.reviewed_head_sha, ZERO_SHA);
-  assert.equal(linearClient.issueStateName("issue-1"), "Blocked");
+  assert.equal(linearClient.issueStateName("issue-1"), "Principal Escalation");
 });
 
 function reviewRunOptions({
@@ -436,6 +534,18 @@ function reviewRunOptions({
   prAdapter,
   linearClient = createMutableReviewLinearClient(),
   orchestratorTurnExecutor,
+  cache = {
+    workspaceId: "workspace-1",
+    teamId: "team-1",
+    app_identity_id: "app-viewer-1",
+    issueStatuses: {
+      needs_principal: "state-needs-principal",
+    },
+    issueLabels: {
+      "Needs Principal": "label-needs-principal",
+      "human-review": "label-human-review",
+    },
+  },
 }) {
   const store = createFakeReviewStore();
   const domain = domainFixture();
@@ -480,16 +590,7 @@ function reviewRunOptions({
     workspaceId: "workspace-1",
     linearClient,
     config: reviewConfig(),
-    cache: {
-      workspaceId: "workspace-1",
-      teamId: "team-1",
-      issueStatuses: {
-        blocked: "state-blocked",
-      },
-      issueLabels: {
-        "Needs Principal": "label-needs-principal",
-      },
-    },
+    cache,
     repoRoot,
     runStoreDir: path.join(repoRoot, ".teami", "runs"),
     runtimeExecutor: {
@@ -505,8 +606,20 @@ function reviewRunOptions({
 function createFakeReviewStore() {
   const wakes = new Map();
   const runs = new Map();
+  const briefingRows = new Map();
   return {
     triggerEvents: [],
+    upsertBriefingRecord(record) {
+      briefingRows.set(record.issue_id, { ...record });
+      return { ...record };
+    },
+    briefingRecords(input = {}) {
+      if (input && typeof input === "object" && Object.hasOwn(input, "issueId")) {
+        const record = briefingRows.get(input.issueId);
+        return record ? { ...record } : null;
+      }
+      return [...briefingRows.values()].map((record) => ({ ...record }));
+    },
     async heartbeat() {
       return { ok: true };
     },
@@ -563,7 +676,9 @@ function createMutableReviewLinearClient() {
     createdAt: "2026-06-28T00:00:00.000Z",
     labels: [],
   };
+  const comments = [];
   return {
+    comments,
     async getIssueContext(id) {
       assert.equal(id, "issue-1");
       return issueView();
@@ -588,6 +703,25 @@ function createMutableReviewLinearClient() {
       return [
         { id: "label-needs-principal", name: "Needs Principal", teamId },
       ];
+    },
+    async listIssueComments(id) {
+      assert.equal(id, "issue-1");
+      return comments.map((comment) => ({ ...comment }));
+    },
+    async createIssueComment(id, body) {
+      assert.equal(id, "issue-1");
+      const comment = {
+        id: `linear-comment-${comments.length + 1}`,
+        body,
+        createdAt: "2026-06-28T00:00:00.000Z",
+        updatedAt: "2026-06-28T00:00:00.000Z",
+        user: { id: "app-viewer-1", name: "Teami App" },
+      };
+      comments.push(comment);
+      return { ...comment };
+    },
+    addIssueLabel(id, name) {
+      issue.labels.push({ id, name });
     },
     issueStateName(id) {
       assert.equal(id, "issue-1");
@@ -747,13 +881,15 @@ function reviewConfig() {
       issue: {
         labels: {
           needs_principal: "Needs Principal",
+          human_review: "human-review",
         },
         statuses: {
           backlog: { name: "Backlog", type: "backlog" },
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
           in_review: { name: "In Review", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          human_review: { name: "Principal Review", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
           ready: { name: "Ready" },
         },
@@ -769,7 +905,9 @@ function workflowStates() {
     { id: "state-in-progress", name: "In Progress", type: "started", teamId: "team-1" },
     { id: "state-ready", name: "Ready", type: "unstarted", teamId: "team-1" },
     { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
-    { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    { id: "state-human-review", name: "Principal Review", type: "started", teamId: "team-1" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId: "team-1" },
     { id: "state-done", name: "Done", type: "completed", teamId: "team-1" },
   ];
 }

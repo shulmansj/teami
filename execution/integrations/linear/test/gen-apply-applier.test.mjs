@@ -66,6 +66,43 @@ test("applyCommitEffects returns ok, projects identities, and records step spans
   }
 });
 
+test("applyCommitEffects projects provider read-back identity while preserving the apply result", async () => {
+  const result = await applyCommitEffects({
+    effects: [projectingEffect({
+      apply: () => ({ ok: true, identity: { ids: ["write-response-id"], batch_id: "write-response" } }),
+      verify: () => ({ ok: true, identity: { ids: ["read-back-id"], batch_id: "read-back" } }),
+    })],
+    ctx: { runId: "run-read-back" },
+    trace: emptyTrace(),
+  });
+
+  assert.deepEqual(result.applied, [{
+    id: "records",
+    identity: { ids: ["write-response-id"], batch_id: "write-response" },
+  }]);
+  assert.deepEqual(result.produced_identities, [{
+    effect_id: "records",
+    provider: "fake",
+    resource_kind: "fake_record",
+    target_ids: ["read-back-id"],
+    identity: { ids: ["read-back-id"], batch_id: "read-back" },
+  }]);
+});
+
+test("applyCommitEffects stays pending when a projected effect has no verified identity", async () => {
+  const result = await applyCommitEffects({
+    effects: [projectingEffect({ verify: () => ({ ok: true }) })],
+    ctx: { runId: "run-no-verified-identity" },
+    trace: emptyTrace(),
+  });
+
+  assert.deepEqual(result, {
+    outcome: "pending",
+    pending_effect_id: "records",
+    reason: "effect_verify_identity_missing",
+  });
+});
+
 test("applyCommitEffects returns pending for explicit non-terminal apply failure", async () => {
   const trace = emptyTrace();
   const result = await applyCommitEffects({
@@ -280,7 +317,7 @@ function projectingEffect(overrides = {}) {
     },
     probe: () => ({ satisfied: false }),
     apply: () => ({ ok: true, identity: { ids: ["record-1"], batch_id: "batch-1" } }),
-    verify: () => ({ ok: true }),
+    verify: () => ({ ok: true, identity: { ids: ["record-1"], batch_id: "batch-1" } }),
     ...overrides,
   };
 }

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   AF_REVIEW_COMMENT_MARKER_EXAMPLE,
   AF_REVIEW_STATUS_CONTEXT,
+  AMBIENT_GITHUB_TOKEN_ENV_NAMES,
   assertGitHubExecutionPrEndpointShape,
   createExecutionPullRequestAdapter,
   createFetchExecutionPrTransport,
@@ -14,6 +15,10 @@ import {
   serializeAfReviewMarker,
   validateExecutionBranchRef,
 } from "../src/execution-pr-adapter.mjs";
+import {
+  GITHUB_TOKEN_ENV_NAMES,
+  resolveAmbientGitHubToken as pushPathResolveAmbientGitHubToken,
+} from "../../git/git-remote-auth.mjs";
 
 const REPO = {
   owner: "acme",
@@ -125,6 +130,7 @@ test("fetch REST transport uses adopter ambient auth, not the deleted broker tok
 
   const brokerOnly = createFetchExecutionPrTransport({
     env: { TEAMI_GITHUB_INSTALLATION_TOKEN: "broker-token" },
+    resolveGhToken: () => null,
     fetchImpl: async () => {
       throw new Error("must_not_fetch_without_ambient_auth");
     },
@@ -173,7 +179,103 @@ test("fetch REST transport uses adopter ambient auth, not the deleted broker tok
   assert.equal(fetchCalls[0].init.headers.Authorization, "Bearer fake-tok");
 });
 
-test("fetch REST transport pins review endpoint paths and bodies behind the allowlist", async () => {
+test("PR API auth resolution is the push path's, by identity, not by copy", () => {
+  assert.equal(AMBIENT_GITHUB_TOKEN_ENV_NAMES, GITHUB_TOKEN_ENV_NAMES);
+  assert.equal(resolveAmbientGitHubToken, pushPathResolveAmbientGitHubToken);
+});
+
+// The live 2026-07-05 sandbox failure: a gateway started from a shell where
+// gh is logged in but no token env var is exported pushed the branch fine
+// (push path falls back to `gh auth token`) and then dead-lettered the run
+// with github_execution_pr_auth_required. The PR API leg must fall back to
+// the same gh authority.
+test("env-less transport with gh logged in resolves PR API auth from the gh CLI, cached across requests", async () => {
+  let ghResolutions = 0;
+  const fetchCalls = [];
+  const rest = createFetchExecutionPrTransport({
+    env: {},
+    resolveGhToken: () => {
+      ghResolutions += 1;
+      return "cli-tok";
+    },
+    fetchImpl: async (url, init) => {
+      fetchCalls.push({ url, init });
+      return jsonResponse([]);
+    },
+  });
+
+  await probeRequest(rest);
+  await probeRequest(rest);
+
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[0].init.headers.Authorization, "Bearer cli-tok");
+  assert.equal(fetchCalls[1].init.headers.Authorization, "Bearer cli-tok");
+  assert.equal(ghResolutions, 1, "gh must be consulted once per transport, not once per request");
+});
+
+test("ambient env token wins without consulting the gh CLI", async () => {
+  const fetchCalls = [];
+  const rest = createFetchExecutionPrTransport({
+    env: { GH_TOKEN: "env-tok" },
+    resolveGhToken: () => {
+      throw new Error("must_not_spawn_gh_when_env_token_present");
+    },
+    fetchImpl: async (url, init) => {
+      fetchCalls.push({ url, init });
+      return jsonResponse([]);
+    },
+  });
+
+  await probeRequest(rest);
+  assert.equal(fetchCalls[0].init.headers.Authorization, "Bearer env-tok");
+});
+
+test("a failed gh resolution is not cached, so gh auth login heals a running transport", async () => {
+  let ghToken = null;
+  const fetchCalls = [];
+  const rest = createFetchExecutionPrTransport({
+    env: {},
+    resolveGhToken: () => ghToken,
+    fetchImpl: async (url, init) => {
+      fetchCalls.push({ url, init });
+      return jsonResponse([]);
+    },
+  });
+
+  await assert.rejects(() => probeRequest(rest), /github_execution_pr_auth_required/);
+  assert.equal(fetchCalls.length, 0);
+
+  ghToken = "relog-tok";
+  await probeRequest(rest);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].init.headers.Authorization, "Bearer relog-tok");
+});
+
+test("gh fallback stays off for a non-default apiBaseUrl so fixture servers never see a real login", async () => {
+  const rest = createFetchExecutionPrTransport({
+    env: {},
+    apiBaseUrl: "http://127.0.0.1:9999",
+    resolveGhToken: () => "real-login-must-not-leak",
+    fetchImpl: async () => {
+      throw new Error("must_not_fetch_without_auth");
+    },
+  });
+
+  await assert.rejects(() => probeRequest(rest), /github_execution_pr_auth_required/);
+});
+
+function probeRequest(transport) {
+  return transport.request({
+    endpointId: "probe_execution_pull_request",
+    method: "GET",
+    path: "/repos/{owner}/{repo}/pulls",
+    owner: "acme",
+    repo: "app",
+    params: { head: HEAD, base: "main" },
+  });
+}
+
+test("fetch REST transport pins review and merge endpoint paths and bodies behind the allowlist", async () => {
   const fetchCalls = [];
   const rest = createFetchExecutionPrTransport({
     env: { GH_TOKEN: "fake-tok" },
@@ -269,14 +371,14 @@ test("fetch REST transport pins review endpoint paths and bodies behind the allo
   assert.equal(url.searchParams.get("head"), `acme:${HEAD}`);
   assert.equal(url.searchParams.get("per_page"), "100");
 
-  assert.throws(
-    () => assertGitHubExecutionPrEndpointShape({
-      endpointId: "merge_execution_pull_request",
-      method: "PUT",
-      path: "/repos/{owner}/{repo}/pulls/{number}/merge",
-    }),
-    /github_execution_pr_endpoint_not_allowlisted:merge_execution_pull_request/,
+  call = await request(
+    "merge_execution_pull_request",
+    "PUT",
+    "/repos/{owner}/{repo}/pulls/{number}/merge",
+    { number: 7, expectedHeadSha: HEAD_SHA },
   );
+  assert.equal(new URL(call.url).pathname, "/repos/acme/app/pulls/7/merge");
+  assert.deepEqual(JSON.parse(call.init.body), { sha: HEAD_SHA });
 });
 
 test("af-review marker bytes are stable and lookup reports found, missing, multiple, and malformed", () => {
@@ -331,7 +433,7 @@ test("af-review marker bytes are stable and lookup reports found, missing, multi
   }).status, "malformed");
 });
 
-test("adapter writes af-review commit statuses and marker comments, with no review or merge verb", async () => {
+test("adapter writes af-review commit statuses and marker comments, with no review verb", async () => {
   const existing = pullRequest({
     number: 7,
     head: HEAD,
@@ -344,7 +446,7 @@ test("adapter writes af-review commit statuses and marker comments, with no revi
     repoIdentity: REPO,
   });
 
-  assert.equal(adapter.mergePullRequest, undefined);
+  assert.equal(typeof adapter.mergePullRequest, "function");
   assert.equal(adapter.createReview, undefined);
   assert.equal(adapter.submitReview, undefined);
 
@@ -384,6 +486,13 @@ test("adapter writes af-review commit statuses and marker comments, with no revi
   });
   assert.equal(lookup.status, "found");
   assert.equal(lookup.comment.comment_id, 1);
+
+  const merged = await adapter.mergePullRequest({
+    number: 7,
+    expectedHeadSha: HEAD_SHA,
+  });
+  assert.equal(merged.merged, true);
+  assert.equal(merged.sha, HEAD_SHA);
 });
 
 test("listPullRequestsForHead uses state all so closed PRs are distinct from no PR", async () => {
@@ -510,6 +619,18 @@ function createFakeExecutionPrTransport({
       if (endpointId === "get_execution_pull_request") {
         const pr = allPullRequests().find((candidate) => candidate.number === params.number);
         return { data: pr || null };
+      }
+
+      if (endpointId === "merge_execution_pull_request") {
+        const pr = allPullRequests().find((candidate) => candidate.number === params.number);
+        if (!pr) return { data: { merged: false, message: "not found" } };
+        if (pr.head?.sha !== params.expectedHeadSha) {
+          return { data: { merged: false, message: "head mismatch" } };
+        }
+        pr.state = "closed";
+        pr.merged = true;
+        pr.merged_at = "2026-06-29T00:00:00.000Z";
+        return { data: { merged: true, sha: params.expectedHeadSha } };
       }
 
       if (endpointId === "get_execution_pull_request_files") {

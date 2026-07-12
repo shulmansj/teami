@@ -17,6 +17,7 @@ import {
 } from "../src/domain-resolver.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
+const home = repoRoot;
 
 test("Exactly-one-intersection resolves; zero returns no context; two-plus active teams fail as cross-domain conflict", () => {
   const config = loadLinearConfig({ repoRoot });
@@ -30,11 +31,12 @@ test("Exactly-one-intersection resolves; zero returns no context; two-plus activ
     registry,
     config,
     repoRoot,
+    home,
     selector: { workspaceId: "workspace-1", projectTeamIds: ["team-a", "external-team"] },
   });
   assert.equal(resolved.ok, true);
   assert.equal(resolved.context.domainId, "domain-a");
-  assert.equal(resolved.context.linear.cachePath, path.join(repoRoot, ".teami", "domains", "domain-a", "linear.json"));
+  assert.equal(resolved.context.linear.cachePath, path.join(home, "domains", "domain-a", "linear.json"));
   assert.equal(Object.isFrozen(resolved.context), true);
   assert.equal(Object.isFrozen(resolved.context.linear), true);
 
@@ -245,6 +247,7 @@ test("doctor and gateway foreground startup read per-domain cache, not legacy ca
       registry,
       config,
       repoRoot: tempRoot,
+      home: tempRoot,
       readCache: (cachePath) => {
         seen.push({ commandName, cachePath });
         return { domainId: "support-ops", workspaceId: "workspace-1", teamId: "team-a" };
@@ -256,9 +259,9 @@ test("doctor and gateway foreground startup read per-domain cache, not legacy ca
   assert.deepEqual(
     seen.map((item) => [item.commandName, item.cachePath.replace(/\\/g, "/")]),
     [
-      ["doctor", `${tempRoot.replace(/\\/g, "/")}/.teami/domains/support-ops/linear.json`],
-      ["gateway", `${tempRoot.replace(/\\/g, "/")}/.teami/domains/support-ops/linear.json`],
-      ["gateway status", `${tempRoot.replace(/\\/g, "/")}/.teami/domains/support-ops/linear.json`],
+      ["doctor", `${tempRoot.replace(/\\/g, "/")}/domains/support-ops/linear.json`],
+      ["gateway", `${tempRoot.replace(/\\/g, "/")}/domains/support-ops/linear.json`],
+      ["gateway status", `${tempRoot.replace(/\\/g, "/")}/domains/support-ops/linear.json`],
     ],
   );
 });

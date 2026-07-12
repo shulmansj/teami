@@ -62,7 +62,9 @@ const POLICY_SHA256 = createHash("sha256")
 // ---------------------------------------------------------------------------
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-experiment-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-phoenix-experiment-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function resolvedEvalDomainContext(root) {
@@ -80,12 +82,13 @@ function resolvedEvalDomainContext(root) {
       }),
     ],
   };
-  writeDomainRegistry({ repoRoot: root }, registry);
+  writeDomainRegistry({ home: root }, registry);
   const resolved = resolveForegroundDomainContext({
     registry,
     domainId: "support-ops",
     config,
     repoRoot: root,
+    home: root,
   });
   assert.equal(resolved.ok, true);
   return resolved.context;
@@ -166,7 +169,7 @@ function exampleRecord({
     id: projectId,
     name: "Customer onboarding pilot",
     description: null,
-    content: "## Goal\n\nDecompose the onboarding pilot.\n\n## Open Questions\n",
+    content: "## Goal\n\nDecompose the onboarding pilot.\n",
     status: "planned",
     labels: [],
     existing_issues: [],
@@ -1418,7 +1421,7 @@ test("end-to-end with the real eval task: dataset example runs the real phase lo
     runEvalTaskFn: (args) => runDecompositionEvalTask({
       ...args,
       repoRoot,
-      evalRunStoreDir: path.join(root, ".teami", "eval-runs"),
+      evalRunStoreDir: path.join(root, "eval-runs"),
       domainContext,
       orchestratorTurnExecutor,
     }),
@@ -1470,7 +1473,7 @@ test("end-to-end with the real eval task: dataset example runs the real phase lo
   assert.equal(runCall.body.output.accepted_packet_count, 4);
   assert.equal(runCall.body.trace_id, "e".repeat(32));
   // The real eval task wrote its local eval-run record under this repoRoot.
-  const evalRunDir = path.join(root, ".teami", "eval-runs");
+  const evalRunDir = path.join(root, "eval-runs");
   assert.ok(fs.existsSync(evalRunDir));
   // Judge failure became an experiment evaluation ERROR row (explainable),
   // and the CODE check landed as a CODE evaluation.
@@ -1581,5 +1584,5 @@ test("phoenix:experiment-decomposition and phoenix:experiment-amend are wired as
   assert.ok(moduleSource.includes("/v1/experiment_evaluations"));
 
   const receiptPath = experimentReceiptPath({ receiptId: "expr-test", repoRoot: "/tmp/x" });
-  assert.ok(receiptPath.replaceAll("\\", "/").includes(".teami/experiments/expr-test.json"));
+  assert.ok(receiptPath.replaceAll("\\", "/").includes("/experiments/expr-test.json"));
 });

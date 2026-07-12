@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { defaultRunGit } from "../../git/git-repo-materializer.mjs";
+import { gitRemoteAuthEnv } from "../../git/git-remote-auth.mjs";
+import { runBoundedGit } from "../../git/bounded-subprocess.mjs";
 import { runRuntimeCommand } from "./runtime-command.mjs";
 
 export const EXECUTION_PROFILE_PREFLIGHT_REASON_CODES = Object.freeze({
@@ -20,7 +21,7 @@ export async function runExecutionProfilePreflight({
   repoDir,
   resourceId,
   runCommand = runRuntimeCommand,
-  runGit = defaultRunGit,
+  runGit = runBoundedGit,
   strictBaselineGreen,
   skipReadiness = false,
   timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -29,6 +30,12 @@ export async function runExecutionProfilePreflight({
   remoteUrl = null,
   owner = null,
   repo = null,
+  // Overlaid onto the READINESS commands (deps install + baseline tests) only,
+  // so what the preflight proves runnable is what the worker will actually see
+  // (the caller passes the run's engine-owned temp env). The authority probes
+  // deliberately stay ambient: they exist to prove the HOST's push/API
+  // authority, not the contained run environment.
+  envAugment = {},
 } = {}) {
   const resource_id = nonEmptyString(resourceId) || null;
   const failures = [];
@@ -87,6 +94,7 @@ export async function runExecutionProfilePreflight({
       command: plan.setupCommand,
       cwd: normalizedRepoDir,
       timeoutMs,
+      envAugment,
     });
     checks.push({
       name: "execution profile deps install",
@@ -110,6 +118,7 @@ export async function runExecutionProfilePreflight({
       command: plan.testCommand,
       cwd: normalizedRepoDir,
       timeoutMs,
+      envAugment,
     });
     checks.push({
       name: "execution profile baseline tests",
@@ -127,7 +136,14 @@ export async function runExecutionProfilePreflight({
     }
   }
 
-  if (failures.length > 0) return redVerdict({ resource_id, failures, missing });
+  if (failures.length > 0) {
+    return redVerdict({
+      resource_id,
+      failures,
+      missing,
+      reconciliationRequired: authority.failures.some((failure) => failure.outcome === "reconciliation_required"),
+    });
+  }
   return {
     ok: true,
     resource_id,
@@ -248,11 +264,13 @@ async function runAuthorityChecks({
     ok: gitPush.ok,
     message: gitPush.ok ? "git push authority available" : "git push authority unavailable",
     fix: gitPush.ok ? null : "restore git credential helper authority for this repo",
+    ...(gitPush.reconciliationRequired ? { outcome: "reconciliation_required" } : {}),
   });
   if (!gitPush.ok) {
     failures.push({
       reason: EXECUTION_PROFILE_PREFLIGHT_REASON_CODES.GIT_PUSH_AUTHORITY_MISSING,
       missing: gitPush.missing || "git push --dry-run",
+      ...(gitPush.reconciliationRequired ? { outcome: "reconciliation_required" } : {}),
     });
   }
 
@@ -281,18 +299,30 @@ async function runAuthorityChecks({
 }
 
 async function defaultGitPushAuthorityProbe({ repoDir, runGit, remoteUrl }) {
-  const targetRemote = nonEmptyString(remoteUrl) || gitRemoteFromOrigin({ repoDir, runGit });
+  const targetRemote = nonEmptyString(remoteUrl) || await gitRemoteFromOrigin({ repoDir, runGit });
   if (!targetRemote) return { ok: false, missing: "git remote" };
-  const result = runGit([
+  // The clone's local credential helpers are deliberately neutralized, so the
+  // probe must carry the same in-memory auth injection the real mediated push
+  // uses (gitRemoteAuthEnv) — a bare dry-run would go red on every
+  // credential-helper-based setup even though the actual push would succeed.
+  const result = await runGit([
     "push",
     "--dry-run",
     targetRemote,
     "HEAD:refs/heads/af-preflight-readiness",
   ], {
     cwd: repoDir,
-    env: { GIT_TERMINAL_PROMPT: "0" },
+    env: gitRemoteAuthEnv({
+      baseEnv: { GIT_TERMINAL_PROMPT: "0" },
+      remoteUrl: targetRemote,
+    }),
   });
-  return { ok: result?.ok === true, missing: "git push --dry-run" };
+  return {
+    ok: result?.ok === true,
+    missing: "git push --dry-run",
+    reconciliationRequired: result?.reconciliationRequired === true,
+    outcome: result?.outcome || null,
+  };
 }
 
 async function defaultGithubApiAuthorityProbe({
@@ -316,8 +346,8 @@ async function defaultGithubApiAuthorityProbe({
   return { ok: result.ok, missing: identity ? "gh api repos/{owner}/{repo}" : "gh auth status" };
 }
 
-function gitRemoteFromOrigin({ repoDir, runGit }) {
-  const result = runGit(["remote", "get-url", "origin"], { cwd: repoDir });
+async function gitRemoteFromOrigin({ repoDir, runGit }) {
+  const result = await runGit(["remote", "get-url", "origin"], { cwd: repoDir });
   if (!result?.ok) return null;
   return nonEmptyString(result.stdout);
 }
@@ -330,6 +360,8 @@ async function runProbe(probe) {
     return {
       ok: result.ok === true,
       missing: nonEmptyString(result.missing) || null,
+      reconciliationRequired: result.reconciliationRequired === true,
+      outcome: nonEmptyString(result.outcome) || null,
     };
   } catch (error) {
     return {
@@ -339,16 +371,16 @@ async function runProbe(probe) {
   }
 }
 
-async function runPreflightCommand({ runCommand, command, cwd, timeoutMs }) {
+async function runPreflightCommand({ runCommand, command, cwd, timeoutMs, envAugment = {} }) {
   try {
-    await runCommand(command, { cwd, timeoutMs });
+    await runCommand(command, { cwd, timeoutMs, envAugment });
     return { ok: true };
   } catch {
     return { ok: false };
   }
 }
 
-function redVerdict({ resource_id, failures, missing }) {
+function redVerdict({ resource_id, failures, missing, reconciliationRequired = false }) {
   const failure_reasons = uniqueSorted(failures);
   return {
     ok: false,
@@ -358,6 +390,7 @@ function redVerdict({ resource_id, failures, missing }) {
       missing: uniqueSorted(missing),
     },
     failure_reasons,
+    ...(reconciliationRequired ? { outcome: "reconciliation_required", reconciliation_required: true } : {}),
   };
 }
 

@@ -217,6 +217,7 @@ test("Ready fix-mode chooses warm_resume before retained replay markers", async 
     prNumber: 7,
     head_sha: HEAD_SHA,
     priorRunId: "run-prior",
+    resumeContextProvenanceTag: "af_review_failure_marker",
   });
   assert.equal(replayReads, 0, "warm fix-mode must run before replay marker reads");
   assert.equal(suppressionReads, 0, "warm fix-mode must run before suppression reads");
@@ -228,159 +229,73 @@ test("Ready fix-mode chooses warm_resume before retained replay markers", async 
   ]);
 });
 
-test("Ready fix-mode escalates when verified review-failure rounds exceed the configured bound", async () => {
-  const issueId = "issue-round-bound";
-  const priorHeadSha = "c".repeat(40);
+test("Ready fix-mode resumes a Todo send-back even when the current review check is green", async () => {
+  const issueId = "issue-green-send-back";
   const adapter = createReadyFixPrAdapter({
-    statusesByHead: {
-      [HEAD_SHA]: [{
-        context: AF_REVIEW_STATUS_CONTEXT,
-        state: "failure",
-        created_at: "2026-06-28T10:10:00.000Z",
-      }],
-      [priorHeadSha]: [{
-        context: AF_REVIEW_STATUS_CONTEXT,
-        state: "failure",
-        created_at: "2026-06-28T09:10:00.000Z",
-      }],
-    },
-    comments: [
-      {
-        id: "comment-prior",
-        user: { type: "Bot" },
-        body: formatAfReviewCommentBody({
-          body: "Prior failed review round.",
-          disposition: "request-changes",
-          head_sha: priorHeadSha,
-          run_id: "run-review-prior",
-        }),
-        created_at: "2026-06-28T09:11:00.000Z",
-      },
-      {
-        id: "comment-current",
-        user: { type: "Bot" },
-        body: formatAfReviewCommentBody({
-          body: "Current failed review round.",
-          disposition: "request-changes",
-          head_sha: HEAD_SHA,
-          run_id: "run-review-current",
-        }),
-        created_at: "2026-06-28T10:11:00.000Z",
-      },
-    ],
+    statuses: [{
+      context: AF_REVIEW_STATUS_CONTEXT,
+      state: "success",
+      created_at: "2026-06-28T10:10:00.000Z",
+    }],
   });
+  let replayReads = 0;
 
   const decision = await decideReadyIssue({
     domainId: "domain-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     fingerprint: "a".repeat(64),
-    config: {
-      workflows: {
-        review: {
-          max_autonomous_fix_rounds: 1,
-        },
-      },
-    },
+    cache: linearCacheFixture(),
     repoIdentity: repoIdentityFixture(),
     store: storeWithPriorRun(issueId),
     prAdapter: adapter,
     resolveSessionHandle: () => ({ id: "driver-session-prior" }),
     idempotency: {
       readGitReplayPending: async () => {
-        throw new Error("over-bound fix-mode must escalate before replay");
+        replayReads += 1;
+        return { runId: "run-replay-marker" };
       },
       readSuppression: async () => null,
     },
   });
 
-  assert.equal(decision.action, "escalate");
-  assert.equal(decision.reason, "ready_fix_review_round_bound_exceeded");
-  assert.equal(decision.roundState.count, 2);
-  assert.equal(decision.roundState.max, 1);
-  assert.deepEqual(new Set(decision.roundState.head_shas), new Set([HEAD_SHA, priorHeadSha]));
+  assert.deepEqual(decision, {
+    action: "warm_resume",
+    prNumber: 7,
+    head_sha: HEAD_SHA,
+    priorRunId: "run-prior",
+    resumeContextProvenanceTag: "linear_todo_reentry",
+  });
+  assert.equal(replayReads, 0, "green send-back fix-mode must run before replay marker reads");
   assert.deepEqual(adapter.calls.map((call) => call.method), [
     "listPullRequestsForHead",
     "getPullRequest",
     "getCommitStatuses",
-    "listPullRequestComments",
-    "getCommitStatuses",
   ]);
-  assert.equal(adapter.calls.at(-1).head_sha, priorHeadSha);
 });
 
-test("processReadyIssue moves an over-bound ready fix to needs_principal", async () => {
-  const issueId = "issue-round-bound-move";
-  const priorHeadSha = "c".repeat(40);
-  const issue = readyIssue({ id: issueId });
-  const updates = [];
+test("processReadyIssue dispatches a green-check Todo send-back to warm_resume", async () => {
+  const issueId = "issue-green-warm-dispatch";
   const adapter = createReadyFixPrAdapter({
-    statusesByHead: {
-      [HEAD_SHA]: [{
-        context: AF_REVIEW_STATUS_CONTEXT,
-        state: "failure",
-        created_at: "2026-06-28T10:10:00.000Z",
-      }],
-      [priorHeadSha]: [{
-        context: AF_REVIEW_STATUS_CONTEXT,
-        state: "failure",
-        created_at: "2026-06-28T09:10:00.000Z",
-      }],
-    },
-    comments: [
-      {
-        id: "comment-prior",
-        body: formatAfReviewCommentBody({
-          body: "Prior failed review round.",
-          disposition: "request-changes",
-          head_sha: priorHeadSha,
-          run_id: "run-review-prior",
-        }),
-        created_at: "2026-06-28T09:11:00.000Z",
-      },
-      {
-        id: "comment-current",
-        body: formatAfReviewCommentBody({
-          body: "Current failed review round.",
-          disposition: "request-changes",
-          head_sha: HEAD_SHA,
-          run_id: "run-review-current",
-        }),
-        created_at: "2026-06-28T10:11:00.000Z",
-      },
-    ],
+    statuses: [{
+      context: AF_REVIEW_STATUS_CONTEXT,
+      state: "success",
+      created_at: "2026-06-28T10:10:00.000Z",
+    }],
   });
+  const warmCalls = [];
+  let freshRuns = 0;
 
   const result = await processReadyIssue({
     domain: domainFixture(),
     domainContext: domainContextWithRepoFixture(),
-    config: configWithNeedsPrincipalAndReviewBound(1),
+    config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
     client: {
       async getIssueContext(id) {
         assert.equal(id, issueId);
-        return issue;
-      },
-      async listWorkflowStates(teamId) {
-        assert.equal(teamId, "team-1");
-        return [
-          { id: "state-ready", name: "Ready", type: "unstarted" },
-          { id: "state-blocked", name: "Blocked", type: "started" },
-        ];
-      },
-      async findIssueLabelsByName(name, teamId) {
-        assert.equal(name, null);
-        assert.equal(teamId, "team-1");
-        return [
-          { id: "label-needs-principal", name: "Needs Principal", teamId },
-        ];
-      },
-      async updateIssue(id, input) {
-        updates.push({ id, input });
-        issue.state = { id: input.stateId, name: "Blocked", type: "started" };
-        issue.labels = input.labelIds.map((labelId) => ({ id: labelId }));
-        return issue;
+        return readyIssue({ id });
       },
     },
     store: storeWithPriorRun(issueId),
@@ -388,24 +303,453 @@ test("processReadyIssue moves an over-bound ready fix to needs_principal", async
     resolveSessionHandle: () => ({ id: "driver-session-prior" }),
     idempotency: {
       readGitReplayPending: async () => {
-        throw new Error("over-bound ready fix escalation must run before replay");
+        throw new Error("green send-back must warm-resume before replay");
+      },
+      readSuppression: async () => null,
+    },
+    runFreshIssue: async () => {
+      freshRuns += 1;
+      throw new Error("green send-back must not start fresh execution");
+    },
+    runWarmResumeIssue: async (input) => {
+      warmCalls.push(input);
+      return { status: "completed", run: { run_id: "run-fix" } };
+    },
+    runTimeoutMs: 0,
+  });
+
+  assert.equal(result.action, "warm_resume");
+  assert.equal(result.status, "started");
+  assert.equal(result.decision.resumeContextProvenanceTag, "linear_todo_reentry");
+  assert.equal(freshRuns, 0);
+  await flushAsync();
+  assert.equal(warmCalls.length, 1);
+  assert.equal(warmCalls[0].warmResumeDecision.resumeContextProvenanceTag, "linear_todo_reentry");
+  assert.equal(warmCalls[0].prNumber, 7);
+  assert.equal(warmCalls[0].head_sha, HEAD_SHA);
+});
+
+test("Ready fix-mode resolves the produced PR when a discarded PR makes branch discovery ambiguous", async () => {
+  const issueId = "issue-produced-first";
+  const branch = branchNameForIssue("AF-1");
+  const adapter = createReadyFixPrAdapter({
+    pullRequests: [
+      { number: 6, state: "closed", base: "main", head_sha: "e".repeat(40) },
+      { number: 7, state: "open", base: "main", head_sha: HEAD_SHA },
+    ],
+    statuses: [{
+      context: AF_REVIEW_STATUS_CONTEXT,
+      state: "success",
+      created_at: "2026-06-28T10:10:00.000Z",
+    }],
+  });
+  const store = {
+    findLatestRunForObject(id) {
+      assert.equal(id, issueId);
+      return {
+        run_id: "run-prior",
+        object_id: issueId,
+        workflow_type: "execution",
+        status: "completed",
+        started_at: "2026-06-28T10:00:00.000Z",
+        terminal_at: "2026-06-28T10:05:00.000Z",
+        session_handle_pointer: {
+          source: "run_artifact.runtime_metadata",
+          runtime_metadata_paths: [["runtime_metadata", "orchestrator", "session_handle"]],
+        },
+        artifact: {
+          produced_identities: [{
+            resource_kind: "github_pull_request",
+            identity: {
+              resource_id: "repo-1",
+              owner: "acme",
+              repo: "product",
+              branch,
+              pull_request_number: 7,
+              head_sha: HEAD_SHA,
+            },
+          }],
+        },
+      };
+    },
+  };
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoIdentity: repoIdentityFixture(),
+    store,
+    prAdapter: adapter,
+    resolveSessionHandle: () => ({ id: "driver-session-prior" }),
+    idempotency: {
+      readGitReplayPending: async () => {
+        throw new Error("produced-first fix-mode must decide before replay reads");
       },
       readSuppression: async () => null,
     },
   });
 
-  assert.equal(result.action, "escalate");
-  assert.equal(result.reason, "ready_fix_review_round_bound_exceeded");
-  assert.equal(result.escalation.outcome, "ok");
-  assert.deepEqual(updates, [{
+  assert.equal(decision.action, "warm_resume");
+  assert.equal(decision.prNumber, 7);
+  assert.equal(decision.head_sha, HEAD_SHA);
+  assert.equal(decision.priorRunId, "run-prior");
+  assert.equal(
+    adapter.calls.some((call) => call.method === "listPullRequestsForHead"),
+    false,
+    "the produced PR identity must resolve without ambiguous branch-name discovery",
+  );
+});
+
+test("Ready fix-mode walks past a non-producing failed resume run to the produced PR identity", async () => {
+  const issueId = "issue-produced-walk-back";
+  const branch = branchNameForIssue("AF-1");
+  const producingRun = {
+    run_id: "run-producing",
+    object_id: issueId,
+    workflow_type: "execution",
+    status: "completed",
+    started_at: "2026-06-28T10:00:00.000Z",
+    terminal_at: "2026-06-28T10:05:00.000Z",
+    artifact: {
+      produced_identities: [{
+        resource_kind: "github_pull_request",
+        identity: {
+          resource_id: "repo-1",
+          owner: "acme",
+          repo: "product",
+          branch,
+          pull_request_number: 7,
+          head_sha: HEAD_SHA,
+        },
+      }],
+    },
+  };
+  const deadLetterRun = {
+    run_id: "run-dead-letter",
+    object_id: issueId,
+    workflow_type: "execution",
+    status: "dead_letter",
+    terminal_reason: "runner_failed_after_execution_mutation_started:example",
+    started_at: "2026-06-28T11:00:00.000Z",
+    terminal_at: "2026-06-28T11:00:30.000Z",
+  };
+  const adapter = githubProbeMustNotRun();
+  const store = {
+    findLatestRunForObject(id) {
+      assert.equal(id, issueId);
+      return structuredClone(deadLetterRun);
+    },
+    findRunsForObject(id) {
+      assert.equal(id, issueId);
+      return [structuredClone(deadLetterRun), structuredClone(producingRun)];
+    },
+  };
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoIdentity: repoIdentityFixture(),
+    store,
+    prAdapter: adapter,
+    resolveSessionHandle: () => {
+      throw new Error("a non-resumable dead-letter run must escalate before session resolution");
+    },
+    idempotency: {
+      readGitReplayPending: async () => null,
+      readSuppression: async () => null,
+    },
+  });
+
+  assert.equal(decision.action, "escalate");
+  assert.equal(decision.reason, "ready_fix_prior_run_not_resumable");
+  assert.equal(
+    decision.hasPr,
+    true,
+    "the produced PR behind the dead-letter run must count as surviving work, not fall to ambiguous discovery",
+  );
+});
+
+test("A rejected resume attempt is transparent to the ready-fix decide", async () => {
+  const issueId = "issue-rejected-transparent";
+  const branch = branchNameForIssue("AF-1");
+  const producingRun = {
+    run_id: "run-producing",
+    object_id: issueId,
+    workflow_type: "execution",
+    status: "completed",
+    started_at: "2026-06-28T10:00:00.000Z",
+    terminal_at: "2026-06-28T10:05:00.000Z",
+    session_handle_pointer: {
+      source: "run_artifact.runtime_metadata",
+      runtime_metadata_paths: [["runtime_metadata", "orchestrator", "session_handle"]],
+    },
+    artifact: {
+      produced_identities: [{
+        resource_kind: "github_pull_request",
+        identity: {
+          resource_id: "repo-1",
+          owner: "acme",
+          repo: "product",
+          branch,
+          pull_request_number: 7,
+          head_sha: HEAD_SHA,
+        },
+      }],
+    },
+  };
+  const rejectedResumeRun = {
+    run_id: "run-rejected-resume",
+    object_id: issueId,
+    workflow_type: "execution",
+    status: "rejected",
+    terminal_reason: "warm_continuation_unavailable",
+    started_at: "2026-06-28T11:00:00.000Z",
+    terminal_at: "2026-06-28T11:00:30.000Z",
+  };
+  const adapter = createReadyFixPrAdapter({
+    pullRequests: [
+      { number: 6, state: "closed", base: "main", head_sha: "e".repeat(40) },
+      { number: 7, state: "open", base: "main", head_sha: HEAD_SHA },
+    ],
+    statuses: [{
+      context: AF_REVIEW_STATUS_CONTEXT,
+      state: "success",
+      created_at: "2026-06-28T10:10:00.000Z",
+    }],
+  });
+  const store = {
+    findLatestRunForObject(id) {
+      assert.equal(id, issueId);
+      return structuredClone(rejectedResumeRun);
+    },
+    findRunsForObject(id) {
+      assert.equal(id, issueId);
+      return [structuredClone(rejectedResumeRun), structuredClone(producingRun)];
+    },
+  };
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoIdentity: repoIdentityFixture(),
+    store,
+    prAdapter: adapter,
+    resolveSessionHandle: () => ({ id: "driver-session-prior" }),
+    idempotency: {
+      readGitReplayPending: async () => null,
+      readSuppression: async () => null,
+    },
+  });
+
+  assert.equal(decision.action, "warm_resume", "a rejected attempt left nothing behind and must not block the resume");
+  assert.equal(decision.prNumber, 7);
+  assert.equal(decision.head_sha, HEAD_SHA);
+  assert.equal(decision.priorRunId, "run-producing");
+  assert.equal(decision.resumeContextProvenanceTag, "linear_todo_reentry");
+});
+
+test("A warm resume rejected by the branch-ownership fence surfaces on the issue instead of stranding silently", async () => {
+  const issueId = "issue-warm-resume-fence-rejected";
+  const adapter = createReadyFixPrAdapter({
+    statuses: [{
+      context: AF_REVIEW_STATUS_CONTEXT,
+      state: "success",
+      created_at: "2026-06-28T10:10:00.000Z",
+    }],
+  });
+  const comments = [];
+  const updates = [];
+  const statusEvents = [];
+  const sentBackIssue = readyIssue({
     id: issueId,
-    input: { stateId: "state-blocked", labelIds: ["label-needs-principal"] },
-  }]);
+    labels: [{ id: "label-human-review", name: "human-review" }],
+  });
+
+  const result = await processReadyIssue({
+    domain: domainFixture(),
+    domainContext: domainContextWithRepoFixture(),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    candidate: { id: issueId },
+    client: escalationClientFixture({ issueId, comments, updates, issue: sentBackIssue }),
+    store: storeWithPriorRun(issueId),
+    runDeps: { prAdapter: adapter },
+    resolveSessionHandle: () => ({ id: "driver-session-prior" }),
+    idempotency: {
+      readGitReplayPending: async () => null,
+      readSuppression: async () => null,
+    },
+    runFreshIssue: async () => {
+      throw new Error("a fence-rejected resume must not start fresh execution");
+    },
+    runWarmResumeIssue: async () => ({
+      status: "rejected",
+      reason: "runner_failed_closed:git_repo_remote_branch_not_owned",
+    }),
+    emitStatus: (event) => {
+      statusEvents.push(event);
+      return event;
+    },
+    runTimeoutMs: 0,
+  });
+
+  assert.equal(result.action, "warm_resume");
+  assert.equal(result.status, "started");
+  await flushAsync();
+
+  assert.equal(updates.length, 1, "the rejection must transition the issue to Needs Principal");
+  assert.equal(updates[0].input.stateId, "state-needs-principal");
+  assert.equal(Object.prototype.hasOwnProperty.call(updates[0].input, "labelIds"), false);
+  assert.equal(comments.length, 1, "the rejection must be explained on the issue");
+  assert.match(comments[0].body, /branch no longer matches the last state Teami produced/);
+  assert.match(comments[0].body, /pull request #7/);
+  assert.match(comments[0].body, /runner_failed_closed:git_repo_remote_branch_not_owned/);
+  assert.match(comments[0].body, /move this issue back to Todo/);
+  assert.ok(
+    statusEvents.some((event) => event.state === "resume_attention"),
+    "the gateway must report the resume as needing attention",
+  );
+});
+
+test("A warm resume that fails closed before dispatch surfaces on the issue", async () => {
+  const issueId = "issue-warm-resume-failed-closed";
+  const adapter = createReadyFixPrAdapter({
+    statuses: [{
+      context: AF_REVIEW_STATUS_CONTEXT,
+      state: "success",
+      created_at: "2026-06-28T10:10:00.000Z",
+    }],
+  });
+  const comments = [];
+  const updates = [];
+
+  await processReadyIssue({
+    domain: domainFixture(),
+    domainContext: domainContextWithRepoFixture(),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    candidate: { id: issueId },
+    client: escalationClientFixture({ issueId, comments, updates }),
+    store: storeWithPriorRun(issueId),
+    runDeps: { prAdapter: adapter },
+    resolveSessionHandle: () => ({ id: "driver-session-prior" }),
+    idempotency: {
+      readGitReplayPending: async () => null,
+      readSuppression: async () => null,
+    },
+    runFreshIssue: async () => {
+      throw new Error("a failed-closed resume must not start fresh execution");
+    },
+    runWarmResumeIssue: async () => ({
+      status: "failed_closed",
+      reason: "warm_resume_prior_run_session_unresolved",
+    }),
+    runTimeoutMs: 0,
+  });
+
+  await flushAsync();
+  assert.equal(updates.length, 1, "the failed-closed resume must transition the issue");
+  assert.equal(comments.length, 1);
+  assert.match(comments[0].body, /warm_resume_prior_run_session_unresolved/);
+});
+
+test("Ready fix-mode has no review-round bound across repeated green Todo re-entry cycles", async () => {
+  const issueId = "issue-repeated-green-send-back";
+  const statusEvents = [];
+  const results = [];
+  const warmCalls = [];
+  const state = gatewayState();
+
+  for (const cycle of [1, 2, 3, 4, 5]) {
+    const adapter = createReadyFixPrAdapter({
+      statuses: [{
+        context: AF_REVIEW_STATUS_CONTEXT,
+        state: "success",
+        created_at: `2026-06-28T10:1${cycle}:00.000Z`,
+      }],
+    });
+
+    const result = await processReadyIssue({
+      domain: domainFixture(),
+      domainContext: domainContextWithRepoFixture(),
+      config: configWithReadyStatus(),
+      cache: linearCacheFixture(),
+      candidate: { id: issueId },
+      state,
+      client: {
+        async getIssueContext(id) {
+          assert.equal(id, issueId);
+          return readyIssue({ id });
+        },
+      },
+      store: storeWithPriorRun(issueId),
+      runDeps: { prAdapter: adapter },
+      resolveSessionHandle: () => ({ id: "driver-session-prior" }),
+      idempotency: {
+        readGitReplayPending: async () => {
+          throw new Error("green send-back must warm-resume before replay");
+        },
+        readSuppression: async () => null,
+      },
+      runFreshIssue: async () => {
+        throw new Error("green send-back must not start fresh execution");
+      },
+      runWarmResumeIssue: async (input) => {
+        warmCalls.push({
+          cycle,
+          priorRunId: input.priorRunId,
+          prNumber: input.prNumber,
+          head_sha: input.head_sha,
+          warmResumeDecision: input.warmResumeDecision,
+        });
+        return { status: "completed", run: { run_id: `run-fix-${cycle}` } };
+      },
+      emitStatus: (event) => {
+        statusEvents.push(event);
+        return event;
+      },
+      runTimeoutMs: 0,
+    });
+
+    results.push(result);
+    assert.equal(result.action, "warm_resume");
+    assert.equal(result.decision.resumeContextProvenanceTag, "linear_todo_reentry");
+    await flushAsync();
+    assert.equal(state.inFlight.has(issueId), false);
+  }
+
+  assert.equal(warmCalls.length, 5);
+  assert.deepEqual(statusEvents.map((event) => event.state), [
+    "resume_working",
+    "resume_working",
+    "resume_working",
+    "resume_working",
+    "resume_working",
+  ]);
+
+  for (const disposition of [...results, ...statusEvents, ...warmCalls]) {
+    const serialized = JSON.stringify(disposition);
+    assert.doesNotMatch(serialized, /\bover_bound\b/);
+    assert.doesNotMatch(serialized, /ready_fix_review_round_bound_exceeded/);
+  }
 });
 
 test("Ready fix-mode escalates on the first persisted paused warm-resume run", async () => {
   const issueId = "issue-paused-resume";
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-paused-resume-"));
+  process.env.TEAMI_HOME = tempRoot;
   writePausedResumeArtifact(tempRoot, {
     runId: "run-prior",
     issueId,
@@ -416,9 +760,14 @@ test("Ready fix-mode escalates on the first persisted paused warm-resume run", a
   const decision = await decideReadyIssue({
     domainId: "domain-1",
     issueId,
-    issueContext: readyIssue({ id: issueId }),
+    issueContext: readyIssue({
+      id: issueId,
+      state: { id: "state-in-review", name: "In Review", type: "started" },
+    }),
+    cache: linearCacheFixture(),
     fingerprint: "a".repeat(64),
     repoRoot: tempRoot,
+    home: tempRoot,
     repoIdentity: repoIdentityFixture(),
     store: storeWithPriorRun(issueId),
     prAdapter: adapter,
@@ -442,6 +791,49 @@ test("Ready fix-mode escalates on the first persisted paused warm-resume run", a
     prior_run_id: "run-before-pause",
   });
   assert.deepEqual(adapter.calls, undefined);
+});
+
+test("Ready fix-mode releases paused warm-resume Todo re-entry into the existing resume path", async () => {
+  const issueId = "issue-paused-resume-todo-reentry";
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-paused-resume-todo-"));
+  process.env.TEAMI_HOME = tempRoot;
+  writePausedResumeArtifact(tempRoot, {
+    runId: "run-prior",
+    issueId,
+    headSha: HEAD_SHA,
+  });
+  const adapter = createReadyFixPrAdapter({
+    statuses: [{
+      context: AF_REVIEW_STATUS_CONTEXT,
+      state: "success",
+      created_at: "2026-06-28T10:10:00.000Z",
+    }],
+  });
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoRoot: tempRoot,
+    home: tempRoot,
+    repoIdentity: repoIdentityFixture(),
+    store: storeWithPriorRun(issueId),
+    prAdapter: adapter,
+    resolveSessionHandle: () => ({ id: "driver-session-prior" }),
+    idempotency: {
+      readGitReplayPending: async () => {
+        throw new Error("paused Todo re-entry must resume before replay");
+      },
+      readSuppression: async () => null,
+    },
+  });
+
+  assert.notEqual(decision.action, "escalate");
+  assert.notEqual(decision.reason, "ready_fix_resume_paused");
+  assert.ok(["warm_resume", "fresh"].includes(decision.action));
 });
 
 test("Ready issues with no prior execution run do not probe GitHub and remain fresh", async () => {
@@ -532,11 +924,13 @@ test("Ready fix-mode escalates prior-run issues when the execution PR is closed 
   for (const entry of cases) {
     await t.test(entry.name, async () => {
       const issueId = `issue-pr-${entry.name}`;
+      const repoRoot = tempRepo();
       const decision = await decideReadyIssue({
         domainId: "domain-1",
         issueId,
         issueContext: readyIssue({ id: issueId }),
         fingerprint: "a".repeat(64),
+        repoRoot,
         repoIdentity: repoIdentityFixture(),
         store: storeWithPriorRun(issueId),
         prAdapter: entry.adapter,
@@ -554,6 +948,300 @@ test("Ready fix-mode escalates prior-run issues when the execution PR is closed 
       assert.equal(decision.priorRunId, "run-prior");
     });
   }
+});
+
+test("Ready fix-mode dispatches fresh when a non-resumable prior run left no surface", async () => {
+  const issueId = "issue-no-surface";
+  const adapter = createReadyFixPrAdapter({ pullRequests: [] });
+  let replayReads = 0;
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoRoot: tempRepo(),
+    repoIdentity: repoIdentityFixture(),
+    store: storeWithNonResumablePriorRun(issueId),
+    prAdapter: adapter,
+    idempotency: {
+      readGitReplayPending: async () => {
+        replayReads += 1;
+        return null;
+      },
+      readSuppression: async () => null,
+    },
+  });
+
+  assert.equal(decision.action, "fresh");
+  assert.equal(replayReads, 1, "confirmed-empty fix-mode must fall through to the fresh path");
+  assert.deepEqual(adapter.calls.map((call) => call.method), [
+    "listPullRequestsForHead",
+  ], "absence confirmation must not hydrate PR or review state");
+});
+
+test("Ready fix-mode still escalates a non-resumable prior run when its PR exists", async () => {
+  const issueId = "issue-surface-pr";
+  const adapter = createReadyFixPrAdapter();
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoRoot: tempRepo(),
+    repoIdentity: repoIdentityFixture(),
+    store: storeWithNonResumablePriorRun(issueId),
+    prAdapter: adapter,
+    idempotency: {
+      readGitReplayPending: async () => {
+        throw new Error("surviving surfaces must escalate before replay");
+      },
+      readSuppression: async () => null,
+    },
+  });
+
+  assert.equal(decision.action, "escalate");
+  assert.equal(decision.reason, "ready_fix_prior_run_not_resumable");
+  assert.equal(decision.priorRunId, "run-prior");
+  assert.equal(decision.hasPr, true);
+  assert.equal(decision.location.pr.number, 7);
+  assert.ok(
+    !adapter.calls.some((call) => call.method === "getCommitStatuses"),
+    "non-resumable escalation must not inspect review state",
+  );
+});
+
+test("Ready fix-mode escalates a non-resumable prior run whose artifact records a produced PR", async () => {
+  const issueId = "issue-surface-recorded";
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoRoot: tempRepo(),
+    repoIdentity: repoIdentityFixture(),
+    store: storeWithNonResumablePriorRun(issueId, {
+      artifact: {
+        produced_identities: [{
+          resource_kind: "github_pull_request",
+          identity: {
+            resource_id: "repo-1",
+            owner: "acme",
+            repo: "product",
+            pull_request_number: "7",
+            branch: "af/execution/AF-1-5215fde5",
+            head_sha: HEAD_SHA,
+          },
+        }],
+      },
+    }),
+    prAdapter: githubProbeMustNotRun(),
+    idempotency: {
+      readGitReplayPending: async () => {
+        throw new Error("recorded surfaces must escalate before replay");
+      },
+      readSuppression: async () => null,
+    },
+  });
+
+  assert.equal(decision.action, "escalate");
+  assert.equal(decision.reason, "ready_fix_prior_run_not_resumable");
+  assert.equal(decision.hasPr, true);
+});
+
+test("Ready fix-mode escalates a non-resumable prior run when the PR probe is degraded", async () => {
+  const issueId = "issue-degraded-probe";
+  const adapter = {
+    async listPullRequestsForHead() {
+      throw new Error("github_unreachable");
+    },
+  };
+
+  const decision = await decideReadyIssue({
+    domainId: "domain-1",
+    issueId,
+    issueContext: readyIssue({ id: issueId }),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    fingerprint: "a".repeat(64),
+    repoRoot: tempRepo(),
+    repoIdentity: repoIdentityFixture(),
+    store: storeWithNonResumablePriorRun(issueId),
+    prAdapter: adapter,
+    idempotency: {
+      readGitReplayPending: async () => {
+        throw new Error("unconfirmed absence must escalate before replay");
+      },
+      readSuppression: async () => null,
+    },
+  });
+
+  assert.equal(decision.action, "escalate");
+  assert.equal(
+    decision.reason,
+    "ready_fix_prior_run_not_resumable",
+    "a degraded probe is not confirmation of absence and must keep the escalation",
+  );
+  assert.equal(decision.hasPr, false);
+});
+
+test("Ready fix-mode dispatches fresh for surviving prior-run defects with no surface", async (t) => {
+  const cases = [
+    {
+      name: "session unresolved",
+      store: (issueId) => storeWithPriorRun(issueId),
+      resolveSessionHandle: () => null,
+    },
+    {
+      name: "run id missing",
+      store: (issueId) => storeWithNonResumablePriorRun(issueId, { run_id: undefined }),
+      resolveSessionHandle: () => {
+        throw new Error("session resolution must not run for a record without a run id");
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const issueId = `issue-no-surface-${entry.name.replaceAll(" ", "-")}`;
+      const adapter = createReadyFixPrAdapter({ pullRequests: [] });
+
+      const decision = await decideReadyIssue({
+        domainId: "domain-1",
+        issueId,
+        issueContext: readyIssue({ id: issueId }),
+        config: configWithReadyStatus(),
+        cache: linearCacheFixture(),
+        fingerprint: "a".repeat(64),
+        repoRoot: tempRepo(),
+        repoIdentity: repoIdentityFixture(),
+        store: entry.store(issueId),
+        prAdapter: adapter,
+        resolveSessionHandle: entry.resolveSessionHandle,
+        idempotency: {
+          readGitReplayPending: async () => null,
+          readSuppression: async () => null,
+        },
+      });
+
+      assert.equal(decision.action, "fresh");
+    });
+  }
+});
+
+test("Ready fix-mode escalation posts one explanatory comment when it transitions the issue", async () => {
+  const issueId = "issue-escalation-comment";
+  const comments = [];
+  const updates = [];
+
+  const result = await processReadyIssue({
+    domain: domainFixture(),
+    domainContext: domainContextWithRepoFixture(),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    candidate: { id: issueId },
+    repoRoot: tempRepo(),
+    client: escalationClientFixture({ issueId, comments, updates }),
+    store: storeWithNonResumablePriorRun(issueId),
+    runDeps: { prAdapter: createReadyFixPrAdapter() },
+    idempotency: {
+      readGitReplayPending: async () => null,
+      readSuppression: async () => null,
+    },
+    runFreshIssue: async () => {
+      throw new Error("escalation must not start fresh execution");
+    },
+    runTimeoutMs: 0,
+  });
+
+  assert.equal(result.action, "escalate");
+  assert.equal(result.reason, "ready_fix_prior_run_not_resumable");
+  assert.equal(updates.length, 1);
+  assert.equal(result.escalation.comment.outcome, "ok");
+  assert.equal(comments.length, 1);
+  assert.equal(comments[0].issueId, issueId);
+  assert.match(comments[0].body, /move this issue back to Todo/);
+  assert.match(comments[0].body, /ready_fix_prior_run_not_resumable/);
+  assert.match(comments[0].body, /pull request #7/);
+});
+
+test("Ready fix-mode escalation completes a missing comment for an issue already in Principal Escalation", async () => {
+  const issueId = "issue-escalation-already-blocked";
+  const comments = [];
+  const updates = [];
+  const blockedIssue = {
+    ...readyIssue({ id: issueId }),
+    state: { id: "state-needs-principal", name: "Principal Escalation", type: "started" },
+    labels: [],
+  };
+
+  const result = await processReadyIssue({
+    domain: domainFixture(),
+    domainContext: domainContextWithRepoFixture(),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    candidate: { id: issueId },
+    repoRoot: tempRepo(),
+    client: escalationClientFixture({ issueId, comments, updates, issue: blockedIssue }),
+    store: storeWithNonResumablePriorRun(issueId),
+    runDeps: { prAdapter: createReadyFixPrAdapter() },
+    idempotency: {
+      readGitReplayPending: async () => null,
+      readSuppression: async () => null,
+    },
+    runFreshIssue: async () => {
+      throw new Error("escalation must not start fresh execution");
+    },
+    runTimeoutMs: 0,
+  });
+
+  assert.equal(result.action, "escalate");
+  assert.equal(updates.length, 0, "an already-escalated issue must not be re-transitioned");
+  assert.equal(comments.length, 1, "the pair is complete only once the human-facing comment exists");
+  assert.match(comments[0].body, /ready_fix_prior_run_not_resumable/);
+  assert.equal(result.escalation.comment.already_present, false);
+});
+
+test("Ready fix-mode escalation does not move status when the required comment post fails", async () => {
+  const issueId = "issue-escalation-comment-fails";
+  const updates = [];
+
+  const result = await processReadyIssue({
+    domain: domainFixture(),
+    domainContext: domainContextWithRepoFixture(),
+    config: configWithReadyStatus(),
+    cache: linearCacheFixture(),
+    candidate: { id: issueId },
+    repoRoot: tempRepo(),
+    client: escalationClientFixture({
+      issueId,
+      updates,
+      failComment: new Error("comment_rejected"),
+    }),
+    store: storeWithNonResumablePriorRun(issueId),
+    runDeps: { prAdapter: createReadyFixPrAdapter() },
+    idempotency: {
+      readGitReplayPending: async () => null,
+      readSuppression: async () => null,
+    },
+    runFreshIssue: async () => {
+      throw new Error("escalation must not start fresh execution");
+    },
+    runTimeoutMs: 0,
+  });
+
+  assert.equal(result.action, "escalate");
+  assert.equal(updates.length, 0, "status must not move before the human-facing comment exists");
+  assert.equal(result.escalation.outcome, "pending");
+  assert.equal(result.escalation.reason, "linear_issue_comment_failed:comment_rejected");
 });
 
 test("processReadyIssue dispatches warm_resume without reaching fresh execution", async () => {
@@ -770,6 +1458,7 @@ test("project polling still runs first and issue dispatch does not block the des
   writeDomainCache(repoRoot);
   const result = await pollGatewayDomain({
     repoRoot,
+    home: repoRoot,
     config: configWithReadyStatus(),
     registry: registryFixture(),
     domain: domainFixture(),
@@ -830,6 +1519,7 @@ test("project polling still runs first and issue dispatch does not block the des
     "fresh-run:issue-1",
     "ready-list:team-1:state-in-progress",
     "ready-list:team-1:state-in-review",
+    "ready-list:team-1:state-human-review",
   ]);
   assert.equal(state.inFlight.has("issue-1"), true, "background dispatch holds the issue in-flight key");
 
@@ -864,6 +1554,7 @@ test("maxInFlight gate prevents overlapping Ready issue execution", async () => 
 });
 
 test("marker sweep clears issue git replay markers only after Linear reports completed", async () => {
+  const repoRoot = tempRepo();
   const cleared = [];
   const client = {
     async getIssueContext(issueId) {
@@ -880,12 +1571,16 @@ test("marker sweep clears issue git replay markers only after Linear reports com
   };
 
   const retained = await sweepIssueReplayMarker({
+    repoRoot,
+    home: repoRoot,
     domain: domainFixture(),
     client,
     marker: { objectId: "issue-review", runId: "run-review" },
     idempotency,
   });
   const done = await sweepIssueReplayMarker({
+    repoRoot,
+    home: repoRoot,
     domain: domainFixture(),
     client,
     marker: { objectId: "issue-done", runId: "run-done" },
@@ -900,7 +1595,8 @@ test("marker sweep clears issue git replay markers only after Linear reports com
     objectType: "issue",
     objectId: "issue-done",
     runId: "run-done",
-    repoRoot: process.cwd(),
+    repoRoot,
+    home: repoRoot,
     runStoreDir: null,
   }]);
 });
@@ -947,6 +1643,76 @@ function storeWithPriorRun(issueId) {
           runtime_metadata_paths: [["runtime_metadata", "orchestrator", "session_handle"]],
         },
       };
+    },
+  };
+}
+
+function storeWithNonResumablePriorRun(issueId, overrides = {}) {
+  return {
+    findLatestRunForObject(id) {
+      assert.equal(id, issueId);
+      return {
+        run_id: "run-prior",
+        object_id: issueId,
+        workflow_type: "execution",
+        status: "waiting",
+        terminal_reason: "dependency_blocked",
+        started_at: "2026-06-28T10:00:00.000Z",
+        terminal_at: "2026-06-28T10:00:09.000Z",
+        ...overrides,
+      };
+    },
+  };
+}
+
+function escalationClientFixture({
+  issueId,
+  issue = null,
+  comments = [],
+  updates = [],
+  failComment = null,
+} = {}) {
+  const context = issue || readyIssue({ id: issueId });
+  return {
+    async getIssueContext(id) {
+      assert.equal(id, issueId);
+      return structuredClone(context);
+    },
+    async listWorkflowStates(teamId) {
+      return [{ id: "state-needs-principal", name: "Principal Escalation", type: "started", teamId }];
+    },
+    async findIssueLabelsByName(name, teamId) {
+      const labels = [{ id: "label-needs-principal", name: "Needs Principal", teamId }];
+      return name ? labels.filter((label) => label.name === name) : labels;
+    },
+    async listIssueComments(id) {
+      assert.equal(id, issueId);
+      return comments.map((comment) => ({
+        ...comment,
+        user: { ...(comment.user || { id: "app-viewer-1", name: "Teami App" }) },
+      }));
+    },
+    async updateIssue(id, input) {
+      updates.push({ id, input });
+      context.state = { id: input.stateId, name: "Principal Escalation", type: "started" };
+      if (Object.prototype.hasOwnProperty.call(input, "labelIds")) {
+        context.labels = input.labelIds.map((labelId) => ({ id: labelId }));
+      }
+      return {
+        ...context,
+        id,
+      };
+    },
+    async createIssueComment(id, body) {
+      if (failComment) throw failComment;
+      const comment = {
+        id: `comment-${comments.length + 1}`,
+        issueId: id,
+        body,
+        user: { id: "app-viewer-1", name: "Teami App" },
+      };
+      comments.push(comment);
+      return { ...comment };
     },
   };
 }
@@ -998,7 +1764,7 @@ function writePausedResumeArtifact(repoRoot, {
     pause_packet: {},
     resume,
   };
-  const runDir = path.join(repoRoot, ".teami", "runs");
+  const runDir = path.join(repoRoot, "domains", "domain-1", "runs");
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(path.join(runDir, `${runId}.json`), `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
 }
@@ -1204,12 +1970,14 @@ function configWithReadyStatus() {
         labels: {
           discovery: "Discovery",
           needs_principal: "Needs Principal",
+          human_review: "human-review",
         },
         statuses: {
           todo: { name: "Todo", type: "unstarted" },
           in_progress: { name: "In Progress", type: "started" },
           in_review: { name: "In Review", type: "started" },
-          blocked: { name: "Blocked", type: "started" },
+          human_review: { name: "Principal Review", type: "started" },
+          needs_principal: { name: "Principal Escalation", type: "started" },
           done: { name: "Done", type: "completed" },
         },
       },
@@ -1222,26 +1990,6 @@ function configWithReadyStatusAndWorkTypeLabels() {
   config.linear.issue.labels.work_type_code = "Code";
   config.linear.issue.labels.work_type_non_code = "Non-code";
   return config;
-}
-
-function configWithNeedsPrincipalAndReviewBound(maxAutonomousFixRounds) {
-  return {
-    linear: {
-      issue: {
-        labels: {
-          needs_principal: "Needs Principal",
-        },
-        statuses: {
-          blocked: { name: "Blocked", type: "started" },
-        },
-      },
-    },
-    workflows: {
-      review: {
-        max_autonomous_fix_rounds: maxAutonomousFixRounds,
-      },
-    },
-  };
 }
 
 function deferred() {
@@ -1257,11 +2005,13 @@ function deferred() {
 function linearCacheFixture() {
   return {
     teamId: "team-1",
+    app_identity_id: "app-viewer-1",
     issueStatuses: {
       todo: "state-todo",
       in_progress: "state-in-progress",
       in_review: "state-in-review",
-      blocked: "state-blocked",
+      human_review: "state-human-review",
+      needs_principal: "state-needs-principal",
       done: "state-done",
     },
     projectStatuses: {
@@ -1270,6 +2020,7 @@ function linearCacheFixture() {
     issueLabels: {
       Discovery: "label-discovery",
       "Needs Principal": "label-needs-principal",
+      "human-review": "label-human-review",
     },
   };
 }
@@ -1320,13 +2071,15 @@ function recordingTraceSink() {
 
 function writeDomainCache(repoRoot) {
   writeLinearCache(
-    path.join(repoRoot, ".teami", "domains", "domain-1", "linear.json"),
+    path.join(repoRoot, "domains", "domain-1", "linear.json"),
     linearCacheFixture(),
   );
 }
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-ready-poll-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-ready-poll-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 async function flushAsync() {
