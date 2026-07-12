@@ -1,6 +1,7 @@
 import path from "node:path";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 
 import {
   SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION,
@@ -45,6 +46,7 @@ export const JUDGE_OUTPUT_SCHEMA_PATH = path.resolve(
 );
 
 const FORBIDDEN_AUTOMATION_FLAGS = new Set(["--last", "--continue"]);
+const RUNTIME_PROMPT_TEMP_PREFIX = "teami-runtime-prompt-";
 
 // The runtime roles the orchestrator can resolve a runtime for come from the
 // decomposition workflow definition: the invocable subagent roles plus the
@@ -58,6 +60,16 @@ export function deriveResolvableRuntimeRoles(definition = getWorkflowDefinition(
 
 export const RESOLVABLE_RUNTIME_ROLES = deriveResolvableRuntimeRoles();
 
+// Engine-owned codex sandbox modes per workflow role. The execution WORKER is
+// the write-capable role by definition: it edits and validates inside the
+// per-run contained clone (which holds no credentials — pushes stay
+// engine-mediated). Every other role stays read-only, ALWAYS explicitly: an
+// absent -s flag would inherit the adopter's codex config default, which is
+// nondeterministic across machines.
+const CODEX_SANDBOX_BY_WORKFLOW_ROLE = Object.freeze({
+  execution: Object.freeze({ worker: "workspace-write" }),
+});
+
 export function resolveRoleRuntimeAssignments(config, workflowType) {
   if (typeof workflowType !== "string" || workflowType.trim() === "") {
     throw new Error("resolveRoleRuntimeAssignments_workflow_type_required");
@@ -68,7 +80,12 @@ export function resolveRoleRuntimeAssignments(config, workflowType) {
   const adapters = runtimeConfig.adapters || {};
   const defaultRuntime = runtimeConfig.default_runtime || "codex";
   const engineOwnedEvaluatorRoles = engineOwnedEvaluatorRoleSet(definition);
-  const resolvableRoles = deriveResolvableRuntimeRoles(definition);
+  // Config is the source of truth for the role set: the definition names the
+  // engine-required roles, and any additional role the adopter declares in
+  // config resolves too (and thereby becomes seatable for one-off subagents).
+  const resolvableRoles = [
+    ...new Set([...deriveResolvableRuntimeRoles(definition), ...Object.keys(roles)]),
+  ];
 
   const assignments = {};
   for (const role of resolvableRoles) {
@@ -80,9 +97,22 @@ export function resolveRoleRuntimeAssignments(config, workflowType) {
       roleConfig,
       adapters,
       defaultRuntime,
+      workflowType,
     });
   }
   return assignments;
+}
+
+// The runtime roles an orchestrator may seat an improvised (one-off) subagent
+// on: every role with a resolved runtime assignment for the workflow, minus the
+// workflow's driver (the orchestrator never spawns itself). Derived from CONFIG
+// so an adopter-declared role becomes seatable with no code change; tool POWER
+// stays fenced per-role by normalizeRoleAssignment regardless.
+export function resolveInvocableRuntimeRoles(config, definition) {
+  const workflowType = definition?.workflow_type;
+  const driver = typeof definition?.driver === "string" ? definition.driver : null;
+  return Object.keys(resolveRoleRuntimeAssignments(config, workflowType))
+    .filter((role) => role !== driver);
 }
 
 // Judge runtime assignment: the quality model judge reuses the
@@ -238,6 +268,7 @@ export function buildCodexSessionStartCommand({
   repoRoot = process.cwd(),
 } = {}) {
   assertRunnerOnlyToolPolicy(assignment);
+  assertRuntimeCommandPrompt(prompt, promptPath);
   if (promptPath) {
     throw new Error("Codex exec prompt files are not supported by the installed CLI; pass prompt text or stdin.");
   }
@@ -245,15 +276,21 @@ export function buildCodexSessionStartCommand({
   const generationSchemaPath =
     schemaPath || assignment.generation_schema_path || canonicalSchemaPath;
   const generationSchemaCliPath = resolveCliFilePath(generationSchemaPath, repoRoot);
-  const args = [...cliPrefixArgs(assignment), "exec"];
+  // codex refuses to run in a directory it does not recognize as a trusted git checkout unless
+  // --skip-git-repo-check is passed — an interactive-safety guard that false-fails Teami's
+  // non-interactive calls in the installed-package world (runtime smoke from a plain folder;
+  // decomposition seats wherever the gateway happens to run). Teami pins the codex sandbox
+  // explicitly on every invocation (-s read-only everywhere except the contained execution
+  // worker), so the directory-trust prompt adds nothing on top; skip it.
+  const args = [...cliPrefixArgs(assignment), "exec", "--skip-git-repo-check"];
   args.push(...toolPolicyToFlags({
     runtime: "codex",
     toolPolicy: assignment.tool_policy,
     capability: assignment.capability,
+    sandbox: assignment.sandbox || null,
   }));
   if (assignment.model) args.push("--model", assignment.model);
   args.push("--output-schema", generationSchemaCliPath);
-  args.push("--", prompt);
 
   assertNoForbiddenAutomationShortcut(args);
   return {
@@ -266,6 +303,7 @@ export function buildCodexSessionStartCommand({
     schema_version: SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION,
     validation_method: "runtime_structured_output_plus_local_canonical",
     tool_policy: assignment.tool_policy,
+    stdinInput: prompt,
   };
 }
 
@@ -277,6 +315,8 @@ export function buildClaudeSessionStartCommand({
   repoRoot = process.cwd(),
 } = {}) {
   assertRunnerOnlyToolPolicy(assignment);
+  assertRuntimeCommandPrompt(prompt, promptPath);
+  const promptTransport = claudePromptTransport({ prompt, promptPath });
   const canonicalSchemaPath = assignment.schema_path || DEFAULT_SCHEMA_PATH;
   const generationSchemaPath =
     schemaPath || assignment.generation_schema_path || canonicalSchemaPath;
@@ -288,9 +328,8 @@ export function buildClaudeSessionStartCommand({
       capability: assignment.capability,
     }),
     "-p",
+    promptTransport.arg,
   ];
-  if (promptPath) args.push(`@${promptPath}`);
-  else args.push(prompt);
   if (assignment.model) args.push("--model", assignment.model);
   args.push("--output-format", "json", "--json-schema", readJsonSchemaForCli(generationSchemaPath, repoRoot));
 
@@ -305,6 +344,8 @@ export function buildClaudeSessionStartCommand({
     schema_version: SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION,
     validation_method: "runtime_structured_output_plus_local_canonical",
     tool_policy: assignment.tool_policy,
+    ...(promptTransport.prompt_path ? { prompt_path: promptTransport.prompt_path } : {}),
+    ...(promptTransport.cleanup_paths ? { cleanup_paths: promptTransport.cleanup_paths } : {}),
   };
 }
 
@@ -358,7 +399,7 @@ export function buildWarmRuntimeCommand({
   const canonicalSchemaPath = assignment.schema_path || DEFAULT_SCHEMA_PATH;
   const generationSchemaPath =
     schemaPath || assignment.generation_schema_path || canonicalSchemaPath;
-  const args = warmArgsForRuntime({
+  const commandParts = warmCommandPartsForRuntime({
     assignment,
     sessionId: sessionHandle.id,
     prompt,
@@ -366,6 +407,7 @@ export function buildWarmRuntimeCommand({
     schemaPath: generationSchemaPath,
     repoRoot,
   });
+  const { args } = commandParts;
   assertNoForbiddenAutomationShortcut(args);
   return {
     runtime: assignment.runtime,
@@ -380,6 +422,9 @@ export function buildWarmRuntimeCommand({
         ? "required_resume_plus_local_canonical"
         : "runtime_structured_output_plus_local_canonical",
     tool_policy: assignment.tool_policy,
+    ...(commandParts.stdinInput !== undefined ? { stdinInput: commandParts.stdinInput } : {}),
+    ...(commandParts.prompt_path ? { prompt_path: commandParts.prompt_path } : {}),
+    ...(commandParts.cleanup_paths ? { cleanup_paths: commandParts.cleanup_paths } : {}),
   };
 }
 
@@ -430,27 +475,50 @@ export function runtimeAssignmentSmokeIdentity(assignment, runtimeVersion = null
   };
 }
 
-function warmArgsForRuntime({ assignment, sessionId, prompt, promptPath, schemaPath, repoRoot }) {
+function warmCommandPartsForRuntime({ assignment, sessionId, prompt, promptPath, schemaPath, repoRoot }) {
   if (assignment.runtime === "codex") {
     if (promptPath) {
       throw new Error("Codex resume prompt files are not supported by the installed CLI; pass prompt text or stdin.");
     }
-    const args = [...cliPrefixArgs(assignment), "exec", "resume"];
+    // Same directory-trust skip as the session_start builder above: warm resumes run in the
+    // same Teami-chosen cwd and carry the same explicitly pinned scoping.
+    const args = [...cliPrefixArgs(assignment), "exec", "resume", "--skip-git-repo-check"];
     if (assignment.model) args.push("--model", assignment.model);
-    args.push("--", sessionId, prompt);
-    return args;
+    args.push("--", sessionId);
+    return { args, stdinInput: prompt };
   }
 
   if (assignment.runtime === "claude") {
+    const promptTransport = claudePromptTransport({ prompt, promptPath });
     const args = [...cliPrefixArgs(assignment), "--resume", sessionId, "-p"];
-    if (promptPath) args.push(`@${promptPath}`);
-    else args.push(prompt);
+    args.push(promptTransport.arg);
     if (assignment.model) args.push("--model", assignment.model);
     args.push("--output-format", "json", "--json-schema", readJsonSchemaForCli(schemaPath, repoRoot));
-    return args;
+    return {
+      args,
+      ...(promptTransport.prompt_path ? { prompt_path: promptTransport.prompt_path } : {}),
+      ...(promptTransport.cleanup_paths ? { cleanup_paths: promptTransport.cleanup_paths } : {}),
+    };
   }
 
   throw new Error(`Unsupported decomposition runtime: ${assignment.runtime}`);
+}
+
+function claudePromptTransport({ prompt, promptPath } = {}) {
+  if (promptPath) return { arg: `@${promptPath}` };
+  const { promptPath: createdPromptPath, cleanupPaths } = writeRuntimePromptTempFile(prompt);
+  return {
+    arg: `@${createdPromptPath}`,
+    prompt_path: createdPromptPath,
+    cleanup_paths: cleanupPaths,
+  };
+}
+
+function writeRuntimePromptTempFile(prompt) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), RUNTIME_PROMPT_TEMP_PREFIX));
+  const promptPath = path.join(tempDir, "prompt.md");
+  fs.writeFileSync(promptPath, prompt, "utf8");
+  return { promptPath, cleanupPaths: [tempDir] };
 }
 
 function assertRunnerOnlyToolPolicy(assignment) {
@@ -459,11 +527,14 @@ function assertRunnerOnlyToolPolicy(assignment) {
   }
 }
 
-export function toolPolicyToFlags({ runtime, toolPolicy, capability } = {}) {
+export function toolPolicyToFlags({ runtime, toolPolicy, capability, sandbox = null } = {}) {
   void toolPolicy;
   if (capability) return [];
   if (runtime === "claude") return ["--allowedTools", ""];
-  if (runtime === "codex") return ["-s", "read-only"];
+  // Always explicit for codex: an omitted -s would inherit the adopter's own
+  // codex config default. `sandbox` is the assignment's engine-owned mode
+  // (execution worker = workspace-write inside the contained clone).
+  if (runtime === "codex") return ["-s", sandbox === "workspace-write" ? "workspace-write" : "read-only"];
   throw new Error(`Unsupported decomposition runtime: ${runtime}`);
 }
 
@@ -665,12 +736,16 @@ function findJsonObjectEnd(text, start) {
   return -1;
 }
 
-function normalizeRoleAssignment({ role, roleConfig = {}, adapters, defaultRuntime }) {
+function normalizeRoleAssignment({ role, roleConfig = {}, adapters, defaultRuntime, workflowType = null }) {
   const runtime = roleConfig.runtime || defaultRuntime;
   const adapter = adapters[runtime] || {};
+  // Engine-owned containment mode, never adopter config (machinery, not policy).
+  // Only present when a role has one, so every other assignment keeps its shape.
+  const sandboxMode = (workflowType && CODEX_SANDBOX_BY_WORKFLOW_ROLE[workflowType]?.[role]) || null;
   return {
     role,
     runtime,
+    ...(sandboxMode ? { sandbox: sandboxMode } : {}),
     model: roleConfig.model || adapter.model || null,
     command: roleConfig.command || adapter.command || runtime,
     cli_args_prefix: roleConfig.cli_args_prefix || adapter.cli_args_prefix || [],

@@ -22,15 +22,18 @@ function freshRepo() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "af-home-state-"));
 }
 
-// Write a valid config at the default config path under the scratch repo (config.example.json is
-// the production default and validates via module-root fallback for accepted runtime roles).
+function freshHome() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "af-home-state-home-"));
+}
+
 function writeValidConfig(repoRoot) {
   const target = path.join(repoRoot, "execution", "integrations", "linear", "config.example.json");
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(exampleConfigPath, target);
+  return target;
 }
 
-function writeActiveRegistry(repoRoot) {
+function writeActiveRegistry(home) {
   const registry = emptyDomainRegistry();
   registry.domains.push(
     makeDomainRecord({
@@ -44,11 +47,11 @@ function writeActiveRegistry(repoRoot) {
       teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ repoRoot }, registry);
+  writeDomainRegistry({ home }, registry);
 }
 
-function writeGatewayLock(repoRoot, lock) {
-  const lockPath = path.join(repoRoot, ".teami", "gateway.lock");
+function writeGatewayLock(home, lock) {
+  const lockPath = path.join(home, "gateway.lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(lockPath, `${JSON.stringify(lock)}\n`, "utf8");
 }
@@ -59,115 +62,140 @@ function cleanup(repoRoot) {
 
 test("uninitialized: a fresh checkout with no config and no registry", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
+  const previous = process.env.TEAMI_LINEAR_CONFIG;
   try {
-    const result = homeStateProbe({ repoRoot });
+    process.env.TEAMI_LINEAR_CONFIG = path.join(repoRoot, "missing-config.json");
+    const result = homeStateProbe({ repoRoot, home });
     assert.equal(result.state, HOME_STATE.UNINITIALIZED);
     assert.equal(result.evidence.hasConfig, false);
   } finally {
+    if (previous === undefined) delete process.env.TEAMI_LINEAR_CONFIG;
+    else process.env.TEAMI_LINEAR_CONFIG = previous;
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("uninitialized: config present but the domain registry has not been written", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    const result = homeStateProbe({ repoRoot });
+    const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.UNINITIALIZED);
     assert.equal(result.evidence.hasConfig, true);
   } finally {
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("uninitialized: registry exists but has no active domain", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    writeDomainRegistry({ repoRoot }, emptyDomainRegistry());
-    const result = homeStateProbe({ repoRoot });
+    writeDomainRegistry({ home }, emptyDomainRegistry());
+    const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.UNINITIALIZED);
     assert.equal(result.evidence.activeDomainId, null);
   } finally {
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("degraded: a present-but-unreadable config", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
+  const previous = process.env.TEAMI_LINEAR_CONFIG;
   try {
     const target = path.join(repoRoot, "execution", "integrations", "linear", "config.example.json");
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, "{ not valid json", "utf8");
-    const result = homeStateProbe({ repoRoot });
+    process.env.TEAMI_LINEAR_CONFIG = target;
+    const result = homeStateProbe({ repoRoot, home });
     assert.equal(result.state, HOME_STATE.DEGRADED);
   } finally {
+    if (previous === undefined) delete process.env.TEAMI_LINEAR_CONFIG;
+    else process.env.TEAMI_LINEAR_CONFIG = previous;
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("degraded: a present-but-corrupt domain registry", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    const registryPath = path.join(repoRoot, ".teami", "domains.json");
+    const registryPath = path.join(home, "domains.json");
     fs.mkdirSync(path.dirname(registryPath), { recursive: true });
     fs.writeFileSync(registryPath, "{ corrupt", "utf8");
-    const result = homeStateProbe({ repoRoot });
+    const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.DEGRADED);
   } finally {
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("idle: active domain, no gateway lock", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    writeActiveRegistry(repoRoot);
-    const result = homeStateProbe({ repoRoot });
+    writeActiveRegistry(home);
+    const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.IDLE);
     assert.equal(result.evidence.activeDomainId, "main");
     assert.equal(result.evidence.lockLive, false);
   } finally {
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("idle: active domain with a stale (invalid-pid) gateway lock", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    writeActiveRegistry(repoRoot);
-    writeGatewayLock(repoRoot, { pid: 0, token: "x", created_at: new Date().toISOString() });
-    const result = homeStateProbe({ repoRoot });
+    writeActiveRegistry(home);
+    writeGatewayLock(home, { pid: 0, token: "x", created_at: new Date().toISOString() });
+    const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.IDLE);
   } finally {
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("listening: active domain with a live gateway lock", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    writeActiveRegistry(repoRoot);
+    writeActiveRegistry(home);
     // The current test process is alive, so its pid makes the lock live.
-    writeGatewayLock(repoRoot, { pid: process.pid, token: "x", created_at: new Date().toISOString() });
-    const result = homeStateProbe({ repoRoot });
+    writeGatewayLock(home, { pid: process.pid, token: "x", created_at: new Date().toISOString() });
+    const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.LISTENING);
     assert.equal(result.evidence.lockLive, true);
   } finally {
     cleanup(repoRoot);
+    cleanup(home);
   }
 });
 
 test("the probe is strictly read-only: it makes no filesystem writes", () => {
   const repoRoot = freshRepo();
+  const home = freshHome();
   // A fully-set-up fixture so the probe exercises its complete read path (config + registry + lock).
   writeValidConfig(repoRoot);
-  writeActiveRegistry(repoRoot);
-  writeGatewayLock(repoRoot, { pid: process.pid, token: "x", created_at: new Date().toISOString() });
+  writeActiveRegistry(home);
+  writeGatewayLock(home, { pid: process.pid, token: "x", created_at: new Date().toISOString() });
 
   const guarded = ["writeFileSync", "mkdirSync", "openSync", "rmSync", "renameSync", "appendFileSync", "copyFileSync"];
   const originals = {};
@@ -178,10 +206,11 @@ test("the probe is strictly read-only: it makes no filesystem writes", () => {
     };
   }
   try {
-    const result = homeStateProbe({ repoRoot });
+    const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.LISTENING);
   } finally {
     for (const name of guarded) fs[name] = originals[name];
     cleanup(repoRoot);
+    cleanup(home);
   }
 });

@@ -7,26 +7,35 @@ import {
   validateDomainRegistry,
 } from "../domain-registry.mjs";
 import { buildDomainContext } from "../domain-resolver.mjs";
+import { doctorCheck } from "../doctor-check.mjs";
 import {
   findOrCreateIssueLabel,
+  findOrCreateIssueLabelGroup,
   findOrCreateProjectLabel,
-  findOrCreateProjectTemplate,
   findOrCreateTeam,
   resolveProjectStatusMappings,
 } from "./shape-resolver.mjs";
 import {
+  WORK_TYPE_LABEL_GROUP,
+  issueLabelMetadata,
+  projectLabelMetadata,
+} from "./label-metadata.mjs";
+import {
   configWithLinearTeam,
   domainNameMatchesRegistryDomain,
   equalsFolded,
-  issueLabelNames,
+  issueLabelRoles,
   knownRegistryWorkspaces,
   normalizeDeclaredWorkspace,
   normalizeLinearWorkspace,
   normalizedErrors,
-  projectLabelNames,
+  projectLabelRoles,
   workspaceLabel,
   workspaceMismatchError,
 } from "./matching-utils.mjs";
+
+const PROJECT_NEEDS_PRINCIPAL_ROLE = "needs_principal";
+const PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR_CODE = "PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR";
 
 export async function resolveLinearSetupWorkspace({ client, workspace = null } = {}) {
   const resolved = normalizeLinearWorkspace(workspace || (await client.getOrganization?.()) || {});
@@ -96,7 +105,17 @@ export function isWorkspaceMismatchError(error) {
 }
 
 export function setupIncompleteDomainForName(registry = emptyDomainRegistry(), domainName = "") {
-  if (typeof domainName !== "string" || domainName.trim() === "") return null;
+  const matches = setupDomainsForName(registry, domainName);
+  return matches.find((domain) => domain.status === "setup_incomplete") || null;
+}
+
+export function setupCompleteDomainForName(registry = emptyDomainRegistry(), domainName = "") {
+  const matches = setupDomainsForName(registry, domainName);
+  return matches.find((domain) => domain.status !== "setup_incomplete") || null;
+}
+
+function setupDomainsForName(registry = emptyDomainRegistry(), domainName = "") {
+  if (typeof domainName !== "string" || domainName.trim() === "") return [];
   const trimmed = domainName.trim();
   const slug = (() => {
     try {
@@ -105,10 +124,9 @@ export function setupIncompleteDomainForName(registry = emptyDomainRegistry(), d
       return null;
     }
   })();
-  const matches = (registry?.domains || []).filter((domain) =>
+  return (registry?.domains || []).filter((domain) =>
     domainNameMatchesRegistryDomain(domain, trimmed, slug),
   );
-  return matches.find((domain) => domain.status === "setup_incomplete") || null;
 }
 
 export function declaredWorkspaceFromResumeDomain(domain = null) {
@@ -134,8 +152,10 @@ export async function setupLinearDomain({
   promoteCredential = async () => {},
   workspace = null,
   declaredWorkspace = null,
+  resumeDomain = null,
   onPreview = () => {},
   behaviorRepoId,
+  ensureNeedsPrincipalProjectStatus = null,
 } = {}) {
   if (!client) throw new Error("Linear client is required for domain setup.");
   if (!config) throw new Error("Linear config is required for domain setup.");
@@ -145,11 +165,12 @@ export async function setupLinearDomain({
   const currentRegistry = registry || emptyDomainRegistry();
   validateDomainRegistry(currentRegistry);
   const trimmedDomainName = domainName.trim();
-  const resumeDomain = setupIncompleteDomainForName(currentRegistry, trimmedDomainName);
-  const adopterProvidedName = resumeDomain?.adopter_provided_name || trimmedDomainName;
-  const domainId = resumeDomain?.id || mintDomainId(trimmedDomainName, currentRegistry.domains.map((domain) => domain.id));
+  const matchedResumeDomain = resumeDomain || setupIncompleteDomainForName(currentRegistry, trimmedDomainName);
+  const completeResume = Boolean(matchedResumeDomain && matchedResumeDomain.status !== "setup_incomplete");
+  const adopterProvidedName = matchedResumeDomain?.adopter_provided_name || trimmedDomainName;
+  const domainId = matchedResumeDomain?.id || mintDomainId(trimmedDomainName, currentRegistry.domains.map((domain) => domain.id));
   const organization = await resolveLinearSetupWorkspace({ client, workspace });
-  const effectiveDeclaredWorkspace = declaredWorkspace || declaredWorkspaceFromResumeDomain(resumeDomain);
+  const effectiveDeclaredWorkspace = declaredWorkspace || declaredWorkspaceFromResumeDomain(matchedResumeDomain);
   verifyDeclaredWorkspace({
     registry: currentRegistry,
     declaredWorkspace: effectiveDeclaredWorkspace,
@@ -158,7 +179,7 @@ export async function setupLinearDomain({
   const workspaceId = organization.id;
   const workspaceName = organization.name;
   let latestRegistry = currentRegistry;
-  let latestSetupDomain = makeSetupIncompleteDomain({
+  let latestSetupDomain = matchedResumeDomain || makeSetupIncompleteDomain({
     domainId,
     domainName: adopterProvidedName,
     workspaceId,
@@ -187,6 +208,14 @@ export async function setupLinearDomain({
   }
 
   async function failWithSetupIncomplete(cause, originalError, state = {}) {
+    if (completeResume) {
+      throw setupIncompleteError({
+        cause,
+        domain: matchedResumeDomain,
+        registry: latestRegistry,
+        originalError,
+      });
+    }
     const fallbackDomain = makeSetupIncompleteDomain({
       domainId,
       domainName: adopterProvidedName,
@@ -221,24 +250,31 @@ export async function setupLinearDomain({
     });
   }
 
-  try {
-    await persistSetupIncomplete();
-  } catch (error) {
-    throw setupIncompleteError({
-      cause: "registry_write_failed",
-      domain: latestSetupDomain,
-      registry: latestRegistry,
-      originalError: error,
-    });
+  if (!completeResume) {
+    try {
+      await persistSetupIncomplete();
+    } catch (error) {
+      throw setupIncompleteError({
+        cause: "registry_write_failed",
+        domain: latestSetupDomain,
+        registry: latestRegistry,
+        originalError: error,
+      });
+    }
   }
 
   const teamPlan = await resolveSetupTeamPlan({
     client,
     requestedName: trimmedDomainName,
     domainId,
-    resumeDomain,
+    resumeDomain: matchedResumeDomain,
     cache,
   });
+  if (completeResume && !teamPlan.team) {
+    throw new Error(
+      `complete_domain_team_missing: domain ${domainId} records Linear team ${matchedResumeDomain.linear?.team_id || "unknown"}, but that team was not found in workspace ${workspaceLabel(organization)}.`,
+    );
+  }
 
   onPreview(
     teamPlan.mode === "adopt"
@@ -271,21 +307,24 @@ export async function setupLinearDomain({
   }
 
   const configForDomain = configWithLinearTeam(config, team);
-  try {
-    await persistSetupIncomplete({ team });
-  } catch (error) {
-    throw setupIncompleteError({
-      cause: "registry_write_failed",
-      domain: makeSetupIncompleteDomain({ domainId, domainName: adopterProvidedName, workspaceId, workspaceName, team }),
-      registry: latestRegistry,
-      originalError: error,
-    });
+  if (!completeResume) {
+    try {
+      await persistSetupIncomplete({ team });
+    } catch (error) {
+      throw setupIncompleteError({
+        cause: "registry_write_failed",
+        domain: makeSetupIncompleteDomain({ domainId, domainName: adopterProvidedName, workspaceId, workspaceName, team }),
+        registry: latestRegistry,
+        originalError: error,
+      });
+    }
   }
   let initializedCache = null;
   const initResult = await initLinear({
     client,
     config: configForDomain,
     cache: { ...(cache || {}), teamId: team.id },
+    ensureNeedsPrincipalProjectStatus,
     writeCache: (nextCache) => {
       initializedCache = nextCache;
     },
@@ -308,7 +347,7 @@ export async function setupLinearDomain({
       await failWithSetupIncomplete("linear_webhook_registration_failed", error, { team });
     }
     try {
-      await persistSetupIncomplete({ team, webhook: webhookRegistration.webhook });
+      if (!completeResume) await persistSetupIncomplete({ team, webhook: webhookRegistration.webhook });
     } catch (error) {
       throw setupIncompleteError({
         cause: "registry_write_failed",
@@ -368,7 +407,7 @@ export async function setupLinearDomain({
   };
   const activeDomain = makeDomainRecord({
     domainId,
-    status: "active",
+    status: completeResume ? matchedResumeDomain.status : "active",
     adopterProvidedName,
     workspaceId,
     workspaceName,
@@ -376,7 +415,10 @@ export async function setupLinearDomain({
     teamKey: team.key,
     teamName: team.name,
     teamNameLastSeenAt: new Date().toISOString(),
-    webhookId: webhookRegistration.webhook?.id || null,
+    webhookId: webhookRegistration.webhook?.id || matchedResumeDomain?.linear?.webhook_id || null,
+    resources: matchedResumeDomain?.resources || [],
+    policyProfile: matchedResumeDomain?.policy_profile || "default",
+    policyOverlayRef: matchedResumeDomain?.policy_overlay_ref || null,
   });
   const nextRegistry = upsertDomainRecord(currentRegistry, activeDomain);
   const context = buildDomainContext({
@@ -410,6 +452,14 @@ export async function setupLinearDomain({
   try {
     await writeRegistry(nextRegistry, activeDomain, context);
   } catch (error) {
+    if (completeResume) {
+      throw setupIncompleteError({
+        cause: "registry_write_failed",
+        domain: activeDomain,
+        registry: nextRegistry,
+        originalError: error,
+      });
+    }
     try {
       await persistSetupIncomplete({
         setupIncompleteCause: "registry_write_failed",
@@ -695,31 +745,50 @@ export function repairPathForSetupIncompleteCause(cause) {
   return "Run npm run doctor for repair guidance.";
 }
 
-export async function initLinear({ client, config, cache = null, writeCache } = {}) {
-  const summary = { created: [], found: [], updated: [], failed: [] };
-  await client.verifyAuth?.();
+export async function initLinear({
+  client,
+  config,
+  cache = null,
+  writeCache,
+  ensureNeedsPrincipalProjectStatus = null,
+} = {}) {
+  const summary = { created: [], found: [], updated: [], failed: [], notes: [], doctorChecks: [] };
+  const appIdentity = await resolveSetupAppIdentity(client);
 
   const configForTeam = cache?.teamId
     ? configWithLinearTeam(config, await cachedLinearTeam(client, cache.teamId))
     : config;
   const team = await findOrCreateTeam(client, configForTeam, cache, summary);
   const projectLabels = {};
-  for (const labelName of projectLabelNames(config)) {
-    const label = await findOrCreateProjectLabel(client, labelName, summary);
-    projectLabels[labelName] = label.id;
+  for (const { role, name } of projectLabelRoles(config)) {
+    const label = await findOrCreateProjectLabel(client, name, summary, projectLabelMetadata(role));
+    projectLabels[name] = label.id;
   }
+
+  const issueRoles = issueLabelRoles(config);
+  const workTypeGroup = issueRoles.some(
+    ({ role }) => issueLabelMetadata(role)?.groupKey === WORK_TYPE_LABEL_GROUP.key,
+  )
+    ? await findOrCreateIssueLabelGroup(client, WORK_TYPE_LABEL_GROUP, team.id, summary)
+    : null;
 
   const issueLabels = {};
-  for (const labelName of issueLabelNames(config)) {
-    const label = await findOrCreateIssueLabel(client, labelName, team.id, summary);
-    issueLabels[labelName] = label.id;
+  for (const { role, name } of issueRoles) {
+    const metadata = issueLabelMetadata(role);
+    const label = await findOrCreateIssueLabel(client, name, team.id, summary, {
+      description: metadata?.description,
+      color: metadata?.color,
+      ...(metadata?.groupKey === WORK_TYPE_LABEL_GROUP.key ? { parentId: workTypeGroup.id } : {}),
+    });
+    issueLabels[name] = label.id;
   }
 
-  const projectStatuses = await resolveProjectStatusMappings({
+  const projectStatuses = await resolveProjectStatusMappingsWithRepair({
     client,
     config,
     cache,
     failClosed: true,
+    ensureNeedsPrincipalProjectStatus,
   });
   const workflowStates = await client.listWorkflowStates?.(team.id);
   if (!workflowStates) {
@@ -729,16 +798,23 @@ export async function initLinear({ client, config, cache = null, writeCache } = 
   for (const role of ISSUE_STATUS_ROLES) {
     const statusConfig = config.linear.issue.statuses[role];
     if (!statusConfig) throw new Error(`Linear issue status role ${role} is not configured.`);
-    const status = await findOrCreateWorkflowState(client, statusConfig, team.id, workflowStates, summary);
+    const status = await findOrCreateWorkflowState(client, {
+      role,
+      statusConfig,
+      statusConfigs: config.linear.issue.statuses,
+      teamId: team.id,
+      states: workflowStates,
+      summary,
+      cache,
+    });
     issueStatuses[role] = status.id;
   }
 
-  const template = await findOrCreateProjectTemplate(client, config, team.id, summary);
+  await guardLegacyCutoverArtifacts({ client, config, cache, teamId: team.id, summary });
 
   const nextCache = {
     teamId: team.id,
     teamKey: team.key,
-    projectTemplateId: template.id,
     projectStatuses: Object.fromEntries(
       Object.entries(projectStatuses).map(([key, value]) => [key, value.id]),
     ),
@@ -748,40 +824,329 @@ export async function initLinear({ client, config, cache = null, writeCache } = 
     issueStatuses,
     projectLabels,
     issueLabels,
+    app_identity_id: appIdentity.id,
+    app_identity_name: appIdentity.name,
   };
 
   await writeCache?.(nextCache);
   return { ok: summary.failed.length === 0, summary, cache: nextCache };
 }
 
-const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "blocked", "done"]);
-const DEFAULT_WORKFLOW_STATE_COLOR = "#f2c94c";
+async function resolveProjectStatusMappingsWithRepair({
+  client,
+  config,
+  cache,
+  failClosed,
+  ensureNeedsPrincipalProjectStatus,
+}) {
+  try {
+    return await resolveProjectStatusMappings({ client, config, cache, failClosed });
+  } catch (error) {
+    if (!isNeedsPrincipalProjectStatusRepairError(error) || typeof ensureNeedsPrincipalProjectStatus !== "function") {
+      throw error;
+    }
+    const status = await ensureNeedsPrincipalProjectStatus({ client, config, cache, error });
+    return await resolveProjectStatusMappings({
+      client,
+      config,
+      cache: cacheWithNeedsPrincipalProjectStatus({ cache, status }),
+      failClosed,
+    });
+  }
+}
 
-async function findOrCreateWorkflowState(client, { name, type }, teamId, states, summary) {
+function cacheWithNeedsPrincipalProjectStatus({ cache = null, status = null } = {}) {
+  if (!status?.id) return cache;
+  return {
+    ...(cache || {}),
+    projectStatuses: {
+      ...(cache?.projectStatuses || {}),
+      [PROJECT_NEEDS_PRINCIPAL_ROLE]: status.id,
+    },
+    projectStatusTypes: {
+      ...(cache?.projectStatusTypes || {}),
+      [PROJECT_NEEDS_PRINCIPAL_ROLE]: status.type,
+    },
+  };
+}
+
+function isNeedsPrincipalProjectStatusRepairError(error) {
+  return error?.code === PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR_CODE;
+}
+
+async function resolveSetupAppIdentity(client) {
+  if (typeof client?.verifyAuth !== "function") {
+    throw new Error("Linear setup requires app-authored OAuth verification.");
+  }
+  const result = await client.verifyAuth();
+  if (typeof result?.viewerId !== "string" || result.viewerId.trim() === "") {
+    throw new Error("Linear setup could not resolve the app viewer id.");
+  }
+  return {
+    id: result.viewerId.trim(),
+    name: typeof result.viewerName === "string" && result.viewerName.trim() !== ""
+      ? result.viewerName.trim()
+      : null,
+  };
+}
+
+const ISSUE_STATUS_ROLES = Object.freeze(["backlog", "todo", "in_progress", "in_review", "human_review", "needs_principal", "done"]);
+const DEFAULT_WORKFLOW_STATE_COLOR = "#f2c94c";
+const PRINCIPAL_ESCALATION_DESCRIPTION =
+  "An agent hit a decision only a human can make. Read the latest comment and move the issue when you've answered.";
+const PRINCIPAL_ESCALATION_COLOR = "#F2994A";
+const LEGACY_HUMAN_REVIEW_WORKFLOW_STATE_NAME = "Human Review";
+const WORKFLOW_STATE_POSITION_INCREMENT = 0.01;
+
+function issueStatusMetadata(role) {
+  if (role !== "needs_principal") return null;
+  return {
+    color: PRINCIPAL_ESCALATION_COLOR,
+    description: PRINCIPAL_ESCALATION_DESCRIPTION,
+  };
+}
+
+async function findOrCreateWorkflowState(
+  client,
+  { role, statusConfig, statusConfigs, teamId, states, summary, cache },
+) {
+  const { name, type } = statusConfig;
+  const cachedId = cache?.issueStatuses?.[role];
+  if (cachedId) {
+    const cachedMatches = states.filter((state) => state.id === cachedId);
+    if (cachedMatches.length === 0) {
+      throw new Error(`Cached Linear issue workflow state ${role}=${cachedId} no longer exists.`);
+    }
+    if (cachedMatches.length > 1) {
+      throw new Error(`Cached Linear issue workflow state ${role}=${cachedId} is ambiguous: found ${cachedMatches.length}.`);
+    }
+    return reconcileWorkflowState(client, role, cachedMatches[0], statusConfig, states, summary);
+  }
+
+  if (role === "human_review") {
+    const configuredMatches = states.filter((state) => state.name === name);
+    const legacyMatches = states.filter((state) => state.name === LEGACY_HUMAN_REVIEW_WORKFLOW_STATE_NAME);
+    if (configuredMatches.length > 0 && legacyMatches.length > 0) {
+      throw new Error(
+        `Cannot safely resolve Linear issue workflow state ${name}: both ${name} and ${LEGACY_HUMAN_REVIEW_WORKFLOW_STATE_NAME} exist without a cached id.`,
+      );
+    }
+    if (legacyMatches.length > 1) {
+      throw new Error(`Multiple Linear issue workflow states found named ${LEGACY_HUMAN_REVIEW_WORKFLOW_STATE_NAME}.`);
+    }
+    if (legacyMatches.length === 1) {
+      return reconcileWorkflowState(client, role, legacyMatches[0], statusConfig, states, summary);
+    }
+  }
+
   const nameMatches = states.filter((state) => state.name === name);
   if (nameMatches.length > 1) {
     throw new Error(`Multiple Linear issue workflow states found named ${name}.`);
   }
   if (nameMatches.length === 1) {
-    const state = nameMatches[0];
-    if (state.type !== type) {
-      throw new Error(`Linear issue workflow state ${name} has type ${state.type}, expected ${type}.`);
-    }
-    summary.found.push(`issue-status:${name}`);
-    return state;
+    return reconcileWorkflowState(client, role, nameMatches[0], statusConfig, states, summary);
   }
 
-  const state = await client.createWorkflowState({
+  const metadata = issueStatusMetadata(role);
+  const input = {
     name,
     type,
     teamId,
-    color: DEFAULT_WORKFLOW_STATE_COLOR,
-  });
+    color: metadata?.color || DEFAULT_WORKFLOW_STATE_COLOR,
+    ...(metadata?.description ? { description: metadata.description } : {}),
+  };
+  const position = workflowStatePositionAfterInProgress(states, statusConfigs);
+  if (role === "needs_principal" && position !== null) {
+    input.position = position;
+  }
+  const state = await client.createWorkflowState(input);
   if (!states.some((candidate) => candidate.id === state.id)) {
     states.push(state);
   }
   summary.created.push(`issue-status:${name}`);
+  if (role === "needs_principal" && position === null) {
+    summary.notes.push("Principal Escalation was created. In Linear, drag it just after In Progress.");
+  }
   return state;
+}
+
+async function reconcileWorkflowState(client, role, state, { name, type }, states, summary) {
+  if (state.type !== type) {
+    throw new Error(`Linear issue workflow state ${state.name} has type ${state.type}, expected ${type}.`);
+  }
+  const metadata = issueStatusMetadata(role);
+  const patch = {};
+  if (role === "human_review" && state.name !== name) {
+    const duplicates = states.filter((candidate) => candidate.id !== state.id && candidate.name === name);
+    if (duplicates.length > 0) {
+      throw new Error(
+        `Cannot safely rename Linear issue workflow state ${state.name} to ${name}: ${name} already exists.`,
+      );
+    }
+    patch.name = name;
+  }
+  if (metadata && descriptionDiffers(state.description, metadata.description)) {
+    patch.description = metadata.description;
+  }
+  if (Object.keys(patch).length === 0) {
+    summary.found.push(`issue-status:${name}`);
+    return state;
+  }
+  if (typeof client.updateWorkflowState !== "function") {
+    throw new Error(`Cannot reconcile Linear issue workflow state ${state.name}: client cannot update workflow states.`);
+  }
+  const updated = await client.updateWorkflowState(state.id, patch);
+  const index = states.findIndex((candidate) => candidate.id === state.id);
+  if (index >= 0) states[index] = updated;
+  summary.updated.push(`issue-status:${name}`);
+  return updated;
+}
+
+function descriptionDiffers(current, canonical) {
+  if (typeof canonical !== "string" || canonical === "") return false;
+  return (current || "") !== canonical;
+}
+
+function workflowStatePositionAfterInProgress(states, statusConfigs) {
+  const inProgressConfig = statusConfigs?.in_progress;
+  if (!inProgressConfig) return null;
+  const matches = states.filter(
+    (state) => state.name === inProgressConfig.name && state.type === inProgressConfig.type,
+  );
+  if (matches.length !== 1) return null;
+  const position = Number(matches[0].position);
+  if (!Number.isFinite(position)) return null;
+  return position + WORKFLOW_STATE_POSITION_INCREMENT;
+}
+
+async function guardLegacyCutoverArtifacts({ client, config, cache, teamId, summary }) {
+  const artifacts = legacyCutoverArtifacts({ config, cache });
+  if (artifacts.length === 0) return;
+
+  for (const artifact of artifacts) {
+    let occupants = [];
+    try {
+      occupants = await listLegacyArtifactOccupants({ client, teamId, artifact });
+    } catch (error) {
+      pushLegacyGuardWarning(
+        summary,
+        artifact,
+        `Could not check legacy ${artifact.label} before archiving it: ${error.message}. It was left in place.`,
+      );
+      continue;
+    }
+
+    if (occupants.length > 0) {
+      pushLegacyGuardWarning(
+        summary,
+        artifact,
+        `Legacy ${artifact.label} still has issues: ${formatIssueIdentifiers(occupants)}. ${LEGACY_LOOP_COPY}`,
+      );
+      continue;
+    }
+
+    if (artifact.configured) continue;
+
+    try {
+      await artifact.archive(client);
+      summary.updated.push(`archived-legacy:${artifact.kind}:${artifact.name}`);
+    } catch (error) {
+      pushLegacyGuardWarning(
+        summary,
+        artifact,
+        `Legacy ${artifact.label} is empty but Linear refused to archive it: ${error.message}. It was left in place.`,
+      );
+    }
+  }
+}
+
+const LEGACY_LOOP_COPY = "Answer it, move it, remove the old label by hand.";
+
+function legacyCutoverArtifacts({ config, cache }) {
+  const artifacts = [];
+  const blockedStateId = stringOrNull(cache?.issueStatuses?.blocked);
+  if (blockedStateId) {
+    artifacts.push({
+      kind: "issue-status",
+      name: "Blocked",
+      label: "Blocked issue status",
+      id: blockedStateId,
+      configured: ISSUE_STATUS_ROLES.includes("blocked"),
+      issueFilter: { stateId: blockedStateId },
+      archive: (client) => client.archiveWorkflowState(blockedStateId),
+    });
+  }
+
+  const legacyLabel = legacyNeedsPrincipalLabel({ config, cache });
+  if (legacyLabel?.id) {
+    artifacts.push({
+      kind: "issue-label",
+      name: legacyLabel.name,
+      label: `issue label "${legacyLabel.name}"`,
+      id: legacyLabel.id,
+      configured: legacyLabel.configured,
+      issueFilter: { labelId: legacyLabel.id },
+      archive: (client) => client.archiveIssueLabel(legacyLabel.id),
+    });
+  }
+
+  return artifacts;
+}
+
+function legacyNeedsPrincipalLabel({ config, cache }) {
+  const issueLabels = cache?.issueLabels && typeof cache.issueLabels === "object" && !Array.isArray(cache.issueLabels)
+    ? cache.issueLabels
+    : {};
+  const configuredNames = new Set(issueLabelRoles(config).map(({ name }) => name));
+  const staleEntries = Object.entries(issueLabels)
+    .map(([name, id]) => [stringOrNull(name), stringOrNull(id)])
+    .filter(([name, id]) => name && id && !configuredNames.has(name));
+  if (staleEntries.length === 0) return null;
+  if (staleEntries.length > 1) {
+    const names = staleEntries.map(([name]) => name).join(", ");
+    throw new Error(`Cannot derive the legacy Needs Principal label from cache: unconfigured cached labels are ${names}.`);
+  }
+  const [[name, id]] = staleEntries;
+  return {
+    name,
+    id,
+    configured: false,
+  };
+}
+
+async function listLegacyArtifactOccupants({ client, teamId, artifact }) {
+  if (typeof client?.listIssues !== "function") {
+    throw new Error("Linear client cannot list issues.");
+  }
+  return client.listIssues({
+    teamId,
+    ...artifact.issueFilter,
+  });
+}
+
+function pushLegacyGuardWarning(summary, artifact, message) {
+  const check = doctorCheck({
+    name: `legacy ${artifact.label}`,
+    state: "warn",
+    message,
+    showMessage: true,
+  });
+  summary.doctorChecks.push(check);
+  summary.notes.push(`${check.name}: ${message}`);
+}
+
+function formatIssueIdentifiers(issues = []) {
+  return issues.map(issueIdentifier).join(", ");
+}
+
+function issueIdentifier(issue) {
+  return stringOrNull(issue?.identifier) || stringOrNull(issue?.key) || stringOrNull(issue?.id) || "unknown issue";
+}
+
+function stringOrNull(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }
 
 async function cachedLinearTeam(client, teamId) {

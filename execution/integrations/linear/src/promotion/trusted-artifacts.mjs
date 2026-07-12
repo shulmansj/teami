@@ -7,6 +7,7 @@ import {
   defaultExperimentReceiptDir,
   deriveExperimentReceiptState,
 } from "../phoenix-experiment.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 import { resolveDefaultBranchRef } from "../promotion-policy.mjs";
 import { defaultRunGit } from "../promotion-workspace.mjs";
 import { newTraceId } from "../../../../engine/trace-contract.mjs";
@@ -45,10 +46,12 @@ function evalPathsForCandidateTargetKey(candidateTargetKey) {
 
 export function findReceiptByExperimentId({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   receiptDir = null,
   experimentId,
 } = {}) {
-  const dir = receiptDir || defaultExperimentReceiptDir(repoRoot);
+  void repoRoot;
+  const dir = receiptDir || defaultExperimentReceiptDir(home);
   if (!fs.existsSync(dir)) return { matches: [] };
   const matches = [];
   for (const name of fs.readdirSync(dir)) {
@@ -227,7 +230,7 @@ function sha256Hex(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function readTrustedArtifactText({
+async function readTrustedArtifactText({
   mode,
   repoRoot,
   relativePath,
@@ -256,9 +259,9 @@ function readTrustedArtifactText({
         "unattended trusted artifact reads require the internal promotion clone.",
       );
     }
-    const head = resolveDefaultBranchRef({ internalCloneDir, runGit });
+    const head = await resolveDefaultBranchRef({ internalCloneDir, runGit });
     if (!head.ok) return trustedArtifactFailure(relativePath, head.detail || head.reason);
-    const show = runGit(["show", `${head.ref}:${relativePath}`], { cwd: internalCloneDir });
+    const show = await runGit(["show", `${head.ref}:${relativePath}`], { cwd: internalCloneDir });
     if (!show.ok) {
       return trustedArtifactFailure(
         relativePath,
@@ -296,7 +299,7 @@ export function findManifestTarget(manifest, candidateTargetKey) {
   return manifestTargets(manifest).find((entry) => entry?.target_key === candidateTargetKey) || null;
 }
 
-export function resolveTrustedPromotionArtifacts({
+export async function resolveTrustedPromotionArtifacts({
   mode,
   repoRoot,
   candidateTargetKey,
@@ -304,7 +307,7 @@ export function resolveTrustedPromotionArtifacts({
   runGit = defaultRunGit,
 } = {}) {
   const evalPaths = evalPathsForCandidateTargetKey(candidateTargetKey);
-  const manifestRead = readTrustedArtifactText({
+  const manifestRead = await readTrustedArtifactText({
     mode,
     repoRoot,
     relativePath: evalPaths.manifest,
@@ -318,7 +321,7 @@ export function resolveTrustedPromotionArtifacts({
   });
   if (!manifestParsed.ok) return manifestParsed;
 
-  const taxonomyRead = readTrustedArtifactText({
+  const taxonomyRead = await readTrustedArtifactText({
     mode,
     repoRoot,
     relativePath: evalPaths.taxonomy,
@@ -337,7 +340,7 @@ export function resolveTrustedPromotionArtifacts({
   let snapshotSource = null;
   const acceptedContentPath = target?.snapshot_path ?? target?.artifact_path;
   if (typeof acceptedContentPath === "string" && acceptedContentPath.trim() !== "") {
-    const snapshotRead = readTrustedArtifactText({
+    const snapshotRead = await readTrustedArtifactText({
       mode,
       repoRoot,
       relativePath: acceptedContentPath,

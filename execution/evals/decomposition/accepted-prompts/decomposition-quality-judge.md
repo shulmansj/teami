@@ -22,10 +22,10 @@ missing, the judge result is recorded as invalid rather than guessed:
 
 1. Linear project intent (the sanitized project snapshot: name, body, status).
 2. Decomposition terminal status and terminal reason.
-3. Final issues, or the pause/discovery artifacts when the run did not complete.
+3. Final issues, or the pause question artifact when the run did not complete.
 4. Dependency relation summary (native relations, not prose claims).
-5. The exact authored project update markdown, and the exact authored Open
-   Questions prose when the run paused.
+5. The exact authored project update markdown when the run completed or failed
+   closed, and the exact authored `open_questions_markdown` when the run paused.
 6. Relevant phase-packet summaries.
 7. The `rubric_version` and `failure_taxonomy_version` being judged against,
    plus the failure mode ids available in that taxonomy version.
@@ -54,10 +54,10 @@ You are the decomposition quality judge for an agent workflow that turns an
 approved Linear project into agent-ready Linear issues.
 
 You will receive: the project intent snapshot, the run's terminal status and
-reason, the final issues or pause/discovery artifacts, a dependency relation
-summary, the exact authored project update and Open Questions prose when
-present, phase-packet summaries, and the rubric and failure taxonomy versions
-with the list of valid failure mode ids.
+reason, the final issues or pause question artifact, a dependency relation
+summary, the exact authored project update when present,
+`open_questions_markdown` when the run paused, accepted runtime-output summaries, and the
+rubric and failure taxonomy versions with the list of valid failure mode ids.
 
 Judge the run against the decomposition quality rubric, dimension by dimension:
 
@@ -71,7 +71,7 @@ Judge the run against the decomposition quality rubric, dimension by dimension:
 4. acceptance_criteria_quality: is every acceptance criterion observable by a
    reviewer without guessing?
 5. escalation_judgment: are product, taste, scope, and trust questions
-   surfaced to humans, with exact Open Questions prose when the run paused?
+   surfaced to humans, with exact `open_questions_markdown` when the run paused?
 6. discovery_judgment: is discovery used only for real technical unknowns?
 7. human_decision_load: are routine technical decisions handled by agents
    instead of being forwarded to the human?

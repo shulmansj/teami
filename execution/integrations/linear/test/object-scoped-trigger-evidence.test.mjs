@@ -131,6 +131,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
   const git = gitIdentity();
   const store = createLocalTriggerStore({
     repoRoot,
+    home: repoRoot,
     idGenerator: sequenceIds(),
     now: sequenceNow([
       "2026-06-24T10:00:00.000Z",
@@ -177,17 +178,29 @@ test("terminal completion clears project mutation intents but skips issue mutati
     artifactKind: "commit",
     wakeId: "wake-1",
     startedAt: "2026-06-24T10:02:00.000Z",
+    repoRoot,
+    home: repoRoot,
+    runStoreDir: null,
+    repoRoot,
+    home: repoRoot,
+    runStoreDir: null,
   }]);
   await store.completeWake({
     wakeId: projectClaim.wake.id,
     runnerId: "runner-1",
     leaseToken: projectClaim.leaseToken,
     status: "completed",
+    providerUpdateIds: ["project-update-1"],
+    reconciliationVerified: true,
+    reconciliationEvidenceDigest: "b".repeat(64),
   });
   assert.deepEqual(clears, [{
     domainId: "support-ops",
     projectId: "project-1",
     runId: "run-project",
+    repoRoot,
+    home: repoRoot,
+    runStoreDir: null,
   }]);
 
   const issueClaim = await store.claimSyntheticIssueWake({
@@ -220,6 +233,9 @@ test("terminal completion clears project mutation intents but skips issue mutati
     artifactKind: "commit",
     wakeId: "wake-1",
     startedAt: "2026-06-24T10:02:00.000Z",
+    repoRoot,
+    home: repoRoot,
+    runStoreDir: null,
   }, {
     domainId: "support-ops",
     objectType: "issue",
@@ -231,6 +247,9 @@ test("terminal completion clears project mutation intents but skips issue mutati
     workflowType: "execution",
     triggerType: "linear.issue.todo",
     git,
+    repoRoot,
+    home: repoRoot,
+    runStoreDir: null,
   }]);
   await store.completeWake({
     wakeId: issueClaim.wake.id,
@@ -243,12 +262,17 @@ test("terminal completion clears project mutation intents but skips issue mutati
     domainId: "support-ops",
     projectId: "project-1",
     runId: "run-project",
+    repoRoot,
+    home: repoRoot,
+    runStoreDir: null,
   }]);
 });
 
 test("claimSyntheticIssueWake returns a leased issue wake and matching event identity", async () => {
+  const repoRoot = tempRepo();
   const store = createLocalTriggerStore({
-    repoRoot: tempRepo(),
+    repoRoot,
+    home: repoRoot,
     idGenerator: sequenceIds(),
     now: sequenceNow(["2026-06-24T10:00:00.000Z"]),
     writeMutationIntent: async () => {},
@@ -335,7 +359,9 @@ function tempRunStore() {
 }
 
 function tempRepo() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "teami-object-trigger-repo-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teami-object-trigger-repo-"));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function sequenceIds() {

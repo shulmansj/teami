@@ -232,7 +232,7 @@ test("local ambient transport rejects unexpected gh api stdout shape", async () 
   );
 });
 
-test("local ambient transport redacts gh failure diagnostics", async () => {
+test("local ambient transport discards gh failure diagnostics", async () => {
   const leakedToken = "ghp_secret123456789";
   const { spawnImpl } = fakeGhSpawn((call) => {
     if (call.args[0] === "auth") {
@@ -247,7 +247,43 @@ test("local ambient transport redacts gh failure diagnostics", async () => {
     (error) => {
       assert.match(error.message, /github_api_request_failed:get_pull_request:auth_status:exit_1/);
       assert.equal(error.message.includes(leakedToken), false);
-      assert.match(error.message, /GITHUB_TOKEN=\[redacted\]/);
+      assert.equal(error.message.includes("GITHUB_TOKEN"), false);
+      assert.match(error.message, /gh_command_failed/);
+      return true;
+    },
+  );
+});
+
+test("timed-out GitHub mutations expose reconciliation-required handling", async () => {
+  const selection = createProductionGitHubPromotionTransport({
+    repoIdentity: {
+      connection_mode: "real",
+      repo: { owner: "acme", repo: "teami" },
+    },
+    runSubprocess: async ({ operation }) => operation === "gh_auth_read"
+      ? { ok: true, stdout: "authenticated", stderr: "", status: 0, signal: null }
+      : {
+          ok: false,
+          stdout: "",
+          stderr: "[captured failure output redacted: command timed out]",
+          status: null,
+          signal: "SIGKILL",
+          outcome: "reconciliation_required",
+          reconciliationRequired: true,
+          failureCode: null,
+        },
+  });
+
+  await assert.rejects(
+    () => request(selection.transport, "create_pull_request", "POST", "/repos/{owner}/{repo}/pulls", {
+      title: "Title",
+      body: "Body",
+      head: "branch",
+      base: "main",
+    }),
+    (error) => {
+      assert.equal(error.reconciliationRequired, true);
+      assert.equal(error.outcome, "reconciliation_required");
       return true;
     },
   );

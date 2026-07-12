@@ -20,12 +20,16 @@ import {
   evaluateDecompositionEligibility,
   initLinear,
   replayPersistedDecompositionRun,
-  resumeProjectAfterQuestions,
   resolveLinearShape,
   runDecomposition,
   setupLinearDomain,
   verifyDeclaredWorkspace,
 } from "../src/linear-service.mjs";
+import {
+  runLinearSetupCommand,
+} from "../src/cli/linear-setup-command.mjs";
+import { formatCommand } from "../src/cli/operator-output.mjs";
+import { LINEAR_OAUTH_WAIT_ESCAPED_CODE } from "../src/linear-oauth.mjs";
 import {
   DOMAIN_REGISTRY_SCHEMA_VERSION,
   domainRegistryPath,
@@ -36,23 +40,25 @@ import {
   validateDomainRegistry,
   writeDomainRegistry,
 } from "../src/domain-registry.mjs";
-import { githubConnectionStatePath } from "../src/github-setup.mjs";
 import {
   createLinearCredentialStore,
   legacyCredentialTargetForConfig,
 } from "../src/linear-credential-store.mjs";
+import { createTeamiProjectMcpServer } from "../src/project-mcp-server.mjs";
+import {
+  TEAMI_PROJECT_MCP_TOOL_NAMES,
+  createProjectMcpToolActions,
+  sanitizeProjectMcpError,
+} from "../src/project-mcp-tools.mjs";
 import {
   acquireDomainRunnerLock,
   authorizeLinearSetupWorkspace,
-  legacyCredentialStores,
+  ensureNeedsPrincipalProjectStatus,
   promptLinearWorkspacePicker,
   promoteSetupCredentialToDomain,
   removeLocalLinearSetup,
-  removeOneDomainSetup,
   resolveGitHubPhaseResumeDomain,
-  resolveSupervisorCommandContext,
   resolveSetupCommandDomainNameHint,
-  selectRunnerDomains,
 } from "../cli.mjs";
 import { setupStatePathForCache } from "../src/local-state.mjs";
 import {
@@ -64,7 +70,8 @@ import {
   PHASE_PACKET_SCHEMA_VERSION,
 } from "../src/phase-contract.mjs";
 import { ORCHESTRATOR_OUTPUT_SCHEMA_VERSION } from "../../../engine/orchestrator-output.mjs";
-import { openQuestionsSectionMarkdown, buildLinearProjectBody } from "../src/project-body.mjs";
+import { buildLinearProjectBody } from "../src/project-body.mjs";
+import { renderPlanningBody } from "../src/project-planning-body.mjs";
 import {
   evaluateAcceptedPacketSufficiencyOffline,
   evaluateDecompositionQualityOffline,
@@ -98,11 +105,19 @@ import {
 } from "../src/project-snapshot-store.mjs";
 import { readRunArtifact, writeRunArtifact } from "../../../engine/run-store.mjs";
 import { PRODUCED_IDENTITIES_TRACE_ATTRIBUTE } from "../../../engine/produced-identities.mjs";
+import {
+  PLANNING_SESSION_TRACE_KIND,
+  digestTraceField,
+} from "../../../engine/trace-contract.mjs";
 import { finishWakeFromRunnerResult, runDecompositionOrchestrator } from "../src/trigger-runner.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
 const SUBAGENT_TURN_SCHEMA_VERSION = "linear-decomposition-orchestrator-subagent-turn/v2";
+const PRINCIPAL_ESCALATION_DESCRIPTION =
+  "An agent hit a decision only a human can make. Read the latest comment and move the issue when you've answered.";
+const HUMAN_REVIEW_LABEL_DESCRIPTION =
+  "A human must review and accept this issue's work before it merges. Set at triage or when the issue is created. Removing it releases the gate — a waiting pull request can then merge without review. Leave it on until you've reviewed.";
 
 // A scripted orchestratorTurnExecutor that drives the free loop to a committed
 // terminal: it invokes the two library subagents (sr_eng grounding, then pm
@@ -133,7 +148,7 @@ function commitOrchestrator(runId, { produced = commitProducedContent(runId) } =
   };
 }
 
-test("init provisions required Linear substrate and keeps the default project template blank", async () => {
+test("init provisions required Linear substrate without provisioning a project template", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({
     workflowStates: nativeWorkflowStates(),
@@ -152,48 +167,141 @@ test("init provisions required Linear substrate and keeps the default project te
   assert.equal(client.teams.length, 1);
   assert.equal(client.teams[0].name, "Teami");
   assert.equal(client.teams[0].key, "AF");
-  assert.equal(client.projectLabels.map((label) => label.name).sort().join(","), "Has Open Questions");
-  assert.equal(client.issueLabels.map((label) => label.name).sort().join(","), "Code,Discovery,Needs Principal,Non-code");
+  assert.deepEqual(client.projectLabels.map((label) => label.name), []);
+  assert.equal(
+    client.issueLabels.map((label) => label.name).sort().join(","),
+    "Code,Discovery,Non-code,Work type,human-review",
+  );
+
+  // Every provisioned label carries its canonical description and color; the
+  // work-type pair is parented under the Work type group so Linear enforces
+  // one work type per issue.
+  for (const name of ["Code", "Discovery", "Non-code", "human-review"]) {
+    const label = client.issueLabels.find((candidate) => candidate.name === name);
+    assert.ok(label.description, `issue label ${name} should carry a description`);
+    assert.ok(label.color, `issue label ${name} should carry a color`);
+  }
+  assert.equal(
+    client.issueLabels.find((label) => label.name === "human-review").description,
+    HUMAN_REVIEW_LABEL_DESCRIPTION,
+  );
+  // Linear's API rejects entity descriptions over 255 characters (live cutover,
+  // 2026-07-06) — every register description must fit or setup fails mid-pass.
+  for (const label of client.issueLabels) {
+    assert.ok(
+      String(label.description || "").length <= 255,
+      `label ${label.name} description exceeds Linear's 255-char limit`,
+    );
+  }
+  assert.ok(PRINCIPAL_ESCALATION_DESCRIPTION.length <= 255);
+  const workTypeGroup = client.issueLabels.find((label) => label.name === "Work type");
+  assert.equal(workTypeGroup.isGroup, true);
+  assert.ok(workTypeGroup.description);
+  assert.equal(client.issueLabels.find((label) => label.name === "Code").parentId, workTypeGroup.id);
+  assert.equal(client.issueLabels.find((label) => label.name === "Non-code").parentId, workTypeGroup.id);
+  for (const name of ["Discovery", "human-review"]) {
+    assert.equal(
+      client.issueLabels.find((candidate) => candidate.name === name).parentId,
+      undefined,
+      `issue label ${name} must stay ungrouped`,
+    );
+  }
   assert.deepEqual(
     client.workflowStates.map((state) => `${state.name}:${state.type}`).sort(),
     [
       "Backlog:backlog",
-      "Blocked:started",
       "Done:completed",
       "In Progress:started",
       "In Review:started",
+      "Principal Escalation:started",
+      "Principal Review:started",
       "Ready:unstarted",
       "Todo:unstarted",
     ],
   );
-  assert.equal(client.templates.length, 1);
-  assert.match(client.templates[0].templateData.content, /## Problem Or Opportunity/);
-  assert.match(client.templates[0].templateData.content, /## Desired Outcome/);
-  assert.match(client.templates[0].templateData.content, /## Acceptance Evidence/);
-  assert.match(client.templates[0].templateData.content, /## Scope Boundaries/);
-  assert.match(client.templates[0].templateData.content, /## Constraints And Decisions/);
-  assert.match(client.templates[0].templateData.content, /^## Open Questions\s*$/m);
-  assert.doesNotMatch(client.templates[0].templateData.content, /## Discovery Findings/);
-  assert.doesNotMatch(client.templates[0].templateData.content, /None\./);
+  assert.equal(client.templates.length, 0);
   assert.equal(writtenCache.projectStatuses.planned, "status-planned");
   assert.equal(writtenCache.projectStatuses.in_progress, "status-started");
   assert.equal(writtenCache.projectStatuses.completed, "status-completed");
+  assert.equal(writtenCache.projectStatuses.needs_principal, "status-principal-escalation");
   assert.deepEqual(writtenCache.issueStatuses, {
     backlog: "state-backlog",
     todo: "state-todo",
     in_progress: "state-in-progress",
     in_review: "state-in-review",
-    blocked: "state-blocked",
+    human_review: "state-principal-review",
+    needs_principal: "state-principal-escalation",
     done: "state-done",
   });
+  const principalEscalation = client.workflowStates.find((state) => state.id === "state-principal-escalation");
+  assert.equal(principalEscalation.name, "Principal Escalation");
+  assert.equal(principalEscalation.type, "started");
+  assert.equal(principalEscalation.color, "#F2994A");
+  assert.equal(principalEscalation.description, PRINCIPAL_ESCALATION_DESCRIPTION);
+  assert.equal(principalEscalation.position, 30.01);
+  assert.equal(writtenCache.app_identity_id, "app-viewer-1");
+  assert.equal(writtenCache.app_identity_name, "Teami App");
 
   const second = await initLinear({ client, config, cache: writtenCache });
   assert.equal(second.ok, true);
   assert.equal(client.teams.length, 1);
-  assert.equal(client.projectLabels.length, 1);
-  assert.equal(client.issueLabels.length, 4);
-  assert.equal(client.workflowStates.length, 7);
-  assert.equal(client.templates.length, 1);
+  assert.equal(client.projectLabels.length, 0);
+  assert.equal(client.issueLabels.length, 5);
+  assert.equal(client.workflowStates.length, 8);
+  assert.equal(client.templates.length, 0);
+  // A second pass over freshly provisioned labels is a no-op: metadata already
+  // matches canonical, so no reconcile updates fire.
+  assert.equal(client.projectLabelUpdates.length, 0);
+  assert.equal(client.issueLabelUpdates.length, 0);
+});
+
+test("init backfills descriptions and work-type grouping onto pre-existing bare labels without touching color", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({ workflowStates: nativeWorkflowStates() });
+  // A legacy workspace: labels exist from an earlier provisioning pass that
+  // stamped no metadata, and the adopter recolored one of them. They are
+  // seeded against the team id init will mint for the configured team.
+  const teamId = "team-1";
+  client.issueLabels.push(
+    { id: "ilabel-discovery", name: "Discovery", teamId, color: "#123456" },
+    { id: "ilabel-human-review", name: "human-review", teamId },
+    { id: "ilabel-code", name: "Code", teamId },
+    { id: "ilabel-non-code", name: "Non-code", teamId },
+  );
+
+  const result = await initLinear({ client, config });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.summary.updated.length, 4);
+  const workTypeGroup = client.issueLabels.find((label) => label.name === "Work type");
+  assert.equal(workTypeGroup.isGroup, true);
+  assert.equal(client.issueLabels.find((label) => label.name === "Code").parentId, workTypeGroup.id);
+  assert.equal(client.issueLabels.find((label) => label.name === "Non-code").parentId, workTypeGroup.id);
+  for (const label of [...client.projectLabels, ...client.issueLabels]) {
+    assert.ok(label.description, `label ${label.name} should have a backfilled description`);
+  }
+  // Color is presentation and belongs to the adopter: the backfill must not
+  // restamp it on found labels.
+  assert.equal(client.issueLabels.find((label) => label.name === "Discovery").color, "#123456");
+
+  // The pass after the backfill is a no-op.
+  client.projectLabelUpdates.length = 0;
+  client.issueLabelUpdates.length = 0;
+  const second = await initLinear({ client, config, cache: result.cache });
+  assert.equal(second.ok, true);
+  assert.equal(client.projectLabelUpdates.length, 0);
+  assert.equal(client.issueLabelUpdates.length, 0);
+});
+
+test("init fails loud when a plain label squats on the Work type group name", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({ workflowStates: nativeWorkflowStates() });
+  client.issueLabels.push({ id: "ilabel-work-type", name: "Work type", teamId: "team-1" });
+
+  await assert.rejects(
+    () => initLinear({ client, config }),
+    /already exists but is not a label group/,
+  );
 });
 
 test("Memory Linear client creates workflow states with read-back list semantics", async () => {
@@ -213,10 +321,33 @@ test("Memory Linear client creates workflow states with read-back list semantics
     name: "Review Gate",
     type: "started",
     teamId: "team-1",
+    description: "Ready for human review.",
+    color: "#f2c94c",
   });
   assert.deepEqual(
     states.find((state) => state.id === created.id),
     created,
+  );
+
+  const updated = await client.updateWorkflowState(created.id, {
+    name: "Principal Review",
+    description: "Waiting for the Principal to review.",
+    color: "#F2994A",
+    position: 42,
+  });
+
+  assert.deepEqual(updated, {
+    id: "state-review-gate",
+    name: "Principal Review",
+    type: "started",
+    teamId: "team-1",
+    description: "Waiting for the Principal to review.",
+    color: "#F2994A",
+    position: 42,
+  });
+  assert.deepEqual(
+    (await client.listWorkflowStates("team-1")).find((state) => state.id === created.id),
+    updated,
   );
 });
 
@@ -233,12 +364,14 @@ test("init caches all configured project statuses by id and type without creatio
     planned: "status-planned",
     in_progress: "status-started",
     completed: "status-completed",
+    needs_principal: "status-principal-escalation",
   });
   assert.deepEqual(result.cache.projectStatusTypes, {
     backlog: "backlog",
     planned: "planned",
     in_progress: "started",
     completed: "completed",
+    needs_principal: "planned",
   });
   assert.deepEqual(client.projectStatuses, originalStatuses);
 });
@@ -258,7 +391,8 @@ test("init provisions configured issue statuses by reusing natives and creating 
     todo: "state-todo",
     in_progress: "state-in-progress",
     in_review: "state-in-review",
-    blocked: "state-blocked",
+    human_review: "state-principal-review",
+    needs_principal: "state-principal-escalation",
     done: "state-done",
   });
   assert.equal(result.cache.issueStatuses.backlog, originalNativeIds.Backlog);
@@ -266,11 +400,382 @@ test("init provisions configured issue statuses by reusing natives and creating 
   assert.equal(result.cache.issueStatuses.in_progress, originalNativeIds["In Progress"]);
   assert.equal(result.cache.issueStatuses.done, originalNativeIds.Done);
   assert.deepEqual(
-    client.workflowStates.filter((state) => ["In Review", "Blocked"].includes(state.name)),
+    client.workflowStates.filter((state) => ["In Review", "Principal Review", "Principal Escalation"].includes(state.name)),
     [
-      { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
-      { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+      { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1", color: "#f2c94c" },
+      { id: "state-principal-review", name: "Principal Review", type: "started", teamId: "team-1", color: "#f2c94c" },
+      {
+        id: "state-principal-escalation",
+        name: "Principal Escalation",
+        type: "started",
+        teamId: "team-1",
+        description: PRINCIPAL_ESCALATION_DESCRIPTION,
+        color: "#F2994A",
+        position: 30.01,
+      },
     ],
+  );
+});
+
+test("MemoryLinearClient createProjectStatus requires admin grant and preserves position", async () => {
+  const appClient = new MemoryLinearClient();
+
+  await assert.rejects(
+    () =>
+      appClient.createProjectStatus({
+        name: "Principal Escalation",
+        color: "#F2994A",
+        position: 20.01,
+        type: "planned",
+      }),
+    (error) => {
+      assert.equal(error.code, "FORBIDDEN");
+      assert.equal(error.errors?.[0]?.path?.[0], "projectStatusCreate");
+      assert.equal(error.errors?.[0]?.extensions?.code, "FORBIDDEN");
+      return true;
+    },
+  );
+
+  const adminClient = new MemoryLinearClient({
+    adminGrant: true,
+    statuses: [
+      { id: "status-backlog", name: "Backlog", type: "backlog", position: 10 },
+      { id: "status-planned", name: "Planned", type: "planned", position: 20 },
+      { id: "status-started", name: "In Progress", type: "started", position: 30 },
+      { id: "status-completed", name: "Completed", type: "completed", position: 40 },
+    ],
+  });
+
+  const created = await adminClient.createProjectStatus({
+    name: "Principal Escalation",
+    color: "#F2994A",
+    position: 20.01,
+    type: "planned",
+  });
+
+  assert.deepEqual(created, {
+    id: "status-principal-escalation",
+    name: "Principal Escalation",
+    type: "planned",
+    color: "#F2994A",
+    position: 20.01,
+  });
+  assert.equal((await adminClient.listProjectStatuses()).at(-1), created);
+});
+
+test("setup authorization provisions missing Principal Escalation with one-shot admin and preserves app identity", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const sharedStatuses = projectStatusesWithoutNeedsPrincipal({ includePaused: true });
+  const appClient = new MemoryLinearClient({
+    statuses: sharedStatuses,
+    viewerId: "app-viewer-1",
+    viewerName: "Teami App",
+  });
+  const adminClient = new MemoryLinearClient({
+    statuses: sharedStatuses,
+    viewerId: "user-admin-1",
+    viewerName: "Workspace Admin",
+    adminGrant: true,
+  });
+  const events = [];
+  const logs = [];
+  const promptMessages = [];
+  const createInputs = [];
+  let teardownCalls = 0;
+  const credentialWrites = [];
+  const credentialStore = {
+    target: "bootstrap-target",
+    writeTokenSet: async (tokenSet) => {
+      credentialWrites.push(tokenSet);
+    },
+  };
+
+  const authorization = await authorizeLinearSetupWorkspace({
+    config,
+    repoRoot,
+    credentialStore,
+    registry: emptyDomainRegistry(),
+    domainNameHint: "First Domain",
+    isTTY: true,
+    createSetupAuth: () =>
+      fakeSetupAuth(appClient, {
+        tokenSource: "browser",
+        onPersist: () => {
+          events.push("persist-app-token");
+        },
+      }),
+    authorizeOneShotAdmin: async (options) => {
+      assert.equal(Object.hasOwn(options, "credentialStore"), false);
+      events.push("browser-open-for-admin");
+      return {
+        adminClient: {
+          createProjectStatus: async (input) => {
+            createInputs.push(input);
+            return adminClient.createProjectStatus(input);
+          },
+        },
+        teardown: async () => {
+          teardownCalls += 1;
+          events.push("teardown-admin");
+        },
+      };
+    },
+    promptAdminProvisioning: async (message) => {
+      promptMessages.push(message);
+      events.push("admin-enter-prompt");
+    },
+    promptReauthorize: async () => {
+      events.push("workspace-confirm");
+      return "";
+    },
+    log: (line) => logs.push(line),
+  });
+
+  assert.equal(authorization.needsPrincipalProjectStatus.id, "status-principal-escalation");
+  assert.equal(authorization.needsPrincipalProjectStatus.type, "planned");
+  assert.equal(createInputs.length, 1);
+  assert.deepEqual(createInputs[0], {
+    name: "Principal Escalation",
+    color: "#F2994A",
+    position: 20.01,
+    type: "planned",
+  });
+  assert.equal(teardownCalls, 1);
+  assert.equal(events.indexOf("admin-enter-prompt") < events.indexOf("browser-open-for-admin"), true);
+  assert.equal(events.at(-1), "persist-app-token");
+  assert.deepEqual(promptMessages, ["Press Enter to approve on the next screen: "]);
+  assert.deepEqual(credentialWrites, []);
+  assert.ok(logs.some((line) => /one-time administrative approval/i.test(line)));
+  assert.ok(logs.some((line) => /exactly one thing/i.test(line)));
+  assert.ok(logs.some((line) => /used once, is not stored/i.test(line)));
+  assert.ok(logs.some((line) => /read\/write access only/i.test(line)));
+
+  let writtenCache = null;
+  await setupLinearDomain({
+    client: authorization.setupAuth.client,
+    config,
+    registry: emptyDomainRegistry(),
+    repoRoot,
+    domainName: "First Domain",
+    cache: {
+      projectStatuses: {
+        needs_principal: authorization.needsPrincipalProjectStatus.id,
+      },
+      projectStatusTypes: {
+        needs_principal: authorization.needsPrincipalProjectStatus.type,
+      },
+    },
+    workspace: authorization.workspace,
+    declaredWorkspace: authorization.declaredWorkspace,
+    writeCache: async (cache) => {
+      writtenCache = cache;
+    },
+    writeRegistry: async () => {},
+  });
+
+  assert.equal(writtenCache.app_identity_id, "app-viewer-1");
+  assert.equal(writtenCache.app_identity_name, "Teami App");
+  assert.equal(writtenCache.projectStatuses.needs_principal, "status-principal-escalation");
+
+  const rerun = await ensureNeedsPrincipalProjectStatus({
+    appClient,
+    interactive: true,
+    adminAuth: async () => {
+      throw new Error("admin consent must not be requested after the status exists");
+    },
+    prompt: async () => {
+      throw new Error("prompt must not be shown after the status exists");
+    },
+    log: () => {},
+  });
+  assert.equal(rerun.id, "status-principal-escalation");
+});
+
+test("setup authorization does not prompt or request admin consent when Principal Escalation exists", async () => {
+  const appClient = new MemoryLinearClient();
+  const status = await ensureNeedsPrincipalProjectStatus({
+    appClient,
+    interactive: true,
+    adminAuth: async () => {
+      throw new Error("admin consent must not be requested for an existing status");
+    },
+    prompt: async () => {
+      throw new Error("prompt must not be shown for an existing status");
+    },
+    log: () => {},
+  });
+
+  assert.equal(status.id, "status-principal-escalation");
+});
+
+test("typing R to reopen the workspace picker forces Linear's consent screen on the retry", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const appClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  const authPrompts = [];
+  const reauthorizeMessages = [];
+  let reauthorizeCalls = 0;
+
+  const authorization = await authorizeLinearSetupWorkspace({
+    config,
+    repoRoot,
+    credentialStore: {},
+    registry: emptyDomainRegistry(),
+    isTTY: true,
+    createSetupAuth: (options) => {
+      authPrompts.push(options.prompt ?? null);
+      return fakeSetupAuth(appClient, { tokenSource: "browser" });
+    },
+    promptReauthorize: async ({ message }) => {
+      reauthorizeMessages.push(message);
+      reauthorizeCalls += 1;
+      return reauthorizeCalls === 1 ? "r" : "";
+    },
+    log: () => {},
+  });
+
+  // The first browser open must NOT force consent (an already-installed app auto-redirects
+  // instantly instead of dead-ending on Linear's "already installed" page); typing R is the
+  // explicit ask for the workspace dropdown, so the reopen must force the consent screen.
+  assert.deepEqual(authPrompts, [null, "consent"]);
+  assert.match(reauthorizeMessages[0], /workspace dropdown/);
+  assert.equal(authorization.workspace.id, "workspace-1");
+});
+
+test("setup authorization fails closed without prompting when Principal Escalation is absent headlessly", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const appClient = new MemoryLinearClient({
+    statuses: projectStatusesWithoutNeedsPrincipal({ includePaused: true }),
+  });
+  let prompted = false;
+  let consented = false;
+  let persisted = false;
+
+  await assert.rejects(
+    () =>
+      authorizeLinearSetupWorkspace({
+        config,
+        repoRoot,
+        credentialStore: {},
+        registry: emptyDomainRegistry(),
+        isTTY: false,
+        createSetupAuth: () =>
+          fakeSetupAuth(appClient, {
+            tokenSource: "browser",
+            onPersist: () => {
+              persisted = true;
+            },
+          }),
+        authorizeOneShotAdmin: async () => {
+          consented = true;
+        },
+        promptAdminProvisioning: async () => {
+          prompted = true;
+        },
+        log: () => {},
+      }),
+    (error) => {
+      assert.equal(error.code, "PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR");
+      assert.match(error.message, /re-run `init` from a desktop session with a browser to recreate it \(one approval\)/);
+      return true;
+    },
+  );
+
+  assert.equal(prompted, false);
+  assert.equal(consented, false);
+  assert.equal(persisted, false);
+});
+
+test("init renames cached Human Review workflow state in place without creating a second review state", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      ...nativeWorkflowStates(),
+      { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
+      { id: "state-human-review", name: "Human Review", type: "started", teamId: "team-1" },
+      {
+        id: "state-needs-principal",
+        name: "Principal Escalation",
+        type: "started",
+        teamId: "team-1",
+        description: PRINCIPAL_ESCALATION_DESCRIPTION,
+      },
+    ],
+  });
+  await client.createTeam(config.linear.team);
+
+  const result = await initLinear({
+    client,
+    config,
+    cache: {
+      teamId: "team-1",
+      issueStatuses: {
+        human_review: "state-human-review",
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cache.issueStatuses.human_review, "state-human-review");
+  assert.equal(client.workflowStates.filter((state) => state.name === "Principal Review").length, 1);
+  assert.equal(client.workflowStates.some((state) => state.name === "Human Review"), false);
+  assert.deepEqual(client.workflowStateUpdates, [
+    { id: "state-human-review", input: { name: "Principal Review" } },
+  ]);
+  assert.equal(result.summary.created.includes("issue-status:Principal Review"), false);
+});
+
+test("init renames a single legacy Human Review workflow state during first provisioning fallback", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      ...nativeWorkflowStates(),
+      { id: "state-in-review", name: "In Review", type: "started", teamId: "team-1" },
+      { id: "state-human-review", name: "Human Review", type: "started", teamId: "team-1" },
+      {
+        id: "state-needs-principal",
+        name: "Principal Escalation",
+        type: "started",
+        teamId: "team-1",
+        description: PRINCIPAL_ESCALATION_DESCRIPTION,
+      },
+    ],
+  });
+
+  const result = await initLinear({ client, config });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cache.issueStatuses.human_review, "state-human-review");
+  assert.equal(client.workflowStates.filter((state) => state.name === "Principal Review").length, 1);
+  assert.equal(client.workflowStates.some((state) => state.name === "Human Review"), false);
+  assert.deepEqual(client.workflowStateUpdates, [
+    { id: "state-human-review", input: { name: "Principal Review" } },
+  ]);
+  assert.equal(result.summary.created.includes("issue-status:Principal Review"), false);
+});
+
+test("init reconciles only the Principal Escalation workflow-state description", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: defaultWorkflowStates().map((state) => {
+      if (state.id === "state-needs-principal") return { ...state, description: "Old escalation copy." };
+      if (state.id === "state-human-review") return { ...state, description: "Custom review copy." };
+      return state;
+    }),
+  });
+
+  const result = await initLinear({ client, config });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.workflowStateUpdates, [
+    { id: "state-needs-principal", input: { description: PRINCIPAL_ESCALATION_DESCRIPTION } },
+  ]);
+  assert.equal(
+    client.workflowStates.find((state) => state.id === "state-needs-principal").description,
+    PRINCIPAL_ESCALATION_DESCRIPTION,
+  );
+  assert.equal(
+    client.workflowStates.find((state) => state.id === "state-human-review").description,
+    "Custom review copy.",
   );
 });
 
@@ -289,12 +794,188 @@ test("init rerun keeps issue status provisioning idempotent", async () => {
   assert.equal(client.workflowStates.length, stateCount);
 });
 
+test("init archives an empty cached legacy Blocked workflow state before writing the new cache", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      ...defaultWorkflowStates(),
+      { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    ],
+  });
+  let writtenCache = null;
+
+  const result = await initLinear({
+    client,
+    config,
+    cache: { issueStatuses: { blocked: "state-blocked" } },
+    writeCache: (cache) => {
+      writtenCache = cache;
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.workflowStateArchives, ["state-blocked"]);
+  assert.equal(client.workflowStates.find((state) => state.id === "state-blocked").archived, true);
+  assert.equal(Object.hasOwn(result.cache.issueStatuses, "blocked"), false);
+  assert.equal(Object.hasOwn(writtenCache.issueStatuses, "blocked"), false);
+  assert.equal(result.summary.updated.includes("archived-legacy:issue-status:Blocked"), true);
+  assert.deepEqual(result.summary.doctorChecks, []);
+});
+
+test("init guard-reports occupied legacy Blocked workflow state without moving issues", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      ...defaultWorkflowStates(),
+      { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    ],
+  });
+  client.issues.push({
+    id: "issue-legacy-blocked",
+    identifier: "AF-42",
+    title: "Needs a decision",
+    teamId: "team-1",
+    state: { id: "state-blocked", name: "Blocked", type: "started" },
+    labels: [],
+  });
+
+  const result = await initLinear({
+    client,
+    config,
+    cache: { issueStatuses: { blocked: "state-blocked" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.workflowStateArchives, []);
+  assert.equal(client.issues[0].state.id, "state-blocked");
+  assert.equal(result.summary.doctorChecks.length, 1);
+  assert.equal(result.summary.doctorChecks[0].state, "warn");
+  assert.match(result.summary.doctorChecks[0].message, /AF-42/);
+  assert.match(result.summary.doctorChecks[0].message, /Answer it, move it, remove the old label by hand\./);
+});
+
+test("init guard-reports legacy Blocked archive refusal and leaves the status inert", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      ...defaultWorkflowStates(),
+      { id: "state-blocked", name: "Blocked", type: "started", teamId: "team-1" },
+    ],
+  });
+  client.workflowStateArchiveFailures.add("state-blocked");
+
+  const result = await initLinear({
+    client,
+    config,
+    cache: { issueStatuses: { blocked: "state-blocked" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.workflowStateArchives, []);
+  assert.equal(client.workflowStates.find((state) => state.id === "state-blocked").archived, undefined);
+  assert.equal(result.summary.doctorChecks.length, 1);
+  assert.equal(result.summary.doctorChecks[0].state, "warn");
+  assert.match(result.summary.doctorChecks[0].message, /Linear refused to archive it/);
+});
+
+test("init archives an empty cached legacy Needs Principal label after label config kill", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  client.issueLabels.push({ id: "ilabel-needs-principal", name: "Needs Principal", teamId: "team-1" });
+
+  const result = await initLinear({
+    client,
+    config,
+    cache: { issueLabels: { "Needs Principal": "ilabel-needs-principal" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.issueLabelArchives, ["ilabel-needs-principal"]);
+  assert.equal(client.issueLabels.find((label) => label.id === "ilabel-needs-principal").archived, true);
+  assert.equal(Object.hasOwn(result.cache.issueLabels, "Needs Principal"), false);
+});
+
+test("init archives an empty legacy Needs Principal label once that label is no longer configured", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  client.issueLabels.push({ id: "ilabel-principal-help", name: "Principal Help", teamId: "team-1" });
+
+  const result = await initLinear({
+    client,
+    config,
+    cache: {
+      issueLabels: {
+        "Principal Help": "ilabel-principal-help",
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.issueLabelArchives, ["ilabel-principal-help"]);
+  assert.equal(client.issueLabels.find((label) => label.id === "ilabel-principal-help").archived, true);
+  assert.equal(Object.hasOwn(result.cache.issueLabels, "Principal Help"), false);
+});
+
+test("init guard-reports occupied legacy Needs Principal label without stripping labels", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const legacyLabel = { id: "ilabel-principal-help", name: "Principal Help", teamId: "team-1" };
+  const client = new MemoryLinearClient();
+  client.issueLabels.push(legacyLabel);
+  client.issues.push({
+    id: "issue-principal-help",
+    identifier: "AF-88",
+    title: "Needs label cleanup",
+    teamId: "team-1",
+    state: { id: "state-todo", name: "Todo", type: "unstarted" },
+    labels: [legacyLabel],
+  });
+
+  const result = await initLinear({
+    client,
+    config,
+    cache: {
+      issueLabels: {
+        "Principal Help": "ilabel-principal-help",
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(client.issueLabelArchives, []);
+  assert.deepEqual(client.issues[0].labels, [legacyLabel]);
+  assert.equal(result.summary.doctorChecks.length, 1);
+  assert.equal(result.summary.doctorChecks[0].state, "warn");
+  assert.match(result.summary.doctorChecks[0].message, /AF-88/);
+  assert.match(result.summary.doctorChecks[0].message, /remove the old label by hand/);
+});
+
+test("init fails closed when the app viewer id cannot be resolved", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    viewerId: null,
+  });
+  let wroteCache = false;
+
+  await assert.rejects(
+    () =>
+      initLinear({
+        client,
+        config,
+        writeCache: () => {
+          wroteCache = true;
+        },
+      }),
+    /Linear setup could not resolve the app viewer id\./,
+  );
+  assert.equal(wroteCache, false);
+});
+
 test("init fails loud when an issue workflow state has the wrong type", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({
     workflowStates: [
       ...nativeWorkflowStates(),
-      { id: "state-blocked-wrong", name: "Blocked", type: "completed" },
+      { id: "state-needs-principal-wrong", name: "Principal Escalation", type: "completed" },
     ],
   });
   let wroteCache = false;
@@ -308,7 +989,7 @@ test("init fails loud when an issue workflow state has the wrong type", async ()
           wroteCache = true;
         },
       }),
-    /Linear issue workflow state Blocked has type completed, expected started\./,
+    /Linear issue workflow state Principal Escalation has type completed, expected started\./,
   );
   assert.equal(wroteCache, false);
 });
@@ -318,8 +999,8 @@ test("init fails loud on duplicate same-name issue workflow states before cache 
   const client = new MemoryLinearClient({
     workflowStates: [
       ...nativeWorkflowStates(),
-      { id: "state-blocked", name: "Blocked", type: "started" },
-      { id: "state-blocked-copy", name: "Blocked", type: "started" },
+      { id: "state-needs-principal", name: "Principal Escalation", type: "started" },
+      { id: "state-needs-principal-copy", name: "Principal Escalation", type: "started" },
     ],
   });
   let wroteCache = false;
@@ -333,7 +1014,7 @@ test("init fails loud on duplicate same-name issue workflow states before cache 
           wroteCache = true;
         },
       }),
-    /Multiple Linear issue workflow states found named Blocked\./,
+    /Multiple Linear issue workflow states found named Principal Escalation\./,
   );
   assert.equal(wroteCache, false);
 });
@@ -360,7 +1041,7 @@ test("init rerun prefers cached project status ids and remains idempotent", asyn
   assert.equal(client.projectLabels.length, projectLabelCount);
   assert.equal(client.issueLabels.length, issueLabelCount);
   assert.equal(client.templates.length, templateCount);
-  for (const role of ["backlog", "planned", "in_progress", "completed"]) {
+  for (const role of ["backlog", "planned", "in_progress", "completed", "needs_principal"]) {
     assert.equal(shape.projectStatuses[role].id, first.cache.projectStatuses[role]);
     assert.equal(shape.projectStatuses[role].resolution, "stable_id");
   }
@@ -409,6 +1090,76 @@ test("init fails loud on ambiguous project status native type without cached id"
   assert.equal(wroteCache, false);
 });
 
+test("init resolves project needs_principal by exact configured name when Paused is also present", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  client.projectStatuses.push({ id: "status-paused", name: "Paused", type: "planned" });
+
+  const result = await initLinear({ client, config });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cache.projectStatuses.needs_principal, "status-principal-escalation");
+  assert.equal(result.cache.projectStatusTypes.needs_principal, "planned");
+});
+
+test("init tags missing project needs_principal for repair instead of resolving by planned type", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    statuses: [
+      { id: "status-backlog", name: "Backlog", type: "backlog" },
+      { id: "status-planned", name: "Planned", type: "planned" },
+      { id: "status-started", name: "In Progress", type: "started" },
+      { id: "status-completed", name: "Completed", type: "completed" },
+    ],
+  });
+  let wroteCache = false;
+
+  await assert.rejects(
+    () =>
+      initLinear({
+        client,
+        config,
+        writeCache: () => {
+          wroteCache = true;
+        },
+      }),
+    (error) => {
+      assert.equal(error.code, "PROJECT_NEEDS_PRINCIPAL_STATUS_REPAIR");
+      assert.match(error.message, /Cannot resolve project status mapping 'needs_principal'/);
+      return true;
+    },
+  );
+  assert.equal(wroteCache, false);
+});
+
+test("init fails loud when project needs_principal has a non-planned type", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    statuses: [
+      { id: "status-backlog", name: "Backlog", type: "backlog" },
+      { id: "status-planned", name: "Planned", type: "planned" },
+      { id: "status-started", name: "In Progress", type: "started" },
+      { id: "status-completed", name: "Completed", type: "completed" },
+      { id: "status-principal-escalation", name: "Principal Escalation", type: "completed" },
+      { id: "status-paused", name: "Paused", type: "planned" },
+    ],
+  });
+  let wroteCache = false;
+
+  await assert.rejects(
+    () =>
+      initLinear({
+        client,
+        config,
+        writeCache: () => {
+          wroteCache = true;
+        },
+      }),
+    /Configured Linear project status needs_principal has type completed, expected planned\./,
+  );
+  assert.equal(wroteCache, false);
+});
+
 test("resolveLinearShape exposes all configured project status roles", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
@@ -420,6 +1171,7 @@ test("resolveLinearShape exposes all configured project status roles", async () 
     "backlog",
     "completed",
     "in_progress",
+    "needs_principal",
     "planned",
   ]);
   assert.deepEqual(
@@ -434,6 +1186,7 @@ test("resolveLinearShape exposes all configured project status roles", async () 
       planned: { id: "status-planned", type: "planned", resolution: "stable_id" },
       in_progress: { id: "status-started", type: "started", resolution: "stable_id" },
       completed: { id: "status-completed", type: "completed", resolution: "stable_id" },
+      needs_principal: { id: "status-principal-escalation", type: "planned", resolution: "stable_id" },
     },
   );
 });
@@ -447,10 +1200,11 @@ test("resolveLinearShape exposes all configured issue status roles", async () =>
 
   assert.deepEqual(Object.keys(shape.issueStatuses).sort(), [
     "backlog",
-    "blocked",
     "done",
+    "human_review",
     "in_progress",
     "in_review",
+    "needs_principal",
     "todo",
   ]);
   assert.deepEqual(
@@ -465,10 +1219,60 @@ test("resolveLinearShape exposes all configured issue status roles", async () =>
       todo: { id: "state-todo", type: "unstarted", resolution: "stable_id" },
       in_progress: { id: "state-in-progress", type: "started", resolution: "stable_id" },
       in_review: { id: "state-in-review", type: "started", resolution: "stable_id" },
-      blocked: { id: "state-blocked", type: "started", resolution: "stable_id" },
+      human_review: { id: "state-human-review", type: "started", resolution: "stable_id" },
+      needs_principal: { id: "state-needs-principal", type: "started", resolution: "stable_id" },
       done: { id: "state-done", type: "completed", resolution: "stable_id" },
     },
   );
+});
+
+test("resolveLinearShape exposes the configured human-review issue label by stable id", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const result = await initLinear({ client, config });
+
+  const shape = await resolveLinearShape({ client, config, cache: result.cache });
+
+  assert.equal(shape.issueLabels.human_review.id, "ilabel-human-review");
+  assert.equal(shape.issueLabels.human_review.name, "human-review");
+  assert.equal(Object.hasOwn(shape.issueLabels, "needs_principal"), false);
+  assert.deepEqual(shape.projectLabels, {});
+});
+
+test("resolveLinearShape fails closed when the human_review status is not configured", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  delete config.linear.issue.statuses.human_review;
+  const client = new MemoryLinearClient();
+  client.teams.push({ id: "team-1", key: "AF", name: "Teami" });
+
+  await assert.rejects(
+    () => resolveLinearShape({ client, config, cache: null }),
+    /Linear issue status role human_review is not configured\./,
+  );
+});
+
+test("resolveLinearShape fails closed when the cached human-review issue label is stale", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const result = await initLinear({ client, config });
+  const staleCache = structuredClone(result.cache);
+  staleCache.issueLabels["human-review"] = "ilabel-missing";
+
+  await assert.rejects(
+    () => resolveLinearShape({ client, config, cache: staleCache }),
+    /Cached Linear issue label human_review=ilabel-missing no longer exists\./,
+  );
+});
+
+test("new execution issues still start in Todo, not Principal Review", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const result = await initLinear({ client, config });
+  const shape = await resolveLinearShape({ client, config, cache: result.cache });
+
+  const { stateIdForNewExecutionIssue } = await import("../src/linear/shape-resolver.mjs");
+
+  assert.equal(stateIdForNewExecutionIssue({}, shape.issueStatuses), "state-todo");
 });
 
 test("resolveLinearShape exposes optional configured work_type issue labels", async () => {
@@ -498,6 +1302,409 @@ test("resolveLinearShape tolerates unprovisioned optional work_type labels witho
   assert.equal(shape.issueLabels.discovery.id, "ilabel-discovery");
   assert.equal(Object.hasOwn(shape.issueLabels, "work_type_code"), false);
   assert.equal(Object.hasOwn(shape.issueLabels, "work_type_non_code"), false);
+});
+
+test("Teami project MCP tools create Backlog project, write body, and require confirm before Planned", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  const cache = mcpDomainCache(initialized.cache);
+  const registry = mcpDomainRegistry({ config, client });
+  const updateInputs = [];
+  const originalUpdateProject = client.updateProject.bind(client);
+  client.updateProject = async (projectId, input) => {
+    updateInputs.push({ projectId, input: { ...input } });
+    return originalUpdateProject(projectId, input);
+  };
+
+  const mcp = await connectedProjectMcpClient({
+    config,
+    registry,
+    readCache: () => cache,
+    linearClient: client,
+  });
+  try {
+    const listed = await mcp.client.listTools();
+    assert.deepEqual(
+      listed.tools.map((tool) => tool.name).sort(),
+      [...TEAMI_PROJECT_MCP_TOOL_NAMES].sort(),
+    );
+
+    const resolved = await mcp.client.callTool({
+      name: "resolve_domain",
+      arguments: { domain: "support-ops" },
+    });
+    assert.equal(resolved.structuredContent.domain.domain_id, "support-ops");
+    assert.equal(resolved.structuredContent.domain.team_id, "team-1");
+
+    const created = await mcp.client.callTool({
+      name: "project_create",
+      arguments: {
+        domain: "support-ops",
+        name: "Customer onboarding pilot",
+        description: "Make onboarding measurable.",
+      },
+    });
+    assert.equal(created.isError, undefined);
+    assert.equal(created.structuredContent.status.id, "status-backlog");
+    assert.equal(client.projects.length, 1);
+    assert.equal(client.issues.length, 0);
+    assert.deepEqual(client.projects[0].teamIds, ["team-1"]);
+    assert.equal(client.projects[0].status.id, "status-backlog");
+    assert.equal(client.projects[0].content, undefined);
+    assert.equal(client.projects[0].templateId, undefined);
+
+    const projectId = client.projects[0].id;
+    const body = "## Problem Or Opportunity\n\nManual onboarding is too hard to measure.\n";
+    const written = await mcp.client.callTool({
+      name: "project_write_body",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+        content: body,
+      },
+    });
+    assert.equal(written.isError, undefined);
+    assert.equal(written.structuredContent.content_length, body.length);
+    assert.equal(client.projects[0].content, body);
+
+    const slots = {
+      problem: "Activation stalls because founders cannot turn intent into decomposition-ready work.",
+      audience: "Non-technical founders using Teami with a connected Linear domain.",
+      desired_outcome: "A byte-stable Linear project body that the factory can decompose.",
+      acceptance: [
+        "project_write_body stores exactly renderPlanningBody(slots).",
+        "The legacy content path still writes authored markdown.",
+      ],
+      scope: "Cover the planning project body write only.",
+      constraints: "Use local MCP tools and do not expose credentials.",
+      sources: "FU3 implementation brief and existing renderer tests.",
+      human_decisions: "Human approval is still required before moving to Planned.",
+    };
+    const expectedPlanningBody = renderPlanningBody(slots);
+    const slotsWritten = await mcp.client.callTool({
+      name: "project_write_body",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+        slots,
+      },
+    });
+    assert.equal(slotsWritten.isError, undefined);
+    assert.equal(slotsWritten.structuredContent.content_length, expectedPlanningBody.length);
+    assert.equal(client.projects[0].content, expectedPlanningBody);
+    assert.equal(updateInputs.at(-1).input.content, expectedPlanningBody);
+
+    const staleContent = "## Stale hand-rendered body\n";
+    const slotsPreferred = await mcp.client.callTool({
+      name: "project_write_body",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+        content: staleContent,
+        slots,
+      },
+    });
+    assert.equal(slotsPreferred.isError, undefined);
+    assert.equal(slotsPreferred.structuredContent.content_length, expectedPlanningBody.length);
+    assert.equal(client.projects[0].content, expectedPlanningBody);
+    assert.notEqual(client.projects[0].content, staleContent);
+
+    const actions = createProjectMcpToolActions({
+      config,
+      registry,
+      readCache: () => cache,
+      linearClient: client,
+    });
+    await assert.rejects(
+      () => actions.project_move_status({
+        domain: "support-ops",
+        project_id: projectId,
+      }),
+      (error) => {
+        assert.equal(error.name, "ProjectMcpToolError");
+        assert.equal(error.code, "confirmation_required");
+        return true;
+      },
+    );
+    assert.equal(client.projects[0].status.id, "status-backlog");
+    assert.equal(updateInputs.some((event) => event.input.statusId === "status-planned"), false);
+
+    const rejectedMove = await mcp.client.callTool({
+      name: "project_move_status",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+      },
+    });
+    assert.equal(rejectedMove.isError, true);
+    assert.equal(client.projects[0].status.id, "status-backlog");
+    assert.equal(updateInputs.some((event) => event.input.statusId === "status-planned"), false);
+
+    const moved = await mcp.client.callTool({
+      name: "project_move_status",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+        confirm: true,
+      },
+    });
+    assert.equal(moved.isError, undefined);
+    assert.equal(moved.structuredContent.status.id, "status-planned");
+    assert.equal(client.projects[0].status.id, "status-planned");
+    assert.equal(updateInputs.some((event) => event.input.statusId === "status-planned"), true);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("Teami project MCP body and Planned mutations fail closed outside one resolved team", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  const cache = mcpDomainCache(initialized.cache);
+  const registry = mcpDomainRegistry({ config, client });
+  const backlog = client.projectStatuses.find((status) => status.id === cache.projectStatuses.backlog);
+  const projects = [
+    { id: "project-foreign", name: "Foreign project", teamIds: ["team-other"], status: backlog, content: "before" },
+    { id: "project-multi", name: "Multi-team project", teamIds: ["team-1", "team-other"], status: backlog, content: "before" },
+    { id: "project-empty-team", name: "Teamless project", teamIds: [], status: backlog, content: "before" },
+  ];
+  client.projects.push(...projects);
+
+  const originalGetProjectContext = client.getProjectContext.bind(client);
+  client.getProjectContext = async (projectId) => (
+    projectId === "project-missing" ? null : originalGetProjectContext(projectId)
+  );
+  const updateCalls = [];
+  const originalUpdateProject = client.updateProject.bind(client);
+  client.updateProject = async (projectId, input) => {
+    updateCalls.push({ projectId, input: structuredClone(input) });
+    return originalUpdateProject(projectId, input);
+  };
+  const traceEvents = [];
+  const mcp = await connectedProjectMcpClient({
+    config,
+    registry,
+    readCache: () => cache,
+    linearClient: client,
+    planningTraceSink: capturingPlanningTraceSink(traceEvents),
+    awaitPlanningTraceEmission: true,
+  });
+
+  const rejectedTargets = [
+    ["project-foreign", "project_outside_domain"],
+    ["project-multi", "project_domain_ambiguous"],
+    ["project-empty-team", "project_domain_unresolved"],
+    ["project-missing", "project_not_found"],
+  ];
+  try {
+    for (const [projectId, expectedCode] of rejectedTargets) {
+      for (const [name, extraArguments] of [
+        ["project_write_body", { content: "must not be written" }],
+        ["project_move_status", { confirm: true }],
+      ]) {
+        const result = await mcp.client.callTool({
+          name,
+          arguments: {
+            domain: "support-ops",
+            project_id: projectId,
+            ...extraArguments,
+          },
+        });
+        assert.equal(result.isError, true, `${name} must reject ${projectId}`);
+        assert.equal(result.structuredContent.error.code, expectedCode);
+        assert.match(result.structuredContent.error.message, /unchanged|nothing was changed/);
+        assert.ok(result.structuredContent.error.repair, "the rejection should explain how to repair it");
+        assert.doesNotMatch(JSON.stringify(result.structuredContent), /team-other/);
+      }
+    }
+
+    assert.deepEqual(updateCalls, [], "domain rejection must happen before every project mutation");
+    assert.equal(planningTraceFinishes(traceEvents).length, 0, "rejected status moves must emit no planning trace");
+    assert.deepEqual(
+      projects.map((project) => ({ id: project.id, content: project.content, statusId: project.status.id })),
+      projects.map((project) => ({ id: project.id, content: "before", statusId: backlog.id })),
+      "every rejected project must remain untouched",
+    );
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("Teami project MCP tools emit planning session traces for created and committed projects", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  const cache = mcpDomainCache(initialized.cache);
+  const registry = mcpDomainRegistry({ config, client });
+  const traceEvents = [];
+  const traceSink = capturingPlanningTraceSink(traceEvents);
+
+  const mcp = await connectedProjectMcpClient({
+    config,
+    registry,
+    readCache: () => cache,
+    linearClient: client,
+    planningTraceSink: traceSink,
+    awaitPlanningTraceEmission: true,
+  });
+  try {
+    const created = await mcp.client.callTool({
+      name: "project_create",
+      arguments: {
+        domain: "support-ops",
+        name: "Loop-ready planning",
+        description: "Emit the planning trace join key.",
+      },
+    });
+    assert.equal(created.isError, undefined);
+    const projectId = created.structuredContent.project.id;
+    const createdFinish = planningTraceFinishes(traceEvents).at(-1);
+    const createdTrace = createdFinish.input.result.trace;
+    const createdSpan = createdTrace.spans[0];
+    assert.equal(createdTrace.name, PLANNING_SESSION_TRACE_KIND);
+    assert.equal(createdTrace.attributes["linear.project_id"], projectId);
+    assert.equal(createdFinish.input.wake.object_id, projectId);
+    assert.equal(createdFinish.input.wake.workflow_type, PLANNING_SESSION_TRACE_KIND);
+    assert.equal(createdSpan.attributes["linear.project_id"], projectId);
+    assert.equal(createdSpan.attributes.outcome, "created");
+    assert.equal(createdSpan.attributes.project_name, "Loop-ready planning");
+    assert.equal(createdSpan.attributes.project_body_present, false);
+
+    const finishCountAfterCreate = planningTraceFinishes(traceEvents).length;
+    const body = "## Problem Or Opportunity\n\nPlanning traces need the downstream project join key.\n";
+    const written = await mcp.client.callTool({
+      name: "project_write_body",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+        content: body,
+      },
+    });
+    assert.equal(written.isError, undefined);
+    assert.equal(planningTraceFinishes(traceEvents).length, finishCountAfterCreate);
+
+    const planningTelemetry = {
+      elicitation_rounds: 3,
+      human_only_decisions_surfaced: 2,
+      pressure_test_verdict: "ready",
+      advisor_used: true,
+    };
+    const moved = await mcp.client.callTool({
+      name: "project_move_status",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+        confirm: true,
+        planning_telemetry: planningTelemetry,
+      },
+    });
+    assert.equal(moved.isError, undefined);
+    assert.equal(moved.structuredContent.status.id, "status-planned");
+
+    const committedFinish = planningTraceFinishes(traceEvents).at(-1);
+    const committedTrace = committedFinish.input.result.trace;
+    const committedSpan = committedTrace.spans[0];
+    assert.equal(committedTrace.name, PLANNING_SESSION_TRACE_KIND);
+    assert.equal(committedTrace.attributes["linear.project_id"], projectId);
+    assert.equal(committedSpan.name, "planning_session");
+    assert.equal(committedSpan.attributes["linear.project_id"], projectId);
+    assert.equal(committedSpan.attributes.outcome, "committed");
+    assert.equal(committedSpan.attributes.project_body, body);
+    assert.equal(committedSpan.attributes.project_body_digest, digestTraceField(body));
+    assert.equal(committedSpan.attributes.project_body_length, body.length);
+    assert.deepEqual(committedSpan.attributes.planning_telemetry, planningTelemetry);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("Teami project MCP planning trace failures are graceful and telemetry stays optional", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  const cache = mcpDomainCache(initialized.cache);
+  const registry = mcpDomainRegistry({ config, client });
+  const traceEvents = [];
+
+  const mcp = await connectedProjectMcpClient({
+    config,
+    registry,
+    readCache: () => cache,
+    linearClient: client,
+    planningTraceSink: capturingPlanningTraceSink(traceEvents, { failStart: true }),
+    awaitPlanningTraceEmission: true,
+  });
+  try {
+    const created = await mcp.client.callTool({
+      name: "project_create",
+      arguments: {
+        domain: "support-ops",
+        name: "Phoenix absent planning",
+      },
+    });
+    assert.equal(created.isError, undefined);
+    const projectId = created.structuredContent.project.id;
+
+    const moved = await mcp.client.callTool({
+      name: "project_move_status",
+      arguments: {
+        domain: "support-ops",
+        project_id: projectId,
+        confirm: true,
+      },
+    });
+    assert.equal(moved.isError, undefined);
+    assert.equal(moved.structuredContent.status.id, "status-planned");
+    assert.equal(client.projects[0].status.id, "status-planned");
+    assert.equal(traceEvents.filter((event) => event.type === "finishRun").length, 0);
+    assert.equal(traceEvents.filter((event) => event.type === "startRun").length, 2);
+    assert.equal(traceEvents.filter((event) => event.type === "shutdown").length, 2);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("Teami project MCP tool errors return opaque reauthorize without credential material", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  await initLinear({ client, config });
+  const registry = mcpDomainRegistry({ config, client });
+  // Assemble the fake leaked credential at runtime so the tracked source carries no
+  // scanner-flaggable token literal (the pre-push secret scan reads source text); the
+  // runtime value still contains the sensitive substrings the tool must redact below.
+  const rawSecret = ["Bearer", "secret-access-token", "refresh_token=secret-refresh-token"].join(" ");
+
+  const mcp = await connectedProjectMcpClient({
+    config,
+    registry,
+    readCache: () => null,
+    linearClientFactory: async () => {
+      throw new Error(`Linear OAuth authorization is missing; ${rawSecret}`);
+    },
+  });
+  try {
+    const result = await mcp.client.callTool({
+      name: "project_create",
+      arguments: {
+        domain: "support-ops",
+        name: "Credential-safe failure",
+      },
+    });
+
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent, {
+      ok: false,
+      error: { code: "reauthorize", message: "reauthorize" },
+    });
+    const text = result.content.map((part) => part.text || "").join("\n");
+    assert.doesNotMatch(text, /Bearer/i);
+    assert.doesNotMatch(text, /secret-access-token/i);
+    assert.doesNotMatch(text, /refresh_token/i);
+  } finally {
+    await mcp.close();
+  }
 });
 
 test("Init without a domain name does not mutate anything", async () => {
@@ -699,6 +1906,452 @@ test("init follows cached Linear team id after setup when the display name is re
   assert.equal(result.cache.teamKey, client.teams[0].key);
 });
 
+test("explicit init domain hint resolves an existing complete domain without shadowing incomplete resume", () => {
+  const registry = upsertDomainRecord(
+    upsertDomainRecord(
+      emptyDomainRegistry(),
+      makeDomainRecord({
+        domainId: "support-ops",
+        status: "active",
+        adopterProvidedName: "Support Ops",
+        workspaceId: "workspace-1",
+        workspaceName: "Workspace One",
+        teamId: "team-support",
+        teamKey: "SUP",
+        teamName: "Support Ops",
+      }),
+    ),
+    makeDomainRecord({
+      domainId: "support-ops-2",
+      status: "setup_incomplete",
+      adopterProvidedName: "Support Ops",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+    }),
+  );
+
+  const byId = resolveSetupCommandDomainNameHint(["--domain", "support-ops"], registry);
+  assert.equal(byId.completeResumeDomain.id, "support-ops");
+  assert.equal(byId.resumeDomain, null);
+
+  const byDisplayName = resolveSetupCommandDomainNameHint(["--domain", "Support Ops"], registry);
+  assert.equal(byDisplayName.resumeDomain.id, "support-ops-2");
+  assert.equal(byDisplayName.completeResumeDomain, null);
+});
+
+test("init over a removed domain record takes the fresh browser-auth path and replaces the tombstone", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-init-removed-domain-"));
+  const previousHome = process.env.TEAMI_HOME;
+  process.env.TEAMI_HOME = tempRoot;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.TEAMI_HOME;
+    else process.env.TEAMI_HOME = previousHome;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+  let registry = upsertDomainRecord(
+    emptyDomainRegistry(),
+    makeDomainRecord({
+      domainId: "livetest",
+      status: "removed",
+      adopterProvidedName: "livetest",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+      teamId: "team-old",
+      teamKey: "OLD",
+      teamName: "livetest",
+    }),
+  );
+  writeDomainRegistry({ home: tempRoot }, registry);
+
+  const resolution = resolveSetupCommandDomainNameHint(["--domain", "livetest"], registry);
+  assert.equal(resolution.resumeDomain, null);
+  assert.equal(resolution.completeResumeDomain, null);
+
+  const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  const output = captureSetupOutput();
+  const events = [];
+  const authOptions = [];
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await runLinearSetupCommand({
+      command: "init",
+      args: ["--domain", "livetest"],
+      context: {
+        config,
+        repoRoot: tempRoot,
+        home: tempRoot,
+        cachePath: cachePathForConfig(config, tempRoot),
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        startLinearBrowserAuthorization: instantBrowserAuthorization(),
+        createLinearSetupAuth: (options) => {
+          authOptions.push({
+            allowBrowserAuth: options.allowBrowserAuth,
+            deferTokenPersistence: options.deferTokenPersistence,
+          });
+          return fakeSetupAuth(client, {
+            tokenSource: "browser",
+            onPersist: () => events.push("persist-browser-token"),
+          });
+        },
+        promptReauthorize: async ({ message }) => {
+          events.push("browser-auth-gate");
+          assert.match(message, /Authorized Linear workspace: Workspace One/);
+          return "";
+        },
+        githubDiscoveryRunCommand: async () => ({ ok: true, status: 0, stdout: "[]", stderr: "" }),
+        ensurePhoenixReady: async () => ({ ok: false, reason: "phoenix skipped in test" }),
+        runGitHubInitPhase: async () => ({
+          ok: true,
+          connection: {
+            repo: { full_name: "Acme/behavior" },
+            connection_mode: "real",
+          },
+        }),
+        githubInitTransportFromFlags: async () => ({}),
+        runClaudePluginRegistrationStep: async () => ({ ok: true, status: "already_installed" }),
+        finalGate: async () => ({ ok: true, smokeOk: true, doctorOk: true }),
+      },
+    });
+    assert.equal(process.exitCode, 0, output.text());
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+
+  registry = readDomainRegistry({ home: tempRoot });
+  const domain = registry.domains.find((candidate) => candidate.id === "livetest");
+  assert.equal(domain.status, "active");
+  assert.equal(domain.linear.workspace_id, "workspace-1");
+  assert.equal(registry.domains.filter((candidate) => candidate.id === "livetest").length, 1);
+  assert.deepEqual(authOptions, [{ allowBrowserAuth: true, deferTokenPersistence: true }]);
+  assert.deepEqual(events, ["persist-browser-token"]);
+  assert.doesNotMatch(output.text(), /Refreshing existing domain/);
+  assert.doesNotMatch(output.text(), /Resuming incomplete setup/);
+});
+test("complete-domain init resumes non-interactively with the domain credential and existing team", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-complete-resume-"));
+  process.env.TEAMI_HOME = tempRoot;
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  let registry = upsertDomainRecord(
+    emptyDomainRegistry(),
+    makeDomainRecord({
+      domainId: "support-ops",
+      status: "active",
+      adopterProvidedName: "Support Ops",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+      teamId: "team-support",
+      teamKey: "SUP",
+      teamName: "Support Ops",
+      webhookId: "webhook-support",
+    }),
+  );
+  writeDomainRegistry({ home: tempRoot }, registry);
+  const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  client.teams.push({ id: "team-support", key: "SUP", name: "Support Ops" });
+  const domainStore = createLinearCredentialStore({
+    config,
+    repoRoot: tempRoot,
+    domainId: "support-ops",
+    workspaceId: "workspace-1",
+  });
+  await domainStore.writeTokenSet({
+    accessToken: "fake-tok",
+    refreshToken: "fake-refresh",
+    expiresAt: Date.now() + 60_000,
+  });
+  const bootstrapStore = createLinearCredentialStore({
+    config,
+    repoRoot: tempRoot,
+    target: legacyCredentialTargetForConfig(config),
+  });
+  assert.equal(await bootstrapStore.readTokenSet(), null);
+
+  let authCalls = 0;
+  let repoDiscoveryCalled = false;
+  const output = captureSetupOutput();
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await runLinearSetupCommand({
+      command: "init",
+      args: ["--domain", "support-ops"],
+      context: {
+        config,
+        repoRoot: tempRoot,
+        home: tempRoot,
+        cachePath: cachePathForConfig(config, tempRoot),
+        output,
+        confirmSetupEffects: async () => true,
+        createLinearSetupAuth: ({ credentialStore, allowBrowserAuth, deferTokenPersistence }) => {
+          authCalls += 1;
+          assert.equal(credentialStore.target, domainStore.target);
+          assert.equal(allowBrowserAuth, false);
+          assert.equal(deferTokenPersistence, false);
+          return fakeSetupAuth(client, { tokenSource: "stored" });
+        },
+        githubDiscoveryRunCommand: () => {
+          repoDiscoveryCalled = true;
+          throw new Error("repo discovery must be skipped");
+        },
+        ensurePhoenixReady: async () => ({ ok: false, reason: "phoenix skipped in test" }),
+        runGitHubInitPhase: async () => ({
+          ok: true,
+          connection: {
+            repo: { full_name: "Acme/behavior" },
+            connection_mode: "real",
+          },
+        }),
+        githubInitTransportFromFlags: async () => ({}),
+        runClaudePluginRegistrationStep: async () => ({ ok: true, status: "already_installed" }),
+        finalGate: async () => ({ ok: true, smokeOk: true, doctorOk: true }),
+      },
+    });
+    assert.equal(process.exitCode, 0, output.text());
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+
+  registry = readDomainRegistry({ home: tempRoot });
+  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
+  const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, domain.linear.cache_path), "utf8"));
+  assert.equal(authCalls, 1);
+  assert.equal(repoDiscoveryCalled, false);
+  assert.equal(client.teams.length, 1);
+  assert.equal(domain.status, "active");
+  assert.equal(domain.linear.team_id, "team-support");
+  assert.equal(domain.linear.team_name, "Support Ops");
+  assert.equal(cache.domainId, "support-ops");
+  assert.equal(cache.workspaceId, "workspace-1");
+  assert.equal(cache.teamId, "team-support");
+  assert.equal(await bootstrapStore.readTokenSet(), null);
+  assert.doesNotMatch(output.text(), /Repository access/);
+  assert.doesNotMatch(output.text(), /GitHub repos were found/);
+  assert.match(output.text(), /Setup verified/);
+});
+
+test("complete-domain init deleted team renders guided recovery and preserves machine prefix", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-complete-resume-deleted-team-"));
+  const previousHome = process.env.TEAMI_HOME;
+  process.env.TEAMI_HOME = tempRoot;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.TEAMI_HOME;
+    else process.env.TEAMI_HOME = previousHome;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+  const registry = upsertDomainRecord(
+    emptyDomainRegistry(),
+    makeDomainRecord({
+      domainId: "support-ops",
+      status: "active",
+      adopterProvidedName: "Support Ops",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+      teamId: "team-support",
+      teamKey: "SUP",
+      teamName: "Support Ops",
+      webhookId: "webhook-support",
+    }),
+  );
+  writeDomainRegistry({ home: tempRoot }, registry);
+  const domainStore = createLinearCredentialStore({
+    config,
+    repoRoot: tempRoot,
+    domainId: "support-ops",
+    workspaceId: "workspace-1",
+  });
+  await domainStore.writeTokenSet({
+    accessToken: "fake-tok",
+    refreshToken: "fake-refresh",
+    expiresAt: Date.now() + 60_000,
+  });
+
+  const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  const output = captureSetupOutput();
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await runLinearSetupCommand({
+      command: "init",
+      args: ["--domain", "support-ops"],
+      context: {
+        config,
+        repoRoot: tempRoot,
+        home: tempRoot,
+        cachePath: cachePathForConfig(config, tempRoot),
+        output,
+        confirmSetupEffects: async () => true,
+        createLinearSetupAuth: () => fakeSetupAuth(client, { tokenSource: "stored" }),
+      },
+    });
+    assert.equal(process.exitCode, 1);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+
+  const text = output.text();
+  assert.match(text, /The Linear team saved for domain "support-ops" no longer exists in workspace Workspace One/);
+  assert.match(text, /complete_domain_team_missing: domain support-ops records Linear team team-support/);
+  assert.match(text, /will not guess by name or silently recreate it/);
+  assert.ok(text.includes(formatCommand("uninstall --domain support-ops")));
+  assert.ok(text.includes(formatCommand("init --domain support-ops")));
+});
+
+test("complete-domain init repairs a deleted cached Principal Escalation status with one-shot admin", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-complete-resume-status-repair-"));
+  process.env.TEAMI_HOME = tempRoot;
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  let registry = upsertDomainRecord(
+    emptyDomainRegistry(),
+    makeDomainRecord({
+      domainId: "support-ops",
+      status: "active",
+      adopterProvidedName: "Support Ops",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+      teamId: "team-support",
+      teamKey: "SUP",
+      teamName: "Support Ops",
+      webhookId: "webhook-support",
+    }),
+  );
+  writeDomainRegistry({ home: tempRoot }, registry);
+  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
+  writeLinearCache(path.resolve(tempRoot, domain.linear.cache_path), {
+    domainId: "support-ops",
+    workspaceId: "workspace-1",
+    teamId: "team-support",
+    projectStatuses: {
+      backlog: "status-backlog",
+      planned: "status-planned",
+      in_progress: "status-started",
+      completed: "status-completed",
+      needs_principal: "status-deleted",
+    },
+    projectStatusTypes: {
+      backlog: "backlog",
+      planned: "planned",
+      in_progress: "started",
+      completed: "completed",
+      needs_principal: "planned",
+    },
+  });
+  const sharedStatuses = projectStatusesWithoutNeedsPrincipal();
+  const client = new MemoryLinearClient({
+    statuses: sharedStatuses,
+    workspaceId: "workspace-1",
+    workspaceName: "Workspace One",
+  });
+  client.teams.push({ id: "team-support", key: "SUP", name: "Support Ops" });
+  const adminClient = new MemoryLinearClient({
+    statuses: sharedStatuses,
+    viewerId: "user-admin-1",
+    viewerName: "Workspace Admin",
+    adminGrant: true,
+  });
+  const domainStore = createLinearCredentialStore({
+    config,
+    repoRoot: tempRoot,
+    domainId: "support-ops",
+    workspaceId: "workspace-1",
+  });
+  await domainStore.writeTokenSet({
+    accessToken: "fake-tok",
+    refreshToken: "fake-refresh",
+    expiresAt: Date.now() + 60_000,
+  });
+  const output = captureSetupOutput();
+  const createInputs = [];
+  const promptMessages = [];
+  let appAuthCalls = 0;
+  let adminAuthCalls = 0;
+  let teardownCalls = 0;
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await runLinearSetupCommand({
+      command: "init",
+      args: ["--domain", "support-ops"],
+      context: {
+        config,
+        repoRoot: tempRoot,
+        home: tempRoot,
+        cachePath: cachePathForConfig(config, tempRoot),
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        createLinearSetupAuth: ({ credentialStore, allowBrowserAuth, deferTokenPersistence }) => {
+          appAuthCalls += 1;
+          assert.equal(credentialStore.target, domainStore.target);
+          assert.equal(allowBrowserAuth, false);
+          assert.equal(deferTokenPersistence, false);
+          return fakeSetupAuth(client, { tokenSource: "stored" });
+        },
+        authorizeOneShotLinearAdmin: async (options) => {
+          assert.equal(Object.hasOwn(options, "credentialStore"), false);
+          adminAuthCalls += 1;
+          return {
+            adminClient: {
+              createProjectStatus: async (input) => {
+                createInputs.push(input);
+                return adminClient.createProjectStatus(input);
+              },
+            },
+            teardown: async () => {
+              teardownCalls += 1;
+              return { revokeVerified: true };
+            },
+          };
+        },
+        promptAdminProvisioning: async (message) => {
+          promptMessages.push(message);
+          return "YES";
+        },
+        githubDiscoveryRunCommand: () => {
+          throw new Error("repo discovery must be skipped");
+        },
+        ensurePhoenixReady: async () => ({ ok: false, reason: "phoenix skipped in test" }),
+        runGitHubInitPhase: async () => ({
+          ok: true,
+          connection: {
+            repo: { full_name: "Acme/behavior" },
+            connection_mode: "real",
+          },
+        }),
+        githubInitTransportFromFlags: async () => ({}),
+        runClaudePluginRegistrationStep: async () => ({ ok: true, status: "already_installed" }),
+        finalGate: async () => ({ ok: true, smokeOk: true, doctorOk: true }),
+      },
+    });
+    assert.equal(process.exitCode, 0, output.text());
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+
+  registry = readDomainRegistry({ home: tempRoot });
+  const repairedDomain = registry.domains.find((candidate) => candidate.id === "support-ops");
+  const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, repairedDomain.linear.cache_path), "utf8"));
+  assert.equal(appAuthCalls, 2, "the stored app authorization is revalidated after just-in-time admin consent");
+  assert.equal(adminAuthCalls, 1);
+  assert.equal(teardownCalls, 1);
+  assert.deepEqual(promptMessages, ["Type YES to approve the one-time Linear admin grant now: "]);
+  assert.deepEqual(createInputs, [{
+    name: "Principal Escalation",
+    color: "#F2994A",
+    position: 20.01,
+    type: "planned",
+  }]);
+  assert.equal(cache.projectStatuses.needs_principal, "status-principal-escalation");
+  assert.equal(cache.projectStatusTypes.needs_principal, "planned");
+  assert.equal(repairedDomain.status, "active");
+});
+
 test("workspace picker known workspace match proceeds before shared setup mutations", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
@@ -854,6 +2507,257 @@ test("stored setup credential workspace mismatch triggers fresh browser auth", a
   assert.equal(authorization.workspace.id, "workspace-1");
 });
 
+test("setup authorization wait escape retries the browser attempt through the setup loop", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const freshClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  const registry = registryWithWorkspace({
+    domainId: "support-ops",
+    workspaceId: "workspace-1",
+    workspaceName: "Workspace One",
+  });
+  const authOptions = [];
+  const logs = [];
+  let authCalls = 0;
+  let promptCalls = 0;
+  let persistCalls = 0;
+
+  const authorization = await authorizeLinearSetupWorkspace({
+    config,
+    repoRoot,
+    credentialStore: {},
+    registry,
+    flags: { workspace: "Workspace One" },
+    isTTY: true,
+    createSetupAuth: (options) => {
+      authCalls += 1;
+      authOptions.push({
+        allowBrowserAuth: options.allowBrowserAuth,
+        hasWaitEscape: typeof options.waitEscape === "function",
+      });
+      if (authCalls === 1) {
+        return {
+          client: {
+            getOrganization: async () => {
+              const escape = options.waitEscape();
+              await escape.promise;
+              const error = new Error("Linear OAuth wait escaped");
+              error.code = LINEAR_OAUTH_WAIT_ESCAPED_CODE;
+              throw error;
+            },
+          },
+          tokenProvider: {
+            lastTokenSource: null,
+            clear: async () => {
+              throw new Error("wait escape retry must not clear credentials");
+            },
+            discardPendingTokenSet: async () => {},
+            persistPendingTokenSet: async () => false,
+          },
+        };
+      }
+      return fakeSetupAuth(freshClient, {
+        tokenSource: "browser",
+        onPersist: () => {
+          persistCalls += 1;
+        },
+      });
+    },
+    promptReauthorize: async ({ message, signal }) => {
+      promptCalls += 1;
+      assert.match(message, /After revoking Teami/);
+      assert.equal(signal.aborted, false);
+      return "";
+    },
+    log: (line) => logs.push(line),
+  });
+
+  assert.equal(authorization.workspace.id, "workspace-1");
+  assert.equal(authCalls, 2);
+  assert.equal(promptCalls, 1);
+  assert.equal(persistCalls, 1);
+  assert.deepEqual(authOptions, [
+    { allowBrowserAuth: true, hasWaitEscape: true },
+    { allowBrowserAuth: true, hasWaitEscape: true },
+  ]);
+  assert.equal(logs.includes("Reopening Linear authorization..."), true);
+});
+
+test("setup authorization wait escape respects max authorization attempts", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const registry = registryWithWorkspace({
+    domainId: "support-ops",
+    workspaceId: "workspace-1",
+    workspaceName: "Workspace One",
+  });
+  let authCalls = 0;
+  let promptCalls = 0;
+
+  await assert.rejects(
+    () =>
+      authorizeLinearSetupWorkspace({
+        config,
+        repoRoot,
+        credentialStore: {},
+        registry,
+        flags: { workspace: "Workspace One" },
+        isTTY: true,
+        maxAuthorizationAttempts: 1,
+        createSetupAuth: (options) => {
+          authCalls += 1;
+          return {
+            client: {
+              getOrganization: async () => {
+                const escape = options.waitEscape();
+                await escape.promise;
+                const error = new Error("Linear OAuth wait escaped");
+                error.code = LINEAR_OAUTH_WAIT_ESCAPED_CODE;
+                throw error;
+              },
+            },
+            tokenProvider: {
+              lastTokenSource: null,
+              clear: async () => {},
+              discardPendingTokenSet: async () => {},
+              persistPendingTokenSet: async () => false,
+            },
+          };
+        },
+        promptReauthorize: async () => {
+          promptCalls += 1;
+          return "";
+        },
+        log: () => {},
+      }),
+    (error) => error.code === LINEAR_OAUTH_WAIT_ESCAPED_CODE,
+  );
+
+  assert.equal(authCalls, 1);
+  assert.equal(promptCalls, 1);
+});
+test("complete-domain refresh reauthorizes when the stored token yields HTTP 401", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const resumeDomain = makeDomainRecord({
+    domainId: "support-ops",
+    status: "active",
+    adopterProvidedName: "Support Ops",
+    workspaceId: "workspace-1",
+    workspaceName: "Workspace One",
+    teamId: "team-support",
+    teamKey: "SUP",
+    teamName: "Support Ops",
+  });
+  const registry = upsertDomainRecord(emptyDomainRegistry(), resumeDomain);
+  const freshClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  const authOptions = [];
+  let authCalls = 0;
+  let clearCalls = 0;
+  let promptCalls = 0;
+  let persistCalls = 0;
+
+  const authorization = await authorizeLinearSetupWorkspace({
+    config,
+    repoRoot,
+    credentialStore: {},
+    registry,
+    domainNameHint: "Support Ops",
+    resumeDomain,
+    isTTY: true,
+    createSetupAuth: (options) => {
+      authCalls += 1;
+      authOptions.push({
+        allowBrowserAuth: options.allowBrowserAuth,
+        deferTokenPersistence: options.deferTokenPersistence,
+      });
+      if (authCalls === 1) {
+        return {
+          client: {
+            getOrganization: async () => {
+              const error = new Error(
+                "Linear GraphQL request failed with HTTP 401: You need to authenticate to access this operation.; Authentication required, not authenticated",
+              );
+              error.httpStatus = 401;
+              throw error;
+            },
+          },
+          tokenProvider: {
+            lastTokenSource: "stored",
+            clear: async () => {
+              clearCalls += 1;
+            },
+            discardPendingTokenSet: async () => {},
+            persistPendingTokenSet: async () => false,
+          },
+        };
+      }
+      return fakeSetupAuth(freshClient, {
+        tokenSource: "browser",
+        onPersist: () => {
+          persistCalls += 1;
+        },
+      });
+    },
+    promptReauthorize: async ({ message }) => {
+      promptCalls += 1;
+      assert.match(message, /needs to be refreshed/);
+      return "";
+    },
+    log: () => {},
+  });
+
+  assert.equal(authorization.workspace.id, "workspace-1");
+  assert.equal(authCalls, 2);
+  assert.equal(clearCalls, 1);
+  assert.equal(promptCalls, 1);
+  assert.equal(persistCalls, 1);
+  assert.deepEqual(authOptions, [
+    { allowBrowserAuth: false, deferTokenPersistence: false },
+    { allowBrowserAuth: true, deferTokenPersistence: true },
+  ]);
+});
+
+test("complete-domain workspace mismatch never clears the stored domain credential", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const resumeDomain = makeDomainRecord({
+    domainId: "support-ops",
+    status: "active",
+    adopterProvidedName: "Support Ops",
+    workspaceId: "workspace-1",
+    workspaceName: "Workspace One",
+    teamId: "team-support",
+    teamKey: "SUP",
+    teamName: "Support Ops",
+  });
+  const registry = upsertDomainRecord(emptyDomainRegistry(), resumeDomain);
+  const mismatchingClient = new MemoryLinearClient({ workspaceId: "workspace-2", workspaceName: "Sandbox Workspace" });
+  let clearCalls = 0;
+
+  await assert.rejects(
+    () =>
+      authorizeLinearSetupWorkspace({
+        config,
+        repoRoot,
+        credentialStore: {},
+        registry,
+        domainNameHint: "Support Ops",
+        resumeDomain,
+        isTTY: false,
+        createSetupAuth: ({ allowBrowserAuth }) => {
+          assert.equal(allowBrowserAuth, false);
+          return fakeSetupAuth(mismatchingClient, {
+            tokenSource: "stored",
+            onClear: () => {
+              clearCalls += 1;
+            },
+          });
+        },
+        log: () => {},
+      }),
+    /Linear authorization for existing domain "Support Ops".*--workspace "Workspace One"/,
+  );
+
+  assert.equal(clearCalls, 0);
+});
+
 test("fresh grant workspace mismatch remains fail-closed with zero mutations", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-2", workspaceName: "Sandbox Workspace" });
@@ -929,6 +2833,39 @@ test("fresh grant token persists after workspace verification, with no admin-tok
   // Admin-token setup authorization was removed in favor of setup grants (C13): the verified
   // Linear token persists after workspace verification, and there is no admin step.
   assert.deepEqual(events, ["persist"]);
+});
+
+test("fresh domain setup still uses the bootstrap browser gate", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const credentialStore = { target: "bootstrap-target" };
+  const client = new MemoryLinearClient({ workspaceId: "workspace-first", workspaceName: "First Workspace" });
+  const events = [];
+  let seenOptions = null;
+
+  const authorization = await authorizeLinearSetupWorkspace({
+    config,
+    repoRoot,
+    credentialStore,
+    registry: emptyDomainRegistry(),
+    domainNameHint: "First Domain",
+    isTTY: false,
+    createSetupAuth: (options) => {
+      seenOptions = options;
+      return fakeSetupAuth(client, {
+        tokenSource: "browser",
+        onPersist: () => {
+          events.push("persist");
+        },
+      });
+    },
+    log: () => {},
+  });
+
+  assert.equal(seenOptions.credentialStore, credentialStore);
+  assert.equal(seenOptions.allowBrowserAuth, true);
+  assert.equal(seenOptions.deferTokenPersistence, true);
+  assert.deepEqual(events, ["persist"]);
+  assert.equal(authorization.workspace.id, "workspace-first");
 });
 
 test("another workspace reflects a genuinely new grant and proceeds", async () => {
@@ -1119,6 +3056,110 @@ test("bare init resumes a single setup_incomplete domain instead of asking for a
   assert.equal(authorization.workspace.id, "workspace-1");
 });
 
+test("resume of setup_incomplete domain reauthorizes when the stored setup credential is missing", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const freshClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  let registry = upsertDomainRecord(
+    emptyDomainRegistry(),
+    makeDomainRecord({
+      domainId: "support-ops",
+      status: "setup_incomplete",
+      setupIncompleteCause: "linear_team_limit_reached",
+      adopterProvidedName: "Support Ops",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+    }),
+  );
+  const resolution = resolveSetupCommandDomainNameHint(["--domain", "Support Ops"], registry);
+  const authOptions = [];
+  let authCalls = 0;
+  let clearCalls = 0;
+  let promptCalls = 0;
+  let persistCalls = 0;
+
+  const authorization = await authorizeLinearSetupWorkspace({
+    config,
+    repoRoot,
+    credentialStore: {},
+    registry,
+    domainNameHint: resolution.domainNameHint,
+    resumeDomain: resolution.resumeDomain,
+    isTTY: true,
+    createSetupAuth: (options) => {
+      authCalls += 1;
+      authOptions.push({
+        allowBrowserAuth: options.allowBrowserAuth,
+        deferTokenPersistence: options.deferTokenPersistence,
+      });
+      if (authCalls === 1) {
+        return {
+          client: {
+            getOrganization: async () => {
+              throw new Error("Linear OAuth authorization is missing.");
+            },
+          },
+          tokenProvider: {
+            lastTokenSource: null,
+            clear: async () => {
+              clearCalls += 1;
+            },
+            discardPendingTokenSet: async () => {},
+            persistPendingTokenSet: async () => false,
+          },
+        };
+      }
+      return fakeSetupAuth(freshClient, {
+        tokenSource: "browser",
+        onPersist: () => {
+          persistCalls += 1;
+        },
+      });
+    },
+    promptWorkspace: async () => {
+      throw new Error("must not prompt for workspace when resuming setup_incomplete");
+    },
+    promptReauthorize: async ({ message }) => {
+      promptCalls += 1;
+      assert.match(message, /needs to be refreshed/);
+      return "";
+    },
+    log: () => {},
+  });
+
+  await setupLinearDomain({
+    client: authorization.setupAuth.client,
+    config,
+    registry,
+    repoRoot,
+    domainName: "Support Ops",
+    workspace: authorization.workspace,
+    declaredWorkspace: authorization.declaredWorkspace,
+    registerWebhook: async ({ workspaceId, teamId }) => ({
+      created: true,
+      webhook: { id: `webhook-${teamId}`, workspaceId },
+    }),
+    ensureRunnerCredential: async ({ workspaceId }) => ({
+      created: true,
+      credential: { credentialId: `runner-${workspaceId}` },
+    }),
+    writeCache: async () => {},
+    writeRegistry: async (nextRegistry) => {
+      registry = nextRegistry;
+    },
+  });
+
+  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
+  assert.equal(domain.status, "active");
+  assert.equal(authorization.workspace.id, "workspace-1");
+  assert.equal(authCalls, 2);
+  assert.equal(clearCalls, 1);
+  assert.equal(promptCalls, 1);
+  assert.equal(persistCalls, 1);
+  assert.deepEqual(authOptions, [
+    { allowBrowserAuth: true, deferTokenPersistence: true },
+    { allowBrowserAuth: true, deferTokenPersistence: true },
+  ]);
+});
 test("bare init resumes GitHub when Linear is active but GitHub setup is incomplete", () => {
   const registry = {
     schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
@@ -1693,7 +3734,7 @@ test("Bootstrap to promotion flow lands tokens under the domain-scoped target be
   const bootstrapStore = createLinearCredentialStore({
     config,
     repoRoot: tempRoot,
-    target: legacyCredentialTargetForConfig(config, tempRoot),
+    target: legacyCredentialTargetForConfig(config),
   });
   await bootstrapStore.writeTokenSet({ refreshToken: "refresh-bootstrap", accessToken: "access-bootstrap" });
   let promotedBeforeActive = false;
@@ -1835,6 +3876,8 @@ test("domain:add and init share setupLinearDomain for a second workspace with is
   assert.equal(Object.hasOwn(first.context.credentialTargets, "runnerInbox"), false);
   assert.equal(Object.hasOwn(second.context.credentialTargets, "runnerInbox"), false);
   assert.notEqual(caches.get("support-ops").path, caches.get("sales-ops").path);
+  assert.equal(JSON.parse(caches.get("support-ops").bytes).app_identity_id, "app-viewer-1");
+  assert.equal(JSON.parse(caches.get("support-ops").bytes).app_identity_name, "Teami App");
   assert.equal(registry.domains.find((domain) => domain.id === "support-ops").linear.webhook_id, "webhook-support");
   assert.equal(registry.domains.find((domain) => domain.id === "sales-ops").linear.webhook_id, "webhook-sales");
 });
@@ -1842,15 +3885,17 @@ test("domain:add and init share setupLinearDomain for a second workspace with is
 test("Failure mid-add leaves the first domain registry entry, credentials, and cache byte-identical", async () => {
   const config = loadLinearConfig({ repoRoot });
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-add-isolation-"));
+  process.env.TEAMI_HOME = tempRoot;
   let registry = emptyDomainRegistry();
   const credentialStatePath = (domainId) =>
-    path.join(tempRoot, ".teami", "domains", domainId, "runner-credential-state.json");
+    path.join(tempRoot, "domains", domainId, "runner-credential-state.json");
 
   await setupLinearDomain({
     client: new MemoryLinearClient({ workspaceId: "workspace-1" }),
     config,
     registry,
     repoRoot: tempRoot,
+    home: tempRoot,
     domainName: "Support Ops",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
@@ -1867,7 +3912,7 @@ test("Failure mid-add leaves the first domain registry entry, credentials, and c
     },
     writeRegistry: async (nextRegistry) => {
       registry = nextRegistry;
-      writeDomainRegistry({ repoRoot: tempRoot }, nextRegistry);
+      writeDomainRegistry({ home: tempRoot }, nextRegistry);
       writeDomainEntrySnapshot({ repoRoot: tempRoot, registry: nextRegistry, domainId: "support-ops" });
     },
   });
@@ -1884,6 +3929,7 @@ test("Failure mid-add leaves the first domain registry entry, credentials, and c
         config,
         registry,
         repoRoot: tempRoot,
+        home: tempRoot,
         domainName: "Sales Ops",
         registerWebhook: async ({ workspaceId, teamId }) => ({
           created: true,
@@ -1897,7 +3943,7 @@ test("Failure mid-add leaves the first domain registry entry, credentials, and c
         },
         writeRegistry: async (nextRegistry) => {
           registry = nextRegistry;
-          writeDomainRegistry({ repoRoot: tempRoot }, nextRegistry);
+          writeDomainRegistry({ home: tempRoot }, nextRegistry);
           writeDomainEntrySnapshot({ repoRoot: tempRoot, registry: nextRegistry, domainId: "support-ops" });
         },
       }),
@@ -1972,6 +4018,7 @@ test("trigger-status all-domains display resolves wake contract identity through
 
 test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-dead-"));
+  process.env.TEAMI_HOME = tempRoot;
   const lockPath = path.join(tempRoot, ".teami", "domains", "support-ops", ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(
@@ -1983,6 +4030,7 @@ test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", 
 
   const lock = acquireDomainRunnerLock({
     repoRoot: tempRoot,
+    home: tempRoot,
     domainId: "support-ops",
     installHandlers: false,
     isProcessAlive: () => false,
@@ -2006,6 +4054,7 @@ test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", 
 
 test("runner lock breaks a stale live-pid lock after the stale age", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-stale-"));
+  process.env.TEAMI_HOME = tempRoot;
   const lockPath = path.join(tempRoot, ".teami", "domains", "support-ops", ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(
@@ -2017,6 +4066,7 @@ test("runner lock breaks a stale live-pid lock after the stale age", () => {
 
   const lock = acquireDomainRunnerLock({
     repoRoot: tempRoot,
+    home: tempRoot,
     domainId: "support-ops",
     staleMs: 1000,
     now: () => new Date("2026-06-11T00:01:00.000Z"),
@@ -2035,8 +4085,10 @@ test("runner lock breaks a stale live-pid lock after the stale age", () => {
 
 test("runner lock live-pid contention yields the clean already-running message", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-live-"));
+  process.env.TEAMI_HOME = tempRoot;
   const lock = acquireDomainRunnerLock({
     repoRoot: tempRoot,
+    home: tempRoot,
     domainId: "support-ops",
     installHandlers: false,
   });
@@ -2044,6 +4096,7 @@ test("runner lock live-pid contention yields the clean already-running message",
   try {
     const contender = acquireDomainRunnerLock({
       repoRoot: tempRoot,
+      home: tempRoot,
       domainId: "support-ops",
       installHandlers: false,
       isProcessAlive: () => true,
@@ -2058,8 +4111,10 @@ test("runner lock live-pid contention yields the clean already-running message",
 
 test("runner lock release only removes the lock when the token still matches", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-token-"));
+  process.env.TEAMI_HOME = tempRoot;
   const lock = acquireDomainRunnerLock({
     repoRoot: tempRoot,
+    home: tempRoot,
     domainId: "support-ops",
     installHandlers: false,
   });
@@ -2083,7 +4138,6 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-ambiguous-uninstall-"));
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const supervisorRegistrationPath = path.join(tempRoot, ".teami", "supervisor", "registration.json");
   const registry = upsertDomainRecord(
     upsertDomainRecord(
       emptyDomainRegistry(),
@@ -2109,8 +4163,6 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
   );
   writeDomainRegistry({ repoRoot: tempRoot }, registry);
   writeLinearCache(cachePath, { workspaceId: "workspace-legacy" });
-  fs.mkdirSync(path.dirname(supervisorRegistrationPath), { recursive: true });
-  fs.writeFileSync(supervisorRegistrationPath, "{}\n", "utf8");
 
   const { result, logs } = await captureConsoleLogs(() =>
     removeLocalLinearSetup(cachePath, setupStatePath, {
@@ -2127,7 +4179,6 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
   assert.equal(result.ok, false);
   assert.deepEqual(logs, ["could not resolve a single domain to uninstall; pass --domain <domain_id>."]);
   assert.equal(fs.existsSync(cachePath), true);
-  assert.equal(fs.existsSync(supervisorRegistrationPath), true);
 });
 
 test("uninstall with a registry and one active domain still marks only that domain removed", async () => {
@@ -2169,9 +4220,10 @@ test("uninstall with a registry and one active domain still marks only that doma
 test("reset with a removed-status ghost entry and no credentials completes and wipes local state", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-reset-removed-ghost-"));
+  process.env.TEAMI_HOME = tempRoot;
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const domainCachePath = path.join(tempRoot, ".teami", "domains", "zztest-secondary", "linear.json");
+  const domainCachePath = path.join(tempRoot, "domains", "zztest-secondary", "linear.json");
   const registry = upsertDomainRecord(
     emptyDomainRegistry(),
     makeDomainRecord({
@@ -2185,7 +4237,7 @@ test("reset with a removed-status ghost entry and no credentials completes and w
       webhookId: "webhook-already-removed",
     }),
   );
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
+  writeDomainRegistry({ home: tempRoot }, registry);
   writeLinearCache(cachePath, { workspaceId: "workspace-legacy" });
   writeLinearCache(domainCachePath, { domainId: "zztest-secondary", workspaceId: "workspace-sandbox" });
   fs.writeFileSync(setupStatePath, "{}\n", "utf8");
@@ -2195,6 +4247,7 @@ test("reset with a removed-status ghost entry and no credentials completes and w
     removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot: tempRoot,
+      home: tempRoot,
       fullReset: true,
       removeDomainSetup: async () => {
         removedDomainCleanupCalls += 1;
@@ -2213,67 +4266,6 @@ test("reset with a removed-status ghost entry and no credentials completes and w
   assert.equal(logs.includes("removed: per-domain Linear caches"), true);
 });
 
-test("supervisor command context falls back to legacy when the domain registry is absent", () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-supervisor-no-registry-"));
-  const context = resolveSupervisorCommandContext({
-    config,
-    repoRoot: tempRoot,
-    cachePath: path.join(tempRoot, "legacy-linear.json"),
-  });
-
-  assert.equal(context.config, config);
-  assert.equal(context.cachePath, path.join(tempRoot, "legacy-linear.json"));
-  assert.equal(Object.hasOwn(context, "runnerCredentialStore"), false);
-  assert.equal(context.domainId, null);
-});
-
-test("supervisor command context surfaces corrupt registry JSON instead of legacy fallback", () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-supervisor-corrupt-registry-"));
-  const registryPath = domainRegistryPath(tempRoot);
-  fs.mkdirSync(path.dirname(registryPath), { recursive: true });
-  fs.writeFileSync(registryPath, "{ not json", "utf8");
-
-  assert.throws(
-    () =>
-      resolveSupervisorCommandContext({
-        config,
-        repoRoot: tempRoot,
-        cachePath: path.join(tempRoot, "legacy-linear.json"),
-      }),
-    /JSON|property name|Unexpected token|not valid/i,
-  );
-});
-
-test("supervisor command context uses healthy domain registry context", () => {
-  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-supervisor-domain-registry-"));
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
-      status: "active",
-      workspaceId: "workspace-1",
-      teamId: "team-support",
-      teamKey: "SUP",
-      teamName: "Support Ops",
-      webhookId: "webhook-support",
-    }),
-  );
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
-  const context = resolveSupervisorCommandContext({
-    config,
-    repoRoot: tempRoot,
-    cachePath: path.join(tempRoot, "legacy-linear.json"),
-  });
-
-  assert.equal(context.domainId, "support-ops");
-  assert.equal(Object.hasOwn(context, "runnerCredentialStore"), false);
-  assert.equal(context.config.linear.team.key, "SUP");
-  assert.match(context.cachePath.replace(/\\/g, "/"), /\/\.teami\/domains\/support-ops\/linear\.json$/);
-});
-
 test("doctor fails closed when project status native type mappings are ambiguous", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({
@@ -2282,17 +4274,12 @@ test("doctor fails closed when project status native type mappings are ambiguous
       { id: "status-planned-a", name: "Planned", type: "planned" },
       { id: "status-planned-b", name: "Later", type: "planned" },
       { id: "status-started", name: "In Progress", type: "started" },
+      { id: "status-principal-escalation", name: "Principal Escalation", type: "planned" },
     ],
   });
   await client.createTeam(config.linear.team);
   await client.createProjectLabel({ name: "Has Open Questions" });
   await client.createIssueLabel({ name: "Discovery", teamId: "team-1" });
-  await client.createTemplate({
-    name: config.linear.project.template_name,
-    type: "project",
-    teamId: "team-1",
-    templateData: { content: "## Open Questions\n" },
-  });
 
   const result = await doctorLinear({ client, config });
   assert.equal(result.healthy, false);
@@ -2300,6 +4287,62 @@ test("doctor fails closed when project status native type mappings are ambiguous
     result.checks.find((check) => check.name === "project status mappings").message,
     /native type 'planned': found 2/,
   );
+});
+
+test("doctor gives the project needs_principal repair copy when it cannot resolve the status", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    statuses: [
+      { id: "status-backlog", name: "Backlog", type: "backlog" },
+      { id: "status-planned", name: "Planned", type: "planned" },
+      { id: "status-started", name: "In Progress", type: "started" },
+      { id: "status-completed", name: "Completed", type: "completed" },
+    ],
+  });
+  await client.createTeam(config.linear.team);
+  await client.createProjectLabel({ name: "Has Open Questions" });
+  await client.createIssueLabel({ name: "Discovery", teamId: "team-1" });
+
+  const result = await doctorLinear({ client, config });
+
+  assert.equal(result.healthy, false);
+  assert.equal(
+    result.checks.find((check) => check.name === "project status mappings").message,
+    "Re-run `init` from a desktop session with a browser to recreate the Principal Escalation project status (one approval).",
+  );
+});
+
+test("doctor gives the project needs_principal repair copy when the cached status was deleted", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  client.projectStatuses = client.projectStatuses.filter(
+    (status) => status.id !== initialized.cache.projectStatuses.needs_principal,
+  );
+
+  const result = await doctorLinear({ client, config, cache: initialized.cache });
+
+  assert.equal(result.healthy, false);
+  assert.equal(
+    result.checks.find((check) => check.name === "project status mappings").message,
+    "Re-run `init` from a desktop session with a browser to recreate the Principal Escalation project status (one approval).",
+  );
+});
+
+test("doctor surfaces project status listing failures without repair copy", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  client.listProjectStatuses = async () => {
+    throw new Error("Linear project status API unavailable");
+  };
+
+  const result = await doctorLinear({ client, config, cache: initialized.cache });
+
+  assert.equal(result.healthy, false);
+  const message = result.checks.find((check) => check.name === "project status mappings").message;
+  assert.equal(message, "Linear project status API unavailable");
+  assert.doesNotMatch(message, /recreate the Principal Escalation project status/);
 });
 
 test("doctor on a healthy single-domain setup shows one domain block", () => {
@@ -2368,10 +4411,12 @@ test("doctor on a two-domain fixture reports each domain independently with setu
 
 test("doctor with a deliberately corrupted registry refuses to guess and names the repair path", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-doctor-corrupt-"));
-  const registryPath = path.join(tempRoot, ".teami", "domains.json");
+  process.env.TEAMI_HOME = tempRoot;
+  const registryPath = path.join(tempRoot, "domains.json");
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, "{ not json", "utf8");
   const legacyCachePath = path.join(tempRoot, ".teami", "linear.json");
+  fs.mkdirSync(path.dirname(legacyCachePath), { recursive: true });
   fs.writeFileSync(
     legacyCachePath,
     JSON.stringify({
@@ -2385,6 +4430,7 @@ test("doctor with a deliberately corrupted registry refuses to guess and names t
 
   const result = doctorDomainRegistryFromDisk({
     repoRoot: tempRoot,
+    home: tempRoot,
     orphanHints: [
       `legacy Linear cache ${legacyCachePath}`,
       "cached workspace workspace-orphan",
@@ -2429,7 +4475,7 @@ test("init reuses the configured team only when cached stable ID proves prior se
   assert.equal(result.cache.teamId, team.id);
 });
 
-test("eligibility records fail-closed reasons for labels, open discovery, and prior execution issues", async () => {
+test("eligibility ignores retired question labels and Discovery carriers but records prior execution issues", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, {
@@ -2460,14 +4506,54 @@ test("eligibility records fail-closed reasons for labels, open discovery, and pr
   });
 
   assert.equal(result.eligible, false);
-  assert.deepEqual(result.blockingConditions.sort(), [
-    "has_open_questions",
-    "open_discovery_issue",
-    "prior_execution_issues",
-    "status_label_mismatch",
-  ]);
-  assert.equal(result.metrics.openDiscoveryIssueCount, 1);
-  assert.equal(result.metrics.nonDiscoveryIssueCount, 1);
+  assert.deepEqual(result.blockingConditions, ["prior_execution_issues"]);
+  assert.equal(Object.hasOwn(result.metrics, "hasOpenQuestionsLabel"), false);
+  assert.deepEqual(Object.keys(result.metrics).sort(), ["belongsToConfiguredTeam", "priorExecutionIssueCount"]);
+  assert.equal(result.metrics.priorExecutionIssueCount, 1);
+});
+
+test("eligibility rejects a same-category status that is not the configured Planned id", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = await initializedClient(config);
+  const project = await seedProject(client, {
+    statusId: "status-principal-escalation",
+    labelIds: [],
+  });
+
+  const result = await evaluateDecompositionEligibility({
+    client,
+    config,
+    cache: client.cache,
+    projectId: project.id,
+    trace: { spans: [] },
+  });
+
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.blockingConditions, ["project_not_configured_planned"]);
+});
+
+test("release gesture is exact Planned even when a retired Open Questions label remains", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = await initializedClient(config);
+  await client.createProjectLabel({ name: "Has Open Questions" });
+  const project = await seedProject(client, {
+    statusId: "status-principal-escalation",
+    labelIds: ["plabel-open"],
+    content: "Linear project: Customer onboarding pilot\n\n## Open Questions\n- Answered already\n",
+  });
+  await client.updateProject(project.id, { statusId: "status-planned" });
+
+  const result = await evaluateDecompositionEligibility({
+    client,
+    config,
+    cache: client.cache,
+    projectId: project.id,
+    trace: { spans: [] },
+  });
+
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.blockingConditions, []);
+  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), true);
 });
 
 test("a committed decomposition run persists the run-version record (accepted_refs + completed_at + execution_mode)", async () => {
@@ -2650,9 +4736,15 @@ test("produced identities carry artifact-set lineage when a prior turn authored 
   assert.equal(JSON.stringify(result.produced_identities).includes("terminal_source_turn_id"), false);
 });
 
-test("a first-pass pause needs only one subagent turn and commits authored prose exactly", async () => {
+test("a first-pass pause posts one project comment and moves to Principal Escalation", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
+  const projectMutationInputs = [];
+  const originalUpdateProject = client.updateProject.bind(client);
+  client.updateProject = async (id, input) => {
+    projectMutationInputs.push({ id, input });
+    return originalUpdateProject(id, input);
+  };
   const project = await seedProject(client, {
     statusId: "status-planned",
     labelIds: [],
@@ -2688,14 +4780,22 @@ test("a first-pass pause needs only one subagent turn and commits authored prose
 
   assert.equal(result.status, "paused");
   assert.equal(client.issues.length, 0);
-  assert.equal(client.projects[0].status.id, "status-backlog");
-  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), true);
-  assert.equal(openQuestionsSectionMarkdown(client.projects[0].content), openQuestionsMarkdown);
-  assert.equal(client.projectUpdates.length, 1);
-  assert.equal(client.projectUpdates[0].body, projectUpdateMarkdown);
+  assert.equal(projectMutationInputs.length, 1);
+  assert.deepEqual(projectMutationInputs[0].input, { statusId: "status-principal-escalation" });
+  assert.equal(Object.hasOwn(projectMutationInputs[0].input, "labelIds"), false);
+  assert.equal(Object.hasOwn(projectMutationInputs[0].input, "content"), false);
+  assert.equal(client.projects[0].status.id, "status-principal-escalation");
+  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), false);
+  assertNoRetiredQuestionSection(client.projects[0].content);
+  assert.equal(client.projectUpdates.length, 0);
+  assertSingleProjectPauseComment(client, {
+    projectId: project.id,
+    runId: "run-pm-pause",
+    questionsMarkdown: openQuestionsMarkdown,
+  });
 });
 
-test("Open Questions verification normalizes CRLF returned by Linear", async () => {
+test("project pause comment preserves CRLF-authored questions", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   client.returnProjectContentWithCrLf = true;
@@ -2722,10 +4822,16 @@ test("Open Questions verification normalizes CRLF returned by Linear", async () 
   });
 
   assert.equal(result.status, "paused");
-  assert.equal(client.projectUpdates.length, 1);
+  assertNoRetiredQuestionSection(client.projects[0].content);
+  assert.equal(client.projectUpdates.length, 0);
+  assertSingleProjectPauseComment(client, {
+    projectId: project.id,
+    runId: "run-crlf-open-questions",
+    questionsMarkdown: "- Question: Which segment owns the pilot?\r\n  Owner: Human",
+  });
 });
 
-test("Open Questions verification accepts Linear markdown serialization", async () => {
+test("project pause comment does not rewrite Linear project content", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   client.returnProjectContentWithLinearMarkdown = true;
@@ -2752,10 +4858,16 @@ test("Open Questions verification accepts Linear markdown serialization", async 
   });
 
   assert.equal(result.status, "paused");
-  assert.match((await client.getProjectContext(project.id)).content, /\* Question: Which segment owns the pilot/);
+  assertNoRetiredQuestionSection(client.projects[0].content);
+  assert.equal(client.projectUpdates.length, 0);
+  assertSingleProjectPauseComment(client, {
+    projectId: project.id,
+    runId: "run-linear-markdown-open-questions",
+    questionsMarkdown: "- Question: Which segment owns the pilot?\n  Owner: Human\n",
+  });
 });
 
-test("pause packets fail closed unless they include authored Open Questions and update prose", async () => {
+test("pause packets fail closed unless they include authored question prose", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
@@ -2765,6 +4877,7 @@ test("pause packets fail closed unless they include authored Open Questions and 
     config,
     cache: client.cache,
     projectId: project.id,
+    runStoreDir: tempRunStore(),
     runResult: pauseRunResult("run-missing-prose", {
       packet: {
         ...packetBase("run-missing-prose", "pm_product_sufficiency_pass"),
@@ -2776,46 +4889,48 @@ test("pause packets fail closed unless they include authored Open Questions and 
   });
 
   assert.equal(result.status, "failed_closed");
-  assert.deepEqual(result.failureReasons.sort(), [
-    "missing_open_questions_markdown",
-    "missing_project_update_markdown",
-  ]);
+  assert.deepEqual(result.failureReasons, ["missing_open_questions_markdown"]);
   assert.equal(client.projects[0].status.id, "status-planned");
+  assert.equal(client.comments.length, 0);
   assert.equal(client.projectUpdates.length, 0);
 });
 
-test("authored Open Questions with top-level headings fail closed before mutation", async () => {
+test("authored pause questions with a heading post as a comment-only pause (headings are fine in a comment)", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
+  // A real agent (live e2e 2026-07-07) authored questions that included a `## ` heading; the questions
+  // are now free-form project COMMENT content, so a heading is fine and must NOT fail the pause closed.
+  const openQuestions = "- Question: Is the pilot scoped?\n\n## Details\nA heading is fine in the comment now.";
 
   const result = await runDecomposition({
     client,
     config,
     cache: client.cache,
     projectId: project.id,
+    runStoreDir: tempRunStore(),
     runResult: pauseRunResult("run-heading-prose", {
       packet: {
         ...packetBase("run-heading-prose", "pm_product_sufficiency_pass"),
         status: "pause",
         reason: "product_questions",
-        open_questions_markdown: "- Question: Is the pilot scoped?\n\n## Details\nThis must not become a project section.",
-        project_update_markdown: projectUpdateMarkdownForRun(
-          "run-heading-prose",
-          "PM paused for product questions.",
-        ),
+        open_questions_markdown: openQuestions,
       },
     }),
   });
 
-  assert.equal(result.status, "failed_closed");
-  assert.deepEqual(result.failureReasons, ["open_questions_markdown_contains_section_heading"]);
-  assert.equal(client.projects[0].status.id, "status-planned");
-  assert.equal(openQuestionsSectionMarkdown(client.projects[0].content), "");
+  assert.equal(result.status, "paused");
+  assert.equal(client.projects[0].status.id, "status-principal-escalation");
+  assertNoRetiredQuestionSection(client.projects[0].content);
   assert.equal(client.projectUpdates.length, 0);
+  assertSingleProjectPauseComment(client, {
+    projectId: project.id,
+    runId: "run-heading-prose",
+    questionsMarkdown: openQuestions,
+  });
 });
 
-test("Sr Eng discovery pause creates Discovery issues from authored bodies and exact Open Questions", async () => {
+test("Sr Eng discovery pause is comment-only and creates no follow-up issues", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
@@ -2832,20 +4947,15 @@ test("Sr Eng discovery pause creates Discovery issues from authored bodies and e
   });
 
   assert.equal(result.status, "paused");
-  assert.equal(client.issues.length, 1);
-  assert.equal(client.issues[0].labels[0].id, "ilabel-discovery");
-  assert.equal(extractDecompositionKey(client.issues[0].description), "discovery:linear-permission-check");
-  assert.equal(
-    bodyAfterKeyLine(client.issues[0].description),
-    packets[1].discovery_issues[0].body_markdown,
-  );
-  assert.equal(openQuestionsSectionMarkdown(client.projects[0].content), packets[1].open_questions_markdown);
-  assert.equal(client.projectUpdates[0].body, packets[1].project_update_markdown);
-  assert.equal(
-    result.trace.spans.find((span) => span.name === "create_linear_issues_or_pause_project").attributes
-      .discovery_issue_created_count,
-    1,
-  );
+  assert.equal(client.issues.length, 0);
+  assert.equal(client.projects[0].status.id, "status-principal-escalation");
+  assertNoRetiredQuestionSection(client.projects[0].content);
+  assert.equal(client.projectUpdates.length, 0);
+  assertSingleProjectPauseComment(client, {
+    projectId: project.id,
+    runId: "run-discovery-pause",
+    questionsMarkdown: packets[1].open_questions_markdown,
+  });
 });
 
 test("Sr Eng blocked constraint decision routes exact technical explanation to PM synthesis", async () => {
@@ -2885,8 +4995,14 @@ test("Sr Eng blocked constraint decision routes exact technical explanation to P
 
   assert.equal(result.status, "paused");
   assert.equal(client.issues.length, 0);
-  assert.equal(openQuestionsSectionMarkdown(client.projects[0].content), packets[2].open_questions_markdown);
-  assert.equal(client.projectUpdates[0].body, packets[2].project_update_markdown);
+  assert.equal(client.projects[0].status.id, "status-principal-escalation");
+  assertNoRetiredQuestionSection(client.projects[0].content);
+  assert.equal(client.projectUpdates.length, 0);
+  assertSingleProjectPauseComment(client, {
+    projectId: project.id,
+    runId: "run-needs-pm",
+    questionsMarkdown: packets[2].open_questions_markdown,
+  });
   assert.equal(
     result.artifact.evidence.perspectives_run.some(
       (entry) => entry.outcome === "needs_constraint_decision",
@@ -2940,9 +5056,135 @@ test("happy path creates issues, posts the authored completion update, and keeps
   assert.equal(offline.label, "pass");
 });
 
+test("resume decomposition writes integrated body update before creating issues", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = await initializedClient(config);
+  const mutationEvents = [];
+  const originalUpdateProject = client.updateProject.bind(client);
+  const originalCreateIssue = client.createIssue.bind(client);
+  client.updateProject = async (id, input) => {
+    mutationEvents.push({ type: "updateProject", id, input });
+    return originalUpdateProject(id, input);
+  };
+  client.createIssue = async (input) => {
+    mutationEvents.push({
+      type: "createIssue",
+      title: input.title,
+      projectContentAtCreate: client.projects[0]?.content,
+    });
+    return originalCreateIssue(input);
+  };
+  const initialSlots = resumePlanningSlots({
+    audience: "TBD after the founder answers the pause question.",
+  });
+  const integratedSlots = resumePlanningSlots({
+    audience: "Support admins at self-serve SaaS companies who own onboarding follow-through.",
+    sources: [
+      "Prior pause answer in the Linear project comment thread: prioritize support admins at self-serve SaaS companies.",
+      "No remaining source gaps for the launch segment.",
+    ].join("\n"),
+  });
+  const expectedBody = renderPlanningBody(integratedSlots);
+  const project = await seedProject(client, {
+    statusId: "status-planned",
+    labelIds: [],
+    content: renderPlanningBody(initialSlots),
+  });
+  client.comments.push({
+    projectId: project.id,
+    body: "Answer: prioritize support admins at self-serve SaaS companies for the first launch.",
+    createdAt: "2026-07-07T12:00:00.000Z",
+    user: { id: "human-1", name: "Founder", displayName: "Founder" },
+  });
+
+  const result = await runDecomposition({
+    client,
+    config,
+    cache: client.cache,
+    projectId: project.id,
+    runStoreDir: tempRunStore(),
+    environment: safeEnvironment(),
+    runtimeEvidence: runtimeEvidenceForRun("run-resume-body-update"),
+    runResult: commitRunResult("run-resume-body-update", {
+      terminalOutput: {
+        project_body_slots: integratedSlots,
+      },
+    }),
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.artifact.project_body_update.content, expectedBody);
+  assert.deepEqual(result.artifact.project_body_update.slots, integratedSlots);
+  assert.equal(result.artifact.payload.project_body_update.content, expectedBody);
+  assert.equal(client.projects[0].content, expectedBody);
+  const firstCreateIssueIndex = mutationEvents.findIndex((event) => event.type === "createIssue");
+  const bodyUpdateIndex = mutationEvents.findIndex(
+    (event) => event.type === "updateProject" && Object.hasOwn(event.input, "content"),
+  );
+  assert.ok(bodyUpdateIndex >= 0, "body update should be applied");
+  assert.ok(firstCreateIssueIndex > bodyUpdateIndex, "body update must happen before issue creation");
+  assert.equal(mutationEvents[firstCreateIssueIndex].projectContentAtCreate, expectedBody);
+  assert.equal(client.issues.length, 2);
+});
+
+test("resume decomposition with insufficient answer re-escalates through the existing pause artifact", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = await initializedClient(config);
+  const projectMutationInputs = [];
+  const originalUpdateProject = client.updateProject.bind(client);
+  client.updateProject = async (id, input) => {
+    projectMutationInputs.push({ id, input });
+    return originalUpdateProject(id, input);
+  };
+  const project = await seedProject(client, {
+    statusId: "status-planned",
+    labelIds: [],
+    content: renderPlanningBody(resumePlanningSlots()),
+  });
+  client.comments.push({
+    projectId: project.id,
+    body: "I am not sure yet; let's decide later.",
+    createdAt: "2026-07-07T12:05:00.000Z",
+    user: { id: "human-1", name: "Founder", displayName: "Founder" },
+  });
+  const openQuestionsMarkdown = "- Question: Which launch audience should this prioritize?\n  Owner: Human";
+
+  const result = await runDecomposition({
+    client,
+    config,
+    cache: client.cache,
+    projectId: project.id,
+    runStoreDir: tempRunStore(),
+    runResult: pauseRunResult("run-resume-insufficient-answer", {
+      packet: {
+        ...packetBase("run-resume-insufficient-answer", "pm_product_sufficiency_pass"),
+        status: "pause",
+        reason: "product_questions",
+        open_questions_markdown: openQuestionsMarkdown,
+      },
+    }),
+  });
+
+  assert.equal(result.status, "paused");
+  assert.equal(result.artifact.kind, "pause");
+  assert.equal(Object.hasOwn(result.artifact, "project_body_update"), false);
+  assert.equal(Object.hasOwn(result.artifact.payload, "project_body_update"), false);
+  assert.equal(client.issues.length, 0);
+  assert.deepEqual(projectMutationInputs.map((entry) => entry.input), [
+    { statusId: "status-principal-escalation" },
+  ]);
+  assert.equal(client.comments.length, 2);
+  assert.equal(client.comments[0].body, "I am not sure yet; let's decide later.");
+  const escalationComment = client.comments[1];
+  assert.equal(escalationComment.projectId, project.id);
+  assert.equal(escalationComment.user.id, client.viewerId);
+  assert.ok(escalationComment.body.includes("(code: `run_id:run-resume-insufficient-answer`)"));
+  assert.ok(escalationComment.body.includes(openQuestionsMarkdown));
+});
+
 const FIRST_SUCCESSFUL_SESSION_MANUAL_VALIDATION_CHECKLIST = [
   "Manual validation checklist (live Linear sandbox):",
-  "1. Create a Planned project with no Has Open Questions label, open Discovery issue, or prior execution issue.",
+  "1. Create a Planned project with no prior execution issue.",
   "2. Trigger decomposition and confirm non-discovery execution issues appear in Todo.",
   "3. Open a Todo issue cold and confirm its body has a decomposition key, concrete assignment, output, acceptance criteria, and dependency context.",
   "4. Read the project update's What I did with each part of your project section and confirm open risks are understandable in product terms.",
@@ -3278,57 +5520,61 @@ test("pause proceeds with an unavailable advisory line when the quality judge re
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
-  const authoredUpdate = [
-    "run_id: run-pause-quality-unavailable",
-    "",
-    "PM paused for product questions.",
-    "",
-    "## What I did with each part of your project",
-    "- Launch scope needs one product answer before issues are safe to create.",
-  ].join("\n");
+  const runStoreDir = tempRunStore();
 
   const result = await runDecomposition({
     client,
     config,
     cache: client.cache,
     projectId: project.id,
-    runStoreDir: tempRunStore(),
-    runResult: pauseRunResult("run-pause-quality-unavailable", {
-      terminalOutput: { project_update_markdown: authoredUpdate },
-    }),
+    runStoreDir,
+    runResult: pauseRunResult("run-pause-quality-unavailable"),
     qualityJudge: async () => null,
   });
 
   assert.equal(result.status, "paused");
-  assert.equal(client.projectUpdates.length, 1);
-  assert.equal(
-    client.projectUpdates[0].body,
-    `${authoredUpdate}\n\nQuality check (advisory, non-gating): unavailable (judge_unavailable)`,
-  );
+  assert.equal(client.projectUpdates.length, 0);
+  assertNoRetiredQuestionSection(client.projects[0].content);
+  assertSingleProjectPauseComment(client, {
+    projectId: project.id,
+    runId: "run-pause-quality-unavailable",
+    questionsMarkdown: "- Question: Which product decision should be resolved?\n  Owner: Human",
+  });
+  const persisted = readRunArtifact({ runId: "run-pause-quality-unavailable", runStoreDir });
+  assert.equal(Object.hasOwn(persisted.pause_packet, "project_update_markdown"), false);
+  assert.equal(Object.hasOwn(persisted, "project_update_markdown"), false);
+  const advisorySpan = result.trace.spans.find((span) => span.name === "quality_check_advisory");
+  assert.ok(advisorySpan);
+  assert.equal(advisorySpan.attributes.appended_to_project_update_markdown, false);
 });
 
-test("terminal decomposition requires accepted subagent turn evidence for runtime metadata", async () => {
+test("a commit with zero subagent turns lands and its record honestly shows the empty work log", async () => {
+  // The orchestrator may judge a project small enough to author alone; whether
+  // it should is governing-prompt guidance the self-improvement loop tunes, not
+  // a harness rule. The record stays honest: runtime_metadata is simply empty,
+  // which is exactly the signal the judge reads.
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
+  const runStoreDir = tempRunStore();
 
-  await assert.rejects(
-    () =>
-      runDecomposition({
-        client,
-        config,
-        cache: client.cache,
-        projectId: project.id,
-        runStoreDir: tempRunStore(),
-        environment: safeEnvironment(),
-        runResult: commitRunResult("run-missing-evidence"),
-      }),
-    /runtime_evidence_turns_required_for_terminal_metadata/,
-  );
+  const result = await runDecomposition({
+    client,
+    config,
+    cache: client.cache,
+    projectId: project.id,
+    runStoreDir,
+    environment: safeEnvironment(),
+    runResult: commitRunResult("run-solo-commit"),
+  });
 
-  assert.equal(client.issues.length, 0);
-  assert.equal(client.projectUpdates.length, 0);
-  assert.equal(client.projects[0].status.id, "status-planned");
+  assert.equal(result.status, "completed");
+  assert.equal(client.issues.length, 2);
+  assert.equal(client.projectUpdates.length, 1);
+  assert.equal(client.projects[0].status.id, "status-started");
+  const persisted = readRunArtifact({ runId: "run-solo-commit", runStoreDir });
+  assert.equal(persisted.kind, "commit");
+  assert.deepEqual(persisted.runtime_metadata, {});
 });
 
 test("issue creation uses configured Todo for committed execution issues without assignees", async () => {
@@ -3614,7 +5860,7 @@ test("replay reruns terminal validation and gate before applying a persisted com
   assert.equal(client.projects[0].status.id, "status-planned");
 });
 
-test("failed_closed bounds breach posts a failure question through the pause transport", async () => {
+test("failed_closed bounds breach surfaces the failure as a Principal Escalation comment", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
@@ -3629,60 +5875,22 @@ test("failed_closed bounds breach posts a failure question through the pause tra
     runResult: failedClosedRunResult("run-bounds-breach"),
   });
 
+  // A failed_closed safety stop presents identically to a product-question pause: one app comment
+  // carrying the "why I stopped" summary + a move to Principal Escalation, and no project update.
   assert.equal(result.status, "failed_closed");
   assert.deepEqual(result.failureReasons, ["bounds_breach"]);
-  assert.equal(client.projects[0].status.id, "status-backlog");
-  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), true);
-  assert.match(openQuestionsSectionMarkdown(client.projects[0].content), /round limit/);
+  assert.equal(client.projects[0].status.id, "status-principal-escalation");
+  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), false);
   assert.equal(client.issues.length, 0);
-  assert.equal(client.projectUpdates.length, 1);
-  assert.match(client.projectUpdates[0].body, /^run_id:\s*run-bounds-breach$/m);
+  assert.equal(client.projectUpdates.length, 0);
+  assert.equal(client.comments.length, 1);
+  assert.match(client.comments[0].body, /^run_id:\s*run-bounds-breach$/m);
+  assert.match(client.comments[0].body, /orchestrator hit a safety bound/i);
+  assert.ok(client.comments[0].body.includes("(code: `run_id:run-bounds-breach`)"));
   const persisted = readRunArtifact({ runId: "run-bounds-breach", runStoreDir });
   assert.equal(persisted.kind, "pause");
   assert.equal(persisted.terminal_output.outcome, "failed_closed");
   assert.equal(persisted.terminal_output.reason, "bounds_breach");
-});
-
-test("resume keeps surviving Open Questions in Backlog and posts an idempotent update", async () => {
-  const config = loadLinearConfig({ repoRoot });
-  const client = await initializedClient(config);
-  const project = await seedProject(client, {
-    statusId: "status-backlog",
-    labelIds: ["plabel-open"],
-    content: "Linear project: Customer onboarding pilot\n\n## Open Questions\n- Question: Old blocker\n",
-  });
-
-  const packet = {
-    ...packetBase("run-resume-survivor", "resume"),
-    status: "continue",
-    reason: "open_questions_answered",
-    open_questions_markdown: "- Question: Surviving product blocker\n  Owner: Human",
-    project_update_markdown:
-      "run_id: run-resume-survivor\n\nOne answer was recorded; one product blocker remains.",
-  };
-  const first = await resumeProjectAfterQuestions({
-    client,
-    config,
-    cache: client.cache,
-    projectId: project.id,
-    runStoreDir: tempRunStore(),
-    packet,
-  });
-  const second = await resumeProjectAfterQuestions({
-    client,
-    config,
-    cache: client.cache,
-    projectId: project.id,
-    runStoreDir: tempRunStore(),
-    packet,
-  });
-
-  assert.equal(first.status, "still_paused");
-  assert.equal(second.status, "still_paused");
-  assert.equal(client.projects[0].status.id, "status-backlog");
-  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), true);
-  assert.equal(openQuestionsSectionMarkdown(client.projects[0].content), packet.open_questions_markdown);
-  assert.equal(client.projectUpdates.length, 1);
 });
 
 test("project update idempotency matches exact run_id lines instead of substrings", async () => {
@@ -3696,31 +5904,24 @@ test("project update idempotency matches exact run_id lines instead of substring
     runId: undefined,
   });
 
+  // The completion update is the surviving project-update path. `run-1` must NOT collide with the
+  // seeded `run-10` line — exact run_id line matching, not substring — so a second update is posted.
   const result = await runDecomposition({
     client,
     config,
     cache: client.cache,
     projectId: project.id,
     runStoreDir: tempRunStore(),
-    runResult: pauseRunResult("run-1", {
-      packet: {
-        ...packetBase("run-1", "pm_product_sufficiency_pass"),
-        status: "pause",
-        reason: "product_questions",
-        open_questions_markdown: "- Question: Which outcome matters first?",
-        project_update_markdown: projectUpdateMarkdownForRun(
-          "run-1",
-          "PM paused for product questions.",
-        ),
-      },
-    }),
+    environment: safeEnvironment(),
+    runtimeEvidence: runtimeEvidenceForRun("run-1"),
+    runResult: commitRunResult("run-1"),
   });
 
-  assert.equal(result.status, "paused");
+  assert.equal(result.status, "completed");
   assert.equal(client.projectUpdates.length, 2);
   assert.equal(
     client.projectUpdates[1].body,
-    projectUpdateMarkdownForRun("run-1", "PM paused for product questions."),
+    projectUpdateMarkdownForRun("run-1", "Decomposition completed with two issues."),
   );
 });
 
@@ -3734,6 +5935,7 @@ test("invalid terminal outcome reason fails closed before mutation", async () =>
     config,
     cache: client.cache,
     projectId: project.id,
+    runStoreDir: tempRunStore(),
     environment: safeEnvironment(),
     runtimeEvidence: runtimeEvidenceForRun("run-invalid-tuple"),
     runResult: commitRunResult("run-invalid-tuple", {
@@ -3744,130 +5946,6 @@ test("invalid terminal outcome reason fails closed before mutation", async () =>
   assert.equal(result.status, "failed_closed");
   assert.deepEqual(result.failureReasons, ["invalid_outcome_reason:commit:no_blockers"]);
   assert.equal(client.issues.length, 0);
-  assert.equal(client.projectUpdates.length, 0);
-});
-
-test("resume returns to Planned only after Open Questions are blank and Discovery issues are closed", async () => {
-  const config = loadLinearConfig({ repoRoot });
-  const client = await initializedClient(config);
-  const project = await seedProject(client, {
-    statusId: "status-backlog",
-    labelIds: ["plabel-open"],
-    content: "Linear project: Customer onboarding pilot\n\n## Open Questions\n- Question: Verify permission model\n",
-  });
-  const discovery = await client.createIssue({
-    title: "Discovery: verify permission model",
-    description: "- Decomposition key: discovery:permission-model\n\nOld body\n",
-    teamId: "team-1",
-    projectId: project.id,
-    labelIds: ["ilabel-discovery"],
-    stateId: "state-backlog",
-  });
-
-  const blocked = await resumeProjectAfterQuestions({
-    client,
-    config,
-    cache: client.cache,
-    projectId: project.id,
-    runStoreDir: tempRunStore(),
-    packet: {
-      ...packetBase("run-resume-open-discovery", "resume"),
-      status: "continue",
-      reason: "discovery_complete",
-      open_questions_markdown: "",
-      project_update_markdown:
-        "run_id: run-resume-open-discovery\n\nDiscovery answer recorded, but the issue is still open.",
-    },
-  });
-
-  assert.equal(blocked.status, "still_paused");
-  assert.equal(client.projects[0].status.id, "status-backlog");
-  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), true);
-
-  const resumed = await resumeProjectAfterQuestions({
-    client,
-    config,
-    cache: client.cache,
-    projectId: project.id,
-    runStoreDir: tempRunStore(),
-    packet: {
-      ...packetBase("run-resume-closed-discovery", "resume"),
-      status: "continue",
-      reason: "discovery_complete",
-      open_questions_markdown: "",
-      project_update_markdown:
-        "run_id: run-resume-closed-discovery\n\nDiscovery closed and decomposition can resume.",
-      discovery_issue_updates: [
-        {
-          issue_id: discovery.id,
-          discovery_key: "discovery:permission-model",
-          body_markdown:
-            "Finding: Linear permissions are sufficient.\n\nEvidence: Verified against the test workspace.\n\nDecomposition impact: The issue split can use project updates.",
-          state_id: "state-done",
-        },
-      ],
-    },
-  });
-
-  assert.equal(resumed.status, "resumed");
-  assert.equal(client.projects[0].status.id, "status-planned");
-  assert.equal(client.projects[0].labels.some((label) => label.id === "plabel-open"), false);
-  assert.equal(openQuestionsSectionMarkdown(client.projects[0].content), "");
-  assert.doesNotMatch(client.projects[0].content, /## Discovery Findings/);
-  assert.match(client.issues[0].description, /Finding: Linear permissions are sufficient/);
-  assert.equal(client.projectUpdates.length, 2);
-});
-
-test("resume discovery issue updates must match the current project and discovery key", async () => {
-  const config = loadLinearConfig({ repoRoot });
-  const client = await initializedClient(config);
-  const project = await seedProject(client, {
-    statusId: "status-backlog",
-    labelIds: ["plabel-open"],
-    content: "Linear project: Customer onboarding pilot\n\n## Open Questions\n- Question: Verify permission model\n",
-  });
-  const otherProject = await seedProject(client, {
-    statusId: "status-backlog",
-    labelIds: ["plabel-open"],
-    content: "Linear project: Other project\n\n## Open Questions\n",
-  });
-  const otherDiscovery = await client.createIssue({
-    title: "Discovery: other project permission model",
-    description: "- Decomposition key: discovery:permission-model\n\nOther body\n",
-    teamId: "team-1",
-    projectId: otherProject.id,
-    labelIds: ["ilabel-discovery"],
-    stateId: "state-backlog",
-  });
-
-  await assert.rejects(
-    () =>
-      resumeProjectAfterQuestions({
-        client,
-        config,
-        cache: client.cache,
-        projectId: project.id,
-        runStoreDir: tempRunStore(),
-        packet: {
-          ...packetBase("run-resume-wrong-discovery", "resume"),
-          status: "continue",
-          reason: "discovery_complete",
-          open_questions_markdown: "",
-          project_update_markdown:
-            "run_id: run-resume-wrong-discovery\n\nDiscovery answer recorded.",
-          discovery_issue_updates: [
-            {
-              issue_id: otherDiscovery.id,
-              discovery_key: "discovery:permission-model",
-              body_markdown: "Finding: should not be written.",
-              state_id: "state-done",
-            },
-          ],
-        },
-      }),
-    /does not match the current project and discovery key/,
-  );
-  assert.doesNotMatch(client.issues.find((issue) => issue.id === otherDiscovery.id).description, /should not be written/);
   assert.equal(client.projectUpdates.length, 0);
 });
 
@@ -4040,7 +6118,7 @@ test("runner wake completion provider_update_ids include reused Linear issue ids
   assert.deepEqual(result.run.provider_update_ids, ["project-update-1", "issue-1", "issue-2"]);
 });
 
-test("fresh commit returns the full apply result when runner relation readback is limited", async () => {
+test("fresh commit remains pending when provider relation readback cannot prove reconciliation", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
@@ -4056,25 +6134,20 @@ test("fresh commit returns the full apply result when runner relation readback i
   };
 
   const mutationCalls = [];
-  const result = await runDecomposition({
-    client,
-    config,
-    cache: client.cache,
-    projectId: project.id,
-    runStoreDir,
-    environment: safeEnvironment(),
-    runtimeEvidence: runtimeEvidenceForRun(runId),
-    runResult: commitRunResult(runId),
-    onBeforeLinearMutation: (event) => mutationCalls.push(event),
-  });
-
-  assert.equal(result.status, "completed");
-  assert.equal(result.created.length, 2);
-  assert.equal(result.reused.length, 0);
-  assert.equal(result.relationsCreated.length, 1);
-  assert.equal(result.relationsReused.length, 0);
-  assert.equal(result.projectUpdate.id, "project-update-1");
-  assert.equal(result.trace.attributes.run_id, runId);
+  await assert.rejects(
+    () => runDecomposition({
+      client,
+      config,
+      cache: client.cache,
+      projectId: project.id,
+      runStoreDir,
+      environment: safeEnvironment(),
+      runtimeEvidence: runtimeEvidenceForRun(runId),
+      runResult: commitRunResult(runId),
+      onBeforeLinearMutation: (event) => mutationCalls.push(event),
+    }),
+    /linear_dependency_relation_missing/,
+  );
   assert.equal(mutationCalls.length, 1);
 });
 
@@ -4736,11 +6809,15 @@ test("per-role runtime config supports different Codex and Claude session start 
 
   assert.equal(pmCommand.command, "claude");
   assert.equal(pmCommand.mode, "session_start");
+  const pmPromptArg = pmCommand.args[pmCommand.args.indexOf("-p") + 1];
+  assert.match(pmPromptArg, /^@.+prompt\.md$/);
+  assert.equal(fs.readFileSync(pmPromptArg.slice(1), "utf8"), "Return a PM packet.");
+  assert.equal(pmCommand.args.includes("Return a PM packet."), false);
   assert.deepEqual(pmCommand.args, [
     "--allowedTools",
     "",
     "-p",
-    "Return a PM packet.",
+    pmPromptArg,
     "--model",
     "claude-opus-4-8",
     "--output-format",
@@ -4755,21 +6832,23 @@ test("per-role runtime config supports different Codex and Claude session start 
     "-c",
     "service_tier=\"fast\"",
     "exec",
+    "--skip-git-repo-check",
     "-s",
     "read-only",
     "--model",
     "gpt-5.5",
     "--output-schema",
     path.resolve(repoRoot, assignments.sr_eng.generation_schema_path),
-    "--",
-    "Return a Sr Eng packet.",
   ]);
+  assert.equal(srEngCommand.stdinInput, "Return a Sr Eng packet.");
+  assert.equal(srEngCommand.args.includes("Return a Sr Eng packet."), false);
   assert.equal(srEngCommand.schema_path, assignments.sr_eng.schema_path);
   assert.equal(srEngCommand.generation_schema_path, assignments.sr_eng.generation_schema_path);
   assert.equal(srEngCommand.tool_policy.linear_write, false);
   assert.equal(strictGenerationSchema.additionalProperties, false);
   assert.equal(strictGenerationSchema.properties.final_issues.items.additionalProperties, false);
-  assert.equal(strictGenerationSchema.properties.discovery_issues.items.additionalProperties, false);
+  assert.equal(Object.hasOwn(strictGenerationSchema.properties, "discovery_issues"), false);
+  assert.equal(Object.hasOwn(strictGenerationSchema.properties, "discovery_issue_updates"), false);
   assert.equal(canonicalRuntimeSchema().$id, PHASE_PACKET_SCHEMA_VERSION);
   assert.equal(canonicalRuntimeSchema().additionalProperties, true);
   assert.deepEqual(
@@ -4996,11 +7075,15 @@ test("warm continuation fails loudly until smoke tests pass and handles match ro
     runtimeVersion: smokeVersion,
   });
   assert.equal(command.mode, "warm_required");
+  const warmPromptArg = command.args[command.args.indexOf("-p") + 1];
+  assert.match(warmPromptArg, /^@.+prompt\.md$/);
+  assert.equal(fs.readFileSync(warmPromptArg.slice(1), "utf8"), "Return PM synthesis.");
+  assert.equal(command.args.includes("Return PM synthesis."), false);
   assert.deepEqual(command.args, [
     "--resume",
     "session-1",
     "-p",
-    "Return PM synthesis.",
+    warmPromptArg,
     "--model",
     "claude-opus-4-8",
     "--output-format",
@@ -5032,12 +7115,14 @@ test("warm continuation fails loudly until smoke tests pass and handles match ro
     "service_tier=\"fast\"",
     "exec",
     "resume",
+    "--skip-git-repo-check",
     "--model",
     "gpt-5.5",
     "--",
     "codex-session-1",
-    "Return Sr Eng blocker check.",
   ]);
+  assert.equal(codexWarm.stdinInput, "Return Sr Eng blocker check.");
+  assert.equal(codexWarm.args.includes("Return Sr Eng blocker check."), false);
   assert.equal(codexWarm.validation_method, "required_resume_plus_local_canonical");
 
   assert.equal(
@@ -5084,10 +7169,14 @@ test("runtime smoke checks cache version-keyed session_start subagent readiness"
   const cache = readRuntimeSmokeCache(cachePath);
   const assignments = resolveRoleRuntimeAssignments(config, "decomposition");
   assert.equal(cache.schema_version, RUNTIME_SMOKE_SCHEMA_VERSION);
-  assert.equal(commands.some((command) => command.mode === "warm_required"), true);
+  assert.equal(
+    commands.some((command) => command.mode === "warm_required"),
+    false,
+    "the unreleased execution workflow must not add a production warm-smoke assignment",
+  );
   const smokeCommands = commands.filter((command) => command.mode === "session_start");
   const smokePrompts = smokeCommands.map(runtimePromptFromCommand);
-  assert.equal(smokeCommands.length, 3);
+  assert.equal(smokeCommands.length, 2);
   for (const command of smokeCommands) {
     assert.equal(command.schema_version, SUBAGENT_TURN_SCHEMA_VERSION);
     assert.match(command.schema_path, /subagent-turn\.schema\.json$/);
@@ -5256,8 +7345,9 @@ test("runtime smoke cache is keyed by role assignment identity, not runtime alon
   assert.equal(result.ok, true);
   // pm (pm-model) and sr_eng (eng-model) are distinct claude identities,
   // judge/drafter/orchestrator collapse into one shared default claude-opus
-  // identity, and execution.orchestrator adds a warm-required codex identity.
-  assert.equal(result.results.length, 4);
+  // identity. The unreleased execution workflow contributes no production
+  // smoke assignment.
+  assert.equal(result.results.length, 3);
   assert.equal(result.results.every((item) => item.cached === false), true);
 
   const cache = readRuntimeSmokeCache(cachePath);
@@ -5367,6 +7457,160 @@ test("trace uses updated decomposition span names", async () => {
   );
 });
 
+async function connectedProjectMcpClient(options = {}) {
+  const serverOptions = {
+    createPlanningTraceSink: null,
+    ...options,
+  };
+  let Client;
+  let server;
+  try {
+    [{ Client }, server] = await Promise.all([
+      import("@modelcontextprotocol/sdk/client/index.js"),
+      createTeamiProjectMcpServer(serverOptions),
+    ]);
+  } catch (error) {
+    if (error?.code === "ERR_MODULE_NOT_FOUND" && /@modelcontextprotocol\/sdk/.test(String(error.message || ""))) {
+      return directProjectMcpClient(serverOptions);
+    }
+    throw error;
+  }
+  const transports = linkedMcpTransports();
+  await server.connect(transports.server);
+  const client = new Client({ name: "teami-project-test", version: "0.0.0" });
+  await client.connect(transports.client);
+  return {
+    client,
+    server,
+    async close() {
+      await Promise.allSettled([client.close(), server.close()]);
+    },
+  };
+}
+
+function directProjectMcpClient(options = {}) {
+  const actions = createProjectMcpToolActions(options);
+  return {
+    client: {
+      async listTools() {
+        return { tools: TEAMI_PROJECT_MCP_TOOL_NAMES.map((name) => ({ name })) };
+      },
+      async callTool({ name, arguments: args } = {}) {
+        const action = actions[name];
+        if (typeof action !== "function") {
+          const structuredContent = { ok: false, error: { code: "unknown_tool", message: "unknown_tool" } };
+          return toolErrorResultForTest(structuredContent);
+        }
+        try {
+          const structuredContent = await action(args || {});
+          return toolResultForTest(structuredContent);
+        } catch (error) {
+          return toolErrorResultForTest(sanitizeProjectMcpError(error));
+        }
+      },
+    },
+    server: null,
+    async close() {},
+  };
+}
+
+function toolResultForTest(structuredContent) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+    structuredContent,
+  };
+}
+
+function toolErrorResultForTest(structuredContent) {
+  return {
+    ...toolResultForTest(structuredContent),
+    isError: true,
+  };
+}
+
+function capturingPlanningTraceSink(events, { failStart = false } = {}) {
+  return {
+    async startRun(input) {
+      events.push({ type: "startRun", input });
+      if (failStart) throw new Error("phoenix_unavailable");
+      return {
+        ok: true,
+        traceId: `planning-trace-${events.length}`,
+        status: "trace_unknown",
+        run: { run_id: input.runId },
+      };
+    },
+    async finishRun(input) {
+      events.push({ type: "finishRun", input });
+      return { status: "trace_exported", traceId: input.session?.traceId || null };
+    },
+    async shutdown() {
+      events.push({ type: "shutdown" });
+    },
+  };
+}
+
+function planningTraceFinishes(events) {
+  return events.filter((event) => event.type === "finishRun");
+}
+
+function linkedMcpTransports() {
+  const client = new InProcessMcpTransport();
+  const server = new InProcessMcpTransport();
+  client.peer = server;
+  server.peer = client;
+  return { client, server };
+}
+
+class InProcessMcpTransport {
+  constructor() {
+    this.peer = null;
+    this.onclose = undefined;
+    this.onerror = undefined;
+    this.onmessage = undefined;
+    this.sessionId = undefined;
+  }
+
+  async start() {}
+
+  async send(message) {
+    queueMicrotask(() => {
+      this.peer?.onmessage?.(message);
+    });
+  }
+
+  async close() {
+    this.onclose?.();
+  }
+}
+
+function mcpDomainRegistry({ config, client }) {
+  return {
+    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
+    domains: [
+      makeDomainRecord({
+        domainId: "support-ops",
+        status: "active",
+        workspaceId: client.workspaceId,
+        workspaceName: client.workspaceName,
+        teamId: "team-1",
+        teamKey: config.linear.team.key,
+        teamName: config.linear.team.name,
+        webhookId: "webhook-team-1",
+      }),
+    ],
+  };
+}
+
+function mcpDomainCache(cache) {
+  return {
+    ...cache,
+    domainId: "support-ops",
+    workspaceId: "workspace-1",
+    teamId: "team-1",
+  };
+}
+
 async function initializedClient(config) {
   const client = new MemoryLinearClient();
   const result = await initLinear({
@@ -5400,6 +7644,20 @@ async function seedProject(client, { statusId, labelIds, content, teamIds = ["te
   });
 }
 
+function assertSingleProjectPauseComment(client, { projectId, runId, questionsMarkdown } = {}) {
+  assert.equal(client.comments.length, 1);
+  const comment = client.comments[0];
+  assert.equal(comment.projectId, projectId);
+  assert.equal(comment.user.id, client.viewerId);
+  assert.ok(comment.body.includes("Teami blocked this project because it needs a human decision before automated work continues."));
+  assert.ok(comment.body.includes(`(code: \`run_id:${runId}\`)`));
+  assert.ok(comment.body.includes(questionsMarkdown));
+}
+
+function assertNoRetiredQuestionSection(markdown) {
+  assert.doesNotMatch(String(markdown || ""), /^## Open Questions\b/m);
+}
+
 async function shapeForClient(client) {
   return {
     team: client.teams[0],
@@ -5409,19 +7667,22 @@ async function shapeForClient(client) {
       planned: client.projectStatuses.find((status) => status.id === "status-planned"),
       in_progress: client.projectStatuses.find((status) => status.id === "status-started"),
       completed: client.projectStatuses.find((status) => status.id === "status-completed"),
+      needs_principal: client.projectStatuses.find((status) => status.id === "status-principal-escalation"),
     },
     projectLabels: {
       hasOpenQuestions: client.projectLabels.find((label) => label.id === "plabel-open"),
     },
     issueLabels: {
       discovery: client.issueLabels.find((label) => label.id === "ilabel-discovery"),
+      human_review: client.issueLabels.find((label) => label.id === "ilabel-human-review"),
     },
     issueStatuses: {
       backlog: client.workflowStates.find((state) => state.id === "state-backlog"),
       todo: client.workflowStates.find((state) => state.id === "state-todo"),
       in_progress: client.workflowStates.find((state) => state.id === "state-in-progress"),
       in_review: client.workflowStates.find((state) => state.id === "state-in-review"),
-      blocked: client.workflowStates.find((state) => state.id === "state-blocked"),
+      human_review: client.workflowStates.find((state) => state.id === "state-human-review"),
+      needs_principal: client.workflowStates.find((state) => state.id === "state-needs-principal"),
       done: client.workflowStates.find((state) => state.id === "state-done"),
       ready: client.workflowStates.find((state) => state.id === "state-ready"),
     },
@@ -5465,9 +7726,14 @@ async function fakeRuntimeSmokeCommand(command) {
 }
 
 function runtimePromptFromCommand(command) {
+  if (typeof command.stdinInput === "string") return command.stdinInput;
   if (command.runtime === "claude") {
     const index = command.args.indexOf("-p");
-    return command.args[index + 1];
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg;
   }
   return command.args.at(-1);
 }
@@ -5519,11 +7785,7 @@ function pauseRunResult(runId, { packet = null, packets = null, terminalOutput =
       : pausePacket.reason,
     turns: packets || [pausePacket],
     terminalOutput: {
-      project_update_markdown: pausePacket.project_update_markdown,
       open_questions_markdown: pausePacket.open_questions_markdown,
-      ...(Array.isArray(pausePacket.discovery_issues)
-        ? { discovery_issues: pausePacket.discovery_issues }
-        : {}),
       ...terminalOutput,
     },
     evidence,
@@ -5689,6 +7951,20 @@ function commitProducedContent(runId, { finalIssues = commitFinalIssues(runId), 
   };
 }
 
+function resumePlanningSlots(overrides = {}) {
+  return {
+    problem: "The onboarding pilot needs a decomposition-ready launch plan.",
+    audience: "Customer success operators evaluating onboarding risk.",
+    desired_outcome: "The factory can decompose the pilot into agent-ready execution issues.",
+    acceptance: "- Issues reflect the launch audience.\n- No unresolved pause answer remains only in comments.",
+    scope: "- Include onboarding pilot setup.\n- Exclude billing and entitlement changes.",
+    constraints: "- Keep the local-first trust boundary intact.",
+    sources: "Initial project body; pause comments may resolve named gaps.",
+    human_decisions: "None after the launch audience is resolved.",
+    ...overrides,
+  };
+}
+
 // A role-agnostic subagent turn (Seam 2): the validated packet a library/one-off
 // subagent returns. Mirrors orchestrator-loop.test.mjs::subagentTurn — no
 // ordered position — and is the canonical shape the runtime-output validator
@@ -5778,11 +8054,10 @@ function pmContinue(runId) {
   });
 }
 
-// The common envelope for the synthetic pause/resume packets the runResult
-// fixtures feed straight into runDecomposition / resumeProjectAfterQuestions.
-// These ride the pause/resume contract (NOT the orchestrator subagent-turn
-// contract): the resume contract still keys on `phase: "resume"`, a surviving
-// non-router concept, so the kind label is carried through here.
+// The common envelope for the synthetic pause packets the runResult fixtures
+// feed straight into runDecomposition.
+// These ride the pause packet contract, not the orchestrator subagent-turn
+// contract, so the kind label is carried through here.
 function packetBase(runId, kind) {
   return {
     schema_version: PHASE_PACKET_SCHEMA_VERSION,
@@ -5891,6 +8166,43 @@ async function captureConsoleLogs(fn) {
   }
 }
 
+function captureSetupOutput() {
+  const lines = [];
+  const push = (kind, text) => {
+    if (typeof text === "object" && text !== null) {
+      lines.push(`${kind}: ${Object.values(text).filter(Boolean).join(" ")}`);
+      return;
+    }
+    lines.push(`${kind}: ${String(text)}`);
+  };
+  return {
+    verbose: false,
+    symbols: {
+      separator: "-",
+      ellipsis: "...",
+    },
+    style: {
+      dim: (value) => String(value),
+    },
+    heading: (text) => push("heading", text),
+    detail: (text) => push("detail", text),
+    step: (current, total, text) => push("step", `${current}/${total} ${text}`),
+    section: (text) => push("section", text),
+    info: (text) => push("info", text),
+    warn: (text) => push("warn", text),
+    success: (text) => push("success", text),
+    error: (text) => push("error", text),
+    done: (text) => push("done", text),
+    nextSteps: (items) => push("next", items.map((item) => item.text || item).join(" | ")),
+    raw: (text) => push("raw", text),
+    progress: (text) => {
+      push("progress", text);
+      return { stop: () => push("progress", "stop") };
+    },
+    text: () => lines.join("\n"),
+  };
+}
+
 function fileCredentialConfig(config) {
   const next = structuredClone(config);
   next.linear.oauth.credential_storage = "file";
@@ -5898,7 +8210,7 @@ function fileCredentialConfig(config) {
 }
 
 function domainEntrySnapshotPath(repoRoot, domainId) {
-  return path.join(repoRoot, ".teami", "domains", domainId, "registry-entry.json");
+  return path.join(repoRoot, "domains", domainId, "registry-entry.json");
 }
 
 function writeDomainEntrySnapshot({ repoRoot, registry, domainId }) {
@@ -5907,12 +8219,6 @@ function writeDomainEntrySnapshot({ repoRoot, registry, domainId }) {
   const snapshotPath = domainEntrySnapshotPath(repoRoot, domainId);
   fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
   fs.writeFileSync(snapshotPath, `${JSON.stringify(domain, null, 2)}\n`, "utf8");
-}
-
-function configWithReadyStatus(config) {
-  const next = structuredClone(config);
-  next.linear.issue.statuses.ready = { name: "Ready" };
-  return next;
 }
 
 function testDomainContext({
@@ -5985,14 +8291,6 @@ function runtimeEvidenceForRun(runId, roles = ["pm", "sr_eng"]) {
   return evidence;
 }
 
-function bodyAfterKeyLine(markdown) {
-  return markdown
-    .split(/\r?\n/)
-    .slice(2)
-    .join("\n")
-    .trimEnd();
-}
-
 function generatedTeamKey(name, fallbackNumber) {
   const letters = String(name || "")
     .toUpperCase()
@@ -6028,6 +8326,22 @@ function fakeSetupAuth(
   };
 }
 
+function instantBrowserAuthorization() {
+  return async () => ({
+    authorizationUrl: "https://linear.test/oauth/authorize",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    browser: { opened: true, reason: null },
+    waitForToken: async () => ({
+      access_token: "test-access-token",
+      refresh_token: "test-refresh-token",
+      token_type: "Bearer",
+      scope: "read write",
+      expires_in: 3600,
+    }),
+    close() {},
+  });
+}
+
 function registryWithWorkspace({
   domainId,
   workspaceId,
@@ -6055,11 +8369,21 @@ function registryWithWorkspace({
 
 function nativeWorkflowStates() {
   return [
-    { id: "state-backlog", name: "Backlog", type: "backlog" },
-    { id: "state-todo", name: "Todo", type: "unstarted" },
-    { id: "state-in-progress", name: "In Progress", type: "started" },
-    { id: "state-ready", name: "Ready", type: "unstarted" },
-    { id: "state-done", name: "Done", type: "completed" },
+    { id: "state-backlog", name: "Backlog", type: "backlog", position: 10 },
+    { id: "state-todo", name: "Todo", type: "unstarted", position: 20 },
+    { id: "state-in-progress", name: "In Progress", type: "started", position: 30 },
+    { id: "state-ready", name: "Ready", type: "unstarted", position: 40 },
+    { id: "state-done", name: "Done", type: "completed", position: 50 },
+  ];
+}
+
+function projectStatusesWithoutNeedsPrincipal({ includePaused = false } = {}) {
+  return [
+    { id: "status-backlog", name: "Backlog", type: "backlog", position: 10 },
+    { id: "status-planned", name: "Planned", type: "planned", position: 20 },
+    { id: "status-started", name: "In Progress", type: "started", position: 30 },
+    { id: "status-completed", name: "Completed", type: "completed", position: 40 },
+    ...(includePaused ? [{ id: "status-paused", name: "Paused", type: "planned", position: 20.02 }] : []),
   ];
 }
 
@@ -6070,9 +8394,22 @@ function defaultWorkflowStates() {
     { id: "state-in-progress", name: "In Progress", type: "started" },
     { id: "state-ready", name: "Ready", type: "unstarted" },
     { id: "state-in-review", name: "In Review", type: "started" },
-    { id: "state-blocked", name: "Blocked", type: "started" },
+    { id: "state-human-review", name: "Principal Review", type: "started" },
+    { id: "state-needs-principal", name: "Principal Escalation", type: "started" },
     { id: "state-done", name: "Done", type: "completed" },
   ];
+}
+
+function issueHasLabelId(issue, labelId) {
+  return Boolean(
+    issue.labelIds?.includes(labelId) ||
+    issue.labels?.some((label) => label?.id === labelId),
+  );
+}
+
+function issueMatchesSearch(issue, searchText) {
+  return [issue.id, issue.identifier, issue.title]
+    .some((value) => String(value || "").toLocaleLowerCase().includes(searchText));
 }
 
 class MemoryLinearClient {
@@ -6082,22 +8419,34 @@ class MemoryLinearClient {
     teamCreateError = null,
     workspaceId = "workspace-1",
     workspaceName = "Example Workspace",
+    viewerId = "app-viewer-1",
+    viewerName = "Teami App",
+    adminGrant = false,
   } = {}) {
     this.teams = [];
     this.projectLabels = [];
+    this.projectLabelUpdates = [];
     this.issueLabels = [];
+    this.issueLabelUpdates = [];
+    this.issueLabelArchives = [];
+    this.issueLabelArchiveFailures = new Set();
     this.projectStatuses =
       statuses ||
       [
-        { id: "status-backlog", name: "Backlog", type: "backlog" },
-        { id: "status-planned", name: "Planned", type: "planned" },
-        { id: "status-started", name: "In Progress", type: "started" },
-        { id: "status-completed", name: "Completed", type: "completed" },
+        { id: "status-backlog", name: "Backlog", type: "backlog", position: 10 },
+        { id: "status-planned", name: "Planned", type: "planned", position: 20 },
+        { id: "status-started", name: "In Progress", type: "started", position: 30 },
+        { id: "status-completed", name: "Completed", type: "completed", position: 40 },
+        { id: "status-principal-escalation", name: "Principal Escalation", type: "planned", position: 20.01 },
       ];
     this.workflowStates = (workflowStates || defaultWorkflowStates()).map((state) => ({ ...state }));
+    this.workflowStateUpdates = [];
+    this.workflowStateArchives = [];
+    this.workflowStateArchiveFailures = new Set();
     this.templates = [];
     this.projects = [];
     this.issues = [];
+    this.comments = [];
     this.issueRelations = [];
     this.projectUpdates = [];
     this.cache = null;
@@ -6107,9 +8456,14 @@ class MemoryLinearClient {
     this.returnProjectContentWithLinearMarkdown = false;
     this.workspaceId = workspaceId;
     this.workspaceName = workspaceName;
+    this.viewerId = viewerId;
+    this.viewerName = viewerName;
+    this.adminGrant = adminGrant;
   }
 
-  async verifyAuth() {}
+  async verifyAuth() {
+    return { ok: true, viewerId: this.viewerId, viewerName: this.viewerName };
+  }
 
   async getOrganization() {
     return { id: this.workspaceId, name: this.workspaceName };
@@ -6161,9 +8515,17 @@ class MemoryLinearClient {
     return label;
   }
 
+  async updateProjectLabel(id, input) {
+    const label = this.projectLabels.find((candidate) => candidate.id === id);
+    if (!label) throw new Error(`Linear project label ${id} not found.`);
+    Object.assign(label, input);
+    this.projectLabelUpdates.push({ id, input });
+    return label;
+  }
+
   async findIssueLabelsByName(name, teamId) {
     return this.issueLabels.filter(
-      (label) => (!name || label.name === name) && (!teamId || label.teamId === teamId),
+      (label) => !label.archived && (!name || label.name === name) && (!teamId || label.teamId === teamId),
     );
   }
 
@@ -6174,8 +8536,50 @@ class MemoryLinearClient {
     return label;
   }
 
+  async updateIssueLabel(id, input) {
+    const label = this.issueLabels.find((candidate) => candidate.id === id);
+    if (!label) throw new Error(`Linear issue label ${id} not found.`);
+    Object.assign(label, input);
+    this.issueLabelUpdates.push({ id, input });
+    return label;
+  }
+
+  async archiveIssueLabel(id) {
+    if (this.issueLabelArchiveFailures.has(id)) throw new Error(`simulated issue label archive refusal for ${id}`);
+    const label = this.issueLabels.find((candidate) => candidate.id === id);
+    if (!label) throw new Error(`Linear issue label ${id} not found.`);
+    label.archived = true;
+    this.issueLabelArchives.push(id);
+    return { ok: true };
+  }
+
   async listProjectStatuses() {
     return this.projectStatuses;
+  }
+
+  async createProjectStatus(input) {
+    if (!this.adminGrant) {
+      const error = new Error("Linear project status creation requires an admin grant.");
+      error.code = "FORBIDDEN";
+      error.errors = [{
+        message: "Only admin users can create project statuses.",
+        path: ["projectStatusCreate"],
+        extensions: { type: "forbidden", code: "FORBIDDEN", statusCode: 403 },
+      }];
+      throw error;
+    }
+    const slug = String(input.name || "status").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const status = {
+      id: input.id || `status-${slug || this.projectStatuses.length + 1}`,
+      name: input.name,
+      type: input.type,
+      color: input.color,
+      position: input.position,
+      ...("description" in input ? { description: input.description ?? null } : {}),
+      ...("indefinite" in input ? { indefinite: Boolean(input.indefinite) } : {}),
+    };
+    this.projectStatuses.push(status);
+    return status;
   }
 
   async findTemplatesByName(name, type, teamId) {
@@ -6200,7 +8604,7 @@ class MemoryLinearClient {
   }
 
   async listWorkflowStates() {
-    return this.workflowStates;
+    return this.workflowStates.filter((state) => !state.archived);
   }
 
   async createWorkflowState(input) {
@@ -6210,9 +8614,31 @@ class MemoryLinearClient {
       name: input.name,
       type: input.type,
       teamId: input.teamId || null,
+      ...("description" in input ? { description: input.description ?? null } : {}),
+      ...("color" in input ? { color: input.color ?? null } : {}),
+      ...("position" in input ? { position: input.position } : {}),
     };
     this.workflowStates.push(state);
     return state;
+  }
+
+  async updateWorkflowState(id, input) {
+    const state = this.workflowStates.find((candidate) => candidate.id === id);
+    if (!state) throw new Error(`Linear workflow state ${id} not found.`);
+    for (const field of ["name", "description", "color", "position"]) {
+      if (input[field] !== undefined) state[field] = input[field];
+    }
+    this.workflowStateUpdates.push({ id, input });
+    return state;
+  }
+
+  async archiveWorkflowState(id) {
+    if (this.workflowStateArchiveFailures.has(id)) throw new Error(`simulated workflow state archive refusal for ${id}`);
+    const state = this.workflowStates.find((candidate) => candidate.id === id);
+    if (!state) throw new Error(`Linear workflow state ${id} not found.`);
+    state.archived = true;
+    this.workflowStateArchives.push(id);
+    return { ok: true };
   }
 
   async createProject(input) {
@@ -6256,6 +8682,13 @@ class MemoryLinearClient {
     return {
       ...project,
       content,
+      comments: this.comments
+        .filter((comment) => comment.projectId === id)
+        .map((comment) => ({
+          author_id: comment.user?.id ?? null,
+          body: comment.body,
+          created_at: comment.createdAt,
+        })),
       issues: this.issues
         .filter((issue) => issue.projectId === id)
         .map((issue) => ({
@@ -6265,6 +8698,27 @@ class MemoryLinearClient {
           ),
         })),
     };
+  }
+
+  async listComments({ projectId } = {}) {
+    return this.comments
+      .filter((comment) => comment.projectId === projectId)
+      .map((comment) => ({ ...comment, user: { ...comment.user } }));
+  }
+
+  async createComment({ projectId } = {}, body) {
+    const project = this.projects.find((candidate) => candidate.id === projectId);
+    if (!project) throw new Error(`Linear project ${projectId} not found.`);
+    const comment = {
+      id: `project-comment-${this.comments.length + 1}`,
+      comment_id: `project-comment-${this.comments.length + 1}`,
+      projectId,
+      body,
+      createdAt: new Date(Date.parse("2026-07-01T00:00:00.000Z") + this.comments.length * 1000).toISOString(),
+      user: { id: this.viewerId, name: this.viewerName, displayName: this.viewerName },
+    };
+    this.comments.push(comment);
+    return { ...comment, user: { ...comment.user } };
   }
 
   async findIssueByDecompositionKey(projectId, decompositionKey) {
@@ -6300,6 +8754,18 @@ class MemoryLinearClient {
     if (input.description !== undefined) issue.description = input.description;
     if (input.stateId) issue.state = this.workflowStates.find((state) => state.id === input.stateId);
     return issue;
+  }
+
+  async listIssues({ teamId = null, projectId = null, query = null, stateId = null, labelId = null } = {}) {
+    const searchText = String(query || "").trim().toLocaleLowerCase();
+    return this.issues.filter((issue) => {
+      if (teamId && issue.teamId !== teamId && issue.team?.id !== teamId) return false;
+      if (projectId && issue.projectId !== projectId) return false;
+      if (stateId && issue.stateId !== stateId && issue.state?.id !== stateId) return false;
+      if (labelId && !issueHasLabelId(issue, labelId)) return false;
+      if (searchText && !issueMatchesSearch(issue, searchText)) return false;
+      return true;
+    });
   }
 
   async findOrCreateIssueRelation(input) {

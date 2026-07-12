@@ -23,12 +23,9 @@ export const STRUCTURAL_FAILURE_MODES = Object.freeze([
   "missing_risks",
   "missing_pause_open_questions",
   "missing_project_update",
-  "missing_discovery_issue_body",
   // evaluatePauseState
-  "missing_has_open_questions_label",
-  "pause_project_not_backlog",
-  "missing_open_questions_section",
-  "incomplete_pause_artifact",
+  "missing_pause_comment_content",
+  "pause_project_not_attention_status",
 ]);
 
 // The failure-taxonomy.json version these emissions are aligned with.
@@ -161,17 +158,10 @@ function collectPhasePacketSufficiencyFailures(phasePackets, failureModes) {
       failureModes.push(`missing_pause_open_questions:${packet.phase}`);
     }
     if (
-      (packet.status === "pause" || packet.phase === "pm_synthesis") &&
+      packet.phase === "pm_synthesis" &&
       !packet.project_update_markdown
     ) {
       failureModes.push(`missing_project_update:${packet.phase}`);
-    }
-    if (packet.reason === "discovery_needed") {
-      for (const discoveryIssue of packet.discovery_issues || []) {
-        if (!discoveryIssue.body_markdown) {
-          failureModes.push(`missing_discovery_issue_body:${packet.phase}`);
-        }
-      }
     }
   }
 }
@@ -199,17 +189,10 @@ function collectTerminalOutputSufficiencyFailures(terminalOutput, failureModes) 
     failureModes.push(`missing_pause_open_questions:${detailSuffix}`);
   }
   if (
-    ["commit", "pause", "failed_closed"].includes(terminalOutput.outcome) &&
+    ["commit", "failed_closed"].includes(terminalOutput.outcome) &&
     !terminalOutput.project_update_markdown
   ) {
     failureModes.push(`missing_project_update:${detailSuffix}`);
-  }
-  if (terminalOutput.reason === "discovery_needed") {
-    for (const discoveryIssue of terminalOutput.discovery_issues || []) {
-      if (!discoveryIssue.body_markdown) {
-        failureModes.push(`missing_discovery_issue_body:${detailSuffix}`);
-      }
-    }
   }
 }
 
@@ -217,15 +200,13 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-export function evaluatePauseState({ project, hasOpenQuestionsLabelId, backlogStatusId }) {
+export function evaluatePauseState({ project, attentionStatusId, appIdentityId }) {
   const failureModes = [];
-  const hasLabel = project.labels?.some((label) => label.id === hasOpenQuestionsLabelId);
-  const isBacklog = project.status?.id === backlogStatusId || project.status?.type === "backlog";
+  const comment = latestAppAuthoredProjectComment(project?.comments, appIdentityId);
+  const hasPauseCommentContent = typeof comment?.body === "string" && comment.body.trim() !== "";
 
-  if (!hasLabel) failureModes.push("missing_has_open_questions_label");
-  if (!isBacklog) failureModes.push("pause_project_not_backlog");
-  if (!project.content?.includes("## Open Questions")) failureModes.push("missing_open_questions_section");
-  if (openQuestionsContent(project.content).trim() === "") failureModes.push("incomplete_pause_artifact");
+  if (!hasPauseCommentContent) failureModes.push("missing_pause_comment_content");
+  if (project?.status?.id !== attentionStatusId) failureModes.push("pause_project_not_attention_status");
 
   return {
     name: "pause_state_correctness",
@@ -235,7 +216,7 @@ export function evaluatePauseState({ project, hasOpenQuestionsLabelId, backlogSt
     score: failureModes.length === 0 ? 1 : 0,
     explanation:
       failureModes.length === 0
-        ? "Paused project has backlog status, blocker label, and explicit unresolved questions."
+        ? "Paused project has Principal Escalation status and an app-authored question comment."
         : `Pause state is incomplete: ${failureModes.join(", ")}`,
     metadata: {
       failure_modes: failureModes,
@@ -244,7 +225,10 @@ export function evaluatePauseState({ project, hasOpenQuestionsLabelId, backlogSt
   };
 }
 
-function openQuestionsContent(markdown = "") {
-  const match = /^## Open Questions[ \t]*\n([\s\S]*?)(?=^##\s|\s*$)/m.exec(markdown);
-  return match ? match[1] : "";
+function latestAppAuthoredProjectComment(comments, appIdentityId) {
+  if (!Array.isArray(comments) || typeof appIdentityId !== "string" || appIdentityId.trim() === "") {
+    return null;
+  }
+  const authored = comments.filter((comment) => comment?.author_id === appIdentityId);
+  return authored.length > 0 ? authored.at(-1) : null;
 }

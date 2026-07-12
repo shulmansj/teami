@@ -34,6 +34,40 @@ test("execution profile preflight is green when deps install and a runnable test
   assert.deepEqual(commands, ["npm install"]);
 });
 
+test("execution profile preflight threads envAugment into the readiness commands", async () => {
+  const repoDir = fixtureRepo({
+    packageJson: {
+      scripts: {
+        test: "node --test",
+      },
+    },
+  });
+  const calls = [];
+  const envAugment = { TMPDIR: "/run/tmp", TMP: "/run/tmp", TEMP: "/run/tmp" };
+
+  const result = await runExecutionProfilePreflight({
+    repoDir,
+    resourceId: "repo-1",
+    strictBaselineGreen: true,
+    envAugment,
+    runCommand: async (command, options = {}) => {
+      calls.push({
+        label: [command.command, ...(command.args || [])].join(" "),
+        envAugment: options.envAugment,
+      });
+      return "";
+    },
+    gitPushAuthorityProbe: passProbe,
+    githubApiAuthorityProbe: passProbe,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.map((call) => call.label), ["npm install", "npm test"]);
+  for (const call of calls) {
+    assert.deepEqual(call.envAugment, envAugment);
+  }
+});
+
 test("execution profile preflight red verdict is stable when dependency install fails", async () => {
   const repoDir = fixtureRepo({
     packageJson: {
@@ -268,6 +302,69 @@ test("readiness repair bypass skips setup and test readiness but keeps authority
     },
     failure_reasons: ["clone_unusable"],
   });
+});
+
+test("default git push authority probe mirrors the mediated push: dry-run with in-memory Basic auth injection", async () => {
+  const repoDir = fixtureRepo({ packageJson: {} });
+  const gitCalls = [];
+  const runGit = (args, opts = {}) => {
+    gitCalls.push({ args, opts });
+    return { ok: true, status: 0, stdout: "", stderr: "" };
+  };
+  const priorGhToken = process.env.GH_TOKEN;
+  process.env.GH_TOKEN = "preflight-fixture-token";
+  try {
+    const result = await runExecutionProfilePreflight({
+      repoDir,
+      resourceId: "repo-1",
+      skipReadiness: true,
+      runCommand: commandRecorder([]),
+      runGit,
+      githubApiAuthorityProbe: passProbe,
+      remoteUrl: "https://github.com/acme/product.git",
+    });
+    assert.equal(result.ok, true);
+  } finally {
+    if (priorGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = priorGhToken;
+  }
+
+  const push = gitCalls.find((call) => call.args[0] === "push");
+  assert.ok(push, "default probe must run git push --dry-run");
+  assert.deepEqual(push.args, [
+    "push",
+    "--dry-run",
+    "https://github.com/acme/product.git",
+    "HEAD:refs/heads/af-preflight-readiness",
+  ]);
+  assert.equal(push.opts.cwd, repoDir);
+  assert.equal(push.opts.env.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(push.opts.env.GIT_CONFIG_COUNT, "1");
+  assert.equal(push.opts.env.GIT_CONFIG_KEY_0, "http.extraHeader");
+  const expectedBasic = Buffer.from("x-access-token:preflight-fixture-token", "utf8").toString("base64");
+  assert.equal(push.opts.env.GIT_CONFIG_VALUE_0, `Authorization: Basic ${expectedBasic}`);
+});
+
+test("git push probe timeout is surfaced as reconciliation-required", async () => {
+  const repoDir = fixtureRepo({ packageJson: {} });
+  const result = await runExecutionProfilePreflight({
+    repoDir,
+    resourceId: "repo-1",
+    skipReadiness: true,
+    runCommand: commandRecorder([]),
+    runGit: async () => ({
+      ok: false,
+      outcome: "reconciliation_required",
+      reconciliationRequired: true,
+    }),
+    githubApiAuthorityProbe: passProbe,
+    remoteUrl: "https://github.com/acme/product.git",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failure_reasons.includes("git_push_authority_missing"), true);
+  assert.equal(result.outcome, "reconciliation_required");
+  assert.equal(result.reconciliation_required, true);
 });
 
 function fixtureRepo({ packageJson }) {

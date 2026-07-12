@@ -14,12 +14,9 @@ import {
 } from "../linear-credential-store.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
 import { removeSetupState } from "../local-state.mjs";
-import {
-  cleanupLocalSupervisorLocalState,
-  formatLocalSupervisorCleanupReport,
-} from "../local-supervisor.mjs";
 import { createCliOutput } from "./cli-output.mjs";
 import { flagValue } from "./flags.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 
 const LOCAL_SETUP_COMMAND_OPTIONS = Object.freeze({
   reset: {
@@ -37,7 +34,7 @@ const LOCAL_SETUP_COMMAND_OPTIONS = Object.freeze({
 });
 
 export async function runLocalSetupCleanupCommand({ context, command, args }) {
-  const { config, repoRoot, cachePath, setupStatePath, output = createCliOutput() } = context;
+  const { config, repoRoot, home = resolveTeamiHome(), cachePath, setupStatePath, output = createCliOutput() } = context;
     const commandOptions = LOCAL_SETUP_COMMAND_OPTIONS[command] || LOCAL_SETUP_COMMAND_OPTIONS.uninstall;
     output.heading(
       command === "reset"
@@ -48,15 +45,18 @@ export async function runLocalSetupCleanupCommand({ context, command, args }) {
     const result = await removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot,
+      home,
       domainId: flagValue(args, "--domain"),
       fullReset: commandOptions.fullReset,
       log: createCleanupProgress(output),
     });
-    output.done(commandOptions.completeMessage);
-    if (commandOptions.printRevocationReminder) {
+    if (result.ok) {
+      output.done(commandOptions.completeMessage);
+    }
+    if (result.ok && commandOptions.printRevocationReminder) {
       output.warn("Revoke the Linear browser grant in Linear workspace settings to remove server-side access.");
     }
-    process.exit(result.ok ? 0 : 1);
+    process.exitCode = result.ok ? 0 : 1;
 }
 function removeLocalState(filePath, label, log = (line) => console.log(line)) {
   if (fs.existsSync(filePath)) {
@@ -71,7 +71,7 @@ function createBootstrapLinearCredentialStore({ config, repoRoot }) {
   return createLinearCredentialStore({
     config,
     repoRoot,
-    target: legacyCredentialTargetForConfig(config, repoRoot),
+    target: legacyCredentialTargetForConfig(config),
   });
 }
 
@@ -98,17 +98,19 @@ async function removeLocalLinearSetup(
   {
     config,
     repoRoot,
+    home = resolveTeamiHome(),
     domainId = null,
     fullReset = false,
     removeDomainSetup = removeOneDomainSetup,
     log = (line) => console.log(line),
   },
 ) {
-  const registry = readDomainRegistry({ repoRoot });
+  const registry = readDomainRegistry({ home });
   if (!registry) {
     return removePreDomainLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot,
+      home,
       log,
     });
   }
@@ -121,9 +123,6 @@ async function removeLocalLinearSetup(
     log("could not resolve a single domain to uninstall; pass --domain <domain_id>.");
     return { ok: false };
   }
-
-  const supervisorCleanup = cleanupLocalSupervisorLocalState({ repoRoot });
-  for (const line of formatLocalSupervisorCleanupReport(supervisorCleanup)) log(line);
 
   for (const store of legacyCredentialStores({ config, repoRoot })) {
     try {
@@ -142,6 +141,7 @@ async function removeLocalLinearSetup(
         ? await removeRemovedDomainSetup({
             config,
             repoRoot,
+            home,
             domain,
             removeDomainSetup,
             log,
@@ -149,6 +149,7 @@ async function removeLocalLinearSetup(
         : await removeDomainSetup({
           config,
           repoRoot,
+          home,
           domain,
           log,
         });
@@ -169,7 +170,7 @@ async function removeLocalLinearSetup(
     if (domain) {
       domain.status = "removed";
       delete domain.setup_incomplete_cause;
-      writeDomainRegistry({ repoRoot }, nextRegistry);
+      writeDomainRegistry({ home }, nextRegistry);
       log(`marked removed: domain ${domain.id}`);
     }
     return { ok };
@@ -177,11 +178,11 @@ async function removeLocalLinearSetup(
 
   removeLocalState(cachePath, "legacy linear cache", log);
   removeRetiredEventPathLocalState({ config, repoRoot, log });
-  const domainState = removeDomainRegistryState({ repoRoot });
+  const domainState = removeDomainRegistryState({ home });
   log(domainState.registryRemoved ? "removed: domain registry" : "already clean: domain registry");
   log(domainState.domainsDirRemoved ? "removed: per-domain Linear caches" : "already clean: per-domain Linear caches");
   removeSetupState(setupStatePath);
-  const githubStatePath = githubConnectionStatePath(repoRoot);
+  const githubStatePath = githubConnectionStatePath(home);
   if (fs.existsSync(githubStatePath)) {
     removeLocalState(githubStatePath, "GitHub connection state", log);
   }
@@ -192,20 +193,17 @@ async function removeLocalLinearSetup(
 async function removePreDomainLocalLinearSetup(
   cachePath,
   setupStatePath,
-  { config, repoRoot, log = (line) => console.log(line) },
+  { config, repoRoot, home = resolveTeamiHome(), log = (line) => console.log(line) },
 ) {
-  const supervisorCleanup = cleanupLocalSupervisorLocalState({ repoRoot });
-  for (const line of formatLocalSupervisorCleanupReport(supervisorCleanup)) log(line);
-
   const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
 
   removeLocalState(cachePath, "linear cache", log);
   removeRetiredEventPathLocalState({ config, repoRoot, log });
-  const domainState = removeDomainRegistryState({ repoRoot });
+  const domainState = removeDomainRegistryState({ home });
   log(domainState.registryRemoved ? "removed: domain registry" : "already clean: domain registry");
   log(domainState.domainsDirRemoved ? "removed: per-domain Linear caches" : "already clean: per-domain Linear caches");
   removeSetupState(setupStatePath);
-  const githubStatePath = githubConnectionStatePath(repoRoot);
+  const githubStatePath = githubConnectionStatePath(home);
   if (fs.existsSync(githubStatePath)) {
     removeLocalState(githubStatePath, "GitHub connection state", log);
   }
@@ -223,12 +221,13 @@ async function removePreDomainLocalLinearSetup(
 async function removeOneDomainSetup({
   config,
   repoRoot,
+  home = resolveTeamiHome(),
   domain,
   createOAuthCredentialStore = createLinearCredentialStore,
   removeLocalFile = removeLocalState,
   log = (line) => console.log(line),
 }) {
-  const context = contextForRegistryDomain({ domain, config, repoRoot });
+  const context = contextForRegistryDomain({ domain, config, repoRoot, home });
   if (!context) {
     log(`skipped: domain ${domain.id} has incomplete identity; npm run reset will remove local files`);
     return { ok: true };
@@ -254,12 +253,13 @@ async function removeOneDomainSetup({
 async function removeRemovedDomainSetup({
   config,
   repoRoot,
+  home = resolveTeamiHome(),
   domain,
   removeDomainSetup = removeOneDomainSetup,
   createOAuthCredentialStore = createLinearCredentialStore,
   log = (line) => console.log(line),
 }) {
-  const context = contextForRegistryDomain({ domain, config, repoRoot });
+  const context = contextForRegistryDomain({ domain, config, repoRoot, home });
   if (!context) {
     log(`already clean: removed domain ${domain.id} has no complete Linear identity`);
     return { ok: true, alreadyClean: true };
@@ -284,6 +284,7 @@ async function removeRemovedDomainSetup({
   return removeDomainSetup({
     config,
     repoRoot,
+    home,
     domain,
     log,
   });
@@ -295,10 +296,10 @@ function selectDomainsForCommand(domains, domainId = null) {
   return activeDomains.length === 1 ? activeDomains : [];
 }
 
-function contextForRegistryDomain({ domain, config, repoRoot }) {
+function contextForRegistryDomain({ domain, config, repoRoot, home }) {
   if (!domain?.linear?.workspace_id || !domain?.id) return null;
   try {
-    return buildDomainContext({ domain, config, repoRoot });
+    return buildDomainContext({ domain, config, repoRoot, home });
   } catch {
     return null;
   }
@@ -312,7 +313,7 @@ function legacyCredentialStores({ config, repoRoot }) {
         createLinearCredentialStore({
           config,
           repoRoot,
-          target: legacyCredentialTargetForConfig(config, repoRoot),
+          target: legacyCredentialTargetForConfig(config),
         }).deleteTokenSet(),
     },
   ];

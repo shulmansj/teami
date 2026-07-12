@@ -3,9 +3,6 @@ import {
   enforceTraceContentPolicy,
   LOCAL_FULL_CONTENT_TRACE_POLICY_OPTIONS,
 } from "../../../../../engine/trace-contract.mjs";
-import {
-  RUN_ARTIFACT_SCHEMA_VERSION,
-} from "../../../../../engine/engine-contract-constants.mjs";
 import { readRunArtifact, runArtifactPath } from "../../../../../engine/run-store.mjs";
 import { validateOrchestratorOutput } from "../../../../../engine/orchestrator-output.mjs";
 import { commitPayload as decompositionCommitPayload } from "./commit-payload.mjs";
@@ -14,10 +11,7 @@ import {
   acceptedRefFromLoadedSnapshot,
   unjoinableCoverageMarker,
 } from "../../../../../engine/run-accepted-refs.mjs";
-import {
-  buildRuntimeMetadata,
-  resolveRoleRuntimeAssignments,
-} from "../../runtime-adapters.mjs";
+import { resolveRoleRuntimeAssignments } from "../../runtime-adapters.mjs";
 import {
   knownTraceAttributes,
   resolveDomainTrace,
@@ -25,20 +19,19 @@ import {
 import { resolveLinearShape } from "../../linear/shape-resolver.mjs";
 import { evaluateEligibilityFromContext } from "./eligibility.mjs";
 import {
-  applyPersistedArtifact,
   maybeApplyPersistedArtifact,
   validateReplayArtifactDomain,
   validateReplayArtifactProject,
 } from "./artifact-apply.mjs";
 import { canApplyTerminal } from "../../../../../engine/terminal-gate.mjs";
 import { unpinnedRuntimeTraceAttributes } from "../../config.mjs";
+import { resolveTeamiHome } from "../../app-home.mjs";
 import { DECOMPOSITION_FUNCTION_VERSION } from "../../phase-contract.mjs";
 import {
   captureRunProjectSnapshot,
   failClosed,
   persistRunArtifact,
   terminalArtifact,
-  validateResumePacket,
 } from "./artifacts.mjs";
 
 export async function runDecomposition({
@@ -50,6 +43,7 @@ export async function runDecomposition({
   environment = null,
   runId = null,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   runtimeEvidence = {},
   retryCommit = false,
@@ -67,6 +61,7 @@ export async function runDecomposition({
     "workflow.version": DECOMPOSITION_FUNCTION_VERSION,
     "teami.domain_id": domainTrace.domain_id,
     "teami.behavior_repo_id": domainTrace.behavior_repo_id,
+    behavior_config_commit: config?.behavior_config_commit || null,
     "linear.workspace_id": domainTrace.workspace_id,
     "linear.team_id": domainTrace.team_id,
     "linear.project_id": projectId,
@@ -90,7 +85,13 @@ export async function runDecomposition({
 
   const runtimeAssignments = resolveRoleRuntimeAssignments(config, "decomposition");
   if (retryCommit) {
-    const persisted = readRunArtifact({ runId, repoRoot, runStoreDir });
+    const persisted = readRunArtifact({
+      runId,
+      repoRoot,
+      home,
+      domainId: domainContext?.domainId || domainTrace.domain_id || null,
+      runStoreDir,
+    });
     if (!persisted) throw new Error(`No persisted run artifact found for ${runId}.`);
     validateReplayArtifactDomain({ artifact: persisted, domainContext, replayed: true });
     if (!["commit", "pause"].includes(persisted.kind)) {
@@ -103,7 +104,13 @@ export async function runDecomposition({
     const durableRecord = {
       written: true,
       terminal_artifact_schema_valid: ["commit", "pause"].includes(persisted.kind),
-      artifact_path: runArtifactPath({ runId, repoRoot, runStoreDir }),
+      artifact_path: runArtifactPath({
+        runId,
+        repoRoot,
+        home,
+        domainId: domainContext?.domainId || domainTrace.domain_id || null,
+        runStoreDir,
+      }),
     };
     const replayGate = canApplyTerminal({
       terminal_output: replayRunResult.terminal_output,
@@ -130,6 +137,7 @@ export async function runDecomposition({
     return maybeApplyPersistedArtifact({
       client,
       config,
+      cache,
       shape,
       project,
       artifact: persisted,
@@ -165,6 +173,8 @@ export async function runDecomposition({
     shape,
     evalMode,
     repoRoot,
+    home,
+    domainId: domainContext?.domainId || domainTrace.domain_id || null,
     runStoreDir,
     trace,
   });
@@ -209,6 +219,7 @@ export async function runDecomposition({
   const durability = persistRunArtifact({
     artifact,
     repoRoot,
+    home,
     runStoreDir,
     trace,
     returnDurabilityResult: true,
@@ -218,6 +229,8 @@ export async function runDecomposition({
   const persistedArtifact = readRunArtifact({
     runId: artifact.run_id,
     repoRoot,
+    home,
+    domainId: artifact.domain_id,
     runStoreDir,
     payloadValidator: decompositionCommitPayload,
     functionVersion: DECOMPOSITION_FUNCTION_VERSION,
@@ -254,6 +267,7 @@ export async function runDecomposition({
   const result = await maybeApplyPersistedArtifact({
     client,
     config,
+    cache,
     shape,
     project,
     artifact: persistedArtifact,
@@ -303,16 +317,20 @@ async function appendQualityCheckAdvisory({
     snapshot: projectSnapshot,
     traceId,
   });
-  const projectUpdateMarkdown = appendAdvisoryQualityLine(
-    runResult.terminal_output.project_update_markdown,
-    advisory.result,
-  );
+  const appendToProjectUpdate = shouldAppendAdvisoryToProjectUpdate({ runResult, artifact });
+  const projectUpdateMarkdown = appendToProjectUpdate
+    ? appendAdvisoryQualityLine(
+      runResult.terminal_output.project_update_markdown,
+      advisory.result,
+    )
+    : null;
   recordQualityJudgeRunSpan(trace, advisory.result);
   safelyRecordSpan(trace, "quality_check_advisory", {
     judge_state: advisory.result?.judge_state || "judge_unavailable",
     judge_label: advisory.result?.judge?.label || null,
     reason: advisory.result?.reason || null,
-    appended_to_project_update_markdown: true,
+    advisory_line: advisory.line,
+    appended_to_project_update_markdown: appendToProjectUpdate,
   });
   // The judge is a maintainer-owned evaluator captured by the #50 ledger (Seam
   // 3 — the cross-path that the run recorder cannot see because the judge runs
@@ -324,13 +342,21 @@ async function appendQualityCheckAdvisory({
   // shape acceptedRefFromLoadedSnapshot mints for every other captured ref
   // (accepted_baseline_id = accepted_prompt_version_id || `sha256:<sha>`).
   const withJudgeRef = appendJudgeAcceptedRef({
-    artifact: withArtifactProjectUpdateMarkdown(artifact, projectUpdateMarkdown),
+    artifact: appendToProjectUpdate
+      ? withArtifactProjectUpdateMarkdown(artifact, projectUpdateMarkdown)
+      : artifact,
     // Default to the judge's OWN contract loader so the captured version
     // provably matches what the judge consumed; tests may inject a throwing
     // loader to exercise the unjoinable-marker degrade path.
     loadPromptRegistrationContract: loadJudgeContractFn || loadPromptRegistrationContract,
     targetKey: DECOMPOSITION_QUALITY_JUDGE_TARGET_KEY,
   });
+  if (!appendToProjectUpdate) {
+    return {
+      runResult,
+      artifact: withJudgeRef,
+    };
+  }
   return {
     runResult: withProjectUpdateMarkdown(runResult, projectUpdateMarkdown),
     artifact: withJudgeRef,
@@ -454,6 +480,12 @@ function withProjectUpdateMarkdown(runResult, projectUpdateMarkdown) {
   };
 }
 
+function shouldAppendAdvisoryToProjectUpdate({ runResult, artifact } = {}) {
+  const outcome = runResult?.terminal_output?.outcome || artifact?.terminal_output?.outcome || null;
+  if (outcome === "commit" || outcome === "failed_closed") return true;
+  return artifact?.source === "failed_closed";
+}
+
 function withArtifactProjectUpdateMarkdown(artifact, projectUpdateMarkdown) {
   if (artifact.kind === "commit") {
     return {
@@ -465,6 +497,7 @@ function withArtifactProjectUpdateMarkdown(artifact, projectUpdateMarkdown) {
       },
     };
   }
+  if (artifact.source !== "failed_closed") return artifact;
   const pausePacket = {
     ...artifact.pause_packet,
     project_update_markdown: projectUpdateMarkdown,
@@ -523,12 +556,12 @@ function runResultFromTerminalArtifact(artifact = {}) {
   if (artifact.kind === "commit") {
     terminalOutput.project_update_markdown = artifact.project_update_markdown;
     terminalOutput.final_issues = artifact.final_issues;
+    if (artifact.project_body_update) terminalOutput.project_body_update = artifact.project_body_update;
   } else if (artifact.kind === "pause") {
-    terminalOutput.project_update_markdown =
-      artifact.pause_packet?.project_update_markdown ?? artifact.project_update_markdown;
     terminalOutput.open_questions_markdown = artifact.pause_packet?.open_questions_markdown;
-    if (Array.isArray(artifact.discovery_issues)) {
-      terminalOutput.discovery_issues = artifact.discovery_issues;
+    if (artifact.source === "failed_closed" || terminalOutput.outcome === "failed_closed") {
+      terminalOutput.project_update_markdown =
+        artifact.pause_packet?.project_update_markdown ?? artifact.project_update_markdown;
     }
   }
   return {
@@ -631,87 +664,4 @@ function runtimeEvidenceTurns(runtimeEvidence, perspectivesRun) {
     });
   }
   return turns;
-}
-
-export async function resumeProjectAfterQuestions({
-  client,
-  config,
-  cache,
-  projectId,
-  packet,
-  repoRoot = process.cwd(),
-  runStoreDir = null,
-  traceContext = {},
-  domainContext = null,
-  onBeforeLinearMutation = null,
-} = {}) {
-  const domainTrace = resolveDomainTrace({ domainContext, traceContext, cache, repoRoot });
-  const trace = createTrace(decompositionDefinition.trace_descriptor.trace_name, knownTraceAttributes({
-    "workflow.name": "project_decomposition_resume",
-    "workflow.version": DECOMPOSITION_FUNCTION_VERSION,
-    "teami.domain_id": domainTrace.domain_id,
-    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
-    "linear.workspace_id": domainTrace.workspace_id,
-    "linear.team_id": domainTrace.team_id,
-    "linear.project_id": projectId,
-    linear_project_id: projectId,
-    run_id: packet?.run_id || null,
-    event_id: traceContext.event_id || null,
-    wake_id: traceContext.wake_id || null,
-    trace_id: traceContext.trace_id || null,
-    attempt: traceContext.attempt || null,
-    workspace_id: domainTrace.workspace_id,
-    domain_id: domainTrace.domain_id,
-    team_id: domainTrace.team_id,
-    behavior_repo_id: domainTrace.behavior_repo_id,
-    source_provider: traceContext.source_provider || "linear",
-    source_object_id: traceContext.source_object_id || projectId,
-    trigger_type: traceContext.trigger_type || null,
-    runner_id: traceContext.runner_id || null,
-    runner_version: traceContext.runner_version || null,
-    ...unpinnedRuntimeTraceAttributes(config),
-  }));
-  const runtimeAssignments = resolveRoleRuntimeAssignments(config, "decomposition");
-  const shape = await resolveLinearShape({ client, config, cache });
-  const project = await client.getProjectContext(projectId);
-  recordSpan(trace, "load_project_context", {
-    linear_project_id: project.id,
-    issue_count: project.issues?.length || 0,
-  });
-
-  const validation = validateResumePacket(packet);
-  if (!validation.ok) return failClosed(trace, validation.failureReasons);
-
-  const artifact = {
-    schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
-    workflow_version: DECOMPOSITION_FUNCTION_VERSION,
-    kind: "resume",
-    run_id: packet.run_id,
-    domain_id: domainTrace.domain_id,
-    workspace_id: domainTrace.workspace_id,
-    team_id: domainTrace.team_id,
-    linear_project_id: project.id,
-    runtime_assignments: runtimeAssignments,
-    runtime_metadata: buildRuntimeMetadata({
-      acceptedPackets: [packet],
-      runtimeAssignments,
-    }),
-    packet,
-  };
-  persistRunArtifact({ artifact, repoRoot, runStoreDir, trace });
-  return applyPersistedArtifact({
-    client,
-    config,
-    shape,
-    project,
-    artifact,
-    trace,
-    repoRoot,
-    runStoreDir,
-    onBeforeLinearMutation,
-  });
-}
-
-export async function encodeDiscoveryFindingsAndResume(options = {}) {
-  return resumeProjectAfterQuestions(options);
 }

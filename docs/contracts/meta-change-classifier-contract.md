@@ -1,7 +1,8 @@
 # Meta-Change Classifier Contract
 
-Status: Distribution-pivot Phase 0D contract
-Date: 2026-06-17
+Status: current
+Current product path: yes
+Date: 2026-07-11
 
 This contract defines the preflight shape for the Phase 1 meta-change
 classifier. It records what must be protected before classifier implementation,
@@ -10,7 +11,7 @@ which current assets are protected.
 
 This is not classifier code, a CI workflow, an approval hierarchy, or a
 production auto-apply system. It does not grant any new branch, PR, merge,
-apply, repo, token, Linear, supervisor, or activation authority.
+apply, repo, token, Linear, unattended-service, or activation authority.
 
 Primary sources:
 [`teami-product-trust-record.md`](teami-product-trust-record.md),
@@ -60,7 +61,7 @@ Class meanings:
 | --- | --- | --- |
 | `ordinary_semantic` | Accepted agent behavior changes that do not alter gates, risk/approval classification, proposal machinery, authority, custody, credentials, CI/workflow authority, or the protected-path map. Manifest-declared accepted prompt targets (excluding the judge-agent prompt, which is maintainer-owned and `meta_change`) and manifest-declared runtime/model defaults are ordinary by default. | Same PR path, with behavior-proposal labeling and the existing process-change gates and packet guard. |
 | `meta_change` | Changes to governance, eval meaning outside an accepted agent prompt, gates, rubrics, thresholds, risk classifiers, approval criteria, proposal packet/marker/controller machinery, protected-path map, classifier code, or evidence rules. | Not produced by the adopter self-improvement loop. If maintainers change these surfaces, do it through normal Teami development with explicit old/new explanation and deterministic evidence. |
-| `authority_change` | Changes to who or what can write repos, create PRs, mutate Linear, mint or store tokens, alter GitHub/Linear permissions, change CI/workflow authority, operate supervisor/scanner write paths, expose custody/egress, or create a maintainer access path. | Not produced by the adopter self-improvement loop. Maintainer-owned authority/custody work needs explicit access/custody before/after and no hidden scope expansion. |
+| `authority_change` | Changes to who or what can write repos, create PRs, mutate Linear, mint or store tokens, alter GitHub/Linear permissions, change CI/workflow authority, operate unattended scanner/write paths, expose custody/egress, or create a maintainer access path. | Not produced by the adopter self-improvement loop. Maintainer-owned authority/custody work needs explicit access/custody before/after and no hidden scope expansion. |
 | `unknown_sensitive` | The diff touches a path or hunk that could affect meta or authority behavior but cannot be deterministically classified, including unparseable generated/binary changes, protected-path additions without a known owner, suspicious renames, or ambiguous script/workflow changes. | Fail closed. No production proposal write until a human splits, reclassifies, or adds a reviewed map entry. |
 
 `unknown_sensitive` always fails closed. When a diff contains both ordinary
@@ -88,9 +89,10 @@ meta-assets.
 | --- | --- | --- |
 | `docs/contracts/meta-change-classifier-contract.md` | `meta_change` | Defines this classifier contract and protected-path map. |
 | `docs/contracts/teami-product-trust-record.md` | `meta_change` | Defines owner loops, behavior-change posture, maintainer-update boundary, and product trust promises. Authority/custody hunks may escalate to `authority_change`. |
-| `docs/contracts/authority-custody-defaults.md` | `authority_change` | Defines write authority, custody classes, broker posture, no-maintainer-access boundary, untrusted-branch rule, packet guard responsibility, and live-proof blockers. |
+| `docs/contracts/authority-custody-defaults.md` | `authority_change` | Defines local write authority, credential/content custody, consent, domain confinement, proposal-branch/CI authority, bounded Git/process behavior, and external-contract verification. |
+| `execution/integrations/linear/test/trust-doc-contract.test.mjs` | `meta_change` | Enforces current trust-doc inventory, superseded-contract tombstones, and exact sanctioned mentions of retired architecture. Weakening it changes the documentation trust gate. |
 | `docs/promotion-acceptance-policy.md` | `meta_change` | Owns MVP HITL acceptance posture, no-auto-accept policy, future auto-accept preconditions, Phoenix handoff, and no-merge promise. Authority or credential hunks escalate to `authority_change`. |
-| `docs/self-improvement.md` sections on evaluation, promotion, scanner, supervisor, acceptance, custody, storage, and process-change loop | `meta_change` | Defines how process changes are detected, evidenced, proposed, and accepted. Authority/custody hunks escalate to `authority_change`. |
+| `docs/self-improvement.md` sections `Core Principle`, `Evaluation Judgment Principle`, `Interaction Surface Principle`, `Storage Responsibilities`, `Offline Evaluators`, `Dataset And Experiment Shape`, `Failure Taxonomy`, and `Process Change Loop` | `meta_change` | Defines how process changes are detected, evidenced, proposed, and accepted. Authority/custody hunks escalate to `authority_change`. |
 | `execution/evals/decomposition/README.md` | `meta_change` | Canonical eval and promotion-controller contract. |
 | `execution/evals/decomposition/promotion-policy.json` | `meta_change` | Promotion controller policy: disable switch, budgets, eligible sources, scanner routing, required evidence ids, and risk defaults. The self-improvement loop cannot edit this policy. |
 | `execution/evals/decomposition/workspace-eval-policy.json` | `meta_change` | Human-set eval policy, train/test assignment, and human-label regression thresholds consumed by gates. |
@@ -129,16 +131,12 @@ meta-assets.
 | `execution/integrations/linear/src/promotion-candidate-scanner.mjs` and `execution/integrations/linear/src/promotion-scanner/**` | `meta_change` | Deterministic candidate scanner, scanner health, worklist derivation, and unattended promotion entry. Write-path hunks escalate to `authority_change`. |
 | `execution/integrations/linear/src/improvement-drafter.mjs` | `meta_change` | Candidate-byte authoring, drafter quotas, target resolution, and production promotion transport use. Write-path hunks escalate to `authority_change`. |
 | `execution/integrations/linear/src/phoenix-self-improvement.mjs` and `execution/integrations/linear/src/phoenix-experiment.mjs` | `meta_change` | Phoenix experiment/candidate evidence creation and intent flow. Authority or custody hunks escalate. |
-| `execution/integrations/linear/src/local-supervisor.mjs`, `execution/integrations/linear/src/cli/supervisor-command.mjs`, and `execution/integrations/linear/src/supervisor/**` if present | `authority_change` when changing write behavior; otherwise `meta_change` for scanner/report-only routing | Supervisor controls unattended cadence and must not write before fail-closed activation. |
 | `execution/integrations/linear/src/foreground-runner.mjs` and `execution/integrations/linear/src/cli/runner-command.mjs` | `authority_change` when changing Linear/repo write behavior; otherwise `meta_change` for workflow routing | Runner path controls live workflow execution and proposal-capable operations. |
 | `execution/engine/workflow-registry.mjs`, `execution/engine/**`, `execution/integrations/linear/src/workflow-runtime-config.mjs`, `trigger-registry.mjs`, `trigger-runner.mjs`, and `execution/integrations/linear/src/workflows/**` | `authority_change` when changing live workflow/mutation authority; otherwise `meta_change` for workflow/eval gate behavior | These are the product's internal workflow and trigger authority surfaces. |
-| `execution/integrations/linear/src/github-promotion-client.mjs`, `github-production-transport.mjs`, `github-setup.mjs`, `github-token-broker-client.mjs`, `broker-credential.mjs`, `github-askpass.mjs`, `linear-credential-store.mjs`, `runner-inbox-credential.mjs`, and `cli/github-command-options.mjs` | `authority_change` | GitHub/Linear authority, credentials, token broker, setup, and endpoint/write boundaries. |
-| `execution/integrations/linear/src/linear-graphql-client.mjs`, `linear-service.mjs`, `linear-oauth.mjs`, `linear-webhook-registration.mjs`, `linear-webhook-inbox.mjs`, and `execution/integrations/linear/src/linear/setup-service.mjs` | `authority_change` | Linear read/write, OAuth, setup, webhook, and live mutation surfaces. |
-| `execution/integrations/linear/src/hosted-inbox-client.mjs` and `execution/integrations/linear/src/inbox-store.mjs` | `authority_change` when changing hosted coordination or custody; otherwise `meta_change` for read-model/reporting semantics | Hosted inbox coordination and local inbox state can affect custody and live-work routing. |
-| `supabase/functions/teami-github-broker/**` and broker/setup-grant migrations | `authority_change` | Hosted broker, token minting, tenant binding, setup grants, and audit posture. |
-| `supabase/functions/teami-inbox/**` and inbox migrations | `authority_change` | Hosted inbox/egress and wake coordination. |
-| `.github/workflows/**` | `authority_change` | Workflow/CI authority. This worktree currently has no `.github/workflows/**`; adding it is still an authority/workflow change. |
-| `package.json` script changes touching `test`, `promote-candidate`, `promotion:scan`, `draft-improvement`, `runner`, `supervisor`, `github:init`, eval gates, or credential/setup commands | `unknown_sensitive` unless a narrower parsed rule classifies the hunk | Scripts can silently change which gates run or which write paths execute. Unknown-sensitive fails closed. |
+| `execution/integrations/linear/src/github-promotion-client.mjs`, `github-production-transport.mjs`, `github-setup.mjs`, `github-secret-hygiene.mjs`, `linear-credential-store.mjs`, and `cli/github-command-options.mjs` | `authority_change` | Ambient GitHub/Linear authority, credential hygiene, setup, and endpoint/write boundaries. |
+| `execution/integrations/linear/src/linear-graphql-client.mjs`, `linear-service.mjs`, `linear-oauth.mjs`, `linear-setup-auth.mjs`, and `execution/integrations/linear/src/linear/setup-service.mjs` | `authority_change` | Linear read/write, OAuth, one-shot admin, setup, and live mutation surfaces. |
+| `.github/workflows/**` | `authority_change` | Workflow/CI authority. Existing workflows are protected; additions and edits remain authority/workflow changes. |
+| `package.json` script changes touching `test`, `promote-candidate`, `promotion:scan`, `draft-improvement`, `runner`, `github:init`, eval gates, or credential/setup commands | `unknown_sensitive` unless a narrower parsed rule classifies the hunk | Scripts can silently change which gates run or which write paths execute. Unknown-sensitive fails closed. |
 | Any activation-state record, feature flag, or config field controlling report-only vs fail-closed classifier enforcement | `authority_change` | Only the owner can activate production write authority; candidate branches cannot flip their own guard mode. |
 
 New files under `execution/**`, `supabase/functions/**`,
@@ -208,7 +206,7 @@ guard, current protected map, or current authority/custody rule.
 
 Until deterministic fail-closed enforcement replaces it, a manual freeze is in
 force for any self-improvement or promotion PR produced by `draft-improvement`,
-`promote-candidate`, `promotion:scan`, the scanner, or the supervisor when the
+`promote-candidate`, `promotion:scan`, or the scanner when the
 diff touches the protected set above.
 
 Freeze owner:
@@ -227,7 +225,7 @@ During the freeze:
   ordinary behavior changes.
 - Unknown-sensitive diffs stay blocked until split, mapped, or explicitly
   reclassified by the owner with a recorded reason.
-- Unattended scanner and supervisor invocations must remain report-only,
+- Unattended scanner invocations must remain report-only,
   read-only, disabled, or blocked for every class. They must not create
   production GitHub branches or PRs before fail-closed activation.
 
@@ -239,12 +237,12 @@ mainline:
 1. GOV-02 has implemented the deterministic classifier using this contract.
 2. The full fixture matrix below passes with the exact local command named in
    this contract.
-3. GOV-03 has wired the S11 write guard at scanner, supervisor, and direct
+3. GOV-03 has wired the S11 write guard at scanner and direct
    `promote-candidate` PR-creation call sites.
 4. All production proposal writes funnel through the allowlisted GitHub client
    and guarded choke point; tests prove no module can bypass it by importing
    production transport directly.
-5. Before activation, unattended scanner/supervisor paths are proven unable to
+5. Before activation, unattended scanner paths are proven unable to
    call production GitHub proposal-writing paths for any class.
 6. After activation, `meta_change`, `authority_change`, `unknown_sensitive`,
    and mixed ordinary+protected classes are blocked or routed separately before
@@ -273,7 +271,7 @@ Modes:
 
 Pre-activation:
 
-- Unattended scanner and supervisor invocations are `report_only` or `blocked`
+- Unattended scanner invocations are `report_only` or `blocked`
   for every class, including `ordinary_semantic`.
 - Foreground/manual commands may write ordinary proposals only through the
   allowlisted client and packet guard, with the manual freeze still applying to
@@ -310,13 +308,13 @@ reports the same ids.
 | `protected_path_map_edit` | Edits this contract or future classifier protected-map artifact. | `meta_change` | Evaluated by current accepted map, never candidate map. |
 | `proposal_marker_or_template_edit` | Changes `templates/process-change-proposal.md`, PR marker grammar, PR body marker rendering, or marker parser. | `meta_change` | Separate governance/meta proposal. |
 | `candidate_self_approval_attempt` | Candidate changes gate/classifier/proposal machinery and includes candidate-generated evidence claiming the new gate passes. | `meta_change` | Candidate evidence ignored; current accepted verifier decides. |
-| `authority_broker_or_token_edit` | Changes broker credential, GitHub token, setup grant, Linear credential, selected-repo verification, endpoint allowlist, or token storage code. | `authority_change` | Separate authority/custody proposal. |
+| `authority_or_token_edit` | Changes GitHub authority, Linear credential, one-shot admin handling, selected-repo verification, endpoint allowlist, or token storage code. | `authority_change` | Separate authority/custody proposal. |
 | `workflow_ci_authority_edit` | Adds or edits `.github/workflows/**` or privileged CI/check behavior. | `authority_change` | Fail closed or separate authority proposal. |
-| `supervisor_write_path_edit` | Lets scanner/supervisor create production proposal branches or PRs before fail-closed activation. | `authority_change` | Blocked. |
+| `unattended_write_path_edit` | Lets a scanner or other unattended path create production proposal branches or PRs before fail-closed activation. | `authority_change` | Blocked. |
 | `direct_production_transport_import` | Adds or preserves a production proposal-write import outside the guarded allowlisted choke point. | `authority_change` | Blocked unless current accepted tests prove it is guarded. |
 | `activation_state_flip` | Candidate changes the report-only/fail-closed activation record, flag, or trusted-base pointer. | `authority_change` | Evaluated from accepted default branch or owner-held config only; candidate value ignored. |
 | `mixed_ordinary_meta` | Same diff changes `pm-synthesis.md` and `rubrics/decomposition-quality.md`. | `meta_change` with `mixed_classes` including `ordinary_semantic` | Block until split. |
-| `mixed_ordinary_authority` | Same diff changes an ordinary prompt and GitHub token broker/permission code. | `authority_change` with `mixed_classes` including `ordinary_semantic` | Block until split. |
+| `mixed_ordinary_authority` | Same diff changes an ordinary prompt and GitHub/Linear permission or credential code. | `authority_change` with `mixed_classes` including `ordinary_semantic` | Block until split. |
 | `unknown_sensitive_generated_or_binary` | Binary/generated/unparseable change under protected directories or script/config change whose effect cannot be parsed. | `unknown_sensitive` | Fail closed. |
 | `unknown_new_protected_surface` | New file under `execution/**`, `supabase/functions/**`, `supabase/migrations/**`, or `docs/contracts/**` with no map entry. | `unknown_sensitive` unless a reviewed map entry classifies it | Fail closed. |
 | `agent_prompt_authority_attempt` | Accepted agent prompt edit asks the runtime to use tools, mutate Linear, bypass packet checks, approve, or apply. | `authority_change` or `unknown_sensitive` | Blocked; not ordinary. |
@@ -423,7 +421,7 @@ Use this checklist to verify GOV-02/GOV-03 against Phase 1 and CON-02:
   promotion policy, protected map, and evidence rules are meta-assets unless
   a later maintainer-owned manifest/materializer design explicitly makes a
   narrower agent-behavior artifact self-improvement eligible.
-- Credential, broker, GitHub/Linear permission, supervisor write-path, and
+- Credential, GitHub/Linear permission, unattended write-path, and
   workflow/CI authority changes are authority changes.
 - Candidate changes to gate/classifier/proposal machinery are evaluated by
   current accepted mainline, not candidate-produced evidence.
@@ -434,7 +432,7 @@ Use this checklist to verify GOV-02/GOV-03 against Phase 1 and CON-02:
 - Untrusted proposal branches run with no secrets, no privileged workflow
   triggers, no write-token CI, no status override, and no artifact/log
   exfiltration path.
-- Supervisor/scanner paths are report-only/read-only/disabled before
+- Unattended scanner paths are report-only/read-only/disabled before
   fail-closed activation and cannot call production GitHub write paths for any
   class.
 - The defective-verifier exception is signed/proposed only, owner-consented,

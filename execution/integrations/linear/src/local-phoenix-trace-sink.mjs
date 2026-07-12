@@ -1246,7 +1246,22 @@ async function exportRestSpans({
     headers: { "content-type": "application/json" },
     body: JSON.stringify(buildPhoenixRestSpanUploadFromOtlp(exportPayload)),
   });
-  if (!restResponse.ok) throw new Error(`phoenix_rest_spans_http_${restResponse.status}`);
+  if (!restResponse.ok) {
+    // Phoenix 400s a request whose spans it has already ingested (idempotent re-delivery —
+    // e.g. a replayed run or a re-processed paused project re-sends the same trace). An
+    // all-duplicates response with zero INVALID spans means the spans are safely in Phoenix,
+    // so the trace IS delivered — treat it as success, not a failure. Grounded live 2026-07-07
+    // against Phoenix 14.13.0 (`{"error":"...duplicate spans","total_duplicates":N,"total_invalid":0}`).
+    let report = null;
+    try { report = JSON.parse(await restResponse.text()); } catch { /* non-JSON error body */ }
+    const received = Number(report?.total_received || 0);
+    const invalid = Number(report?.total_invalid || 0);
+    const accountedFor = Number(report?.total_queued || 0) + Number(report?.total_duplicates || 0);
+    const alreadyDelivered = received > 0 && invalid === 0 && accountedFor >= received;
+    if (!alreadyDelivered) {
+      throw new Error(`phoenix_rest_spans_http_${restResponse.status}`);
+    }
+  }
   const exportedSpanNames = markExported();
   return {
     ok: true,

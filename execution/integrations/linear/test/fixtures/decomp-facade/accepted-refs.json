@@ -1,18 +1,18 @@
 [
   {
     "target_key": "prompt/decomposition/orchestrator_governing",
-    "accepted_baseline_id": "sha256:9230bafbaf10b5d6bd9511898b7f65ce3d3cf3ea507d127d5a866e3fffce3ace",
-    "snapshot_sha256": "9230bafbaf10b5d6bd9511898b7f65ce3d3cf3ea507d127d5a866e3fffce3ace"
+    "accepted_baseline_id": "sha256:ac0bb976bcefa1c8b753bb7aa9b4c99e41f0e59252eb652524503859a4d1b126",
+    "snapshot_sha256": "ac0bb976bcefa1c8b753bb7aa9b4c99e41f0e59252eb652524503859a4d1b126"
   },
   {
     "target_key": "prompt/decomposition/sr_eng_grounding_pass",
-    "accepted_baseline_id": "sha256:d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843",
-    "snapshot_sha256": "d9657e0ac66ea9612d9fee02ba417c3b14a386c9f6499ed9b35fac3d590bc843"
+    "accepted_baseline_id": "sha256:e8e89502e67d82f958197711a5acbf05dd5078442c970e6a548dc2e02cc77798",
+    "snapshot_sha256": "e8e89502e67d82f958197711a5acbf05dd5078442c970e6a548dc2e02cc77798"
   },
   {
     "target_key": "prompt/decomposition/pm_product_sufficiency_pass",
-    "accepted_baseline_id": "sha256:41fceb1ee15b9aa2c6905fe06e7acfa08eb0c4401e8431a26d7e0e980666bca1",
-    "snapshot_sha256": "41fceb1ee15b9aa2c6905fe06e7acfa08eb0c4401e8431a26d7e0e980666bca1"
+    "accepted_baseline_id": "sha256:3b0964184816e237416d2104d46af4516d5f45502ffdcfe818e2d40c1441c6d8",
+    "snapshot_sha256": "3b0964184816e237416d2104d46af4516d5f45502ffdcfe818e2d40c1441c6d8"
   },
   {
     "target_key": "rule/decomposition/runtime_role_assignments",

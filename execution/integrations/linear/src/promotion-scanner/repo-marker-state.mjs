@@ -3,11 +3,13 @@ import {
 } from "../github-promotion-client.mjs";
 import { createProductionGitHubPromotionTransport } from "../github-production-transport.mjs";
 import { resolveBehaviorRepoIdentity } from "../github-setup.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 import { readPromotionMarker } from "../promote-candidate.mjs";
 import { controllerNamespacePr } from "../promotion-workspace.mjs";
 
 export async function deriveScannerRepoMarkerState({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   policy,
   githubTransport = null,
   now = () => new Date(),
@@ -33,7 +35,7 @@ export async function deriveScannerRepoMarkerState({
     };
   }
 
-  const identity = resolveBehaviorRepoIdentity({ repoRoot });
+  const identity = resolveBehaviorRepoIdentity({ repoRoot, home });
   if (!identity.ok) {
     return {
       ok: false,

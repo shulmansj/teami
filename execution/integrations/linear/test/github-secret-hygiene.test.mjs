@@ -13,6 +13,8 @@ test("redactGitHubSecrets redacts GitHub token values, bearer values, and auth e
   const userToken = "ghu_" + "f".repeat(16);
   const appToken = "ghs_" + "c".repeat(16);
   const bearer = "Bearer " + "d".repeat(24);
+  const basicBlob = Buffer.from("x-access-token:" + "gho_" + "e".repeat(16), "utf8").toString("base64");
+  const basic = `Basic ${basicBlob}`;
   const diagnostic = [
     `token=${pat}`,
     `classic ${classic}`,
@@ -20,6 +22,7 @@ test("redactGitHubSecrets redacts GitHub token values, bearer values, and auth e
     `user ${userToken}`,
     `app ${appToken}`,
     `authorization: ${bearer}`,
+    `authorization: ${basic}`,
     `GH_TOKEN=${classic}`,
     `GITHUB_TOKEN="${pat}"`,
     "GIT_ASKPASS=/tmp/teami-askpass.sh",
@@ -33,10 +36,17 @@ test("redactGitHubSecrets redacts GitHub token values, bearer values, and auth e
   assert.equal(redacted.includes(userToken), false);
   assert.equal(redacted.includes(appToken), false);
   assert.equal(redacted.includes("d".repeat(24)), false);
+  assert.equal(redacted.includes(basicBlob), false);
   assert.match(redacted, /Bearer \[redacted\]/);
+  assert.match(redacted, /Basic \[redacted\]/);
   assert.match(redacted, /GH_TOKEN=\[redacted\]/);
   assert.match(redacted, /GITHUB_TOKEN="\[redacted\]"/);
   assert.match(redacted, /GIT_ASKPASS=\[redacted\]/);
+});
+
+test("redactGitHubSecrets leaves short prose after the word Basic untouched", () => {
+  const prose = "Basic authentication and basic configuration remain readable.";
+  assert.equal(redactGitHubSecrets(prose), prose);
 });
 
 test("scrubGitHubAuthEnv strips GitHub auth env without mutating the caller env", () => {

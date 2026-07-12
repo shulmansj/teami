@@ -43,7 +43,9 @@ const TRACE_IDENTITY = Object.freeze({
 });
 
 function makeRepoRoot(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 function writeReceipt(repoRoot, { runId, traceId, projectId, observedAt }) {
@@ -60,7 +62,7 @@ function writeReceipt(repoRoot, { runId, traceId, projectId, observedAt }) {
 }
 
 function writeRunArtifactFile(repoRoot, { runId, kind = "commit", phasePackets = [] }) {
-  const runsDir = path.join(repoRoot, ".teami", "runs");
+  const runsDir = path.join(repoRoot, "domains", TRACE_IDENTITY.domainId, "runs");
   fs.mkdirSync(runsDir, { recursive: true });
   fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify({
     schema_version: "linear-decomposition-run-artifact/v1",
@@ -482,8 +484,8 @@ test("worklist ranking matches the plan's priority order across fixture classes"
   );
 
   // Nothing durable is persisted: local stores are unchanged after computing.
-  const receiptsDir = path.join(repoRoot, ".agent-shell", "telemetry", "runs");
-  const artifactsDir = path.join(repoRoot, ".teami", "runs");
+  const receiptsDir = path.join(repoRoot, "phoenix-data", "telemetry", "runs");
+  const artifactsDir = path.join(repoRoot, "domains", TRACE_IDENTITY.domainId, "runs");
   const before = [fs.readdirSync(receiptsDir).sort(), fs.readdirSync(artifactsDir).sort()];
   const lines = formatWorklistReport({ report, items });
   assert.ok(lines.some((line) => line.includes("never persisted")));
@@ -523,7 +525,7 @@ test("status report covers per-run flags including dataset-membership receipts",
   const repoRoot = makeRepoRoot("teami-eval-status-");
   writeReceipt(repoRoot, { runId: "run-promoted", traceId: TRACE_IDS.low1, projectId: "proj-A", observedAt: "2026-06-09T01:00:00.000Z" });
   writeRunArtifactFile(repoRoot, { runId: "run-promoted", kind: "commit" });
-  const artifactsDir = path.join(repoRoot, ".teami", "runs");
+  const artifactsDir = path.join(repoRoot, "domains", TRACE_IDENTITY.domainId, "runs");
   // Local dataset-membership receipt (sibling file; read-only input here).
   fs.writeFileSync(path.join(artifactsDir, "run-promoted.promotion.json"), JSON.stringify({
     datasets: [{ name: "teami-decomposition-examples", dataset_id: "RGF0YXNldDox" }],

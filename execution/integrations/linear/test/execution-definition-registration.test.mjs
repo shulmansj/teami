@@ -24,31 +24,40 @@ import {
   EXECUTION_FUNCTION_VERSION,
   EXECUTION_RUN_PAYLOAD_SCHEMA_ID,
 } from "../src/workflows/execution/phase-contract.mjs";
+import { executionDefinition } from "../src/workflows/execution/definition.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
-test("execution definition registers through the trigger-registry load path and validates O6 joins", async () => {
+test("execution definition remains valid while the shipped trigger registry keeps it unregistered", async () => {
   const registrySnapshot = snapshotRegistry();
   try {
     const triggerRegistry = await import("../src/trigger-registry.mjs");
-    const definition = getWorkflowDefinition("execution");
+    const definition = executionDefinition;
 
     assert.equal(validateWorkflowDefinition(definition), "execution");
+    assert.throws(
+      () => getWorkflowDefinition("execution"),
+      /unknown_workflow_type:execution/,
+      "unshipped execution must not register in the shipped workflow registry",
+    );
     assert.equal(typeof definition.run, "function");
     assert.equal(definition.workflow_type, "execution");
     assert.equal(definition.input_status, "Ready");
     assert.equal(definition.output_status, "In Review");
     assert.equal(definition.eval_namespace, "execution/evals/execution");
     assert.deepEqual(definition.engine_owned_evaluator_roles, ["execution_quality_judge"]);
-    assert.deepEqual(definition.invocable_runtime_roles, ["worker"]);
+    // One-off seats are config-derived (configured runtime assignments minus
+    // the driver) — the definition carries no role list.
+    assert.equal(definition.invocable_runtime_roles, undefined);
 
-    assert.ok(
+    assert.equal(
       triggerRegistry.TRIGGER_REGISTRY.some((trigger) =>
         trigger.workflow_type === "execution" &&
         trigger.trigger_type === "linear.issue.ready" &&
         trigger.object_type === "issue"
       ),
-      "execution trigger should be visible through the real trigger registry entrypoint",
+      false,
+      "unshipped execution must not be visible through the real trigger registry entrypoint",
     );
 
     assert.deepEqual(

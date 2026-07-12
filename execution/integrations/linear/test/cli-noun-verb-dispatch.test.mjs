@@ -46,9 +46,10 @@ test("normalizeCommandInvocation maps noun-verb commands", () => {
   assert.equal(COMMAND_INDEX.has(`domain:${retiredRepoPathVerb}`), false);
   assertNormalization("domain", ["frobnicate"], { command: "domain", args: ["frobnicate"] });
   assertNormalization("execution", ["run", "--issue", "ISS-1"], {
-    command: "execution:run",
-    args: ["--issue", "ISS-1"],
+    command: "execution",
+    args: ["run", "--issue", "ISS-1"],
   });
+  assert.equal(COMMAND_INDEX.has("execution:run"), false);
   assertNormalization("execution", ["--verbose", "run"], {
     command: "execution",
     args: ["--verbose", "run"],
@@ -97,9 +98,9 @@ test("CLI noun-verb commands dispatch to shipped command paths", async (t) => {
       expected: /domain show[\s\S]*Domain show failed[\s\S]*domain_registry_missing/,
     },
     {
-      name: "execution run",
+      name: "unshipped execution run",
       tokens: ["execution", "run", "--issue", "ISS-1"],
-      expected: /execution run[\s\S]*Execution run could not start[\s\S]*no_active_domains/,
+      expected: /unknown command: execution/,
     },
     {
       name: "review run",
@@ -154,6 +155,7 @@ async function runCliDispatch({ tokens }) {
         env: {
           ...process.env,
           FACTORY_REPO_ROOT: tempRoot,
+          TEAMI_HOME: tempRoot,
           TEAMI_LINEAR_CONFIG: configPath,
           TEAMI_PHOENIX_URL: "http://not-loopback.invalid:6006",
           NO_COLOR: "1",

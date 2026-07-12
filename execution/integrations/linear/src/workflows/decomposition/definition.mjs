@@ -47,6 +47,12 @@ async function runTriggeredDecompositionFromDefinition(options) {
 
 export const decompositionDefinition = Object.freeze({
   workflow_type: DECOMPOSITION_WORKFLOW_TYPE,
+  // The '## What I did with each part of your project' heading is decomposition
+  // vocabulary: a commit's completion update — and a failed_closed stop's authored
+  // summary — account for every part of the project. (A product-question pause authors
+  // open questions, not a project update, so it carries no such section.) Other
+  // functions keep the project-update + run_id floor without this heading.
+  require_project_update_accountability_section: true,
   trace_descriptor: Object.freeze({
     trace_name: "decomposition_run",
     // Documents the stable root attributes; dynamic runtime attributes still
@@ -82,7 +88,6 @@ export const decompositionDefinition = Object.freeze({
   roles: DECOMPOSITION_ROLES,
   driver: "orchestrator",
   driver_governing_target_key: "prompt/decomposition/orchestrator_governing",
-  invocable_runtime_roles: Object.freeze(["pm", "sr_eng", "judge", "drafter"]),
   runtime_assignment_roles: DECOMPOSITION_ROLES,
   get engine_owned_evaluator_roles() {
     return DECOMPOSITION_ENGINE_OWNED_EVALUATOR_ROLES;

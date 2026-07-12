@@ -25,6 +25,7 @@ test("doctor product-repo readout includes bound repo facts and unbound domains"
   resetResourceRegistry();
   registerGitRepoResourceKind();
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-doctor-product-repo-"));
+  process.env.TEAMI_HOME = repoRoot;
   t.after(() => {
     resetResourceRegistry();
     fs.rmSync(repoRoot, { recursive: true, force: true });
@@ -92,6 +93,7 @@ test("doctor product-repo readout does not inspect local git state", (t) => {
   resetResourceRegistry();
   registerGitRepoResourceKind();
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-doctor-product-repo-no-git-"));
+  process.env.TEAMI_HOME = repoRoot;
   t.after(() => {
     resetResourceRegistry();
     fs.rmSync(repoRoot, { recursive: true, force: true });

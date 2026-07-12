@@ -146,8 +146,8 @@ async function captureDrafterDraftBytes() {
     repoRoot,
     config: runtimeConfig(),
     policyPath: path.join(repoRoot, "execution", "evals", "decomposition", "promotion-policy.json"),
-    draftDir: path.join(repoRoot, ".teami", "drafts"),
-    registryDir: path.join(repoRoot, ".teami", "promotion-candidates"),
+    draftDir: path.join(repoRoot, "drafts"),
+    registryDir: path.join(repoRoot, "promotion-candidates"),
     githubTransport: emptyGitHubTransport(),
     resolveRepoIdentity: identityOk,
     runCommand: async () => runtimeOutput,
@@ -205,6 +205,7 @@ function seedJudgeRun(repoRoot, runId) {
   captureProjectSnapshot({
     repoRoot,
     runId,
+    domainId: "support-ops",
     project: {
       id: "project-post-migration-golden",
       name: "Post Migration Golden Project",
@@ -473,7 +474,7 @@ function makeDrafterChain() {
         prompt_name: "sr_eng_grounding_pass",
         prompt_id: "P-GOLDEN",
         prompt_version_id: "PV-GOLDEN",
-        receipt_path: path.join(options.repoRoot, ".teami", "phoenix-prompt-registrations.json"),
+        receipt_path: path.join(options.repoRoot, "phoenix-prompt-registrations.json"),
         manifest_mutated: false,
       };
     },
@@ -482,7 +483,7 @@ function makeDrafterChain() {
       return {
         ok: true,
         receipt_id: "expr-draft-golden",
-        receipt_path: path.join(options.repoRoot, ".teami", "experiments", "expr-draft-golden.json"),
+        receipt_path: path.join(options.repoRoot, "experiments", "expr-draft-golden.json"),
         phoenix_experiment_id: "EXP-DRAFT-GOLDEN",
       };
     },
@@ -607,7 +608,9 @@ function identityOk() {
 }
 
 function tempRoot(label) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `teami-post-migration-${label}-`));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `teami-post-migration-${label}-`));
+  process.env.TEAMI_HOME = root;
+  return root;
 }
 
 const readyUp = async () => ({

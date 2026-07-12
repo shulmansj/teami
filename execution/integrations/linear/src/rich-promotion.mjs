@@ -33,6 +33,7 @@ import {
   loadCapturedProjectSnapshot,
 } from "./project-snapshot-store.mjs";
 import { defaultRunStoreDir, readRunArtifact, renameWithRetry } from "../../../engine/run-store.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 import {
   isInvalidTraceReceiptResult,
   readTraceReceipt,
@@ -87,18 +88,31 @@ export function richExampleId(runId) {
   return `teami:${runId}`;
 }
 
-export function promotionReceiptPath({ runId, repoRoot = process.cwd(), runStoreDir = null } = {}) {
+export function promotionReceiptPath({
+  runId,
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir = null,
+} = {}) {
+  void repoRoot;
   if (!runId || typeof runId !== "string" || !SAFE_RUN_ID_PATTERN.test(runId)) {
     throw new Error(`Invalid run_id for local promotion receipt store: ${runId}`);
   }
-  return path.join(runStoreDir || defaultRunStoreDir(repoRoot), `${runId}.promotion.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.promotion.json`);
 }
 
 // Tolerant-shape promotion receipt (the worklist already reads
 // `{ datasets: [{ name, ... }] }`); promotion events are APPEND-ONLY
 // (CONSTRAINTS #21: never rewrite prior receipt facts).
-export function readPromotionReceipt({ runId, repoRoot = process.cwd(), runStoreDir = null } = {}) {
-  const filePath = promotionReceiptPath({ runId, repoRoot, runStoreDir });
+export function readPromotionReceipt({
+  runId,
+  repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
+  domainId = null,
+  runStoreDir = null,
+} = {}) {
+  const filePath = promotionReceiptReadPath({ runId, repoRoot, home, domainId, runStoreDir });
   if (!fs.existsSync(filePath)) return { ok: true, exists: false, path: filePath, receipt: null };
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -108,6 +122,20 @@ export function readPromotionReceipt({ runId, repoRoot = process.cwd(), runStore
     // closed instead of risking a duplicate upload.
     return { ok: false, exists: true, path: filePath, reason: "promotion_receipt_unreadable", error: error.message };
   }
+}
+
+function promotionReceiptReadPath(options = {}) {
+  if (options.runStoreDir || options.domainId) return promotionReceiptPath(options);
+  const home = teamiHomePaths({ home: options.home || resolveTeamiHome() }).home;
+  const direct = path.join(home, "runs", `${options.runId}.promotion.json`);
+  if (fs.existsSync(direct)) return direct;
+  const domainsDir = path.join(home, "domains");
+  if (!fs.existsSync(domainsDir)) return direct;
+  for (const domainId of fs.readdirSync(domainsDir)) {
+    const candidate = promotionReceiptPath({ ...options, home, domainId });
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return direct;
 }
 
 export function validateExampleAgainstSchema(example) {
@@ -151,7 +179,6 @@ function terminalStateFromArtifact(artifact) {
       project_update_markdown: artifact.project_update_markdown,
       open_questions_markdown: null,
       final_issues: artifact.final_issues || [],
-      discovery_issues: artifact.discovery_issues || [],
     };
   }
   if (artifact.kind === "pause") {
@@ -160,14 +187,16 @@ function terminalStateFromArtifact(artifact) {
     if (!pausePacket?.reason) {
       return { ok: false, cause: "missing_pause_packet" };
     }
+    const terminalStatus = terminalOutput.outcome === "failed_closed" ? "failed_closed" : "paused";
     return {
       ok: true,
-      terminal_status: terminalOutput.outcome === "failed_closed" ? "failed_closed" : "paused",
+      terminal_status: terminalStatus,
       terminal_reason: terminalOutput.reason || pausePacket.reason,
-      project_update_markdown: pausePacket.project_update_markdown ?? null,
+      project_update_markdown: terminalStatus === "failed_closed"
+        ? pausePacket.project_update_markdown ?? null
+        : null,
       open_questions_markdown: pausePacket.open_questions_markdown ?? null,
       final_issues: [],
-      discovery_issues: artifact.discovery_issues || [],
     };
   }
   // checkpoint/resume artifacts are not terminal run records; rich examples
@@ -531,7 +560,6 @@ export function buildRichDecompositionExample({
       terminal_reason: terminal.terminal_reason,
       phase_packets: [terminalOutputSummary(artifact, terminal)],
       final_issues: terminal.final_issues,
-      discovery_issues: terminal.discovery_issues,
       dependency_relations: dependencyRelationsFromIssues(terminal.final_issues),
       ...(terminal.project_update_markdown !== null && terminal.project_update_markdown !== undefined
         ? { project_update_markdown: terminal.project_update_markdown }
@@ -614,6 +642,7 @@ export function buildRichDatasetUploadPayload({
 
 export async function promoteRichDecompositionExample({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runId,
   datasetName = DEFAULT_RICH_DATASET_NAME,
   annotationIds = [],
@@ -657,7 +686,7 @@ export async function promoteRichDecompositionExample({
   // 2. Local run artifact (.teami/runs/<run_id>.json).
   let artifact;
   try {
-    artifact = readRunArtifact({ runId, repoRoot, runStoreDir });
+    artifact = readRunArtifact({ runId, repoRoot, home, runStoreDir });
   } catch (error) {
     return { ok: false, state: "cannot_promote", reason: "invalid_run_artifact", run_id: runId, detail: error.message };
   }
@@ -670,10 +699,11 @@ export async function promoteRichDecompositionExample({
       detail: `No local run artifact found for run ${runId} under .teami/runs/.`,
     };
   }
+  const domainId = artifact.domain_id || null;
 
   // 3. Captured project snapshot. Fail closed when absent: rich promotion has
   // NO live-Linear fallback by design (CONSTRAINTS #28).
-  const snapshotResult = loadCapturedProjectSnapshot(runId, { repoRoot, runStoreDir });
+  const snapshotResult = loadCapturedProjectSnapshot(runId, { repoRoot, home, domainId, runStoreDir });
   if (!snapshotResult.ok) {
     return {
       ok: false,
@@ -724,7 +754,7 @@ export async function promoteRichDecompositionExample({
   if (!build.ok) return { run_id: runId, ...build };
 
   // 6. Client-side idempotency via the local promotion receipt.
-  const existing = readPromotionReceipt({ runId, repoRoot, runStoreDir });
+  const existing = readPromotionReceipt({ runId, repoRoot, home, domainId, runStoreDir });
   if (!existing.ok) {
     return { ok: false, state: "cannot_promote", reason: existing.reason, run_id: runId, path: existing.path };
   }
@@ -838,6 +868,8 @@ export async function promoteRichDecompositionExample({
   const receiptPath = writePromotionReceipt({
     runId,
     repoRoot,
+    home,
+    domainId,
     runStoreDir,
     existingReceipt: existing.receipt,
     datasetName,
@@ -868,12 +900,14 @@ export async function promoteRichDecompositionExample({
 function writePromotionReceipt({
   runId,
   repoRoot,
+  home,
+  domainId,
   runStoreDir,
   existingReceipt,
   datasetName,
   promotionEvent,
 }) {
-  const filePath = promotionReceiptPath({ runId, repoRoot, runStoreDir });
+  const filePath = promotionReceiptPath({ runId, repoRoot, home, domainId, runStoreDir });
   const datasets = Array.isArray(existingReceipt?.datasets)
     ? existingReceipt.datasets.map((entry) => ({ ...entry }))
     : [];

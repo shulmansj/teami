@@ -119,6 +119,38 @@ test("progress stop() clears the spinner without printing a terminal mark", asyn
   }
 });
 
+test("regular output clears an active spinner before rendering an error", async () => {
+  const savedCI = process.env.CI;
+  delete process.env.CI;
+  const baselineExitListeners = process.listenerCount("exit");
+  try {
+    const stream = fakeStream(true);
+    const output = createCliOutput({ color: true, unicode: false, stream, errStream: stream });
+
+    const p = output.progress("spinning");
+    output.error({ what: "Boom", fix: "rerun" });
+
+    assert.equal(
+      process.listenerCount("exit"),
+      baselineExitListeners,
+      "error output removes the active spinner exit listener",
+    );
+    const text = stream.text();
+    const clearIndex = text.indexOf("\r\x1b[K");
+    const errorIndex = text.indexOf("x Boom");
+    assert.ok(clearIndex >= 0, "the active spinner line is cleared");
+    assert.ok(errorIndex > clearIndex, "the error block is rendered after the spinner clear");
+
+    const writesAfter = stream.writes.length;
+    p.update("late frame");
+    await sleep(150);
+    assert.equal(stream.writes.length, writesAfter, "no frames are drawn after error output clears the spinner");
+  } finally {
+    if (savedCI === undefined) delete process.env.CI;
+    else process.env.CI = savedCI;
+  }
+});
+
 test("progress is CI-aware: a TTY under CI uses durable lines, not animation", () => {
   const savedCI = process.env.CI;
   process.env.CI = "true";

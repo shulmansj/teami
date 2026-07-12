@@ -17,7 +17,6 @@ function validDefinition(overrides = {}) {
     run: async () => ({ status: "noop" }),
     triggers: [],
     roles: ["worker", "orchestrator"],
-    invocable_runtime_roles: ["worker"],
     runtime_assignment_roles: ["worker", "orchestrator"],
     commit_effects: [{
       id: "linear_issues",
@@ -89,11 +88,6 @@ const FAILURE_CASES = [
   ["non-function run", validDefinition({ run: "nope" }), "workflow_definition_run_required:probe"],
   ["non-array triggers", validDefinition({ triggers: {} }), "workflow_definition_triggers_must_be_array:probe"],
   ["non-array roles", validDefinition({ roles: "pm" }), "workflow_definition_roles_must_be_array:probe"],
-  [
-    "non-array invocable_runtime_roles",
-    validDefinition({ invocable_runtime_roles: null }),
-    "workflow_definition_invocable_runtime_roles_must_be_array:probe",
-  ],
   [
     "non-array runtime_assignment_roles",
     validDefinition({ runtime_assignment_roles: 1 }),

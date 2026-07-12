@@ -1,5 +1,3 @@
-import { issueHasLabel } from "./matching-utils.mjs";
-
 export function createIssueMoveEffect({
   id,
   op,
@@ -10,10 +8,19 @@ export function createIssueMoveEffect({
   notAppliedReason,
   defaultStatusName,
   terminal = false,
+  resolveExpectedSource = null,
+  expectedSourceMissingReason = "linear_issue_expected_source_missing",
+  expectedSourceResolutionFailedReason = "linear_issue_expected_source_resolution_failed",
+  sourceMismatchReason = "linear_issue_source_mismatch",
+  guardSkippedKey = null,
 } = {}) {
   if (!id) throw new Error("linear_issue_move_effect_id_required");
   if (!op) throw new Error("linear_issue_move_effect_op_required");
   if (typeof resolveTarget !== "function") throw new Error("linear_issue_move_target_resolver_required");
+  if (resolveExpectedSource !== null && typeof resolveExpectedSource !== "function") {
+    throw new Error("linear_issue_move_source_resolver_invalid");
+  }
+  const skippedKey = guardSkippedKey || `${id}Skipped`;
 
   async function probe(ctx = {}) {
     const resolved = await safelyResolveTarget(ctx);
@@ -56,6 +63,38 @@ export function createIssueMoveEffect({
       };
     }
 
+    let sourceIssue = null;
+    if (resolveExpectedSource) {
+      const sourceResolution = await safelyResolveExpectedSource(ctx);
+      if (!sourceResolution.ok || !sourceResolution.target) {
+        return {
+          ok: false,
+          terminal: true,
+          reason: sourceResolution.reason || expectedSourceMissingReason,
+        };
+      }
+
+      const freshRead = await readFreshIssueFromClient(ctx, issueId);
+      if (!freshRead.ok) {
+        return { ok: false, terminal: true, reason: freshRead.reason };
+      }
+      sourceIssue = freshRead.issue;
+      if (!sourceIssue) {
+        return { ok: false, terminal: true, reason: "linear_issue_missing" };
+      }
+      if (!issueMatchesMoveTarget(sourceIssue, sourceResolution.target)) {
+        const skipped = {
+          ok: true,
+          skipped: true,
+          reason: sourceMismatchReason,
+          source_state_id: sourceResolution.target.id,
+          actual_state_id: sourceIssue.state?.id || null,
+        };
+        ctx[skippedKey] = skipped;
+        return skipped;
+      }
+    }
+
     await ctx.onBeforeLinearMutation?.({
       artifactKind: ctx.artifact?.kind || null,
       runId: ctx.runId || ctx.artifact?.run_id || null,
@@ -64,7 +103,7 @@ export function createIssueMoveEffect({
     });
 
     const target = resolved.target;
-    const input = await issueMoveUpdateInput({ ctx, target });
+    const input = await issueMoveUpdateInput({ target });
     const issue = await ctx.client.updateIssue(issueId, input);
     const identity = issueMoveIdentity({ issue, issueId, target, defaultStatusName });
     if (appliedIdentityKey) ctx[appliedIdentityKey] = identity;
@@ -74,6 +113,9 @@ export function createIssueMoveEffect({
   async function verify(ctx = {}) {
     if (appliedIdentityKey && ctx[appliedIdentityKey]) {
       return { ok: true, identity: ctx[appliedIdentityKey] };
+    }
+    if (resolveExpectedSource && ctx[skippedKey]?.skipped === true) {
+      return { ok: true, skipped: true, reason: ctx[skippedKey].reason || sourceMismatchReason };
     }
 
     const issueId = issueIdFromIssueMoveContext(ctx);
@@ -109,6 +151,15 @@ export function createIssueMoveEffect({
     }
   }
 
+  async function safelyResolveExpectedSource(ctx = {}) {
+    try {
+      const target = await resolveExpectedSource(ctx);
+      return { ok: true, target: normalizeIssueMoveTarget(target) };
+    } catch (error) {
+      return { ok: false, reason: error?.message || expectedSourceResolutionFailedReason };
+    }
+  }
+
   const effect = Object.freeze({
     id,
     provider: "linear",
@@ -136,13 +187,7 @@ export function createIssueMoveEffect({
 export function issueMatchesMoveTarget(issue, target) {
   const normalizedTarget = normalizeIssueMoveTarget(target);
   if (!issue || !normalizedTarget) return false;
-  if (normalizedTarget.targetType === "status") {
-    return issue.state?.id === normalizedTarget.id;
-  }
-  if (normalizedTarget.targetType === "label") {
-    return issueHasLabel(issue, normalizedTarget.id);
-  }
-  return false;
+  return issue.state?.id === normalizedTarget.id;
 }
 
 export function issueIdFromIssueMoveContext(ctx = {}) {
@@ -168,50 +213,44 @@ export function normalizeIssueMoveTarget(target) {
   const targetType =
     target.targetType ||
     target.target_type ||
-    (target.type ? "status" : "label");
-  if (!["status", "label"].includes(targetType)) return null;
+    (target.type ? "status" : null);
+  if (targetType !== "status") return null;
   return {
     ...target,
-    targetType,
+    targetType: "status",
   };
 }
 
-async function issueMoveUpdateInput({ ctx, target }) {
-  if (target.targetType === "status") {
-    return { stateId: target.id };
-  }
+async function issueMoveUpdateInput({ target }) {
+  return { stateId: target.id };
+}
 
-  const issue = await readIssueFromContext(ctx);
-  if (!issue) {
-    throw new Error("linear_issue_missing");
+async function readFreshIssueFromClient(ctx = {}, issueId) {
+  if (typeof ctx.client?.getIssue === "function") {
+    return { ok: true, issue: await ctx.client.getIssue(issueId) };
   }
-  const labelIds = new Set((issue.labels || []).map((label) => label.id).filter(Boolean));
-  labelIds.add(target.id);
-  return { labelIds: [...labelIds] };
+  if (typeof ctx.client?.getIssueContext === "function") {
+    return { ok: true, issue: await ctx.client.getIssueContext(issueId) };
+  }
+  return { ok: false, reason: "linear_read_issue_unavailable" };
 }
 
 async function readIssueFromContext(ctx = {}) {
   const issueId = issueIdFromIssueMoveContext(ctx);
   if (!issueId) return null;
+  // Fresh read first: ctx snapshots can lag provider state, and guarded moves
+  // compare the current status before mutating.
+  const freshRead = await readFreshIssueFromClient(ctx, issueId);
+  if (freshRead.ok && freshRead.issue) return freshRead.issue;
   for (const issue of [ctx.issue, ctx.linearIssue, ctx.targetIssue]) {
     if (issue?.id === issueId) return issue;
-  }
-  if (typeof ctx.client?.getIssue === "function") {
-    const issue = await ctx.client.getIssue(issueId);
-    if (issue) return issue;
-  }
-  if (typeof ctx.client?.getIssueContext === "function") {
-    const issue = await ctx.client.getIssueContext(issueId);
-    if (issue) return issue;
   }
   return null;
 }
 
 function issueMoveIdentity({ issue, issueId, target, defaultStatusName }) {
   const normalizedTarget = normalizeIssueMoveTarget(target);
-  const stateId = normalizedTarget?.targetType === "status"
-    ? normalizedTarget.id
-    : issue?.state?.id || null;
+  const stateId = normalizedTarget?.id || issue?.state?.id || null;
   return {
     linear_issue_id: issue?.id || issueId,
     issue_id: issue?.id || issueId,
@@ -221,7 +260,6 @@ function issueMoveIdentity({ issue, issueId, target, defaultStatusName }) {
     status: firstNonEmptyString([normalizedTarget?.name, issue?.state?.name, defaultStatusName]),
     status_id: stateId,
     state_id: stateId,
-    label_id: normalizedTarget?.targetType === "label" ? normalizedTarget.id : null,
   };
 }
 

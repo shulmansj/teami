@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createLinearGraphqlClient, isLinearRateLimited } from "../src/linear-graphql-client.mjs";
+import {
+  createLinearGraphqlClient,
+  createLinearProjectStatusAdminClient,
+  isLinearRateLimited,
+  normalizeComment,
+} from "../src/linear-graphql-client.mjs";
 import { findIssueByDecompositionKey } from "../src/linear-service.mjs";
 import { renderResourceTargetBlock } from "../src/resource-target.mjs";
 
@@ -113,6 +118,221 @@ test("GraphQL project update listing paginates and finds updates by exact run_id
   assert.equal(existing.runId, "run-1");
 });
 
+test("GraphQL issue comment listing paginates and returns newest first with stable user ids", async () => {
+  const cursors = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      cursors.push(body.variables.after);
+      assert.match(body.query, /query IssueComments/);
+      assert.match(body.query, /comments\s*\(/);
+      assert.match(body.query, /user\s*\{[\s\S]*id[\s\S]*name[\s\S]*displayName/);
+      if (!body.variables.after) {
+        return jsonResponse({
+          data: {
+            issue: {
+              id: "issue-1",
+              comments: connection(
+                [{
+                  id: "comment-1",
+                  body: "Please handle the empty state.",
+                  createdAt: "2026-06-29T10:00:00.000Z",
+                  updatedAt: "2026-06-29T10:01:00.000Z",
+                  user: { id: "user-1", name: "Ada", displayName: "Ada L." },
+                }],
+                { hasNextPage: true, endCursor: "cursor-1" },
+              ),
+            },
+          },
+        });
+      }
+      return jsonResponse({
+        data: {
+          issue: {
+            id: "issue-1",
+            comments: connection([{
+              id: "comment-2",
+              body: "Second comment.",
+              createdAt: "2026-06-29T10:02:00.000Z",
+              updatedAt: null,
+              user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+            }]),
+          },
+        },
+      });
+    },
+  });
+
+  const comments = await client.listIssueComments("issue-1");
+
+  assert.deepEqual(cursors, [null, "cursor-1"]);
+  assert.deepEqual(comments, [
+    {
+      id: "comment-2",
+      body: "Second comment.",
+      createdAt: "2026-06-29T10:02:00.000Z",
+      updatedAt: null,
+      user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+    },
+    {
+      id: "comment-1",
+      body: "Please handle the empty state.",
+      createdAt: "2026-06-29T10:00:00.000Z",
+      updatedAt: "2026-06-29T10:01:00.000Z",
+      user: { id: "user-1", name: "Ada", displayName: "Ada L." },
+    },
+  ]);
+});
+
+test("GraphQL project comment listing paginates and returns newest first", async () => {
+  const cursors = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      cursors.push(body.variables.after);
+      assert.match(body.query, /query ProjectComments/);
+      // Project comments are read via the top-level `comments` connection filtered by
+      // project — NOT `project(id).comments` (which does not surface them).
+      assert.match(body.query, /comments\(filter: \{ project: \{ id: \{ eq: \$projectId \} \} \}/);
+      assert.doesNotMatch(body.query, /project\(id:/);
+      if (!body.variables.after) {
+        return jsonResponse({
+          data: {
+            comments: connection(
+              [{
+                id: "comment-old",
+                body: "Earlier answer.",
+                createdAt: "2026-06-29T10:00:00.000Z",
+                updatedAt: null,
+                user: { id: "user-1", name: "Ada", displayName: "Ada L." },
+              }],
+              { hasNextPage: true, endCursor: "cursor-1" },
+            ),
+          },
+        });
+      }
+      return jsonResponse({
+        data: {
+          comments: connection([{
+            id: "comment-new",
+            body: "Latest answer.",
+            createdAt: "2026-06-29T10:02:00.000Z",
+            updatedAt: null,
+            user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+          }]),
+        },
+      });
+    },
+  });
+
+  const comments = await client.listComments({ projectId: "project-1" });
+
+  assert.deepEqual(cursors, [null, "cursor-1"]);
+  assert.deepEqual(comments, [
+    {
+      id: "comment-new",
+      body: "Latest answer.",
+      createdAt: "2026-06-29T10:02:00.000Z",
+      updatedAt: null,
+      user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+    },
+    {
+      id: "comment-old",
+      body: "Earlier answer.",
+      createdAt: "2026-06-29T10:00:00.000Z",
+      updatedAt: null,
+      user: { id: "user-1", name: "Ada", displayName: "Ada L." },
+    },
+  ]);
+});
+
+test("GraphQL issue comment creation posts exact body and normalizes the comment", async () => {
+  const authoredBody = "Please review the checkout flow.";
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      assert.match(body.query, /mutation CreateIssueComment/);
+      assert.match(body.query, /commentCreate\s*\(/);
+      assert.deepEqual(body.variables.input, {
+        issueId: "issue-1",
+        body: authoredBody,
+      });
+      return jsonResponse({
+        data: {
+          commentCreate: {
+            success: true,
+            comment: {
+              id: "comment-1",
+              body: authoredBody,
+              createdAt: "2026-06-29T10:03:00.000Z",
+              updatedAt: null,
+              user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+            },
+          },
+        },
+      });
+    },
+  });
+
+  const comment = await client.createIssueComment("issue-1", authoredBody);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(comment, normalizeComment({
+    id: "comment-1",
+    body: authoredBody,
+    createdAt: "2026-06-29T10:03:00.000Z",
+    updatedAt: null,
+    user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+  }));
+});
+
+test("GraphQL project comment creation posts exact body and normalizes the comment", async () => {
+  const authoredBody = "Answer: prioritize the shorter onboarding path.";
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      assert.match(body.query, /commentCreate\s*\(/);
+      assert.deepEqual(body.variables.input, {
+        projectId: "project-1",
+        body: authoredBody,
+      });
+      return jsonResponse({
+        data: {
+          commentCreate: {
+            success: true,
+            comment: {
+              id: "comment-project-1",
+              body: authoredBody,
+              createdAt: "2026-06-29T10:04:00.000Z",
+              updatedAt: null,
+              user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+            },
+          },
+        },
+      });
+    },
+  });
+
+  const comment = await client.createComment({ projectId: "project-1" }, authoredBody);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(comment, normalizeComment({
+    id: "comment-project-1",
+    body: authoredBody,
+    createdAt: "2026-06-29T10:04:00.000Z",
+    updatedAt: null,
+    user: { id: "app-viewer-1", name: "Teami App", displayName: "Teami App" },
+  }));
+});
+
 test("GraphQL setup methods implement the Linear service contract", async () => {
   const calls = [];
   const client = createLinearGraphqlClient({
@@ -146,12 +366,31 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
         return payloadResponse("projectLabelCreate", "projectLabel", {
           id: "plabel-2",
           name: body.variables.input.name,
+          description: body.variables.input.description ?? null,
+          color: body.variables.input.color ?? null,
+        });
+      }
+      if (body.query.includes("mutation UpdateProjectLabel")) {
+        return payloadResponse("projectLabelUpdate", "projectLabel", {
+          id: body.variables.id,
+          name: "Has Open Questions",
+          description: body.variables.input.description ?? null,
         });
       }
       if (body.query.includes("query IssueLabels")) {
         return jsonResponse({
           data: {
-            issueLabels: connection([{ id: "ilabel-1", name: "Discovery", team: { id: "team-1" } }]),
+            issueLabels: connection([
+              {
+                id: "ilabel-1",
+                name: "Discovery",
+                team: { id: "team-1" },
+                description: "About discovery.",
+                color: "#BB87FC",
+                isGroup: false,
+                parent: null,
+              },
+            ]),
           },
         });
       }
@@ -160,12 +399,25 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
           id: "ilabel-2",
           name: body.variables.input.name,
           team: { id: body.variables.input.teamId },
+          description: body.variables.input.description ?? null,
+          color: body.variables.input.color ?? null,
+          isGroup: body.variables.input.isGroup ?? false,
+          parent: body.variables.input.parentId ? { id: body.variables.input.parentId } : null,
+        });
+      }
+      if (body.query.includes("mutation UpdateIssueLabel")) {
+        return payloadResponse("issueLabelUpdate", "issueLabel", {
+          id: body.variables.id,
+          name: "Code",
+          team: { id: "team-1" },
+          description: body.variables.input.description ?? null,
+          parent: body.variables.input.parentId ? { id: body.variables.input.parentId } : null,
         });
       }
       if (body.query.includes("query ProjectStatuses")) {
         return jsonResponse({
           data: {
-            projectStatuses: connection([{ id: "status-planned", name: "Planned", type: "planned" }]),
+            projectStatuses: connection([{ id: "status-planned", name: "Planned", type: "planned", position: 20 }]),
           },
         });
       }
@@ -266,9 +518,40 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   assert.equal((await client.createTeam({ key: "AF2", name: "Teami 2" })).key, "AF2");
   assert.equal((await client.findProjectLabelsByName("Has Open Questions"))[0].id, "plabel-1");
   assert.equal((await client.createProjectLabel({ name: "Has Open Questions" })).id, "plabel-2");
-  assert.equal((await client.findIssueLabelsByName("Discovery", "team-1"))[0].teamId, "team-1");
+  assert.equal(
+    (await client.updateProjectLabel("plabel-1", { description: "Paused with questions." })).description,
+    "Paused with questions.",
+  );
+  const foundIssueLabel = (await client.findIssueLabelsByName("Discovery", "team-1"))[0];
+  assert.equal(foundIssueLabel.teamId, "team-1");
+  assert.equal(foundIssueLabel.description, "About discovery.");
+  assert.equal(foundIssueLabel.color, "#BB87FC");
+  assert.equal(foundIssueLabel.isGroup, false);
+  assert.equal(foundIssueLabel.parentId, null);
   assert.equal((await client.createIssueLabel({ name: "Discovery", teamId: "team-1" })).teamId, "team-1");
-  assert.equal((await client.listProjectStatuses())[0].type, "planned");
+  const createdGroup = await client.createIssueLabel({
+    name: "Work type",
+    teamId: "team-1",
+    description: "One work type per issue.",
+    color: "#5E6AD2",
+    isGroup: true,
+  });
+  assert.equal(createdGroup.isGroup, true);
+  const createdChild = await client.createIssueLabel({
+    name: "Code",
+    teamId: "team-1",
+    parentId: "ilabel-group",
+  });
+  assert.equal(createdChild.parentId, "ilabel-group");
+  const updatedIssueLabel = await client.updateIssueLabel("ilabel-code", {
+    description: "Repo-changing work.",
+    parentId: "ilabel-group",
+  });
+  assert.equal(updatedIssueLabel.description, "Repo-changing work.");
+  assert.equal(updatedIssueLabel.parentId, "ilabel-group");
+  const plannedStatus = (await client.listProjectStatuses())[0];
+  assert.equal(plannedStatus.type, "planned");
+  assert.equal(plannedStatus.position, 20);
   assert.equal((await client.listWorkflowStates("team-1"))[0].name, "Ready");
   assert.equal(
     (await client.findTemplatesByName("Teami Roadmap Item", "project", "team-1"))[0]
@@ -324,6 +607,57 @@ test("GraphQL setup methods implement the Linear service contract", async () => 
   });
 });
 
+test("GraphQL admin project status client creates planned statuses without exposing generic request", async () => {
+  const calls = [];
+  const client = createLinearProjectStatusAdminClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("mutation CreateProjectStatus")) {
+        // Linear's ProjectStatusPayload returns the created status under `status`
+        // (NOT `projectStatus`) — introspection-confirmed against the live API.
+        return payloadResponse("projectStatusCreate", "status", {
+          id: "status-principal-escalation",
+          name: body.variables.input.name,
+          type: body.variables.input.type,
+          position: body.variables.input.position,
+        });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  assert.equal("request" in client, false);
+
+  const status = await client.createProjectStatus({
+    name: "Principal Escalation",
+    color: "#F2994A",
+    position: 20.01,
+    type: "planned",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].query, /mutation CreateProjectStatus\(\$input: ProjectStatusCreateInput!\)/);
+  assert.match(calls[0].query, /projectStatusCreate\(input: \$input\)/);
+  // The payload entity is `status` on ProjectStatusPayload; never the conventional `projectStatus`.
+  assert.match(calls[0].query, /\bstatus\s*\{/);
+  assert.doesNotMatch(calls[0].query, /projectStatus\s*\{/);
+  assert.match(calls[0].query, /\bposition\b/);
+  assert.deepEqual(calls[0].variables.input, {
+    name: "Principal Escalation",
+    color: "#F2994A",
+    position: 20.01,
+    type: "planned",
+  });
+  assert.deepEqual(status, {
+    id: "status-principal-escalation",
+    name: "Principal Escalation",
+    type: "planned",
+    position: 20.01,
+  });
+});
+
 test("GraphQL workflow state creation sends required input and normalizes read-back", async () => {
   const calls = [];
   const client = createLinearGraphqlClient({
@@ -336,6 +670,8 @@ test("GraphQL workflow state creation sends required input and normalizes read-b
           id: "state-in-review",
           name: body.variables.input.name,
           type: body.variables.input.type,
+          description: body.variables.input.description,
+          position: body.variables.input.position,
           team: { id: body.variables.input.teamId },
         });
       }
@@ -349,24 +685,157 @@ test("GraphQL workflow state creation sends required input and normalizes read-b
     teamId: "team-1",
     color: "#f2c94c",
     description: "Ready for human review.",
+    position: 42,
   });
 
   assert.equal(calls.length, 1);
   assert.match(calls[0].query, /mutation CreateWorkflowState\(\$input: WorkflowStateCreateInput!\)/);
   assert.match(calls[0].query, /workflowStateCreate\(input: \$input\)/);
+  assert.match(calls[0].query, /\bdescription\b/);
+  assert.match(calls[0].query, /\bposition\b/);
   assert.deepEqual(calls[0].variables.input, {
     name: "In Review",
     type: "started",
     teamId: "team-1",
     color: "#f2c94c",
     description: "Ready for human review.",
+    position: 42,
   });
   assert.deepEqual(state, {
     id: "state-in-review",
     name: "In Review",
     type: "started",
     teamId: "team-1",
+    description: "Ready for human review.",
+    position: 42,
   });
+});
+
+test("GraphQL workflow state update sends reconciled input and normalizes description", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("mutation UpdateWorkflowState")) {
+        return payloadResponse("workflowStateUpdate", "workflowState", {
+          id: body.variables.id,
+          name: body.variables.input.name,
+          type: "started",
+          description: body.variables.input.description,
+          team: { id: "team-1" },
+        });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  const state = await client.updateWorkflowState("state-escalation", {
+    name: "Principal Escalation",
+    description: "Read the latest comment and move the issue when you've answered.",
+    color: "#F2994A",
+    position: 42,
+    type: "completed",
+    teamId: "team-1",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].query, /mutation UpdateWorkflowState\(\$id: String!, \$input: WorkflowStateUpdateInput!\)/);
+  assert.match(calls[0].query, /workflowStateUpdate\(id:\s*\$id,\s*input:\s*\$input\)/);
+  assert.deepEqual(calls[0].variables, {
+    id: "state-escalation",
+    input: {
+      name: "Principal Escalation",
+      description: "Read the latest comment and move the issue when you've answered.",
+      color: "#F2994A",
+      position: 42,
+    },
+  });
+  assert.deepEqual(state, {
+    id: "state-escalation",
+    name: "Principal Escalation",
+    type: "started",
+    teamId: "team-1",
+    description: "Read the latest comment and move the issue when you've answered.",
+  });
+});
+
+test("GraphQL workflow state update throws when Linear reports an unsuccessful payload", async () => {
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      if (body.query.includes("mutation UpdateWorkflowState")) {
+        return jsonResponse({ data: { workflowStateUpdate: { success: false, workflowState: null } } });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  await assert.rejects(
+    () => client.updateWorkflowState("state-escalation", { description: "Needs decision." }),
+    /Linear workflow state update did not return a successful payload\./,
+  );
+});
+
+test("GraphQL workflow state and issue label archive mutations are success-only", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("mutation ArchiveWorkflowState")) {
+        return jsonResponse({ data: { workflowStateArchive: { success: true } } });
+      }
+      if (body.query.includes("mutation ArchiveIssueLabel")) {
+        return jsonResponse({ data: { issueLabelRetire: { success: true } } });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  assert.deepEqual(await client.archiveWorkflowState("state-blocked"), { ok: true });
+  assert.deepEqual(await client.archiveIssueLabel("ilabel-needs-principal"), { ok: true });
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].query, /workflowStateArchive\(id:\s*\$id\)/);
+  assert.deepEqual(calls[0].variables, { id: "state-blocked" });
+  assert.match(calls[1].query, /issueLabelRetire\(id:\s*\$id\)/);
+  assert.doesNotMatch(calls[1].query, /issueLabelArchive|issueLabelDelete/);
+  assert.deepEqual(calls[1].variables, { id: "ilabel-needs-principal" });
+});
+
+test("GraphQL workflow state and issue label archive mutations throw on unsuccessful payloads", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("mutation ArchiveWorkflowState")) {
+        return jsonResponse({ data: { workflowStateArchive: { success: false } } });
+      }
+      if (body.query.includes("mutation ArchiveIssueLabel")) {
+        return jsonResponse({ data: { issueLabelRetire: { success: false } } });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  await assert.rejects(
+    () => client.archiveWorkflowState("state-blocked"),
+    /Linear workflow state archive failed\./,
+  );
+  await assert.rejects(
+    () => client.archiveIssueLabel("ilabel-needs-principal"),
+    /Linear issue label archive failed\./,
+  );
+  assert.deepEqual(calls.map((call) => call.variables), [
+    { id: "state-blocked" },
+    { id: "ilabel-needs-principal" },
+  ]);
 });
 
 test("GraphQL project and issue methods preserve context, prose, and relations", async () => {
@@ -377,6 +846,22 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
     fetchImpl: async (_url, options) => {
       const body = JSON.parse(options.body);
       calls.push(body);
+      if (body.query.includes("query ProjectById")) {
+        return jsonResponse({
+          data: {
+            project: {
+              id: body.variables.projectId,
+              name: "Project",
+              url: "https://linear.test/project/1",
+              description: "Intent",
+              content: "## Open Questions\n",
+              status: { id: "status-planned", name: "Planned", type: "planned" },
+              labels: connection([{ id: "plabel-1", name: "Has Open Questions" }]),
+              teams: connection([{ id: "team-1", key: "AF", name: "Teami" }]),
+            },
+          },
+        });
+      }
       if (body.query.includes("query ProjectContext")) {
         const firstPage = !body.variables.after;
         return jsonResponse({
@@ -400,6 +885,20 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
           },
         });
       }
+      if (body.query.includes("query ProjectComments")) {
+        return jsonResponse({
+          data: {
+            comments: connection([{
+              id: "comment-1",
+              body: "Answer: ship the empty state first.",
+              createdAt: "2026-06-29T10:02:00.000Z",
+              updatedAt: null,
+              user: { id: "user-founder-1", name: "Ada", displayName: "Ada L." },
+            }]),
+          },
+        });
+      }
+
       if (body.query.includes("mutation UpdateProject")) {
         return payloadResponse("projectUpdate", "project", {
           id: body.variables.id,
@@ -475,9 +974,17 @@ test("GraphQL project and issue methods preserve context, prose, and relations",
     },
   });
 
+  const projectSummary = await client.getProject("project-1");
+  assert.deepEqual(projectSummary.teamIds, ["team-1"]);
+  assert.equal(projectSummary.content, "## Open Questions\n");
   const project = await client.getProjectContext("project-1");
   assert.equal(project.issues.length, 2);
   assert.equal(project.teamIds[0], "team-1");
+  assert.deepEqual(project.comments, [{
+    author_id: "user-founder-1",
+    body: "Answer: ship the empty state first.",
+    created_at: "2026-06-29T10:02:00.000Z",
+  }]);
   assert.equal((await findIssueByDecompositionKey(client, "project-1", "backend")).id, "issue-2");
   assert.equal(
     (await client.createProject({
@@ -662,6 +1169,14 @@ test("GraphQL planned project candidates query is cheap, server-filtered, and cl
                 projects: connection(
                   [
                     plannedProjectCandidate("project-1", { teamIds: ["team-1"] }),
+                    plannedProjectCandidate("project-attention", {
+                      status: {
+                        id: "status-principal-escalation",
+                        name: "Principal Escalation",
+                        type: "planned",
+                      },
+                      teamIds: ["team-1"],
+                    }),
                     plannedProjectCandidate("project-started", {
                       status: { id: "status-started", name: "Started", type: "started" },
                       teamIds: ["team-1"],
@@ -707,6 +1222,12 @@ test("GraphQL planned project candidates query is cheap, server-filtered, and cl
       teams: { nodes: [{ id: "team-1" }] },
     },
     {
+      id: "project-attention",
+      name: "Project project-attention",
+      status: { id: "status-principal-escalation", name: "Principal Escalation", type: "planned" },
+      teams: { nodes: [{ id: "team-1" }] },
+    },
+    {
       id: "project-2",
       name: "Project project-2",
       status: { id: "status-planned", name: "Planned", type: "planned" },
@@ -729,6 +1250,46 @@ test("GraphQL planned project candidates query is cheap, server-filtered, and cl
       "x-ratelimit-endpoint-requests-reset": "1710000002000",
     },
   });
+});
+
+test("GraphQL planned project candidates with cached Planned id exclude same-category attention statuses", async () => {
+  const calls = [];
+  const client = createLinearGraphqlClient({
+    tokenProvider: async () => "oauth-token",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body);
+      if (body.query.includes("query PlannedProjectCandidates")) {
+        return jsonResponse({
+          data: {
+            team: {
+              id: "team-1",
+              projects: connection([
+                plannedProjectCandidate("project-1", { teamIds: ["team-1"] }),
+                plannedProjectCandidate("project-attention", {
+                  status: {
+                    id: "status-principal-escalation",
+                    name: "Principal Escalation",
+                    type: "planned",
+                  },
+                  teamIds: ["team-1"],
+                }),
+              ]),
+            },
+          },
+        });
+      }
+      throw new Error(`unhandled GraphQL operation: ${body.query}`);
+    },
+  });
+
+  const result = await client.listPlannedProjectCandidates("team-1", {
+    plannedStateId: "status-planned",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].variables, { teamId: "team-1", after: null, first: 25 });
+  assert.deepEqual(result.candidates.map((candidate) => candidate.id), ["project-1"]);
 });
 
 test("GraphQL project snapshot context query pages issues with bounded fingerprint projection", async () => {

@@ -1,7 +1,8 @@
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { runBoundedSubprocess } from "../../../git/bounded-subprocess.mjs";
 
 import { collectExperimentEvidence } from "../disagreement-report.mjs";
+import { resolveTeamiHome } from "../app-home.mjs";
 import { sanitizeAndClassifyContent } from "../eval-content-gate.mjs";
 import { createGitHubPromotionClient } from "../github-promotion-client.mjs";
 import { createProductionGitHubPromotionTransport } from "../github-production-transport.mjs";
@@ -175,7 +176,7 @@ export async function promoteCandidate(options = {}) {
 
 // TEST-ONLY construction seam (outside-review FIX 4): the single place where
 // transports/policy paths/baseline override/fetch/git/gh-spawn/env may be injected.
-// Production code (cli.mjs and any future scanner/supervisor caller) calls
+  // Production code (cli.mjs and any future scanner caller) calls
 // promoteCandidate above and can never reach these seams.
 export function createPromoteCandidateTestHarness(overrides = {}) {
   if ("acceptCrossVersion" in overrides) {
@@ -201,6 +202,7 @@ async function promoteCandidateWithOverrides(options = {}) {
 
 async function promoteCandidateWithOverridesUnlocked({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   request,
   invocation = { transport: "cli_local_session" },
   githubTransport = null,
@@ -219,14 +221,14 @@ async function promoteCandidateWithOverridesUnlocked({
   ensureReady = ensurePhoenixReady,
   fetchImpl = globalThis.fetch,
   runGit = defaultRunGit,
-  githubSpawnImpl = spawn,
+  githubSpawnImpl = null,
   env = process.env,
   now = () => new Date(),
   onProgress = () => {},
   materializePromotionCandidateImpl = materializePromotionCandidate,
 } = {}, lockRef = { lock: null }) {
   const startedAt = now().toISOString();
-  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(repoRoot);
+  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(home);
   const acquireMutationLock = () => {
     if (lockRef.lock) return { ok: true, lock: lockRef.lock };
     const lock = acquirePromotionControllerLock({
@@ -245,7 +247,7 @@ async function promoteCandidateWithOverridesUnlocked({
   let githubRepoSource = "test_harness_override";
   let repoIdentity = null;
   if (!githubRepo) {
-    repoIdentity = resolveBehaviorRepoIdentity({ repoRoot });
+    repoIdentity = resolveBehaviorRepoIdentity({ repoRoot, home });
     if (repoIdentity.ok) {
       githubRepo = repoIdentity.repo;
       githubRepoSource = `github_connection_state:${repoIdentity.connection_mode}`;
@@ -331,13 +333,13 @@ async function promoteCandidateWithOverridesUnlocked({
   // an explicit user invocation; unattended callers must read from the
   // internal clone at default-branch HEAD and fail closed without it.
   const policyMode = invocation?.transport === "cli_local_session" ? "user_invoked" : "unattended";
-  const policyRead = resolveTrustedPolicyRead({
+  const policyRead = await resolveTrustedPolicyRead({
     mode: policyMode,
     policyPath: promotionPolicyPath,
     policyRelativePath: promotionPolicyRelativePath,
     internalCloneDir: workspaceDir
       ? path.join(workspaceDir, "repo")
-      : path.join(defaultPromotionWorkspaceDir(repoRoot), "repo"),
+      : path.join(defaultPromotionWorkspaceDir(home), "repo"),
     runGit,
   });
   if (!policyRead.ok) return blockedEarly(policyRead.reason, policyRead.detail);
@@ -425,6 +427,7 @@ async function promoteCandidateWithOverridesUnlocked({
   // 8. Managed receipt join (explicit intent; CONSTRAINTS #18/#19).
   const join = findReceiptByExperimentId({
     repoRoot,
+    home,
     receiptDir,
     experimentId: effectiveExperimentId,
   });
@@ -556,13 +559,13 @@ async function promoteCandidateWithOverridesUnlocked({
   const candidateKind = targetParse.candidate_kind;
   const candidateVersionId = receipt.launch.candidate?.candidate_version_id ?? null;
   const acceptedBaselineId = receipt.launch.launch_baseline?.accepted_baseline_id ?? null;
-  let trustedArtifacts = resolveTrustedPromotionArtifacts({
+  let trustedArtifacts = await resolveTrustedPromotionArtifacts({
     mode: policyMode,
     repoRoot,
     candidateTargetKey,
     internalCloneDir: workspaceDir
       ? path.join(workspaceDir, "repo")
-      : path.join(defaultPromotionWorkspaceDir(repoRoot), "repo"),
+      : path.join(defaultPromotionWorkspaceDir(home), "repo"),
     runGit,
   });
   if (!trustedArtifacts.ok) {
@@ -600,6 +603,7 @@ async function promoteCandidateWithOverridesUnlocked({
   // cannot waive them).
   const gate = await evaluateProcessChangeGate({
     repoRoot,
+    home,
     receiptId: receiptState.receipt_id,
     receiptDir,
     evalRunStoreDir,
@@ -911,7 +915,14 @@ async function promoteCandidateWithOverridesUnlocked({
           repoRoot,
           repoIdentity,
           now,
-          spawnImpl: githubSpawnImpl,
+          ...(githubSpawnImpl
+            ? {
+                runSubprocess: (options) => runBoundedSubprocess({
+                  ...options,
+                  spawnImpl: githubSpawnImpl,
+                }),
+              }
+            : {}),
         });
     }
     return githubSelection;
@@ -1011,13 +1022,13 @@ async function promoteCandidateWithOverridesUnlocked({
   // PRs, or outcome annotations. A row stuck after commit resumes.
   if (preexistingRecord?.outcome?.outcome === "blocked" && !registryBlockedOutcomeIsRetryable(preexistingRecord)) {
     if (preexistingRecord.outcome.reason === "improvement_opportunity_no_proposed_change") {
-      trustedArtifacts = resolveTrustedPromotionArtifacts({
+      trustedArtifacts = await resolveTrustedPromotionArtifacts({
         mode: policyMode,
         repoRoot,
         candidateTargetKey,
         internalCloneDir: workspaceDir
           ? path.join(workspaceDir, "repo")
-          : path.join(defaultPromotionWorkspaceDir(repoRoot), "repo"),
+          : path.join(defaultPromotionWorkspaceDir(home), "repo"),
         runGit,
       });
       if (!trustedArtifacts.ok) {
@@ -1184,13 +1195,13 @@ async function promoteCandidateWithOverridesUnlocked({
   }
 
   if (!trustedArtifacts) {
-    trustedArtifacts = resolveTrustedPromotionArtifacts({
+    trustedArtifacts = await resolveTrustedPromotionArtifacts({
       mode: policyMode,
       repoRoot,
       candidateTargetKey,
       internalCloneDir: workspaceDir
         ? path.join(workspaceDir, "repo")
-        : path.join(defaultPromotionWorkspaceDir(repoRoot), "repo"),
+        : path.join(defaultPromotionWorkspaceDir(home), "repo"),
       runGit,
     });
   }
@@ -1658,11 +1669,11 @@ async function promoteCandidateWithOverridesUnlocked({
   );
 
   // 18. Internal workspace (dirty gate) + deterministic branch.
-  const workspace = ensurePromotionWorkspace({ repoRoot, workspaceDir, runGit });
+  const workspace = await ensurePromotionWorkspace({ repoRoot, workspaceDir, runGit });
   if (!workspace.ok) return blockedRetryable(workspace.reason, workspace.detail ?? null);
   const branch = promotionBranchName({ candidateTargetKey, envelopeHash });
   const proposalRelativePath = `${DECOMPOSITION_EVAL_PATHS.proposals}/${proposalInstanceId}.md`;
-  const branchAlreadyExists = branchExists({ cloneDir: workspace.cloneDir, branch, runGit });
+  const branchAlreadyExists = await branchExists({ cloneDir: workspace.cloneDir, branch, runGit });
   if (branchAlreadyExists && !preexistingRecord) {
     // An orphan internal branch with no registry row is surfaced as repair
     // state, never silently retried into duplicates (CONSTRAINTS #16).
@@ -1672,7 +1683,7 @@ async function promoteCandidateWithOverridesUnlocked({
     );
   }
   if (branchAlreadyExists) {
-    const branchEnvelope = verifyPromotionBranchEnvelope({
+    const branchEnvelope = await verifyPromotionBranchEnvelope({
       cloneDir: workspace.cloneDir,
       branch,
       envelopeHash,
@@ -1705,7 +1716,7 @@ async function promoteCandidateWithOverridesUnlocked({
   let commitSha = preexistingRecord?.commit_sha ?? null;
   const resumeFromCommit = Boolean(commitSha && branchAlreadyExists);
   if (!resumeFromCommit) {
-    const checkout = checkoutPromotionBranch({
+    const checkout = await checkoutPromotionBranch({
       cloneDir: workspace.cloneDir,
       branch,
       defaultBranchRef: workspace.defaultBranchRef,
@@ -1717,7 +1728,7 @@ async function promoteCandidateWithOverridesUnlocked({
       proposal_relative_path: null,
       materialized_paths: Object.keys(materializerResult.files || {}).sort(),
     });
-    const commit = commitPromotionDraft({
+    const commit = await commitPromotionDraft({
       cloneDir: workspace.cloneDir,
       files: materializerResult.files,
       message: `promotion proposal ${proposalInstanceId} for ${candidateTargetKey}`,
@@ -1749,7 +1760,7 @@ async function promoteCandidateWithOverridesUnlocked({
   let push;
   const githubSelectionForPush = selectGitHub();
   if (githubSelectionForPush.mode === "local_ambient" && githubSelectionForPush.realPushEnabled) {
-    push = pushPromotionBranchWithAmbientAuth({
+    push = await pushPromotionBranchWithAmbientAuth({
       cloneDir: workspace.cloneDir,
       owner: githubSelectionForPush.owner,
       repo: githubSelectionForPush.repo,

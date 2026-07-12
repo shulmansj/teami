@@ -9,6 +9,7 @@ export async function applyCommitEffects({ effects, ctx, trace } = {}) {
   }
 
   const applied = [];
+  const verifiedApplied = [];
   for (const effect of effects) {
     const effectId = effect?.id;
     if (typeof effectId !== "string" || effectId.trim() === "") {
@@ -27,7 +28,12 @@ export async function applyCommitEffects({ effects, ctx, trace } = {}) {
         });
       }
       if (probe.result?.satisfied === true) {
-        applied.push({ id: effectId, identity: probe.result.identity });
+        if (hasProducedIdentityProjector(effect) && !hasEffectIdentity(probe.result)) {
+          return pendingEffect(effectId, "effect_probe_identity_missing");
+        }
+        const satisfied = { id: effectId, identity: probe.result.identity };
+        applied.push(satisfied);
+        verifiedApplied.push(satisfied);
         continue;
       }
 
@@ -60,7 +66,11 @@ export async function applyCommitEffects({ effects, ctx, trace } = {}) {
         }
         return pendingEffect(effectId, verified.result?.reason || "effect_verify_failed");
       }
+      if (hasProducedIdentityProjector(effect) && !hasEffectIdentity(verified.result)) {
+        return pendingEffect(effectId, "effect_verify_identity_missing");
+      }
       applied.push({ id: effectId, identity: appliedEffect.result.identity });
+      verifiedApplied.push({ id: effectId, identity: verified.result.identity });
     } catch (error) {
       if (error?.step === "probe") {
         recordCommitEffectSpan(trace, "commit_effect_probe", {
@@ -88,7 +98,7 @@ export async function applyCommitEffects({ effects, ctx, trace } = {}) {
   const produced_identities = projectAndAttachProducedIdentities({
     trace,
     effects,
-    applied,
+    applied: verifiedApplied,
     artifactSetLineage: ctx?.artifactSetLineage,
   });
   return { outcome: "ok", applied, produced_identities };
@@ -114,6 +124,10 @@ function resultOutcome(result) {
 
 function isExplicitTerminalFailure(result) {
   return result?.ok === false && result?.terminal === true;
+}
+
+function hasEffectIdentity(result) {
+  return result?.identity !== null && result?.identity !== undefined;
 }
 
 async function callEffectStep(effect, step, ctx) {

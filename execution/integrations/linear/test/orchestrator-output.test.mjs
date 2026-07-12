@@ -173,6 +173,13 @@ test("pause output missing open questions fails", () => {
   assert.deepEqual(result.failureReasons, ["missing_open_questions_markdown"]);
 });
 
+test("pause output does not require a project update", () => {
+  const runResult = validPauseRunResult();
+  delete runResult.terminal_output.project_update_markdown;
+
+  assert.deepEqual(validate(runResult), { ok: true, failureReasons: [] });
+});
+
 test("failed_closed output missing note and questions fails", () => {
   const runResult = validFailedClosedRunResult();
   delete runResult.terminal_output.project_update_markdown;
@@ -302,7 +309,6 @@ function validPauseRunResult() {
       ...baseTerminalOutput(),
       outcome: "pause",
       reason: "product_questions",
-      project_update_markdown: projectUpdateMarkdown("Paused for product input."),
       open_questions_markdown: "- Which launch segment should this prioritize?",
     },
     bounds: { rounds_used: 2, max_rounds: 5 },

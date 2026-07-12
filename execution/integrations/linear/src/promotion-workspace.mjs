@@ -1,9 +1,10 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 import { redactGitHubSecrets, scrubGitHubAuthEnv } from "./github-secret-hygiene.mjs";
+import { runBoundedGit } from "../../git/bounded-subprocess.mjs";
 import { resolveDefaultBranchRef } from "./promotion-policy.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
 // Internal promotion workspace (CONSTRAINTS #14/#15/#16): repo-writing
 // promotion work happens ONLY in a dedicated internal clone under
@@ -43,8 +44,8 @@ export const PROMOTION_MARKER_KEY = "teami_promotion";
 export const PROMOTION_MARKER_SENTINEL_BEGIN = "<!-- teami_promotion:begin -->";
 export const PROMOTION_MARKER_SENTINEL_END = "<!-- teami_promotion:end -->";
 
-export function defaultPromotionWorkspaceDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "promotion-workspace");
+export function defaultPromotionWorkspaceDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "promotion-workspace");
 }
 
 export function promotionWorkspaceCloneDir(workspaceDir) {
@@ -52,18 +53,7 @@ export function promotionWorkspaceCloneDir(workspaceDir) {
 }
 
 export function defaultRunGit(args, { cwd, env, exactEnv = false } = {}) {
-  const result = spawnSync("git", args, {
-    cwd,
-    env: env ? (exactEnv ? env : { ...process.env, ...env }) : process.env,
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  return {
-    ok: result.status === 0,
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-  };
+  return runBoundedGit(args, { cwd, env, exactEnv });
 }
 
 // Deterministic branch namespace (CONSTRAINTS #15):
@@ -114,16 +104,17 @@ export function validatePromotionBranchRef(branch) {
 // Ensures the internal clone exists, is up to date with the local origin, and
 // is CLEAN. A dirty internal worktree fails closed (the dirty-worktree gate
 // applies to the internal workspace, not the adopter checkout).
-export function ensurePromotionWorkspace({
+export async function ensurePromotionWorkspace({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   workspaceDir = null,
   runGit = defaultRunGit,
 } = {}) {
-  const dir = workspaceDir || defaultPromotionWorkspaceDir(repoRoot);
+  const dir = workspaceDir || defaultPromotionWorkspaceDir(home);
   const cloneDir = promotionWorkspaceCloneDir(dir);
   if (!fs.existsSync(path.join(cloneDir, ".git"))) {
     fs.mkdirSync(dir, { recursive: true });
-    const clone = runGit(["clone", "--no-hardlinks", repoRoot, cloneDir], { cwd: dir });
+    const clone = await runGit(["clone", "--no-hardlinks", repoRoot, cloneDir], { cwd: dir });
     if (!clone.ok) {
       return {
         ok: false,
@@ -132,7 +123,7 @@ export function ensurePromotionWorkspace({
       };
     }
   } else {
-    const fetch = runGit(["fetch", "origin", "--prune"], { cwd: cloneDir });
+    const fetch = await runGit(["fetch", "origin", "--prune"], { cwd: cloneDir });
     if (!fetch.ok) {
       return {
         ok: false,
@@ -141,7 +132,7 @@ export function ensurePromotionWorkspace({
       };
     }
   }
-  const status = runGit(["status", "--porcelain"], { cwd: cloneDir });
+  const status = await runGit(["status", "--porcelain"], { cwd: cloneDir });
   if (!status.ok) {
     return { ok: false, reason: "internal_clone_status_failed", detail: status.stderr.trim() };
   }
@@ -154,13 +145,13 @@ export function ensurePromotionWorkspace({
       dirty_paths: status.stdout.trim().split("\n").map((line) => line.slice(3)),
     };
   }
-  const head = resolveDefaultBranchRef({ internalCloneDir: cloneDir, runGit });
+  const head = await resolveDefaultBranchRef({ internalCloneDir: cloneDir, runGit });
   if (!head.ok) return head;
   return { ok: true, workspaceDir: dir, cloneDir, defaultBranchRef: head.ref };
 }
 
-export function listPromotionBranches({ cloneDir, runGit = defaultRunGit } = {}) {
-  const result = runGit(
+export async function listPromotionBranches({ cloneDir, runGit = defaultRunGit } = {}) {
+  const result = await runGit(
     ["for-each-ref", "--format=%(refname:short)", `refs/heads/${PROMOTION_BRANCH_NAMESPACE}/`],
     { cwd: cloneDir },
   );
@@ -168,14 +159,14 @@ export function listPromotionBranches({ cloneDir, runGit = defaultRunGit } = {})
   return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
-export function branchExists({ cloneDir, branch, runGit = defaultRunGit } = {}) {
-  return runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: cloneDir }).ok;
+export async function branchExists({ cloneDir, branch, runGit = defaultRunGit } = {}) {
+  return (await runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: cloneDir })).ok;
 }
 
 // Reads a committed file from a branch tip without checking it out (used to
 // compare an existing branch's committed marker against the current envelope).
-export function readFileFromBranch({ cloneDir, branch, relativePath, runGit = defaultRunGit } = {}) {
-  const result = runGit(["show", `${branch}:${relativePath}`], { cwd: cloneDir });
+export async function readFileFromBranch({ cloneDir, branch, relativePath, runGit = defaultRunGit } = {}) {
+  const result = await runGit(["show", `${branch}:${relativePath}`], { cwd: cloneDir });
   if (!result.ok) return null;
   return result.stdout;
 }
@@ -303,8 +294,8 @@ function lastNonEmptyParagraph(message) {
   return paragraphs.length > 0 ? paragraphs[paragraphs.length - 1] : "";
 }
 
-export function readPromotionCommitTrailers({ cloneDir, branch, runGit = defaultRunGit } = {}) {
-  const result = runGit(["log", "-1", "--pretty=%B", branch, "--"], { cwd: cloneDir });
+export async function readPromotionCommitTrailers({ cloneDir, branch, runGit = defaultRunGit } = {}) {
+  const result = await runGit(["log", "-1", "--pretty=%B", branch, "--"], { cwd: cloneDir });
   if (!result.ok) return { ok: false, reason: "trailers_absent" };
   return parsePromotionTrailerParagraph(lastNonEmptyParagraph(result.stdout));
 }
@@ -341,7 +332,7 @@ function parsePromotionMarkersFromDocument(body) {
   return markers;
 }
 
-export function verifyPromotionBranchEnvelope({
+export async function verifyPromotionBranchEnvelope({
   cloneDir,
   branch,
   envelopeHash,
@@ -358,7 +349,7 @@ export function verifyPromotionBranchEnvelope({
   // only runs when a recorded SHA is present: envelopes recorded before this
   // field existed (commit_sha null/absent) keep their prior behavior.
   if (typeof recordedCommitSha === "string" && recordedCommitSha.length > 0) {
-    const tip = runGit(["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: cloneDir });
+    const tip = await runGit(["rev-parse", "--verify", `refs/heads/${branch}`], { cwd: cloneDir });
     const tipSha = tip.ok ? tip.stdout.trim() : null;
     if (tipSha !== recordedCommitSha) {
       return {
@@ -370,7 +361,7 @@ export function verifyPromotionBranchEnvelope({
       };
     }
   }
-  const commitTrailers = readPromotionCommitTrailers({ cloneDir, branch, runGit });
+  const commitTrailers = await readPromotionCommitTrailers({ cloneDir, branch, runGit });
   if (commitTrailers.ok) {
     const matches = commitTrailers.trailers.envelope === envelopeHash
       && commitTrailers.trailers.instance === proposalInstanceId
@@ -391,7 +382,7 @@ export function verifyPromotionBranchEnvelope({
       method: "commit_trailers",
     };
   }
-  const committedDoc = readFileFromBranch({
+  const committedDoc = await readFileFromBranch({
     cloneDir,
     branch,
     relativePath: proposalRelativePath,
@@ -412,20 +403,20 @@ export function verifyPromotionBranchEnvelope({
 // Creates (or checks out) the deterministic promotion branch from the remote
 // default branch — base derives from origin's default branch, never from the
 // adopter's active checkout (CONSTRAINTS #15).
-export function checkoutPromotionBranch({
+export async function checkoutPromotionBranch({
   cloneDir,
   branch,
   defaultBranchRef,
   runGit = defaultRunGit,
 } = {}) {
-  if (branchExists({ cloneDir, branch, runGit })) {
-    const checkout = runGit(["checkout", branch], { cwd: cloneDir });
+  if (await branchExists({ cloneDir, branch, runGit })) {
+    const checkout = await runGit(["checkout", branch], { cwd: cloneDir });
     if (!checkout.ok) {
       return { ok: false, reason: "branch_checkout_failed", detail: checkout.stderr.trim() };
     }
     return { ok: true, created: false, branch };
   }
-  const create = runGit(["checkout", "-b", branch, defaultBranchRef], { cwd: cloneDir });
+  const create = await runGit(["checkout", "-b", branch, defaultBranchRef], { cwd: cloneDir });
   if (!create.ok) {
     return { ok: false, reason: "branch_create_failed", detail: create.stderr.trim() };
   }
@@ -660,7 +651,7 @@ function pathContainedWithin(parent, child) {
 // materializer's self-reported file list, so a path staged out of band cannot
 // ride along. `allowedPaths` omitted/null disables the allowlist (the workflows
 // block still runs) — used by unit tests that exercise other facets.
-export function commitPromotionDraft({
+export async function commitPromotionDraft({
   cloneDir,
   files,
   message,
@@ -734,17 +725,17 @@ export function commitPromotionDraft({
     fs.mkdirSync(path.dirname(absolute), { recursive: true });
     fs.writeFileSync(absolute, content, "utf8");
   }
-  const add = runGit(["add", "--", ...declaredPaths], { cwd: cloneDir });
+  const add = await runGit(["add", "--", ...declaredPaths], { cwd: cloneDir });
   if (!add.ok) return { ok: false, reason: "git_add_failed", detail: add.stderr.trim() };
   // RAW -z staged diff: modes expose symlinks; R/C entries expose the rename
   // SOURCE and DESTINATION; -z framing survives unusual filenames.
-  const staged = runGit(["diff", "--cached", "--raw", "-z"], { cwd: cloneDir });
+  const staged = await runGit(["diff", "--cached", "--raw", "-z"], { cwd: cloneDir });
   if (!staged.ok) return { ok: false, reason: "git_diff_failed", detail: staged.stderr.trim() };
   const rawEntries = parseRawCachedDiff(staged.stdout);
   const stagedPaths = [...new Set(rawEntries.flatMap((entry) => entry.paths))];
   const blockedEntries = findBlockedStagedEntries(rawEntries);
   if (blockedEntries.length > 0) {
-    runGit(["reset", "--", ...stagedPaths], { cwd: cloneDir });
+    await runGit(["reset", "--", ...stagedPaths], { cwd: cloneDir });
     const blockedPaths = [...new Set(blockedEntries.map((entry) => entry.path))];
     return {
       ok: false,
@@ -765,7 +756,7 @@ export function commitPromotionDraft({
   if (Array.isArray(allowedPaths) && allowedPaths.length > 0) {
     const outsideAllowlist = findStagedPathsOutsideAllowlist(rawEntries, allowedPaths);
     if (outsideAllowlist.length > 0) {
-      runGit(["reset", "--", ...stagedPaths], { cwd: cloneDir });
+      await runGit(["reset", "--", ...stagedPaths], { cwd: cloneDir });
       const outsidePaths = [...new Set(outsideAllowlist.map((entry) => entry.path))];
       return {
         ok: false,
@@ -780,7 +771,7 @@ export function commitPromotionDraft({
       };
     }
   }
-  const commit = runGit(
+  const commit = await runGit(
     [
       "-c", `user.name=${botIdentity.name}`,
       "-c", `user.email=${botIdentity.email}`,
@@ -790,7 +781,7 @@ export function commitPromotionDraft({
     { cwd: cloneDir },
   );
   if (!commit.ok) return { ok: false, reason: "git_commit_failed", detail: commit.stderr.trim() };
-  const sha = runGit(["rev-parse", "HEAD"], { cwd: cloneDir });
+  const sha = await runGit(["rev-parse", "HEAD"], { cwd: cloneDir });
   return {
     ok: true,
     commit_sha: sha.ok ? sha.stdout.trim() : null,
@@ -821,7 +812,7 @@ export function pushBranchPlaceholder({ branch } = {}) {
   };
 }
 
-function resolvePromotionPushUrl({
+async function resolvePromotionPushUrl({
   owner,
   repo,
   checkoutPath,
@@ -829,7 +820,7 @@ function resolvePromotionPushUrl({
   runGit,
 } = {}) {
   if (checkoutPath) {
-    const remote = runGit(["remote", "get-url", "--push", "origin"], { cwd: checkoutPath });
+    const remote = await runGit(["remote", "get-url", "--push", "origin"], { cwd: checkoutPath });
     const url = remote.ok ? remote.stdout.trim() : "";
     if (url) return { ok: true, pushUrl: url, source: "origin_push_remote" };
   }
@@ -848,7 +839,7 @@ function resolvePromotionPushUrl({
   };
 }
 
-export function pushPromotionBranchWithAmbientAuth({
+export async function pushPromotionBranchWithAmbientAuth({
   cloneDir,
   owner,
   repo,
@@ -866,7 +857,7 @@ export function pushPromotionBranchWithAmbientAuth({
   const normalizedPushAuth = pushAuth === "ssh" ? "ssh" : "https";
   const resolvedPushUrl = typeof pushUrl === "string" && pushUrl.trim()
     ? { ok: true, pushUrl: pushUrl.trim(), source: "provided" }
-    : resolvePromotionPushUrl({
+    : await resolvePromotionPushUrl({
       owner,
       repo,
       checkoutPath,
@@ -875,7 +866,7 @@ export function pushPromotionBranchWithAmbientAuth({
     });
   if (!resolvedPushUrl.ok) return resolvedPushUrl;
 
-  const result = runGit(
+  const result = await runGit(
     [
       "push",
       resolvedPushUrl.pushUrl,
@@ -893,8 +884,11 @@ export function pushPromotionBranchWithAmbientAuth({
   if (!result.ok) {
     return {
       ok: false,
-      reason: "github_promotion_branch_push_failed",
+      reason: result.reconciliationRequired
+        ? "github_promotion_branch_push_reconciliation_required"
+        : "github_promotion_branch_push_failed",
       detail: redactGitHubSecrets(result.stderr.trim() || result.stdout.trim()),
+      reconciliation_required: result.reconciliationRequired === true,
     };
   }
   return {

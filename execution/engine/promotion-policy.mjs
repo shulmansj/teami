@@ -48,10 +48,6 @@ function plainObject(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function positiveInteger(value) {
-  return Number.isInteger(value) && value > 0;
-}
-
 export function promotionPolicyValidationFailures(policy) {
   const failures = [];
   if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
@@ -169,7 +165,7 @@ function missingRunGitResult() {
   };
 }
 
-export function resolveTrustedPolicyRead({
+export async function resolveTrustedPolicyRead({
   mode,
   policyPath = PROMOTION_POLICY_PATH,
   policyRelativePath = PROMOTION_POLICY_RELATIVE_PATH,
@@ -208,9 +204,9 @@ export function resolveTrustedPolicyRead({
       };
     }
     if (typeof runGit !== "function") return missingRunGitResult();
-    const head = resolveDefaultBranchRef({ internalCloneDir, runGit });
+    const head = await resolveDefaultBranchRef({ internalCloneDir, runGit });
     if (!head.ok) return head;
-    const show = runGit(["show", `${head.ref}:${policyRelativePath}`], {
+    const show = await runGit(["show", `${head.ref}:${policyRelativePath}`], {
       cwd: internalCloneDir,
     });
     if (!show.ok) {
@@ -243,9 +239,9 @@ export function resolveTrustedPolicyRead({
 
 // The internal clone's remote default branch (origin/HEAD), never the
 // adopter checkout's current branch.
-export function resolveDefaultBranchRef({ internalCloneDir, runGit = null } = {}) {
+export async function resolveDefaultBranchRef({ internalCloneDir, runGit = null } = {}) {
   if (typeof runGit !== "function") return missingRunGitResult();
-  const symbolic = runGit(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], {
+  const symbolic = await runGit(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], {
     cwd: internalCloneDir,
   });
   if (symbolic.ok && symbolic.stdout.trim()) {
@@ -253,7 +249,7 @@ export function resolveDefaultBranchRef({ internalCloneDir, runGit = null } = {}
     return { ok: true, ref: full.replace("refs/remotes/", "") };
   }
   // Older clones may lack origin/HEAD; ask the local origin directly.
-  const remoteHead = runGit(["ls-remote", "--symref", "origin", "HEAD"], { cwd: internalCloneDir });
+  const remoteHead = await runGit(["ls-remote", "--symref", "origin", "HEAD"], { cwd: internalCloneDir });
   if (remoteHead.ok) {
     const match = remoteHead.stdout.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD/m);
     if (match) return { ok: true, ref: `origin/${match[1]}` };

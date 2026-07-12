@@ -83,6 +83,38 @@ test("runtime options seam: envAugment overlays the scrubbed env and reaches the
   assert.equal(Object.hasOwn(spawnCall.options.env, "GITHUB_TOKEN"), false);
 });
 
+test("runtime options seam: on win32 an envAugment temp override evicts case-variant host duplicates", async () => {
+  const env = spawnBaseEnv({
+    Temp: "host-temp-case-variant",
+    TMP: "host-tmp",
+  });
+  let spawnCall = null;
+
+  await runRuntimeCommand(
+    { command: "runtime-options-temp-check", args: [] },
+    {
+      env,
+      platform: "win32",
+      envAugment: {
+        TMPDIR: "engine-run-temp",
+        TMP: "engine-run-temp",
+        TEMP: "engine-run-temp",
+      },
+      timeoutMs: 5_000,
+      spawnImpl: fakeSpawn({
+        onSpawn: (call) => {
+          spawnCall = call;
+        },
+      }),
+    },
+  );
+
+  assert.equal(spawnCall.options.env.TMPDIR, "engine-run-temp");
+  assert.equal(spawnCall.options.env.TMP, "engine-run-temp");
+  assert.equal(spawnCall.options.env.TEMP, "engine-run-temp");
+  assert.equal(Object.hasOwn(spawnCall.options.env, "Temp"), false);
+});
+
 test("runtime options seam: envAugment carrying a write credential participates in the credential proof", async () => {
   const env = spawnBaseEnv({
     GH_TOKEN: "parent-gh-token",

@@ -114,11 +114,42 @@ Use these locations:
 - `docs/`: durable documentation for adopters, contributors, and agents.
 - `execution/`: runnable templates, schemas, workflows, and integration docs.
 - `examples/`: fictional or disposable examples.
+- `openwiki/`: auto-generated, code-scoped reference docs (the openwiki tool);
+  tracked but never-public (maintainer/build artifact, excluded from the public
+  projection); see [Auto-generated code docs](#auto-generated-code-docs-openwiki)
+  below.
 
 Private maintainer plans, review artifacts, launch records, manifests, and
 approval packets are not public owner docs. If a maintainer note becomes
 durable, move the accepted content into `docs/` or the relevant `execution/`
 README and retire the stale note.
+
+## Auto-Generated Code Docs (openwiki)
+
+`openwiki/` holds tool-generated, code-scoped reference docs: architecture,
+navigation, and workflows as implemented. Maintainers may regenerate it on
+demand with the `openwiki` CLI; the maintainer-only
+`.github/workflows/openwiki-update.yml` also proposes scheduled refreshes. A
+generated change is never authoritative merely because automation opened it.
+
+- It is a maintainer/build artifact: tracked in this repo but **never-public**
+  (excluded from the public projection). It narrates code in internal
+  vocabulary, so it stays out of the public artifact by design.
+- It documents code only. Strategy, roadmap, and planning never live here; those
+  stay human-owned in `docs/` and are intended to move to an external,
+  MCP-accessed library over time.
+- It links to owner docs — including code-adjacent `README` files — and must not
+  restate or replace them. The owner doc stays the single source of truth.
+- The `## OpenWiki` pointer sections in `AGENTS.md` and `CLAUDE.md` are
+  intentional and human-owned; they point maintainers at the local `openwiki/`
+  map and do not resolve in the public projection. openwiki has no hard ignore
+  mechanism, so scope is set per run; reviewers confirm each `openwiki/` diff
+  stays code-scoped and owner-doc-linking.
+- Regeneration follows source correction, never precedes it. The semantic
+  trust-doc tests validate current exported source Markdown; they do not scan
+  the never-public generated OpenWiki tree. Run them before regeneration, then
+  separately scan and review the complete `openwiki/**` diff for dormant modules,
+  shipped-capability overclaims, and retired architecture language.
 
 ## How To Handle Planning Notes
 

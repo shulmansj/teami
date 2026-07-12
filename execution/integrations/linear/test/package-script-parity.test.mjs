@@ -9,9 +9,14 @@ const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf
 
 // Scripts that legitimately do NOT invoke the CLI (checked as "not a registry command").
 const NON_CLI_SCRIPTS = new Set([
+  "canary:claude-plugin",
+  "canary:linear-graphql",
+  "canary:mcp-linear-setup",
   "security:secrets",
   "security:secrets:history",
   "security:secrets:seed",
+  "quality:static",
+  "verify",
   "validation:decomposition",
   "uat:gateway",
   "uat:github-local",

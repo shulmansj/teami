@@ -1,0 +1,13 @@
+{
+  "schema_version": "teami-product-execution-readiness/v1",
+  "enabled": false,
+  "release_commit": null,
+  "evidence": {
+    "runtime_credential_containment": { "status": "missing", "artifacts": [] },
+    "agent_tool_environment_isolation": { "status": "missing", "artifacts": [] },
+    "os_process_isolation": { "status": "missing", "artifacts": [] },
+    "recoverable_git_effects": { "status": "missing", "artifacts": [] },
+    "domain_confinement": { "status": "missing", "artifacts": [] },
+    "no_push_on_safety_failure": { "status": "missing", "artifacts": [] }
+  }
+}

@@ -4,21 +4,39 @@ All notable changes to teami are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/) flavored; versions are
 the `version` field in `package.json`.
 
+Historical entries: released-version sections preserve what shipped at that
+time and are not current product guidance. Retired hosted, GitHub App, broker,
+or supervisor designs mentioned there are superseded. Use
+[`README.md`](README.md) and the current trust contracts for today's supported
+local-first product path.
+
 ## [Unreleased]
 
 ### Changed
 
-- Public setup defaults and setup docs now target the Teami-operated
-  hosted public beta endpoint instead of the reserved launch-gated host.
+- Teami's supported path is local-first and zero-hosted: foreground Linear
+  polling, the adopter's OAuth grant, ambient local git/`gh` authority, and
+  local Phoenix.
+- Conversational MCP setup is the primary experience, with the CLI retained as
+  a fallback and operator surface.
+- Product-repo write-capable execution remains unshipped and fail-closed.
 
 ### Fixed
 
-- CLI help flags now return usage before setup configuration, credential, OAuth,
-  or external mutation work.
-- Setup validates reserved hosted URLs before Linear OAuth, team creation, or
-  webhook registration.
-- Reset cleanup now removes local setup-incomplete state when webhook creation
-  failed before a webhook id was recorded.
+- CLI help flags return usage before setup configuration, credential, OAuth, or
+  external mutation work.
+- Reset cleanup removes local setup-incomplete state left by an interrupted or
+  failed setup attempt.
+- Deterministic tests now isolate every test process from the adopter's real
+  `TEAMI_HOME`, safely clean runner-owned state, and support an explicit
+  disposable `TEAMI_TEST_HOME` parent.
+- The verification path now includes static checks for undeclared globals,
+  unused values, unresolved imports, and named-export drift across current
+  JavaScript modules, including live acceptance and publication tooling outside normal test
+  imports.
+- Setup recovery no longer depends on remote callbacks or remote wake state.
+- Current trust docs no longer present retired infrastructure as supported or
+  planned behavior.
 - The lockfile includes the root `UNLICENSED` metadata that npm writes during a
   fresh install.
 

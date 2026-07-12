@@ -6,35 +6,36 @@ Start in shadow mode, then move to a low-risk pilot, then expand permissions
 only after the workflow proves that it improves clarity and reduces coordination
 load.
 
-Shadow mode and dry-run are rollout tools, not the intended steady-state product
-UX. In the real roadmap decomposition workflow, the human approval moment is
-moving a Linear project to `Planned`. Teami should then decompose the
-project non-interactively or record a visible paused, rejected, or repair-needed
-state before unsafe mutation; it should not add a routine human approval screen
-for the generated decomposition.
+Shadow mode and dry-run are rollout tools, not the intended steady-state
+product UX. In the roadmap decomposition workflow, the human approval moment is
+moving a Linear project to `Planned`. Teami should then decompose the project
+non-interactively or record a visible paused, rejected, or repair-needed state
+before unsafe mutation; it should not add a routine human approval screen for
+the generated decomposition.
 
 ## Phase 1: Shadow Mode
 
-Teami observes an existing project from roadmap to release. No
-generated artifact becomes official unless the team chooses to use it.
+Teami observes an existing project from roadmap to release. No generated
+artifact becomes official unless the team chooses to use it.
 
 Success means the team says, "This would have saved us time or improved
 clarity."
 
 ## Phase 2: Sandbox Pilot
 
-Use a low-risk project in a disposable or internal repo.
+Use a low-risk project with disposable or internal resources.
 
 Connect:
 
 - Test Linear workspace or low-risk Linear project.
-- Teami browser authorization through `teami init`, using the
-  adopter's own Linear OAuth grant.
+- Teami plugin installation in the adopter's coding tool.
+- Teami browser authorization, using the adopter's own Linear OAuth grant.
+- MCP planning tools for project creation, body writing, and moving to Planned.
 - Local gateway polling for projects in the trigger state; Linear is the queue.
 - A dedicated Teami behavior repo for process-change proposals.
 - The adopter's own git/`gh` auth for behavior-repo proposal branches and PRs.
 - Local agent runtimes for PM, Sr Eng, and execution agents.
-- Managed or reused local Phoenix for trace inspection and self-improvement.
+- Local Phoenix for trace inspection and self-improvement evidence.
 
 Avoid:
 
@@ -46,6 +47,8 @@ Avoid:
 The pilot boundary is local-first. The external authorities are the adopter's
 Linear OAuth grant and the adopter's GitHub session. Evaluation should use
 disposable or low-risk resources with clear revocation and cleanup steps.
+There is no hosted inbox, GitHub App, token broker, retained admin authority, or
+always-running service in the supported path.
 
 ## Phase 3: Controlled Production Pilot
 
@@ -55,7 +58,7 @@ Recommended lane:
 
 - Linear project decomposition.
 - Agent-ready Linear issue creation.
-- Pull request draft generation.
+- Pull request draft generation when the product-repo capability is enabled.
 - Review report.
 - Release note draft.
 - Local Phoenix trace and snapshot capture for each agent-driven Linear change.
@@ -78,166 +81,155 @@ decides otherwise.
 
 ## Current Technical Preview Shape
 
-The current runnable setup is two commands:
+Teami is installed as a Claude Code plugin. The plugin launches Teami's stdio
+MCP server with an exact `npx -y @shulmansj/teami@<version> mcp` command, and
+Teami keeps local state under
+the adopter's per-user Teami home.
 
-```bash
-npm install
-./teami init
-```
+The preview has three adopter-facing surfaces:
 
-`teami` is a repo-local launcher (macOS/Linux `./teami <cmd>`, Windows
-cmd.exe `teami <cmd>`, PowerShell `.\teami.cmd <cmd>`); the `npm run
-<script>` forms remain as a fallback. `teami init` folds in the runtime check
-and a final health gate and ends on a green summary, then points at `teami
-gateway start`. After setup, the committed `AGENTS.md`/`CLAUDE.md` companion is
-the post-setup surface: open a claude/codex session in the folder and it adds
-domains, repairs red checks, and starts the gateway by running these same
-deterministic commands.
+- Setup and repair: `init_onboarding` through MCP as the primary conversational
+  path, or `npx -y @shulmansj/teami@release init` /
+  `npx -y @shulmansj/teami@release doctor` through the thin CLI fallback.
+- Planning: MCP tools `resolve_domain`, `project_create`,
+  `project_write_body`, and `project_move_status`.
+- Running: `npx -y @shulmansj/teami@release gateway start` to poll Linear for
+  Planned projects, and `npx -y @shulmansj/teami@release gateway status` for a
+  one-pass snapshot.
 
-The target audience is a product-manager persona, not an infra operator. The
-detailed self-improvement interaction model, including local-supervisor consent,
-PM-facing status routing, machine-off limits, and no-third-eval-UI boundaries,
-is owned in [self-improvement.md](self-improvement.md).
+`npx -y @shulmansj/teami@release init` authorizes Linear in the browser and uses
+Linear GraphQL to set up
+the Teami team, labels, project status mappings, project template, generated
+cache, local gateway state, local Phoenix, and local OAuth credential. No API
+key is required. If the Principal Escalation project status is missing, setup
+asks once for Linear admin approval to create that one status, then discards the
+admin token and verifies remote revocation. If revocation cannot be verified,
+Teami leaves a durable repair marker and will not claim setup complete.
 
-`teami init` authorizes Linear in the browser and uses Linear GraphQL to set
-up the Teami team, labels, project status mappings, project template,
-generated cache, local gateway state, managed or reused local Phoenix, and local
-OAuth credential. No API key or Linear admin scope is required.
-Setup can also run a GitHub connection phase for the Teami behavior
-repo. It creates or verifies a dedicated behavior repo, keeps starter/template
-remotes only as template state, verifies local git/`gh` access, and checks
-whether behavior-change PR generation can work. The behavior-repo path is for
+CLI and MCP setup share one effects disclosure, one exclusive local setup
+writer, and one live-health contract. The MCP flow returns the authorization
+URL before the callback completes and resumes by `setup_id`; OAuth codes, PKCE
+material, and tokens are never written to setup state. Product-repository intent
+must be explicit: either a non-code team or an owner/repo allowlist.
+
+MCP and CLI setup must disclose the same complete effect set and require
+explicit consent before mutation: workspace-wide Linear read/write access; the
+possible one-time, non-retained admin approval; product-repo allowlisting;
+behavior-repo creation or connection through ambient git/`gh`; Claude plugin
+registration; and local Teami, runtime, and Phoenix state. A successful setup
+result is valid only when the shared final health contract says every required
+phase is healthy; non-blocking degradation must be named with a repair action.
+
+Setup can also run a GitHub connection phase for the Teami behavior repo. It
+creates or verifies a dedicated behavior repo, keeps starter/template remotes
+only as template state, verifies local git/`gh` access, and checks whether
+behavior-change PR generation can work. The behavior-repo path is for
 reviewable process-change proposals; it is distinct from product-repo grants
 and must not be treated as product-repo access. Grant product repos to a domain
-with `teami domain grant <id> --repo <owner/name>`; for example,
-`teami domain grant main --repo owner/product-app`. The grant records the
-product repo's `owner/repo` and default branch. No local checkout path is
-recorded.
-`teami github:init` repairs only the behavior-repo GitHub phase when a prior
-init was interrupted.
+with `npx -y @shulmansj/teami@release domain grant <id> --repo <owner/name>`.
+The grant records the product repo's `owner/repo` and default branch. No local
+checkout path is recorded, and product-repo execution is not shipped.
 
 Linear setup uses the adopter's read/write OAuth grant locally through GraphQL.
 The local gateway polls current project state and records local wake state
-before the Workflow Runner re-reads Linear and applies mutation gates. Agentic
-Factory does not store GitHub secrets; behavior-repo writes use the adopter's
-existing git/`gh` authority.
+before the Workflow Runner re-reads Linear and applies mutation gates. Teami
+does not store GitHub secrets; behavior-repo writes use the adopter's existing
+git/`gh` authority.
 
-Local Phoenix is managed from the adopter machine. `teami init` installs or
-reuses Phoenix on a loopback endpoint, starts it when needed, records service
-metadata under `.agent-shell/phoenix-service.json`, and prints the Phoenix UI
-URL. When Phoenix is available, init also emits and verifies a synthetic
-preflight trace. If Phoenix setup is degraded, Linear onboarding can still
-finish, but trace health is recorded locally and repair commands are printed.
+Local Phoenix is managed from the adopter machine. Setup installs or reuses the
+carried runtime/Phoenix path, starts Phoenix when needed, records service
+metadata under local Teami state, and prints the Phoenix UI URL. If Phoenix is
+degraded, Linear onboarding can still finish, but trace health is recorded
+locally and repair commands are printed.
 
-A local supervisor exists behind one explicit init-time consent; OS
-login/autostart registration is not yet live, so `teami runner` remains the
-required manual sandbox/operator command for claiming queued decomposition
-work. It is not the target adopter UX.
+Service-specific package commands exist for repair, testing, and maintainer
+rehearsal:
 
-Service-specific commands exist for repair, testing, and maintainer rehearsal:
+- `npx -y @shulmansj/teami@release init`
+- `npx -y @shulmansj/teami@release doctor`
+- `npx -y @shulmansj/teami@release domain show <id>`
+- `npx -y @shulmansj/teami@release domain grant <id> --repo <owner/name>`
+- `npx -y @shulmansj/teami@release domain revoke <id> --repo <owner/name>`
+- `npx -y @shulmansj/teami@release phoenix:doctor`
+- `npx -y @shulmansj/teami@release phoenix:start`
+- `npx -y @shulmansj/teami@release phoenix:stop`
+- `npx -y @shulmansj/teami@release phoenix status`
+- `npx -y @shulmansj/teami@release phoenix:preflight`
+- `npx -y @shulmansj/teami@release phoenix:annotate-trace`
+- `npx -y @shulmansj/teami@release phoenix:promote-run`
 
-- `init:linear`
-- `doctor:linear`
-- `uninstall:linear`
-- `reset:linear`
-- `teami domain show <id>`
-- `teami domain grant <id> --repo <owner/name>`
-- `teami domain revoke <id> --repo <owner/name>`
-- `phoenix:doctor`
-- `phoenix:start`
-- `phoenix:stop`
-- `phoenix:status`
-- `preflight:phoenix`
-- `phoenix:annotate-trace`
-- `phoenix:promote-run`
-
-The adopter-facing cleanup command is:
-
-```bash
-./teami uninstall
-```
-
-`teami reset` is maintainer-only clean-slate rehearsal for local onboarding
-tests. It should not become the adopter exit path.
+The adopter-facing cleanup command is
+`npx -y @shulmansj/teami@release uninstall`.
+`npx -y @shulmansj/teami@release reset` is maintainer-only clean-slate
+rehearsal for local onboarding tests. It should not become the adopter exit
+path.
 
 ## Product-Repo Binding
 
-Product-repo grants are local and explicit. `teami domain grant` adds a
-GitHub repo identity to a domain as a `git_repo` resource, and `teami domain
-revoke` removes it. Each grant records `owner/repo` and default branch only.
+Product-repo grants are local and explicit.
+`npx -y @shulmansj/teami@release domain grant` adds a GitHub repo identity to a
+domain as a `git_repo` resource, and
+`npx -y @shulmansj/teami@release domain revoke` removes it. Each grant records
+`owner/repo` and default branch only.
 
 The trust boundary is narrow: product-repo binding is repo-selection scoping
 for one selected GitHub repo, plus the foundation for sanitized per-run
 clone/cwd selection in domain-scoped execution work. It is not OS isolation,
 container isolation, behavior-repo proposal authority, or an all-repositories
-GitHub grant.
-Local run state stays on the adopter's machine and must not appear in public
-examples, prompts, logs, traces, or export artifacts.
+GitHub grant. Local run state stays on the adopter's machine and must not
+appear in public examples, prompts, logs, traces, or export artifacts.
 
-### Execution Clone Containment Known Limits
+### Execution Readiness Boundary (Not Shipped)
 
-Execution materializes the code worker's copy as a fresh per-run shallow clone
-of the selected repo's GitHub remote. The initial clone/fetch uses the
-adopter's ambient local GitHub authority non-interactively. Before the worker
-uses the directory, the clone has isolated `HOME`/`USERPROFILE`, an empty
-global git config and template directory, `GIT_CONFIG_NOSYSTEM=1`, no remotes,
-neutralized repo-local credential and hook config, `GIT_TERMINAL_PROMPT=0`, and
-no askpass or SSH agent socket in the runtime environment. The engine-side git
-effect is responsible for the later authenticated push/PR step.
+Product-repo write-capable execution is not shipped. The repository contains a
+prototype materializer and execution workflow code, but those modules are not
+a supported permission to edit, commit, push, or open product-repo PRs. Any
+future activation must first prove a fresh per-run clone, bounded Git effects,
+credential and tool isolation, domain confinement, staged-content guards, and
+no push when a safety gate fails.
 
 Known limits:
 
-- Network egress is not locked by this containment layer. The worker should not
-  receive git push credentials, but this is not a firewall or container sandbox.
-- The worker can still produce a large local diff inside the clone. The later
-  git effect must enforce runaway-diff bounds before any push.
+- Network egress is not locked by the prototype containment layer. A future
+  worker should not receive git push credentials, but this is not a firewall or
+  container sandbox.
+- A future worker could still produce a large local diff inside the clone. The
+  later git effect must enforce runaway-diff bounds before any push.
 - If the selected GitHub remote cannot be cloned with local ambient auth,
-  materialization fails before the worker starts.
+  future materialization must fail before the worker starts.
 
 ## Suggested Sandbox Run
 
-Use this path to verify the current Linear slice. Or skip the command list: open
-a claude/codex session in the factory folder and the committed
-`AGENTS.md`/`CLAUDE.md` companion walks you through the same steps, running the
-commands for you.
+Use this path to verify the current Linear slice. Or ask the companion to walk
+you through it.
 
-1. Run `npm install`.
-2. Run `./teami init` (Windows: `teami init` / `.\teami.cmd init`). It
-   authorizes Linear and GitHub in your browser, folds in the runtime check and a
-   final health gate, and ends on a green summary — no separate `doctor` or
-   `runtime-smoke` step. Re-run it to repair; it is idempotent and resumable.
-3. Create one disposable Linear project in the Teami team with a
-   non-empty body. The repo template at
-   [../execution/templates/linear-roadmap-project-body.md](../execution/templates/linear-roadmap-project-body.md)
-   is an optional drafting aid, not a validation contract.
-4. Run `./teami gateway start` so it polls Linear, creates local wake-ups, and
-   runs the Workflow Runner against eligible projects. It runs until Ctrl-C; keep
-   the terminal open while you want the factory listening. (Always-on autostart
-   after login is a later capability.)
-5. Move the Linear project to `Planned` when the human owner approves
+1. Install the Teami plugin.
+2. Start setup from the agent with `init_onboarding`, or run
+   `npx -y @shulmansj/teami@release init`. Approve Linear in your browser; GitHub effects
+   use your existing local git/`gh` session.
+3. Create one disposable Linear project through MCP, or select an existing
+   project in the Teami team with a non-empty body.
+4. Start the local gateway with
+   `npx -y @shulmansj/teami@release gateway start`. It runs until Ctrl-C; keep
+   that terminal open while you want Teami listening.
+5. Move the Linear project to `Planned` only after the human owner approves
    non-interactive decomposition. The running gateway picks it up.
-6. Check progress with `./teami gateway status` (a one-pass wake/run view), and
-   open the local Phoenix UI URL printed by init/status to inspect the run trace
-   and phase spans. Internal states such as `dead_letter` are translated to
-   repair-needed product copy before they reach adopter-primary surfaces.
+6. Check progress with `npx -y @shulmansj/teami@release gateway status`, and
+   open the local Phoenix UI URL printed by setup/status to inspect the run
+   trace and phase spans. Internal states such as `dead_letter` are translated
+   to repair-needed product copy before they reach adopter-primary surfaces.
 7. Move or delete test artifacts after the check.
 
-At this point, Teami has proven GraphQL-backed Linear setup, local
-gateway polling, local wake lease/replay behavior, exact project update
-posting, project-body Open Questions replacement, issue creation,
-deterministic idempotency behavior, and fail-closed terminal handling for
-unsafe partial mutation states. Local Phoenix trace export should be verified
-separately on the adopter machine. It has not proven pull request generation,
-dev-agent dispatch, review automation, release automation, or cloud agent
-execution.
+At this point, Teami has proven GraphQL-backed Linear setup, local gateway
+polling, local wake lease/replay behavior, exact project update posting,
+project-comment pause questions, issue creation, deterministic idempotency
+behavior, and fail-closed terminal handling for unsafe partial mutation states.
+Local Phoenix trace export should be verified separately on the adopter
+machine.
 
 ## Permission Model
 
 Start with the narrowest useful permissions.
-
-The Linear credential contract is owned by
-[../execution/integrations/linear/README.md](../execution/integrations/linear/README.md).
-This section applies that contract to pilot rollout.
 
 Linear:
 
@@ -250,24 +242,25 @@ Linear:
 
 GitHub:
 
-- Create or verify a dedicated Teami behavior repo during setup using
-  the adopter's local git/`gh` auth.
-- Grant product repos separately per domain with `teami domain grant`; keep
-  that separate from behavior-repo setup, and do not treat behavior-repo
-  authority as product-repo authority.
+- Create or verify a dedicated Teami behavior repo during setup using the
+  adopter's local git/`gh` auth.
+- Grant product repos separately per domain with
+  `npx -y @shulmansj/teami@release domain grant`; keep that separate from
+  behavior-repo setup, and do not treat behavior-repo authority as
+  product-repo authority.
 - Keep proposal automation scoped to the configured behavior repo remote.
 - Read repo metadata.
 - Create branches and push proposal commits.
 - Open pull requests and update controller-owned PR bodies/state.
-- Read open and closed pull request metadata for candidate dedupe, rejection
-  memory. Future automated acceptance remains a separate product/trust decision.
+- Read open and closed pull request metadata for candidate dedupe and rejection
+  memory. Future automated acceptance remains a separate product/trust
+  decision.
 - Avoid retained repository-administration authority and avoid PR comment
   permissions in MVP unless the product intentionally adds them later.
 
 Local:
 
-- Run in a dedicated workspace.
-- Write ignored run artifacts under `.teami/`.
+- Keep Teami state local to the adopter's machine.
 - Use project test commands.
 
 Do not grant organization-wide write permissions during the first pilot.
@@ -276,7 +269,7 @@ Do not grant organization-wide write permissions during the first pilot.
 
 Before claiming a platform is supported for a pilot, verify:
 
-- The platform can run the Teami repo and complete browser OAuth.
+- The platform can install the Teami plugin and complete browser OAuth.
 - The GraphQL client can read the source Linear project.
 - The GraphQL client can post a project update with exact authored Markdown.
 - The workflow can capture and persist the accepted run artifact before Linear
@@ -306,7 +299,7 @@ Until those checks pass, the platform is not in the supported path.
 | Permissions are too broad | Security and trust risk. | Narrow pilot permissions. |
 | Local auth scope feels surprising | The adopter may distrust onboarding. | Explain that Linear uses read/write OAuth locally, behavior-repo writes use the adopter's own git/`gh` auth, and Teami stores no GitHub secret. |
 | Workflow changes are not traceable | The system cannot learn from successes or failures. | Persist run artifacts and trace links before treating a run as successful. |
-| Onboarding becomes a pile of commands | The adopter loses trust before seeing value. | Keep one top-level init as the golden path and leave service-specific commands for repair and testing. |
+| Onboarding becomes a pile of commands | The adopter loses trust before seeing value. | Keep one setup path and leave service-specific commands for repair and testing. |
 | Local Phoenix is down | Self-improvement evidence is missing for a run. | Continue real work, record local trace failure receipts and health counters, and repair with Phoenix commands. |
 
 ## Adoption Pitch

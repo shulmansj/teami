@@ -49,6 +49,7 @@ export const PROTECTED_SLOTS = Object.freeze({
     { path: "docs/contracts/meta-change-classifier-contract.md", class: "meta_change", surface: "protected_path_map" },
     { path: "docs/contracts/teami-product-trust-record.md", class: "meta_change", surface: "product_trust_contract" },
     { path: "docs/contracts/authority-custody-defaults.md", class: "authority_change", surface: "authority_custody_contract" },
+    { path: "execution/integrations/linear/test/trust-doc-contract.test.mjs", class: "meta_change", surface: "trust_doc_guard" },
     { path: "docs/promotion-acceptance-policy.md", class: "meta_change", surface: "promotion_acceptance_policy" },
     { path: "docs/self-improvement.md", class: "meta_change", surface: "self_improvement_contract" },
     { path: decompositionEvalNamespacePath("readme.md"), class: "meta_change", surface: "eval_contract" },
@@ -84,8 +85,6 @@ export const PROTECTED_SLOTS = Object.freeze({
     { path: "execution/integrations/linear/src/improvement-drafter.mjs", class: "meta_change", surface: "improvement_drafter" },
     { path: "execution/integrations/linear/src/phoenix-self-improvement.mjs", class: "meta_change", surface: "phoenix_self_improvement" },
     { path: "execution/integrations/linear/src/phoenix-experiment.mjs", class: "meta_change", surface: "phoenix_experiment" },
-    { path: "execution/integrations/linear/src/local-supervisor.mjs", class: "meta_change", surface: "supervisor" },
-    { path: "execution/integrations/linear/src/cli/supervisor-command.mjs", class: "meta_change", surface: "supervisor" },
     { path: "execution/integrations/linear/src/foreground-runner.mjs", class: "meta_change", surface: "foreground_runner" },
     { path: "execution/integrations/linear/src/cli/runner-command.mjs", class: "meta_change", surface: "foreground_runner" },
     { path: "execution/engine/workflow-registry.mjs", class: "meta_change", surface: "workflow_registry" },
@@ -116,7 +115,6 @@ export const PROTECTED_SLOTS = Object.freeze({
     { prefix: `${DECOMPOSITION_EVAL_NAMESPACE}/rubrics/`, class: "meta_change", surface: "rubric" },
     { prefix: "execution/integrations/linear/src/promotion/", class: "meta_change", surface: "promotion_machinery" },
     { prefix: "execution/integrations/linear/src/promotion-scanner/", class: "meta_change", surface: "promotion_scanner" },
-    { prefix: "execution/integrations/linear/src/supervisor/", class: "meta_change", surface: "supervisor" },
     { prefix: "execution/integrations/linear/src/workflows/", class: "meta_change", surface: "workflow" },
     { prefix: "execution/engine/", class: "meta_change", surface: "integration_source_default", broad_default: true },
     { prefix: "execution/integrations/linear/src/", class: "meta_change", surface: "integration_source_default", broad_default: true },
@@ -183,7 +181,6 @@ const SENSITIVE_PACKAGE_SCRIPT_PATTERNS = Object.freeze([
   /^runner$/,
   /^runtime-smoke$/,
   /^trigger-status$/,
-  /^supervisor(?::|$)/,
   /^github:init$/,
   /^init(?::linear)?$/,
   /^reset(?::linear)?$/,
@@ -221,12 +218,12 @@ const AUTHORITY_HUNK_PATTERNS = Object.freeze([
   {
     id: "authority_unattended_write_path",
     surface: "unattended_write_path",
-    pattern: /\b(?:scanner|supervisor|unattended|foreground runner|workflow trigger)[\s\S]{0,120}\b(?:write|create(?:s)? (?:production )?(?:proposal|pull request|pr)|open(?:s)? (?:production )?(?:proposal|pull request|pr)|push|promoteCandidate|githubTransport|production transport)\b/i,
+    pattern: /\b(?:scanner|unattended|foreground runner|workflow trigger)[\s\S]{0,120}\b(?:write|create(?:s)? (?:production )?(?:proposal|pull request|pr)|open(?:s)? (?:production )?(?:proposal|pull request|pr)|push|promoteCandidate|githubTransport|production transport)\b/i,
   },
   {
     id: "authority_unattended_write_path_reversed",
     surface: "unattended_write_path",
-    pattern: /\b(?:write|create(?:s)? (?:production )?(?:proposal|pull request|pr)|open(?:s)? (?:production )?(?:proposal|pull request|pr)|push|promoteCandidate|githubTransport|production transport)[\s\S]{0,120}\b(?:scanner|supervisor|unattended|foreground runner|workflow trigger)\b/i,
+    pattern: /\b(?:write|create(?:s)? (?:production )?(?:proposal|pull request|pr)|open(?:s)? (?:production )?(?:proposal|pull request|pr)|push|promoteCandidate|githubTransport|production transport)[\s\S]{0,120}\b(?:scanner|unattended|foreground runner|workflow trigger)\b/i,
   },
   {
     id: "authority_ci_or_workflow",
@@ -497,7 +494,7 @@ function classifyOneChange(change) {
       id: "unknown_sensitive_package_script",
       className: "unknown_sensitive",
       filePath,
-      detail: "package.json script hunk touches promotion, scanner, runner, supervisor, GitHub setup, eval gate, or test authority",
+      detail: "package.json script hunk touches promotion, scanner, runner, GitHub setup, eval gate, or test authority",
       surface: "package_script_authority",
     });
     return { classes, reasons, surfaces, protectedPaths };

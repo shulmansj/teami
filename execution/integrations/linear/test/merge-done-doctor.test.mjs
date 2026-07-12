@@ -2,10 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  MERGE_DONE_AUTOMATION_CHECK_NAME,
+  MERGE_PATH_AF_REVIEW_CHECK_NAME,
+  MERGE_PATH_DONE_CHECK_NAME,
+  MERGE_PATH_GITHUB_CHECK_NAME,
+  doctorMergePathAfReviewCheck,
+  doctorMergePathGitHubCheck,
   doctorLinear,
-  mergeDoneAutomationVerdict,
 } from "../src/linear/doctor-service.mjs";
+import {
+  AF_REVIEW_STATUS_CONTEXT,
+} from "../src/execution-pr-adapter.mjs";
 
 const CONFIG = Object.freeze({
   linear: {
@@ -14,78 +20,105 @@ const CONFIG = Object.freeze({
       name: "Teami",
     },
     project: {
-      labels: {
-        has_open_questions: "Has Open Questions",
-      },
       statuses: {
         backlog: { name: "Backlog", type: "backlog" },
         planned: { name: "Planned", type: "planned" },
         in_progress: { name: "In Progress", type: "started" },
         completed: { name: "Completed", type: "completed" },
+        needs_principal: { name: "Principal Escalation", type: "planned" },
       },
       template_name: "Teami Roadmap Item",
     },
     issue: {
       labels: {
         discovery: "Discovery",
-        needs_principal: "Needs Principal",
+        human_review: "human-review",
       },
       statuses: {
         backlog: { name: "Backlog", type: "backlog" },
         todo: { name: "Todo", type: "unstarted" },
         in_progress: { name: "In Progress", type: "started" },
         in_review: { name: "In Review", type: "started" },
-        blocked: { name: "Blocked", type: "started" },
+        human_review: { name: "Principal Review", type: "started" },
+        needs_principal: { name: "Principal Escalation", type: "started" },
         done: { name: "Done", type: "completed" },
       },
     },
   },
 });
 
-test("doctor passes the merge-to-Done check when Linear merge automation targets Done", async () => {
+test("doctor reports merge-path Done and af-review checks without requiring Linear merge automation", async () => {
   const result = await doctorLinear({
-    client: new DoctorClient({
-      automation: {
-        mergeWorkflowState: { id: "state-done", name: "Done", type: "completed" },
-        gitAutomationStates: [],
-      },
-    }),
+    client: new DoctorClient(),
     config: CONFIG,
     cache: healthyCache(),
   });
 
-  const check = mergeDoneCheck(result);
+  const doneCheck = mergePathDoneCheck(result);
+  const afReviewCheck = checkByName(result, MERGE_PATH_AF_REVIEW_CHECK_NAME);
   assert.equal(result.healthy, true);
-  assert.equal(check.ok, true);
-  assert.match(check.message, /PR merge automation is wired/);
-  assert.match(check.message, /Done \(completed\)/);
+  assert.equal(doneCheck.ok, true);
+  assert.match(doneCheck.message, /Done \(completed\)/);
+  assert.equal(afReviewCheck.ok, true);
+  assert.match(afReviewCheck.message, new RegExp(AF_REVIEW_STATUS_CONTEXT));
+  assert.equal(result.checks.some((check) => /merge-to-Done automation/.test(check.name)), false);
   assert.equal(checkByName(result, "issue status mappings").ok, true);
-  assert.equal(checkByName(result, "issue label Needs Principal").ok, true);
+  assert.equal(result.checks.some((check) => check.name === "project label Has Open Questions"), false);
+  assert.equal(result.checks.some((check) => check.name === "issue label Needs Principal"), false);
+  assert.equal(checkByName(result, "issue label human-review").ok, true);
 });
 
-test("doctor fails the merge-to-Done check with the dependency-stall message when not wired", async () => {
+test("doctor issue status mapping failure tells the adopter to rerun setup provisioning", async () => {
+  const cache = healthyCache();
+  delete cache.issueStatuses.needs_principal;
+
   const result = await doctorLinear({
-    client: new DoctorClient({
-      automation: {
-        mergeWorkflowState: null,
-        gitAutomationStates: [],
-      },
-    }),
+    client: new DoctorClient(),
+    config: CONFIG,
+    cache,
+  });
+
+  const check = checkByName(result, "issue status mappings");
+  assert.equal(result.healthy, false);
+  assert.equal(check.state, "fail");
+  assert.equal(check.ok, false);
+  assert.equal(check.fix, "npm run init");
+  assert.match(check.message, /Cached Linear issue status needs_principal is missing/);
+  assert.match(check.message, /provision Linear issue statuses/);
+});
+
+test("doctor stays green when external merge-to-Done automation is absent", async () => {
+  const result = await doctorLinear({
+    client: new DoctorClient(),
     config: CONFIG,
     cache: healthyCache(),
   });
 
-  const check = mergeDoneCheck(result);
+  assert.equal(result.healthy, true);
+  assert.equal(mergePathDoneCheck(result).ok, true);
+  assert.equal(result.checks.some((check) => /automation/.test(check.name)), false);
+});
+
+test("doctor fails loud when the cached Done issue status id is missing", async () => {
+  const cache = healthyCache();
+  delete cache.issueStatuses.done;
+
+  const result = await doctorLinear({
+    client: new DoctorClient(),
+    config: CONFIG,
+    cache,
+  });
+
+  const check = mergePathDoneCheck(result);
   assert.equal(result.healthy, false);
   assert.equal(check.ok, false);
-  assert.match(check.message, /merge-to-Done automation is not wired/);
-  assert.match(check.message, /Dependents will stall until you wire this automation/);
-  assert.match(check.message, /move issues manually after merging/);
+  assert.match(check.message, /Cached Linear issue status done is missing/);
 });
 
-test("doctor fails loud when a required cached issue status id is missing", async () => {
+test("doctor fails legacy caches that have no app identity", async () => {
   const cache = healthyCache();
-  delete cache.issueStatuses.in_review;
+  delete cache.app_identity_id;
+  delete cache.app_identity_name;
 
   const result = await doctorLinear({
     client: new DoctorClient({
@@ -98,13 +131,51 @@ test("doctor fails loud when a required cached issue status id is missing", asyn
     cache,
   });
 
-  const check = checkByName(result, "issue status mappings");
+  const check = checkByName(result, "app identity");
   assert.equal(result.healthy, false);
   assert.equal(check.ok, false);
-  assert.match(check.message, /Cached Linear issue status in_review is missing/);
+  assert.equal(check.fix, "npm run init");
+  assert.match(check.message, /re-run `npm run init` to re-authorize as the app/);
 });
 
-test("doctor fails loud when a cached label id no longer resolves", async () => {
+test("doctor fails when the cached app identity differs from the live viewer", async () => {
+  const result = await doctorLinear({
+    client: new DoctorClient({
+      viewerId: "app-viewer-2",
+      automation: {
+        mergeWorkflowState: { id: "state-done", name: "Done", type: "completed" },
+        gitAutomationStates: [],
+      },
+    }),
+    config: CONFIG,
+    cache: healthyCache(),
+  });
+
+  const check = checkByName(result, "app identity");
+  assert.equal(result.healthy, false);
+  assert.equal(check.ok, false);
+  assert.equal(check.fix, "npm run init");
+  assert.match(check.message, /Cached Linear app identity app-viewer-1 does not match live viewer app-viewer-2/);
+});
+
+test("doctor accepts a cached app identity that matches the live viewer", async () => {
+  const result = await doctorLinear({
+    client: new DoctorClient({
+      automation: {
+        mergeWorkflowState: { id: "state-done", name: "Done", type: "completed" },
+        gitAutomationStates: [],
+      },
+    }),
+    config: CONFIG,
+    cache: healthyCache(),
+  });
+
+  const check = checkByName(result, "app identity");
+  assert.equal(check.ok, true);
+  assert.match(check.message, /Teami App \(app-viewer-1\)/);
+});
+
+test("doctor ignores stale cached legacy Needs Principal label ids", async () => {
   const cache = healthyCache();
   cache.issueLabels["Needs Principal"] = "ilabel-missing";
 
@@ -119,29 +190,80 @@ test("doctor fails loud when a cached label id no longer resolves", async () => 
     cache,
   });
 
-  const check = checkByName(result, "issue label Needs Principal");
-  assert.equal(result.healthy, false);
-  assert.equal(check.ok, false);
-  assert.match(check.message, /Cached Linear issue label Needs Principal=ilabel-missing no longer exists/);
+  assert.equal(result.healthy, true);
+  assert.equal(result.checks.some((check) => check.name === "issue label Needs Principal"), false);
 });
 
-test("merge-to-Done verdict accepts explicit PR-merge git automation rules", () => {
-  const check = mergeDoneAutomationVerdict({
-    teamName: "AF Teami",
-    automation: {
-      mergeWorkflowState: null,
-      gitAutomationStates: [{
-        id: "automation-1",
-        event: "pullRequestMerged",
-        branchPattern: "main",
-        state: { id: "state-done", name: "Done", type: "completed" },
-      }],
-    },
+test("doctor fails loud when the cached human-review label id is missing", async () => {
+  const cache = healthyCache();
+  delete cache.issueLabels["human-review"];
+
+  const result = await doctorLinear({
+    client: new DoctorClient({
+      automation: {
+        mergeWorkflowState: { id: "state-done", name: "Done", type: "completed" },
+        gitAutomationStates: [],
+      },
+    }),
+    config: CONFIG,
+    cache,
   });
 
+  const check = checkByName(result, "issue label human-review");
+  assert.equal(result.healthy, false);
+  assert.equal(check.ok, false);
+  assert.match(check.message, /Cached Linear issue label human-review is missing/);
+});
+
+test("af-review doctor check uses the shared execution PR adapter constant", () => {
+  const check = doctorMergePathAfReviewCheck();
   assert.equal(check.ok, true);
-  assert.match(check.message, /git automation event pullRequestMerged on main/);
-  assert.match(check.message, /Done \(completed\)/);
+  assert.match(check.message, new RegExp(AF_REVIEW_STATUS_CONTEXT));
+
+  const mismatch = doctorMergePathAfReviewCheck({ context: "review" });
+  assert.equal(mismatch.ok, false);
+  assert.match(mismatch.message, new RegExp(AF_REVIEW_STATUS_CONTEXT));
+});
+
+test("GitHub merge-path doctor check probes PR API without attempting a merge", async () => {
+  const adapter = fakePrAdapter();
+  const check = await doctorMergePathGitHubCheck({
+    repoIdentity: repoIdentity(),
+    prAdapter: adapter,
+  });
+
+  assert.equal(check.name, MERGE_PATH_GITHUB_CHECK_NAME);
+  assert.equal(check.ok, true);
+  assert.match(check.message, /Merge permission is proven at the first real merge/);
+  assert.deepEqual(adapter.calls, [{
+    method: "probePullRequest",
+    request: {
+      head: "af/execution/doctor-merge-path",
+      base: "main",
+    },
+  }]);
+});
+
+test("GitHub merge-path doctor check fails closed when PR API is unreachable", async () => {
+  const check = await doctorMergePathGitHubCheck({
+    repoIdentity: repoIdentity(),
+    prAdapter: fakePrAdapter({ probeError: new Error("github_execution_pr_auth_required") }),
+  });
+
+  assert.equal(check.ok, false);
+  assert.match(check.message, /github_execution_pr_auth_required/);
+  assert.match(check.message, /Merge permission is proven at the first real merge/);
+});
+
+test("GitHub merge-path doctor check is a warning for domains without a code repo", async () => {
+  const check = await doctorMergePathGitHubCheck({
+    repoIdentityError: "review_git_repo_resource_missing",
+  });
+
+  assert.equal(check.name, MERGE_PATH_GITHUB_CHECK_NAME);
+  assert.equal(check.state, "warn");
+  assert.equal(check.ok, true);
+  assert.match(check.message, /no code merge path is checkable/);
 });
 
 function healthyCache() {
@@ -154,10 +276,12 @@ function healthyCache() {
       planned: "status-planned",
       in_progress: "status-started",
       completed: "status-completed",
+      needs_principal: "status-principal-escalation",
     },
     projectStatusTypes: {
       backlog: "backlog",
       planned: "planned",
+      needs_principal: "planned",
       in_progress: "started",
       completed: "completed",
     },
@@ -166,21 +290,47 @@ function healthyCache() {
       todo: "state-todo",
       in_progress: "state-in-progress",
       in_review: "state-in-review",
-      blocked: "state-blocked",
+      human_review: "state-human-review",
+      needs_principal: "state-needs-principal",
       done: "state-done",
-    },
-    projectLabels: {
-      "Has Open Questions": "plabel-open",
     },
     issueLabels: {
       Discovery: "ilabel-discovery",
-      "Needs Principal": "ilabel-needs-principal",
+      "human-review": "ilabel-human-review",
+    },
+    app_identity_id: "app-viewer-1",
+    app_identity_name: "Teami App",
+  };
+}
+
+function repoIdentity() {
+  return {
+    owner: "acme",
+    repo: "product",
+    default_branch: "main",
+  };
+}
+
+function fakePrAdapter({ probeError = null } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async probePullRequest(request) {
+      calls.push({ method: "probePullRequest", request });
+      if (probeError) throw probeError;
+      return null;
+    },
+    async getCommitStatuses() {
+      throw new Error("doctor should not read statuses without a head sha");
+    },
+    async mergePullRequest() {
+      throw new Error("doctor must not perform a merge");
     },
   };
 }
 
-function mergeDoneCheck(result) {
-  return checkByName(result, MERGE_DONE_AUTOMATION_CHECK_NAME);
+function mergePathDoneCheck(result) {
+  return checkByName(result, MERGE_PATH_DONE_CHECK_NAME);
 }
 
 function checkByName(result, name) {
@@ -190,23 +340,26 @@ function checkByName(result, name) {
 }
 
 class DoctorClient {
-  constructor({ automation }) {
-    this.automation = automation;
+  constructor({ viewerId = "app-viewer-1", viewerName = "Teami App", workflowStates = null } = {}) {
+    this.viewerId = viewerId;
+    this.viewerName = viewerName;
+    this.workflowStates = workflowStates;
   }
 
-  async verifyAuth() {}
+  async verifyAuth() {
+    return { ok: true, viewerId: this.viewerId, viewerName: this.viewerName };
+  }
 
   async listTeams() {
     return [{ id: "team-1", key: "AF", name: "Teami" }];
   }
 
   async findProjectLabelsByName(name) {
-    const labels = [{ id: "plabel-open", name: "Has Open Questions" }];
-    return labels.filter((label) => !name || label.name === name);
+    return [];
   }
 
   async findIssueLabelsByName(name, teamId) {
-    const labels = ["Discovery", "Needs Principal"].map((labelName) => ({
+    const labels = ["Discovery", "human-review"].map((labelName) => ({
       id: `ilabel-${labelName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
       name: labelName,
       teamId: "team-1",
@@ -219,44 +372,26 @@ class DoctorClient {
     return [
       { id: "status-backlog", name: "Backlog", type: "backlog" },
       { id: "status-planned", name: "Planned", type: "planned" },
+      { id: "status-principal-escalation", name: "Principal Escalation", type: "planned" },
       { id: "status-started", name: "In Progress", type: "started" },
       { id: "status-completed", name: "Completed", type: "completed" },
     ];
   }
 
-  async findTemplatesByName(name, type, teamId) {
-    return (!name || name === CONFIG.linear.project.template_name) &&
-      (!type || type === "project") &&
-      (!teamId || teamId === "team-1")
-      ? [{
-        id: "template-1",
-        name: CONFIG.linear.project.template_name,
-        type: "project",
-        teamId: "team-1",
-        templateData: { content: "## Open Questions\n" },
-      }]
-      : [];
-  }
-
   async listWorkflowStates(teamId) {
     assert.equal(teamId, "team-1");
-    return [
+    return this.workflowStates || [
       { id: "state-backlog", name: "Backlog", type: "backlog" },
       { id: "state-todo", name: "Todo", type: "unstarted" },
       { id: "state-in-progress", name: "In Progress", type: "started" },
       { id: "state-in-review", name: "In Review", type: "started" },
-      { id: "state-blocked", name: "Blocked", type: "started" },
+      { id: "state-human-review", name: "Principal Review", type: "started" },
+      { id: "state-needs-principal", name: "Principal Escalation", type: "started" },
       { id: "state-done", name: "Done", type: "completed" },
     ];
   }
 
   async getTeamGitAutomationSettings(teamId) {
-    assert.equal(teamId, "team-1");
-    return {
-      id: teamId,
-      key: "AF",
-      name: "Teami",
-      ...this.automation,
-    };
+    throw new Error("doctor should not inspect Linear/GitHub merge automation");
   }
 }

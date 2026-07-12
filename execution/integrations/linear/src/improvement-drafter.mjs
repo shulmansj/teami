@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { loadLinearConfig } from "./config.mjs";
+import { loadLinearConfigAsync } from "./config.mjs";
 import { registerPromptInPhoenix } from "./decomposition-quality-judge.mjs";
 import { findTokenShapedContent } from "./eval-content-gate.mjs";
 import { resolveEvalContract } from "./eval-annotation-contract.mjs";
@@ -55,6 +55,7 @@ import {
   controllerNamespacePr,
   ensurePromotionWorkspace,
 } from "./promotion-workspace.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
 const MODULE_REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
 
@@ -77,7 +78,6 @@ const MAX_DRAFT_CONTENT_BYTES = 256 * 1024;
 const SAFE_HASH_PATTERN = /^[a-f0-9]{64}$/i;
 const SAFE_DRAFT_ID_PATTERN = /^draft-[0-9]{8}T[0-9]{9}Z-[a-f0-9]{6}$/;
 const DRAFT_CONTENT_SUFFIX = ".content.md";
-const RUNTIME_ROLE_FIELDS = Object.freeze(["runtime", "model"]);
 const DRAFT_CONTENT_PLACEHOLDER = "@@DRAFT_CONTENT@@";
 const DRAFT_CONTENT_BEGIN_DELIMITER = "-----BEGIN DRAFT CONTENT-----";
 const DRAFT_CONTENT_END_DELIMITER = "-----END DRAFT CONTENT-----";
@@ -122,8 +122,8 @@ export const UNTRUSTED_DRAFTER_OVERRIDE_KEYS = Object.freeze([
   "collectAutonomousLoopSignalSurfacesImpl",
 ]);
 
-export function defaultImprovementDraftDir(repoRoot = process.cwd()) {
-  return path.resolve(repoRoot, ".teami", "drafts");
+export function defaultImprovementDraftDir(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, "drafts");
 }
 
 export function improvementDraftReceiptPath({ draftDir, draftId } = {}) {
@@ -188,6 +188,7 @@ export function createAutonomousImprovementDrafterTestHarness(overrides = {}) {
 
 async function runAutonomousImprovementDrafterWithOverrides({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   opportunityHash = null,
   registryDir = null,
   policyPath = undefined,
@@ -201,7 +202,7 @@ async function runAutonomousImprovementDrafterWithOverrides({
   onProgress = () => {},
   ...drafterOverrides
 } = {}) {
-  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(repoRoot);
+  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(home);
   const input = resolveDraftInput({
     opportunityHash,
     registryDir: resolvedRegistryDir,
@@ -263,7 +264,7 @@ async function runAutonomousImprovementDrafterWithOverrides({
     }
     cloneDir = workspace.cloneDir;
   }
-  const policyRead = resolveTrustedPolicyReadImpl({
+  const policyRead = await resolveTrustedPolicyReadImpl({
     mode: "unattended",
     policyPath: resolvedPolicyPath,
     policyRelativePath: resolvedPolicyRelativePath,
@@ -351,6 +352,7 @@ async function runAutonomousImprovementDrafterWithOverrides({
 
 async function runImprovementDrafterWithOverrides({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   opportunityHash = null,
   targetKey = null,
   failureModeIds = [],
@@ -358,7 +360,7 @@ async function runImprovementDrafterWithOverrides({
   supersedeExistingCandidate = false,
   onProgress = () => {},
   config = null,
-  loadConfig = loadLinearConfig,
+  loadConfig = loadLinearConfigAsync,
   runCommand = runRuntimeCommand,
   githubTransport = null,
   policyPath = undefined,
@@ -388,9 +390,9 @@ async function runImprovementDrafterWithOverrides({
   experimentReceiptDir = null,
 } = {}) {
   const startedAt = now();
-  const resolvedDraftDir = draftDir || defaultImprovementDraftDir(repoRoot);
-  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(repoRoot);
-  const loadedConfig = config || loadConfig({ repoRoot });
+  const resolvedDraftDir = draftDir || defaultImprovementDraftDir(home);
+  const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(home);
+  const loadedConfig = config || await loadConfig({ repoRoot });
   const input = resolveDraftInput({
     opportunityHash,
     targetKey,
@@ -423,7 +425,7 @@ async function runImprovementDrafterWithOverrides({
   const target = resolveDraftTarget({ repoRoot, targetKey: input.target_key, definition });
   if (!target.ok) return refuse(target.reason, target.detail, { target_key: input.target_key });
 
-  const policyRead = resolveTrustedPolicyReadImpl({
+  const policyRead = await resolveTrustedPolicyReadImpl({
     mode: policyReadMode,
     policyPath: resolvedPolicyPath,
     policyRelativePath: resolvedPolicyRelativePath,
@@ -2558,7 +2560,8 @@ export function assertAppendOnlyDraftReceiptUpdate(before, after) {
 
 export async function continueImprovementDraftChain({
   repoRoot = process.cwd(),
-  draftDir = defaultImprovementDraftDir(repoRoot),
+  home = resolveTeamiHome(),
+  draftDir = defaultImprovementDraftDir(home),
   draftId = null,
   datasetName = null,
   config = null,
@@ -2684,16 +2687,17 @@ export async function continueImprovementDraftChain({
     const resolvedPolicyPath = policyPath || policyPaths.path;
     const resolvedPolicyRelativePath = policyRelativePath || policyPaths.relativePath;
 
-    const loadedConfig = config || loadLinearConfig({ repoRoot });
-    const loadedPolicy = policy || (() => {
-      const policyRead = resolveTrustedPolicyRead({
+    const loadedConfig = config || await loadLinearConfigAsync({ repoRoot });
+    let loadedPolicy = policy;
+    if (!loadedPolicy) {
+      const policyRead = await resolveTrustedPolicyRead({
         mode: "user_invoked",
         policyPath: resolvedPolicyPath,
         policyRelativePath: resolvedPolicyRelativePath,
       });
       if (!policyRead.ok) throw new Error(`${policyRead.reason}:${policyRead.detail || ""}`);
-      return policyRead.policy;
-    })();
+      loadedPolicy = policyRead.policy;
+    }
     const datasetResolution = resolveDraftExperimentDataset({ datasetName, policy: loadedPolicy });
     if (!datasetResolution.ok) {
       receipt = recordDraftChainFailure({

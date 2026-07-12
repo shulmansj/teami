@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  confirmCliSetupEffects,
   factoryLauncherCommand,
   finishSetupOutput,
+  runLinearSetupCommand,
   runFinalGate,
 } from "../src/cli/linear-setup-command.mjs";
+import {
+  SETUP_DISCLOSURE_HASH,
+  SETUP_DISCLOSURE_VERSION,
+  createSetupStateStore,
+  setupEffectsDisclosure,
+} from "../src/setup-orchestrator.mjs";
 
 const sourcePath = path.resolve(import.meta.dirname, "../src/cli/linear-setup-command.mjs");
 
@@ -19,6 +28,7 @@ test("runFinalGate passes when runtime smoke and doctor are green", async () => 
     cachePath: "linear-cache.json",
     domainId: "domain-one",
     output,
+    phoenixOk: true,
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
       { name: "domain registry", ok: true },
@@ -33,7 +43,7 @@ test("runFinalGate passes when runtime smoke and doctor are green", async () => 
   assertCall(output, "success", "Setup verified.");
 });
 
-test("runFinalGate keeps setup green when smoke fails but doctor is green", async () => {
+test("runFinalGate blocks completion when runtime smoke fails even if doctor is green", async () => {
   const output = createRecordingOutput();
   const result = await runFinalGate({
     config: {},
@@ -41,17 +51,19 @@ test("runFinalGate keeps setup green when smoke fails but doctor is green", asyn
     cachePath: "linear-cache.json",
     domainId: "domain-one",
     output,
+    phoenixOk: true,
     runSmoke: async () => ({ ok: false, results: [] }),
     runDoctor: async () => [
       { name: "domain registry", ok: true },
     ],
   });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "blocked");
   assert.equal(result.smokeOk, false);
-  assertCall(output, "warn", "Runtime check did not pass; setup will still complete.");
+  assertCall(output, "warn", "Runtime check did not pass; setup cannot be marked complete.");
   assertCall(output, "info", `You can re-run the check any time with ${factoryLauncherCommand("runtime-smoke")}.`);
-  assertCall(output, "success", "Setup verified.");
+  assert.equal(output.calls.some((call) => call.method === "success" && call.args[0] === "Setup verified."), false);
 });
 
 test("runFinalGate fails when doctor has a red check", async () => {
@@ -62,6 +74,7 @@ test("runFinalGate fails when doctor has a red check", async () => {
     cachePath: "linear-cache.json",
     domainId: "domain-one",
     output,
+    phoenixOk: true,
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
       { name: "domain registry", ok: true },
@@ -83,7 +96,7 @@ test("runFinalGate fails when doctor has a red check", async () => {
   );
 });
 
-test("runFinalGate stays green when doctor has only a warning (warn never fails onboarding)", async () => {
+test("runFinalGate reports degraded when required Phoenix is only a warning", async () => {
   const output = createRecordingOutput();
   const result = await runFinalGate({
     config: {},
@@ -94,13 +107,15 @@ test("runFinalGate stays green when doctor has only a warning (warn never fails 
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
       { name: "domain registry", ok: true },
-      { name: "local supervisor OS autostart", state: "warn", message: "DRY-RUN only" },
+      { name: "local Phoenix", state: "warn", message: "not running" },
     ],
   });
 
-  assert.equal(result.ok, true, "a warning must not fail onboarding");
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "degraded");
+  assert.equal(result.phoenixOk, false);
   assert.equal(result.doctorOk, true);
-  assertCall(output, "success", "Setup verified.");
+  assertCall(output, "warn", "Setup health is degraded; local Phoenix must pass before setup is complete.");
 });
 
 test("finishSetupOutput prints closeout on green gate and resumable warning on red gate", async () => {
@@ -146,6 +161,7 @@ test("runFinalGate is idempotent with injected fakes", async () => {
     cachePath: "linear-cache.json",
     domainId: "domain-one",
     output: createRecordingOutput(),
+    phoenixOk: true,
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
       { name: "domain registry", ok: true },
@@ -155,22 +171,93 @@ test("runFinalGate is idempotent with injected fakes", async () => {
   const first = await runFinalGate(makeArgs());
   const second = await runFinalGate(makeArgs());
 
-  assert.deepEqual(second, first);
+  const withoutObservationTimes = (result) => ({
+    ...result,
+    health: result.health.map(({ observed_at: _observedAt, ...step }) => step),
+  });
+  assert.deepEqual(withoutObservationTimes(second), withoutObservationTimes(first));
 });
 
-test("finishSetupOutput fires from both normal finish and GitHub resume paths", () => {
-  const source = fs.readFileSync(sourcePath, "utf8");
-  const callSites = [...source.matchAll(/await finishSetupOutput\(/g)];
-  assert.ok(callSites.length >= 2, `expected at least 2 finishSetupOutput call sites, found ${callSites.length}`);
+test("CLI setup uses the same disclosure and requires an explicit exact confirmation", async () => {
+  const rejectedOutput = createRecordingOutput();
+  const rejected = await confirmCliSetupEffects({
+    context: { isTTY: false },
+    output: rejectedOutput,
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.status, "consent_required");
+  assertCall(rejectedOutput, "section", "Setup effects and access");
 
-  const resumeStart = source.indexOf("if (githubResumeDomain)");
-  const resumeEnd = source.indexOf("output.step(1, totalSteps, commandOptions.runGithubPhase", resumeStart);
-  assert.notEqual(resumeStart, -1);
-  assert.notEqual(resumeEnd, -1);
-  const resumeBlock = source.slice(resumeStart, resumeEnd);
-  assert.match(resumeBlock, /await finishSetupOutput\(/);
-  assert.match(resumeBlock, /domainId:\s*githubResumeDomain\.id/);
-  assert.match(source, /domainId:\s*result\.domain\.id/);
+  let presented = null;
+  const acceptedOutput = createRecordingOutput();
+  const accepted = await confirmCliSetupEffects({
+    context: {
+      confirmSetupEffects: async (disclosure) => {
+        presented = disclosure;
+        return true;
+      },
+    },
+    output: acceptedOutput,
+  });
+  assert.equal(accepted.ok, true);
+  assert.match(presented.version, /^teami-setup-effects\/v\d+$/);
+  assert.match(presented.hash, /^[a-f0-9]{64}$/);
+  assert.equal(presented.effects.length, 6);
+  const rendered = acceptedOutput.calls.flatMap((call) => call.args).filter((value) => typeof value === "string").join("\n");
+  for (const effect of setupEffectsDisclosure().effects) {
+    assert.match(rendered, new RegExp(escapeRegExp(effect.detail)));
+    assert.match(rendered, new RegExp(escapeRegExp(effect.authority)));
+    assert.match(rendered, new RegExp(escapeRegExp(effect.retention)));
+  }
+});
+
+test("CLI setup refuses to interleave with a pending conversational setup", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-cli-active-setup-"));
+  const previousExitCode = process.exitCode;
+  try {
+    const store = createSetupStateStore({ home });
+    const active = store.start({
+      input: { domain: "Pending MCP", repo_intent: { mode: "non_code" } },
+      consent: {
+        confirmed: true,
+        version: SETUP_DISCLOSURE_VERSION,
+        hash: SETUP_DISCLOSURE_HASH,
+      },
+    });
+    store.recordPhase(active.setup_id, "linear", {
+      status: "awaiting_authorization",
+      reason: "callback_pending",
+      setupStatus: "awaiting_authorization",
+    });
+    const output = createRecordingOutput();
+    const result = await runLinearSetupCommand({
+      command: "init",
+      args: [],
+      context: {
+        home,
+        output,
+        setupStateStore: store,
+        confirmSetupEffects: async () => true,
+      },
+    });
+    assert.equal(result.status, "blocked");
+    assert.equal(result.reason, "setup_session_active");
+    assert.equal(result.setup_id, active.setup_id);
+    assert.equal(process.exitCode, 1);
+    assert.ok(output.calls.some((call) =>
+      call.method === "error" && call.args[0]?.what === "A conversational setup is waiting for authorization"));
+  } finally {
+    process.exitCode = previousExitCode;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI init is a renderer over the same resumable onboarding action as MCP", () => {
+  const source = fs.readFileSync(sourcePath, "utf8");
+  assert.match(source, /if \(command === "init"\) \{\s*return runCliSharedOnboarding\(/);
+  assert.match(source, /createProjectMcpToolActions/);
+  assert.match(source, /actions\.init_onboarding\(input\)/);
+  assert.match(source, /setupStateStore/);
 });
 
 test("factoryLauncherCommand returns the platform launcher form and appends the subcommand", () => {
@@ -232,4 +319,8 @@ function assertCall(output, method, value) {
     output.calls.some((call) => call.method === method && call.args[0] === value),
     `expected ${method} call with ${JSON.stringify(value)}`,
   );
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

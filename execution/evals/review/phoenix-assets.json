@@ -38,7 +38,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/review/accepted-prompts/reviewer.md",
-      "snapshot_sha256": "7572670cfd021ebebe00a24e6ba3e553b67fb7e063d5f7d387e98c1c85085457",
+      "snapshot_sha256": "8649536c01c5e4ead73312a41e662de24fe30a16b13045e45478e099bbc56e9c",
       "prompt_version": "unpinned-initial"
     },
     {
@@ -54,7 +54,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/review/accepted-prompts/orchestrator-governing.md",
-      "snapshot_sha256": "5ce0e16005676ec03d393b5648b7e210a6846c8391f773ae07d994c9c2ccf7f1",
+      "snapshot_sha256": "57b8ae0395994cacbc1701f295acd5c4b5137454a91b61301cecf714a80b4a7e",
       "prompt_version": "unpinned-initial",
       "_note": "The governing prompt is adopter-tunable accepted behavior, but it is excluded from the selectable reviewer roster by the review workflow definition's driver_governing_target_key."
     }

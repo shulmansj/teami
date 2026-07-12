@@ -7,22 +7,24 @@ import { configWithDomainLinearTeam } from "./domain-command-context.mjs";
 import { emptyDomainRegistry, readDomainRegistry } from "./domain-registry.mjs";
 import { buildDomainContext } from "./domain-resolver.mjs";
 import { createLinearCredentialStore } from "./linear-credential-store.mjs";
+import { formatCommand } from "./cli/operator-output.mjs";
 import { isLinearRateLimited } from "./linear-graphql-client.mjs";
 import { createLinearSetupGraphqlClient } from "./linear-setup-auth.mjs";
 import { createLocalPhoenixTraceSink } from "./local-phoenix-trace-sink.mjs";
 import { createTrace, recordSpan } from "./trace.mjs";
 import {
   createLocalTriggerStore,
+  recoverLocalMutationReconciliation,
   resolveDriverSessionHandle,
   runIsResumable,
 } from "./local-trigger-store.mjs";
-import { collectNextResumeReconciliation } from "./local-supervisor.mjs";
 import {
-  resolveInReviewIssueStatus,
   resolveIssueStatuses,
+  resolveIssueStatusRoleTarget,
 } from "./linear/shape-resolver.mjs";
-import { issueNeedsPrincipalEscalationEffect } from "./linear/issue-needs-principal-effect.mjs";
-import { knownTraceAttributes } from "./linear/matching-utils.mjs";
+import { createIssueMoveEffect } from "./linear/issue-move-effect-factory.mjs";
+import { applyNeedsPrincipalEscalationPair } from "./linear/needs-principal-comment.mjs";
+import { issueHasLabel, knownTraceAttributes } from "./linear/matching-utils.mjs";
 import {
   readRuntimeSmokeCache,
   runtimeVersionsFromRuntimeSmokeCache,
@@ -70,26 +72,39 @@ import {
   AF_REVIEW_STATUS_CONTEXT,
   createDefaultExecutionPullRequestAdapter,
   lookupAfReviewCommentByMarker,
-  parseAfReviewCommentMarker,
 } from "./execution-pr-adapter.mjs";
 import {
   REVIEW_REQUIRED_CAPABILITIES,
   REVIEW_WORKFLOW_TYPE,
 } from "./workflows/review/definition.mjs";
+import { decideMergeGateAction } from "./linear/merge-gate-decision.mjs";
+import {
+  mergePrEffect,
+  readMergeGateSnapshot,
+} from "./linear/merge-pr-effect.mjs";
+import {
+  gateBounceToInReviewEffect,
+  gateBounceToTodoEffect,
+  gateInvalidateMoveEffect,
+  gateParkMoveEffect,
+} from "./linear/merge-gate-move-effects.mjs";
+import { issueDoneEffect } from "./linear/issue-done-effect.mjs";
+import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 
-export const GATEWAY_LOCK_RELATIVE_PATH = path.join(".teami", "gateway.lock");
+export const GATEWAY_LOCK_RELATIVE_PATH = "gateway.lock";
 export const DEFAULT_GATEWAY_RUN_TIMEOUT_MS = 30 * 60 * 1000;
-export const RESUME_CRASH_SAFETY_FOLLOW_UP =
-  "Verify resume crash-safety in the poll model, or extend the replay gate to resume.";
-
+export const DEFAULT_LIVE_GATEWAY_STATUS_RETENTION = 100;
+export const DEFAULT_LIVE_GATEWAY_ITERATION_RETENTION = 25;
 const DEFAULT_CANDIDATE_PAGE_SIZE = 25;
 const TERMINAL_REPLAY_STATUSES = new Set(["completed", "paused"]);
 const EXECUTION_READY_TRIGGER_TYPE = "linear.issue.ready";
 const REVIEW_IN_REVIEW_TRIGGER_TYPE = "linear.issue.in_review";
+const MERGE_GATE_TRIGGER_TYPE = "linear.issue.merge_gate";
+const MERGE_GATE_WORKFLOW_TYPE = "merge";
 const REVIEW_PR_CREATION_GRACE_MS = 5 * 60 * 1000;
 const READY_FIX_REVIEW_DISPOSITION = "request-changes";
-export const DEFAULT_READY_FIX_MAX_AUTONOMOUS_ROUNDS = 99;
-const READY_FIX_FAILURE_REVIEW_DISPOSITIONS = new Set(["request-changes", "escalate"]);
+const WARM_RESUME_REVIEW_FAILURE_TAG = "af_review_failure_marker";
+const WARM_RESUME_LINEAR_REENTRY_TAG = "linear_todo_reentry";
 export const READY_ISSUE_SUPPRESSIBLE_REASONS = Object.freeze(new Set([
   "git_repo_empty_diff",
   "git_repo_diff_over_budget_changed_files",
@@ -106,6 +121,30 @@ const STATUS_STATES = new Set([
   "resume_attention",
   "resume_working",
 ]);
+const MERGE_GATE_ISSUE_STATUS_ROLES = Object.freeze([
+  "backlog",
+  "todo",
+  "in_progress",
+  "in_review",
+  "human_review",
+  "needs_principal",
+  "done",
+]);
+
+const mergeGateConflictBounceToTodoEffect = createIssueMoveEffect({
+  id: "merge_gate_conflict_bounce_to_todo",
+  op: "merge_gate_conflict_bounce_to_todo",
+  appliedIdentityKey: "mergeGateConflictBounceToTodoAppliedIdentity",
+  targetMissingReason: "merge_gate_conflict_todo_target_missing",
+  targetResolutionFailedReason: "merge_gate_conflict_todo_target_resolution_failed",
+  notAppliedReason: "merge_gate_conflict_not_todo",
+  defaultStatusName: "Todo",
+  resolveTarget: (ctx) => resolveMergeGateBridgeRoleTarget(ctx, "todo"),
+  resolveExpectedSource: (ctx) => resolveMergeGateBridgeRoleTarget(ctx, mergeGateBridgeExpectedSourceRole(ctx)),
+  expectedSourceMissingReason: "merge_gate_conflict_source_missing",
+  expectedSourceResolutionFailedReason: "merge_gate_conflict_source_resolution_failed",
+  sourceMismatchReason: "merge_gate_conflict_source_mismatch",
+}).effect;
 
 const pollTargetRegistry = [];
 
@@ -135,6 +174,8 @@ export function replaceGatewayPollTargetsForTest(descriptors) {
   };
 }
 
+// The Planned trigger must stay actor-agnostic: the verbal-commit path depends
+// on an app-actor move being a valid human-authorized trigger.
 const PLANNED_PROJECT_POLL_TARGET = {
   input_status: "Planned",
   listCandidates: listPlannedProjectCandidates,
@@ -185,8 +226,28 @@ const IN_REVIEW_ISSUE_POLL_TARGET = {
 
 registerPollTarget(IN_REVIEW_ISSUE_POLL_TARGET);
 
-export function gatewayLockPath(repoRoot = process.cwd()) {
-  return path.join(repoRoot, GATEWAY_LOCK_RELATIVE_PATH);
+const HUMAN_REVIEW_ISSUE_POLL_TARGET = {
+  input_status: "Principal Review",
+  listCandidates: listHumanReviewIssueCandidates,
+  process: processHumanReviewIssueCandidate,
+  inFlightKey: inReviewIssueInFlightKey,
+  order: oldestInReviewIssueFirst,
+};
+
+registerPollTarget(HUMAN_REVIEW_ISSUE_POLL_TARGET);
+
+const MERGE_GATE_WATCHLIST_POLL_TARGET = {
+  input_status: "Merge Gate Watchlist",
+  listCandidates: listMergeGateWatchlistCandidates,
+  process: processMergeGateWatchlistCandidate,
+  inFlightKey: mergeGateWatchlistInFlightKey,
+  order: oldestParkRecordFirst,
+};
+
+registerPollTarget(MERGE_GATE_WATCHLIST_POLL_TARGET);
+
+export function gatewayLockPath(home = resolveTeamiHome()) {
+  return path.join(teamiHomePaths({ home }).home, GATEWAY_LOCK_RELATIVE_PATH);
 }
 
 // Read-only gateway-lock liveness for the home screen / `gateway status` surfaces. It NEVER
@@ -195,10 +256,12 @@ export function gatewayLockPath(repoRoot = process.cwd()) {
 // created_at, and that pid is still alive (gatewayLockBreakReason === null); a missing, malformed,
 // or stale lock reports live:false. This is the reader S4 keys "listening" off of.
 export function readGatewayLockLiveness({
-  repoRoot = process.cwd(),
-  lockPath = gatewayLockPath(repoRoot),
+  repoRoot = null,
+  home = resolveTeamiHome(),
+  lockPath = gatewayLockPath(home),
   isProcessAlive = defaultIsProcessAlive,
 } = {}) {
+  void repoRoot;
   const lock = readGatewayLock(lockPath);
   if (!lock) return { present: false, live: false, breakReason: "missing_lock_file", lock: null };
   const breakReason = gatewayLockBreakReason({ lock, isProcessAlive });
@@ -206,13 +269,15 @@ export function readGatewayLockLiveness({
 }
 
 export function acquireGatewayLock({
-  repoRoot = process.cwd(),
-  lockPath = gatewayLockPath(repoRoot),
+  repoRoot = null,
+  home = resolveTeamiHome(),
+  lockPath = gatewayLockPath(home),
   now = () => new Date(),
   isProcessAlive = defaultIsProcessAlive,
   installHandlers = true,
   idGenerator = randomUUID,
 } = {}) {
+  void repoRoot;
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const createdAt = toDate(now()).toISOString();
   const token = idGenerator();
@@ -242,6 +307,7 @@ export function acquireGatewayLock({
 export async function runGatewayOnce(options = {}) {
   const {
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     acquireLock = acquireGatewayLock,
     onStatus = null,
   } = options;
@@ -252,7 +318,7 @@ export async function runGatewayOnce(options = {}) {
       onStatus?.(event);
     },
   });
-  const lock = acquireLock({ repoRoot });
+  const lock = acquireLock({ repoRoot, home });
   if (!lock.ok) {
     return {
       ok: false,
@@ -290,20 +356,30 @@ export async function runGatewayOnce(options = {}) {
 export async function runGatewayLoop(options = {}) {
   const {
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     acquireLock = acquireGatewayLock,
     onStatus = null,
     signal = null,
     sleep = defaultSleep,
     maxIterations = null,
+    statusRetentionLimit = DEFAULT_LIVE_GATEWAY_STATUS_RETENTION,
+    iterationRetentionLimit = DEFAULT_LIVE_GATEWAY_ITERATION_RETENTION,
+    runStartup = runGatewayStartup,
+    runPollIteration = runGatewayPollIteration,
   } = options;
+  assertGatewayMaxIterations(maxIterations);
+  const liveStatusRetentionLimit = liveLoopRetentionLimit({ maxIterations, retentionLimit: statusRetentionLimit });
+  const liveIterationRetentionLimit = liveLoopRetentionLimit({ maxIterations, retentionLimit: iterationRetentionLimit });
   const statuses = [];
+  let statusTotal = 0;
   const emitStatus = createStatusEmitter({
     onStatus: (event) => {
-      statuses.push(event);
+      statusTotal += 1;
+      retainRecent(statuses, event, liveStatusRetentionLimit);
       onStatus?.(event);
     },
   });
-  const lock = acquireLock({ repoRoot });
+  const lock = acquireLock({ repoRoot, home });
   if (!lock.ok) {
     return {
       ok: false,
@@ -311,24 +387,35 @@ export async function runGatewayLoop(options = {}) {
       reason: lock.reason || "gateway_already_running",
       lock,
       statuses,
+      retention: gatewayLoopRetention({
+        statusTotal,
+        statuses,
+        statusLimit: liveStatusRetentionLimit,
+        iterationTotal: 0,
+        iterations: [],
+        iterationLimit: liveIterationRetentionLimit,
+      }),
     };
   }
 
   const state = gatewayState(options);
   const iterations = [];
+  let iterationTotal = 0;
   try {
-    const startup = await runGatewayStartup({
+    const startup = await runStartup({
       ...options,
       state,
       emitStatus,
     });
     let count = 0;
     while (!signal?.aborted) {
-      iterations.push(await runGatewayPollIteration({
+      const iteration = await runPollIteration({
         ...options,
         state,
         emitStatus,
-      }));
+      });
+      iterationTotal += 1;
+      retainRecent(iterations, iteration, liveIterationRetentionLimit);
       count += 1;
       if (maxIterations !== null && count >= maxIterations) break;
       await sleep(pollIntervalMs(options), { signal });
@@ -339,26 +426,82 @@ export async function runGatewayLoop(options = {}) {
       startup,
       iterations,
       statuses,
+      retention: gatewayLoopRetention({
+        statusTotal,
+        statuses,
+        statusLimit: liveStatusRetentionLimit,
+        iterationTotal,
+        iterations,
+        iterationLimit: liveIterationRetentionLimit,
+      }),
     };
   } finally {
     lock.release?.();
   }
 }
 
+function assertGatewayMaxIterations(maxIterations) {
+  if (maxIterations === null) return;
+  if (!Number.isInteger(maxIterations) || maxIterations <= 0) {
+    throw new Error("gateway_max_iterations_must_be_a_positive_integer");
+  }
+}
+
+function liveLoopRetentionLimit({ maxIterations, retentionLimit }) {
+  if (maxIterations !== null) return null;
+  if (!Number.isInteger(retentionLimit) || retentionLimit <= 0) {
+    throw new Error("gateway_live_retention_limit_must_be_a_positive_integer");
+  }
+  return retentionLimit;
+}
+
+function retainRecent(records, value, limit) {
+  records.push(value);
+  if (limit !== null && records.length > limit) {
+    records.splice(0, records.length - limit);
+  }
+}
+
+function gatewayLoopRetention({
+  statusTotal,
+  statuses,
+  statusLimit,
+  iterationTotal,
+  iterations,
+  iterationLimit,
+}) {
+  return {
+    statuses: retentionCounts(statusTotal, statuses.length, statusLimit),
+    iterations: retentionCounts(iterationTotal, iterations.length, iterationLimit),
+  };
+}
+
+function retentionCounts(total, retained, limit) {
+  return {
+    total,
+    retained,
+    dropped: total - retained,
+    limit,
+  };
+}
+
 export async function runGatewayStartup(options = {}) {
   const {
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     config,
-    registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry(),
+    registry = readDomainRegistry({ home }) || emptyDomainRegistry(),
     domains = selectGatewayDomains({ registry }),
     idempotency = triggerIdempotency,
     createLinearClient = createGatewayLinearClient,
     runReplayProject = replayPendingMutation,
-    collectResumeReconciliation = collectNextResumeReconciliation,
+    recoverMutationState = recoverLocalMutationReconciliation,
     emitStatus = createStatusEmitter(),
     state = gatewayState(options),
   } = options;
-  if (domains.length === 0) throw new Error("no_active_domains: no active domains are configured. Run npm run init.");
+  if (domains.length === 0) throw new Error(`no_active_domains: no active domains are configured. Run ${formatCommand("init")}.`);
+
+  recoverMutationState({ repoRoot, home });
 
   const replay = [];
   for (const domain of domains) {
@@ -376,25 +519,21 @@ export async function runGatewayStartup(options = {}) {
     }));
   }
 
-  const resumeReconciliation = await collectResumeReconciliation({ repoRoot });
-  emitResumeReconciliationStatus({ report: resumeReconciliation, emitStatus });
-
   return {
     replay,
-    resumeReconciliation,
-    followUps: [RESUME_CRASH_SAFETY_FOLLOW_UP],
   };
 }
 
 export async function runGatewayPollIteration(options = {}) {
   const {
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     config,
-    registry = readDomainRegistry({ repoRoot }) || emptyDomainRegistry(),
+    registry = readDomainRegistry({ home }) || emptyDomainRegistry(),
     domains = selectGatewayDomains({ registry }),
     state = gatewayState(options),
   } = options;
-  if (domains.length === 0) throw new Error("no_active_domains: no active domains are configured. Run npm run init.");
+  if (domains.length === 0) throw new Error(`no_active_domains: no active domains are configured. Run ${formatCommand("init")}.`);
 
   const results = [];
   for (const domain of domains) {
@@ -545,6 +684,7 @@ export async function listIssueReplayMarkers(domainCtx, _page = {}) {
   const {
     domain,
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     idempotency = triggerIdempotency,
   } = domainCtx;
@@ -558,6 +698,7 @@ export async function listIssueReplayMarkers(domainCtx, _page = {}) {
     candidates: await idempotency.listGitReplayPending({
       domainId: domain.id,
       repoRoot,
+      home,
       runStoreDir,
     }),
     pageInfo: { hasNextPage: false, endCursor: null },
@@ -578,6 +719,7 @@ function issueReplayMarkerInFlightKey(marker) {
 export async function sweepIssueReplayMarker(options = {}) {
   const {
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     domain,
     client,
@@ -588,6 +730,18 @@ export async function sweepIssueReplayMarker(options = {}) {
   if (!issueId) return { action: "marker_sweep", status: "skipped", reason: "issue_id_missing", marker };
 
   const issue = await client.getIssueContext(issueId);
+  const parkRecord = await parkRecordForMarkerSweep({ ...options, repoRoot, issueId });
+  if (parkRecord) {
+    return {
+      action: "marker_sweep",
+      status: "retained",
+      reason: "park_record_present",
+      issueId,
+      runId: marker.runId,
+      stateType: issue?.state?.type || null,
+      parkRecord,
+    };
+  }
   if (issue?.state?.type !== "completed") {
     return {
       action: "marker_sweep",
@@ -604,6 +758,7 @@ export async function sweepIssueReplayMarker(options = {}) {
     objectId: issueId,
     runId: marker.runId,
     repoRoot,
+    home,
     runStoreDir,
   });
   return {
@@ -613,6 +768,14 @@ export async function sweepIssueReplayMarker(options = {}) {
     runId: marker.runId,
     cleared,
   };
+}
+
+async function parkRecordForMarkerSweep(options = {}) {
+  const { issueId } = options;
+  if (!issueId) return null;
+  const store = mergeGateStore(options);
+  if (typeof store?.parkRecords !== "function") return null;
+  return store.parkRecords({ issueId });
 }
 
 export async function listReadyIssueCandidates(domainCtx, page = {}) {
@@ -679,6 +842,7 @@ export function oldestReadyIssueFirst(a, b) {
 async function processInProgressIssueCandidate(candidate, domainCtx) {
   const {
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     config = null,
     registry,
@@ -701,7 +865,7 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
     };
   }
 
-  const readyStore = store || runDeps?.store || createLocalTriggerStore({ repoRoot });
+  const readyStore = store || runDeps?.store || createLocalTriggerStore({ repoRoot, home });
   const priorRun = latestExecutionRunForReadyFix({ store: readyStore, issueId });
   if (await latestExecutionWakeLeaseIsLive({
     store: readyStore,
@@ -743,7 +907,7 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
       createPrAdapter: runDeps?.createPrAdapter || null,
       resolveSessionHandle: domainCtx.resolveSessionHandle,
       isRunResumable: domainCtx.isRunResumable,
-      maxAutonomousFixRounds: domainCtx.maxAutonomousFixRounds,
+      cache,
       allowColdReconstruct: true,
     }) || readyFixEscalationDecision({
       reason: "ready_fix_prior_run_missing",
@@ -812,32 +976,25 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
 }
 
 export async function listInReviewIssueCandidates(domainCtx, page = {}) {
+  return listIssueCandidatesForStatusRole(domainCtx, "in_review", page);
+}
+
+export async function listHumanReviewIssueCandidates(domainCtx, page = {}) {
+  return listIssueCandidatesForStatusRole(domainCtx, "human_review", page);
+}
+
+async function listIssueCandidatesForStatusRole(domainCtx, role, page = {}) {
   const {
-    config,
     domain,
     client,
-    cache,
   } = domainCtx;
   const {
     first = DEFAULT_CANDIDATE_PAGE_SIZE,
     after = null,
   } = page;
   assertValidPollScope(domainCtx.pollScope);
-  if (!config?.linear?.issue?.statuses?.in_review?.name) {
-    return applyPollScopeToPage(
-      {
-        candidates: [],
-        pageInfo: { hasNextPage: false, endCursor: null },
-      },
-      domainCtx.pollScope,
-      candidateProjectId,
-    );
-  }
-  const inReviewStatus = cache?.issueStatuses?.in_review
-    ? { id: cache.issueStatuses.in_review, targetType: "status" }
-    : await resolveInReviewIssueStatus(client, config, domain.linear.team_id, cache);
-  const inReviewStateId = inReviewStatus?.targetType === "status" ? inReviewStatus.id : null;
-  if (!inReviewStateId) {
+  const stateId = await issueStatusIdForPollRole(domainCtx, role);
+  if (!stateId) {
     return applyPollScopeToPage(
       {
         candidates: [],
@@ -848,11 +1005,27 @@ export async function listInReviewIssueCandidates(domainCtx, page = {}) {
     );
   }
   const candidatePage = await client.listReadyIssueCandidates(domain.linear.team_id, {
-    readyStateId: inReviewStateId,
+    readyStateId: stateId,
     first,
     after,
   });
   return applyPollScopeToPage(candidatePage, domainCtx.pollScope, candidateProjectId);
+}
+
+export async function listMergeGateWatchlistCandidates(domainCtx, _page = {}) {
+  assertValidPollScope(domainCtx.pollScope);
+  const store = mergeGateStore(domainCtx);
+  if (typeof store?.parkRecords !== "function") {
+    return {
+      candidates: [],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    };
+  }
+  const records = await store.parkRecords();
+  return {
+    candidates: Array.isArray(records) ? records : [],
+    pageInfo: { hasNextPage: false, endCursor: null },
+  };
 }
 
 export async function listInProgressIssueCandidates(domainCtx, page = {}) {
@@ -898,7 +1071,7 @@ async function issueStatusIdForPollRole(domainCtx, role) {
   return issueStatuses[role]?.id || null;
 }
 
-function processInReviewIssueCandidate(candidate, domainCtx) {
+async function processInReviewIssueCandidate(candidate, domainCtx) {
   const {
     repoRoot,
     config,
@@ -909,6 +1082,20 @@ function processInReviewIssueCandidate(candidate, domainCtx) {
     emitStatus,
     state,
   } = domainCtx;
+  const gateResult = await processMergeGateIssueCandidate(candidate, {
+    ...domainCtx,
+    repoRoot,
+    config,
+    registry,
+    domain,
+    domainContext,
+    client,
+    emitStatus,
+    state,
+    source: "in_review_status",
+    reviewLoopFallback: true,
+  });
+  if (gateResult?.action !== "review_loop") return gateResult;
   return processReviewIssue({
     ...domainCtx,
     repoRoot,
@@ -927,8 +1114,30 @@ function inReviewIssueInFlightKey(candidate) {
   return candidate?.id || null;
 }
 
+function processHumanReviewIssueCandidate(candidate, domainCtx) {
+  return processMergeGateIssueCandidate(candidate, {
+    ...domainCtx,
+    source: "human_review_status",
+  });
+}
+
+function processMergeGateWatchlistCandidate(candidate, domainCtx) {
+  return processMergeGateIssueCandidate(candidate, {
+    ...domainCtx,
+    source: "park_record_watchlist",
+  });
+}
+
+function mergeGateWatchlistInFlightKey(candidate) {
+  return candidate?.issue_id || candidate?.issueId || null;
+}
+
 export function oldestInReviewIssueFirst(a, b) {
   return oldestReadyIssueFirst(a, b);
+}
+
+export function oldestParkRecordFirst(a, b) {
+  return compareCreatedAt(a?.parked_at, b?.parked_at);
 }
 
 function orderPollCandidates(candidates, order) {
@@ -1132,7 +1341,7 @@ export async function processReadyIssue(options = {}) {
   try {
     const issueContext = issue || await client.getIssueContext(issueId);
     const fingerprint = computeFingerprint(issueContext);
-    const readyStore = store || runDeps?.store || createLocalTriggerStore({ repoRoot });
+    const readyStore = store || runDeps?.store || createLocalTriggerStore({ repoRoot, home: options.home });
     readyEligibilityTraceSink = traceSink || createReadyEligibilityTraceSink({ createTraceSink, repoRoot });
     shouldShutdownReadyEligibilityTraceSink = !traceSink && Boolean(readyEligibilityTraceSink);
     const decision = await decideReadyIssue({
@@ -1316,7 +1525,7 @@ export async function processReviewIssue(options = {}) {
   let dispatchLaunched = false;
   try {
     const issueContext = issue || await client.getIssueContext(issueId);
-    const reviewStore = store || runDeps?.store || createLocalTriggerStore({ repoRoot });
+    const reviewStore = store || runDeps?.store || createLocalTriggerStore({ repoRoot, home: options.home });
     const decision = await decideReviewIssue({
       domainId: domain.id,
       issueId,
@@ -1372,11 +1581,792 @@ export async function processReviewIssue(options = {}) {
   }
 }
 
+export async function processMergeGateIssueCandidate(candidate, options = {}) {
+  const {
+    domain,
+    emitStatus = createStatusEmitter(),
+    state = gatewayState(options),
+    reviewLoopFallback = false,
+  } = options;
+  const issueId = mergeGateIssueId(candidate);
+  if (!issueId) throw new Error("merge_gate_issue_id_required");
+
+  let read;
+  try {
+    read = await readMergeGateDecisionForCandidate({
+      ...options,
+      candidate,
+      issueId,
+      store: mergeGateStore(options),
+    });
+  } catch (error) {
+    if (reviewLoopFallback) {
+      return {
+        action: "review_loop",
+        reason: `merge_gate_snapshot_unavailable:${error?.message || "unknown_error"}`,
+        issueId,
+      };
+    }
+    return surfaceMergeGateDecision({
+      domain,
+      issueId,
+      emitStatus,
+      reason: `merge gate snapshot unavailable: ${error?.message || "unknown error"}`,
+      decision: null,
+      snapshot: null,
+    });
+  }
+
+  const decision = decideMergeGateAction(read.snapshot);
+  if (reviewLoopFallback && decision.action === "none" && decision.deleteParkRecord !== true) {
+    return {
+      action: "review_loop",
+      reason: decision.reason,
+      issueId,
+      decision,
+      snapshot: read.snapshot,
+    };
+  }
+
+  if (decision.action === "none" && decision.deleteParkRecord !== true) {
+    return {
+      action: "merge_gate_none",
+      reason: decision.reason,
+      issueId,
+      decision,
+      snapshot: read.snapshot,
+    };
+  }
+
+  const duplicateInFlight = state.inFlight.has(issueId);
+  if (!tryEnterInFlight(state, issueId)) {
+    return {
+      action: "skipped",
+      reason: duplicateInFlight ? "issue_in_flight" : "max_in_flight",
+      issueId,
+    };
+  }
+
+  try {
+    return await dispatchMergeGateDecision({
+      ...options,
+      domain,
+      emitStatus,
+      issueId,
+      read,
+      decision,
+      store: read.store,
+    });
+  } catch (error) {
+    if (isRateLimitedError(options, error)) throw error;
+    return surfaceMergeGateDecision({
+      domain,
+      issueId,
+      emitStatus,
+      reason: `merge gate dispatch failed: ${error?.message || "unknown error"}`,
+      decision,
+      snapshot: read.snapshot,
+      error,
+    });
+  } finally {
+    state.inFlight.delete(issueId);
+  }
+}
+
+async function readMergeGateDecisionForCandidate({
+  candidate,
+  issueId,
+  client,
+  config = null,
+  cache = null,
+  domainContext = null,
+  runDeps = null,
+  store,
+  prAdapter = null,
+  createPrAdapter = null,
+  repoRoot = process.cwd(),
+  runStoreDir = null,
+  now = () => new Date(),
+} = {}) {
+  const effectiveStore = store || mergeGateStore({ runDeps });
+  const issueContext = mergeGateIssueContext(candidate) || await readMergeGateIssueContext(client, issueId);
+  const parkRecord = typeof effectiveStore?.parkRecords === "function"
+    ? await effectiveStore.parkRecords({ issueId })
+    : null;
+  const noRecordSnapshot = mergeGateNoRecordSnapshot({
+    issue: issueContext,
+    config,
+    cache,
+    parkRecord,
+  });
+  if (noRecordSnapshot) {
+    return {
+      issueId,
+      issueContext,
+      store: effectiveStore,
+      prAdapter: null,
+      prNumber: null,
+      repoIdentity: null,
+      parkRecord,
+      snapshot: noRecordSnapshot,
+    };
+  }
+  const prContext = await resolveMergeGatePrContext({
+    issueContext,
+    domainContext,
+    parkRecord,
+    candidate,
+    // The factory's own produced identity outranks branch-name discovery: a
+    // discarded PR on the reused issue branch makes name discovery permanently
+    // ambiguous ("multiple"), while the latest execution run knows the PR number
+    // — the same source the review path ranks first.
+    producedPrNumber: mergeGateProducedPrNumber({
+      store: effectiveStore,
+      issueId,
+      repoRoot,
+      runStoreDir,
+    }),
+    prAdapter: prAdapter || runDeps?.prAdapter || null,
+    createPrAdapter: createPrAdapter || runDeps?.createPrAdapter || null,
+  });
+  const ctx = mergeGateEffectContext({
+    client,
+    config,
+    cache,
+    domainContext,
+    issueId,
+    issueContext,
+    store: effectiveStore,
+    prAdapter: prContext.prAdapter,
+    prNumber: prContext.prNumber,
+    now,
+  });
+  const snapshot = await readMergeGateSnapshot(ctx);
+  return {
+    issueId,
+    issueContext,
+    store: effectiveStore,
+    prAdapter: prContext.prAdapter,
+    prNumber: prContext.prNumber,
+    repoIdentity: prContext.repoIdentity,
+    parkRecord,
+    snapshot,
+  };
+}
+
+function mergeGateNoRecordSnapshot({ issue, config = null, cache = null, parkRecord = null } = {}) {
+  if (parkRecord) return null;
+  const issueStatusRole = mergeGateIssueStatusRole(issue, cache);
+  if (issueStatusRole !== "human_review") return null;
+  const gateLabelId = mergeGateHumanReviewLabelId({ config, cache });
+  if (!gateLabelId) throw new Error("merge_gate_human_review_label_missing");
+  return Object.freeze({
+    issueStatusRole,
+    gateLabelPresent: issueHasLabel(issue, gateLabelId),
+    parkRecord: null,
+    currentHeadSha: null,
+    checkState: "absent",
+    checkHeadSha: null,
+    prState: "open",
+  });
+}
+
+function mergeGateIssueStatusRole(issue = {}, cache = null) {
+  const stateId = stringOrNull(issue?.state?.id || issue?.stateId || issue?.state_id);
+  if (!stateId) return null;
+  for (const role of MERGE_GATE_ISSUE_STATUS_ROLES) {
+    if (cache?.issueStatuses?.[role] === stateId) return role;
+  }
+  return null;
+}
+
+function mergeGateHumanReviewLabelId({ config = null, cache = null } = {}) {
+  const labelName = stringOrNull(config?.linear?.issue?.labels?.human_review);
+  if (labelName && cache?.issueLabels?.[labelName]) return cache.issueLabels[labelName];
+  return stringOrNull(cache?.issueLabels?.human_review);
+}
+
+async function resolveMergeGatePrContext({
+  issueContext,
+  domainContext = null,
+  parkRecord = null,
+  candidate = null,
+  producedPrNumber = null,
+  prAdapter = null,
+  createPrAdapter = null,
+} = {}) {
+  const explicitPrNumber = positiveIntegerValue(
+    parkRecord?.pr_number ??
+    candidate?.pr_number ??
+    candidate?.prNumber ??
+    candidate?.pull_request_number ??
+    candidate?.pullRequestNumber ??
+    producedPrNumber,
+  );
+  const repoIdentity = resolveMergeGateRepoIdentity({ issueContext, domainContext, prAdapter });
+  const adapter = await resolveReadyFixPrAdapter({
+    repoIdentity,
+    prAdapter,
+    createPrAdapter,
+  });
+  if (explicitPrNumber) {
+    return {
+      prAdapter: adapter,
+      prNumber: explicitPrNumber,
+      repoIdentity,
+    };
+  }
+
+  const location = await locatePullRequestForIssue({
+    issueContext,
+    repoIdentity,
+    prAdapter: adapter,
+    createPrAdapter,
+  });
+  if (location?.status !== "found") {
+    throw new Error(`merge_gate_pr_location_${location?.status || "missing"}`);
+  }
+  const locatedPrNumber = positiveIntegerValue(location.pr?.number);
+  if (!locatedPrNumber) throw new Error("merge_gate_pr_number_missing");
+  return {
+    prAdapter: adapter,
+    prNumber: locatedPrNumber,
+    repoIdentity,
+    location,
+  };
+}
+
+function resolveMergeGateRepoIdentity({ issueContext, domainContext = null, prAdapter = null } = {}) {
+  try {
+    return resourcesToRepoIdentity(domainContext, {
+      resourceId: resourceIdFromIssueContext(issueContext),
+    });
+  } catch (error) {
+    if (prAdapter && typeof prAdapter === "object") return null;
+    throw error;
+  }
+}
+
+async function dispatchMergeGateDecision(options = {}) {
+  const {
+    domain,
+    emitStatus = createStatusEmitter(),
+    issueId,
+    read,
+    decision,
+    store,
+  } = options;
+
+  if (decision.action === "surface") {
+    return surfaceMergeGateDecision({
+      domain,
+      issueId,
+      emitStatus,
+      reason: decision.reason,
+      decision,
+      snapshot: read.snapshot,
+    });
+  }
+
+  if (decision.action === "none" && decision.deleteParkRecord === true) {
+    const deleted = await store.deleteParkRecord(issueId);
+    emitMergeGateStatus({
+      domain,
+      emitStatus,
+      issueId,
+      state: "working",
+      reason: decision.reason,
+      decision,
+      snapshot: read.snapshot,
+    });
+    return {
+      action: "delete_park_record",
+      status: deleted?.ok === false ? "failed_closed" : "completed",
+      reason: deleted?.reason || decision.reason,
+      issueId,
+      decision,
+      snapshot: read.snapshot,
+      deleted,
+    };
+  }
+
+  if (decision.action === "park") {
+    const record = await store.upsertParkRecord({
+      issue_id: issueId,
+      pr_number: read.prNumber,
+      parked_head_sha: read.snapshot.currentHeadSha,
+      parked_at: toDate(typeof options.now === "function" ? options.now() : options.now || new Date()).toISOString(),
+    });
+    emitMergeGateStatus({
+      domain,
+      emitStatus,
+      issueId,
+      state: "working",
+      reason: decision.reason,
+      decision,
+      snapshot: read.snapshot,
+    });
+    const applied = await applyMergeGateMoveEffects({
+      ...options,
+      read,
+      store,
+      effects: [gateParkMoveEffect],
+    });
+    return {
+      action: "park",
+      issueId,
+      record,
+      decision,
+      snapshot: read.snapshot,
+      ...applied,
+    };
+  }
+
+  if (decision.action === "invalidate") {
+    emitMergeGateStatus({
+      domain,
+      emitStatus,
+      issueId,
+      state: "working",
+      reason: decision.reason,
+      decision,
+      snapshot: read.snapshot,
+    });
+    const applied = await applyMergeGateMoveEffects({
+      ...options,
+      read,
+      store,
+      effects: [gateInvalidateMoveEffect],
+    });
+    return {
+      action: "invalidate",
+      issueId,
+      decision,
+      snapshot: read.snapshot,
+      ...applied,
+    };
+  }
+
+  if (decision.action === "bounce") {
+    const effect = decision.bounceTo === "todo" ? gateBounceToTodoEffect : gateBounceToInReviewEffect;
+    emitMergeGateStatus({
+      domain,
+      emitStatus,
+      issueId,
+      state: "working",
+      reason: decision.reason,
+      decision,
+      snapshot: read.snapshot,
+    });
+    const applied = await applyMergeGateMoveEffects({
+      ...options,
+      read,
+      store,
+      effects: [effect],
+    });
+    return {
+      action: "bounce",
+      bounceTo: decision.bounceTo,
+      issueId,
+      decision,
+      snapshot: read.snapshot,
+      ...applied,
+    };
+  }
+
+  if (decision.action === "merge") {
+    emitMergeGateStatus({
+      domain,
+      emitStatus,
+      issueId,
+      state: "working",
+      reason: decision.reason,
+      decision,
+      snapshot: read.snapshot,
+    });
+    const merged = await applyMergeGateMergeEffects({
+      ...options,
+      read,
+      store,
+      effects: mergeGateMergeEffectsForSnapshot(read.snapshot),
+    });
+    const bridge = await maybeBridgeMergeFailureToTodo({
+      ...options,
+      read,
+      store,
+      mergeResult: merged,
+    });
+    return {
+      action: "merge",
+      issueId,
+      decision,
+      snapshot: read.snapshot,
+      ...merged,
+      ...(bridge ? { bridge } : {}),
+    };
+  }
+
+  return surfaceMergeGateDecision({
+    domain,
+    issueId,
+    emitStatus,
+    reason: `unhandled merge gate action: ${decision.action}`,
+    decision,
+    snapshot: read.snapshot,
+  });
+}
+
+function mergeGateMergeEffectsForSnapshot(snapshot = {}) {
+  const effects = [mergePrEffect];
+  if (shouldPairDoneMoveForUngatedMerge(snapshot)) {
+    effects.push(issueDoneEffect);
+  }
+  return effects;
+}
+
+function shouldPairDoneMoveForUngatedMerge(snapshot = {}) {
+  if (snapshot.issueStatusRole === "in_review") return true;
+  return snapshot.issueStatusRole === "human_review" && snapshot.gateLabelPresent === false;
+}
+
+async function applyMergeGateMoveEffects(options = {}) {
+  const { read, effects } = options;
+  const trace = mergeGateTrace({
+    issueId: read.issueId,
+    decision: options.decision,
+    snapshot: read.snapshot,
+  });
+  const result = await applyCommitEffects({
+    effects,
+    ctx: mergeGateEffectContext({
+      ...options,
+      issueId: read.issueId,
+      issueContext: read.issueContext,
+      prAdapter: read.prAdapter,
+      prNumber: read.prNumber,
+      trace,
+      expectedSourceRole: read.snapshot.issueStatusRole,
+    }),
+    trace,
+  });
+  return {
+    status: commitEffectDispatchStatus(result),
+    result,
+    trace,
+  };
+}
+
+async function applyMergeGateMergeEffects(options = {}) {
+  const {
+    domain,
+    domainContext,
+    read,
+    store,
+    effects,
+  } = options;
+  const run = await startMergeGateRun({
+    domain,
+    domainContext,
+    store,
+    issueId: read.issueId,
+    now: options.now,
+  });
+  const trace = mergeGateTrace({
+    issueId: read.issueId,
+    decision: options.decision,
+    snapshot: read.snapshot,
+    runId: run.runId,
+    wakeId: run.wake.id,
+  });
+  const result = await applyCommitEffects({
+    effects,
+    ctx: mergeGateEffectContext({
+      ...options,
+      issueId: read.issueId,
+      issueContext: read.issueContext,
+      store,
+      prAdapter: read.prAdapter,
+      prNumber: read.prNumber,
+      trace,
+      wake: run.wake,
+      wakeId: run.wake.id,
+      runId: run.runId,
+      expectedSourceRole: read.snapshot.issueStatusRole,
+    }),
+    trace,
+  });
+  const status = commitEffectDispatchStatus(result);
+  const terminalStatus = status === "completed"
+    ? "completed"
+    : status === "pending"
+      ? "paused"
+      : "rejected";
+  const completed = await store.completeWake({
+    wakeId: run.wake.id,
+    runnerId: run.runnerId,
+    leaseToken: run.leaseToken,
+    status: terminalStatus,
+    reason: result.reason || result.outcome,
+    at: toDate(typeof options.now === "function" ? options.now() : options.now || new Date()).toISOString(),
+  });
+  return {
+    status,
+    result,
+    trace,
+    runId: run.runId,
+    wakeId: run.wake.id,
+    completed,
+  };
+}
+
+async function maybeBridgeMergeFailureToTodo(options = {}) {
+  const { mergeResult, read } = options;
+  if (mergeResult?.status !== "failed_closed") return null;
+  if (!isConflictClassMergeFailure(mergeResult?.result?.reason)) return null;
+  const applied = await applyMergeGateMoveEffects({
+    ...options,
+    read,
+    effects: [mergeGateConflictBounceToTodoEffect],
+    decision: {
+      action: "bounce",
+      bounceTo: "todo",
+      reason: "merge conflict requires the fix loop",
+    },
+  });
+  return {
+    action: "bounce",
+    bounceTo: "todo",
+    reason: "merge conflict requires the fix loop",
+    ...applied,
+  };
+}
+
+async function resolveMergeGateBridgeRoleTarget(ctx = {}, role) {
+  return resolveIssueStatusRoleTarget({
+    client: ctx.client,
+    config: ctx.config,
+    shape: ctx.shape,
+    teamId: mergeGateTeamIdFromContext(ctx),
+    cache: ctx.cache || ctx.linearCache || null,
+    role,
+  });
+}
+
+function mergeGateBridgeExpectedSourceRole(ctx = {}) {
+  const role = stringOrNull(
+    ctx.merge_gate_bounce?.expectedSourceRole ||
+    ctx.merge_gate_bounce?.expected_source_role ||
+    ctx.mergeGateBounce?.expectedSourceRole ||
+    ctx.mergeGateBounce?.expected_source_role,
+  );
+  if (!role) throw new Error("merge_gate_conflict_expected_source_role_missing");
+  return role;
+}
+
+async function startMergeGateRun({
+  domain,
+  domainContext = null,
+  store,
+  issueId,
+  now = () => new Date(),
+} = {}) {
+  if (typeof store?.claimSyntheticIssueWake !== "function") throw new Error("merge_gate_store_claim_missing");
+  if (typeof store?.markWakeRunning !== "function") throw new Error("merge_gate_store_mark_running_missing");
+  const runnerId = `local-runner:${domainContext?.domainId || domain?.id || "unknown"}`;
+  const claim = await store.claimSyntheticIssueWake({
+    domainId: domainContext?.domainId || domain?.id,
+    workspaceId: domainContext?.linear?.workspaceId || domain?.linear?.workspace_id,
+    teamId: domainContext?.linear?.teamId || domain?.linear?.team_id,
+    objectId: issueId,
+    workflowType: MERGE_GATE_WORKFLOW_TYPE,
+    triggerType: MERGE_GATE_TRIGGER_TYPE,
+    objectType: "issue",
+  });
+  if (claim?.ok !== true) throw new Error(claim?.reason || "merge_gate_wake_claim_failed");
+
+  const runId = `merge-${issueId}-${Date.now()}-${randomUUID()}`;
+  const at = toDate(typeof now === "function" ? now() : now || new Date()).toISOString();
+  const running = await store.markWakeRunning({
+    wakeId: claim.wake.id,
+    runnerId,
+    leaseToken: claim.leaseToken,
+    runId,
+    domainId: domainContext?.domainId || domain?.id,
+    at,
+  });
+  if (running?.ok !== true) throw new Error(running?.reason || "merge_gate_wake_start_failed");
+  return {
+    wake: claim.wake,
+    leaseToken: claim.leaseToken,
+    runnerId,
+    runId,
+  };
+}
+
+function mergeGateEffectContext({
+  client,
+  config = null,
+  cache = null,
+  domainContext = null,
+  issueId,
+  issueContext = null,
+  store = null,
+  prAdapter = null,
+  prNumber = null,
+  trace = null,
+  wake = null,
+  wakeId = null,
+  runId = null,
+  expectedSourceRole = null,
+  now = () => new Date(),
+} = {}) {
+  return {
+    client,
+    config,
+    cache,
+    domainContext,
+    issue: issueContext,
+    issueId,
+    linearIssueId: issueId,
+    store,
+    prAdapter,
+    prNumber,
+    pullRequestNumber: prNumber,
+    trace,
+    wake,
+    wakeId,
+    runId,
+    now,
+    linear_issue_done: {
+      expectedSourceRole,
+    },
+    merge_gate_bounce: {
+      expectedSourceRole,
+    },
+  };
+}
+
+function mergeGateTeamIdFromContext(ctx = {}) {
+  return stringOrNull(
+    ctx.teamId ||
+    ctx.team_id ||
+    ctx.shape?.team?.id ||
+    ctx.cache?.teamId ||
+    ctx.linearCache?.teamId ||
+    ctx.domainContext?.linear?.teamId ||
+    ctx.domainContext?.linear?.team_id ||
+    ctx.issue?.teamId ||
+    ctx.issue?.team?.id ||
+    ctx.linearIssue?.teamId ||
+    ctx.linearIssue?.team?.id ||
+    ctx.targetIssue?.teamId ||
+    ctx.targetIssue?.team?.id,
+  );
+}
+
+function mergeGateTrace({ issueId, decision = null, snapshot = null, runId = null, wakeId = null } = {}) {
+  return createTrace("merge_gate_dispatch", knownTraceAttributes({
+    "workflow.name": "merge_gate_dispatch",
+    "linear.issue_id": issueId,
+    source_object_id: issueId,
+    run_id: runId,
+    wake_id: wakeId,
+    merge_gate_action: decision?.action || null,
+    merge_gate_reason: decision?.reason || null,
+    merge_gate_issue_status_role: snapshot?.issueStatusRole || null,
+    merge_gate_pr_state: snapshot?.prState || null,
+  }));
+}
+
+function surfaceMergeGateDecision({
+  domain,
+  issueId,
+  emitStatus = createStatusEmitter(),
+  reason,
+  decision = null,
+  snapshot = null,
+  error = null,
+} = {}) {
+  emitMergeGateStatus({
+    domain,
+    emitStatus,
+    issueId,
+    state: "degraded",
+    reason,
+    decision,
+    snapshot,
+  });
+  return {
+    action: "surface",
+    status: "degraded",
+    reason,
+    issueId,
+    decision,
+    snapshot,
+    ...(error ? { error } : {}),
+  };
+}
+
+function emitMergeGateStatus({
+  domain,
+  emitStatus = createStatusEmitter(),
+  issueId,
+  state,
+  reason,
+  decision = null,
+  snapshot = null,
+} = {}) {
+  emitStatus({
+    domainId: domain?.id || null,
+    issueId,
+    state,
+    reason,
+    note: {
+      merge_gate: true,
+      decision,
+      snapshot,
+    },
+  });
+}
+
+function commitEffectDispatchStatus(result = {}) {
+  if (result.outcome === "ok") return "completed";
+  if (result.outcome === "failed_closed") return "failed_closed";
+  return "pending";
+}
+
+function isConflictClassMergeFailure(reason) {
+  const text = String(reason || "");
+  return /not mergeable/i.test(text) || /merged:false/i.test(text);
+}
+
+function mergeGateIssueId(candidate = {}) {
+  return stringOrNull(candidate?.issue_id || candidate?.issueId || candidate?.id);
+}
+
+function mergeGateIssueContext(candidate = {}) {
+  return candidate?.id ? candidate : null;
+}
+
+async function readMergeGateIssueContext(client, issueId) {
+  if (typeof client?.getIssueContext === "function") return client.getIssueContext(issueId);
+  if (typeof client?.getIssue === "function") return client.getIssue(issueId);
+  throw new Error("merge_gate_linear_issue_read_unavailable");
+}
+
+function mergeGateStore(options = {}) {
+  return options.store || options.runDeps?.store || createLocalTriggerStore({
+    repoRoot: options.repoRoot || process.cwd(),
+    home: options.home || resolveTeamiHome(),
+  });
+}
+
 export async function decidePlannedProject({
   domainId,
   projectId,
   fingerprint,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   idempotency = triggerIdempotency,
 } = {}) {
@@ -1384,6 +2374,7 @@ export async function decidePlannedProject({
     domainId,
     projectId,
     repoRoot,
+    home,
     runStoreDir,
   });
   if (replay) {
@@ -1394,9 +2385,11 @@ export async function decidePlannedProject({
   }
 
   const suppression = await idempotency.readSuppression({
+    domainId,
     projectId,
     fingerprint,
     repoRoot,
+    home,
     runStoreDir,
   });
   if (suppression) {
@@ -1418,6 +2411,7 @@ export async function decideReadyIssue({
   cache = null,
   fingerprint,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   idempotency = triggerIdempotency,
   store = null,
@@ -1427,7 +2421,6 @@ export async function decideReadyIssue({
   locatePr = locatePullRequestForIssue,
   resolveSessionHandle = resolveDriverSessionHandle,
   isRunResumable = runIsResumable,
-  maxAutonomousFixRounds = null,
   traceSink = null,
 } = {}) {
   const fixMode = await decideReadyIssueFixMode({
@@ -1437,6 +2430,7 @@ export async function decideReadyIssue({
     config,
     repoIdentity,
     repoRoot,
+    home,
     runStoreDir,
     store,
     prAdapter,
@@ -1444,7 +2438,7 @@ export async function decideReadyIssue({
     locatePr,
     resolveSessionHandle,
     isRunResumable,
-    maxAutonomousFixRounds,
+    cache,
   });
   if (fixMode) return fixMode;
 
@@ -1453,6 +2447,7 @@ export async function decideReadyIssue({
         domainId,
         objectId: issueId,
         repoRoot,
+        home,
         runStoreDir,
       })
     : null;
@@ -1503,10 +2498,12 @@ export async function decideReadyIssue({
 
   const suppression = typeof idempotency.readSuppression === "function"
     ? await idempotency.readSuppression({
+        domainId,
         objectType: "issue",
         objectId: issueId,
         fingerprint,
         repoRoot,
+        home,
         runStoreDir,
       })
     : null;
@@ -1599,42 +2596,34 @@ async function decideReadyIssueFixMode({
   repoRoot = process.cwd(),
   runStoreDir = null,
   store = null,
+  cache = null,
   prAdapter = null,
   createPrAdapter = null,
   locatePr = locatePullRequestForIssue,
+  locateProducedPr = locatePullRequestForProducedIdentity,
   resolveSessionHandle = resolveDriverSessionHandle,
   isRunResumable = runIsResumable,
-  maxAutonomousFixRounds = null,
   allowColdReconstruct = false,
 } = {}) {
   const priorRun = latestExecutionRunForReadyFix({ store, issueId });
   if (!priorRun && !allowColdReconstruct) return null;
 
-  const roundLimit = readyFixMaxAutonomousRounds({
-    config,
-    maxAutonomousFixRounds,
-  });
-  if (!roundLimit.ok) {
-    return readyFixEscalationDecision({
-      reason: roundLimit.reason,
-      priorRunId: stringOrNull(priorRun?.run_id || priorRun?.runId),
-      priorRun,
-      roundState: roundLimit,
-    });
-  }
-
   let priorRunId = null;
   let coldReconstructReason = null;
+  // A prior run with no resumable session may fall through to a fresh dispatch
+  // only when the probe positively confirms it left nothing behind (no produced
+  // PR identity and a clean not-found from the PR probe). Absence must be
+  // confirmed, not merely unprobed — any doubt keeps the escalation.
+  let pendingEscalationReason = null;
+  let pendingEscalationError = null;
   if (priorRun) {
     priorRunId = stringOrNull(priorRun.run_id || priorRun.runId);
     if (!priorRunId) {
       if (!allowColdReconstruct) {
-        return readyFixEscalationDecision({
-          reason: "ready_fix_prior_run_id_missing",
-          priorRun,
-        });
+        pendingEscalationReason = "ready_fix_prior_run_id_missing";
+      } else {
+        coldReconstructReason = "ready_fix_prior_run_id_missing";
       }
-      coldReconstructReason = "ready_fix_prior_run_id_missing";
     }
 
     const resumeRecord = readyFixResumeRecordForRun({
@@ -1642,7 +2631,7 @@ async function decideReadyIssueFixMode({
       repoRoot,
       runStoreDir,
     });
-    if (resumeRecord?.resume_status === "paused") {
+    if (resumeRecord?.resume_status === "paused" && !isReadyFixTodoReentry({ issueContext, cache })) {
       return readyFixEscalationDecision({
         reason: "ready_fix_resume_paused",
         priorRunId,
@@ -1653,39 +2642,30 @@ async function decideReadyIssueFixMode({
 
     if (typeof isRunResumable === "function" && !isRunResumable(priorRun)) {
       if (!allowColdReconstruct) {
-        return readyFixEscalationDecision({
-          reason: "ready_fix_prior_run_not_resumable",
-          priorRunId,
-          priorRun,
-        });
+        pendingEscalationReason ||= "ready_fix_prior_run_not_resumable";
+      } else {
+        coldReconstructReason ||= "ready_fix_prior_run_not_resumable";
       }
-      coldReconstructReason ||= "ready_fix_prior_run_not_resumable";
     }
 
-    if (typeof resolveSessionHandle === "function" && !coldReconstructReason) {
+    if (typeof resolveSessionHandle === "function" && !coldReconstructReason && !pendingEscalationReason) {
       let sessionHandle;
       try {
         sessionHandle = await resolveSessionHandle(priorRun, { repoRoot, runStoreDir });
       } catch (error) {
         if (!allowColdReconstruct) {
-          return readyFixEscalationDecision({
-            reason: "ready_fix_prior_run_session_unresolved",
-            priorRunId,
-            priorRun,
-            error,
-          });
+          pendingEscalationReason = "ready_fix_prior_run_session_unresolved";
+          pendingEscalationError = error;
+        } else {
+          coldReconstructReason = "ready_fix_prior_run_session_unresolved";
         }
-        coldReconstructReason = "ready_fix_prior_run_session_unresolved";
       }
-      if (!sessionHandle && !coldReconstructReason) {
+      if (!sessionHandle && !coldReconstructReason && !pendingEscalationReason) {
         if (!allowColdReconstruct) {
-          return readyFixEscalationDecision({
-            reason: "ready_fix_prior_run_session_unresolved",
-            priorRunId,
-            priorRun,
-          });
+          pendingEscalationReason = "ready_fix_prior_run_session_unresolved";
+        } else {
+          coldReconstructReason = "ready_fix_prior_run_session_unresolved";
         }
-        coldReconstructReason = "ready_fix_prior_run_session_unresolved";
       }
     }
   } else {
@@ -1694,12 +2674,24 @@ async function decideReadyIssueFixMode({
 
   let resolvedRepoIdentity;
   let adapter;
+  let priorProducedIdentity = null;
   try {
-    const priorProducedIdentity = producedPrIdentityForRun({
-      run: priorRun,
+    priorProducedIdentity = latestProducedPrIdentityForReadyFix({
+      store,
+      priorRun,
+      issueId,
       repoRoot,
       runStoreDir,
     });
+    if (pendingEscalationReason && priorProducedIdentity) {
+      return readyFixEscalationDecision({
+        reason: pendingEscalationReason,
+        priorRunId,
+        priorRun,
+        hasPr: true,
+        ...(pendingEscalationError ? { error: pendingEscalationError } : {}),
+      });
+    }
     const selectedResourceId = selectedReviewResourceId({
       issueContext,
       producedIdentity: priorProducedIdentity,
@@ -1716,7 +2708,7 @@ async function decideReadyIssueFixMode({
     });
   } catch (error) {
     return readyFixEscalationDecision({
-      reason: "ready_fix_pr_probe_unavailable",
+      reason: pendingEscalationReason || "ready_fix_pr_probe_unavailable",
       priorRunId,
       repoIdentity: resolvedRepoIdentity || null,
       priorRun,
@@ -1726,15 +2718,30 @@ async function decideReadyIssueFixMode({
 
   let location;
   try {
-    location = await locatePr({
-      issueContext,
-      repoIdentity: resolvedRepoIdentity,
-      prAdapter: adapter,
-      createPrAdapter,
-    });
+    // Produced identity first (the #135 rule, applied to the send-back path):
+    // a discarded PR on the reused issue branch makes name discovery
+    // permanently ambiguous ("multiple"), which would park every later resume
+    // of the issue as Needs Principal even though the factory knows exactly
+    // which PR it produced.
+    const producedLocation = shouldLocateProducedReviewPr(priorProducedIdentity)
+      ? await locateProducedPr({
+          producedIdentity: priorProducedIdentity,
+          repoIdentity: resolvedRepoIdentity,
+          prAdapter: adapter,
+          createPrAdapter,
+        })
+      : null;
+    location = shouldUseProducedReviewLocation(producedLocation)
+      ? producedLocation
+      : await locatePr({
+          issueContext,
+          repoIdentity: resolvedRepoIdentity,
+          prAdapter: adapter,
+          createPrAdapter,
+        });
   } catch (error) {
     return readyFixEscalationDecision({
-      reason: "ready_fix_pr_probe_failed",
+      reason: pendingEscalationReason || "ready_fix_pr_probe_failed",
       priorRunId,
       repoIdentity: resolvedRepoIdentity,
       priorRun,
@@ -1743,13 +2750,27 @@ async function decideReadyIssueFixMode({
   }
 
   if (location?.status !== "found") {
+    if (pendingEscalationReason && readyFixPrAbsenceConfirmed(location)) return null;
     return readyFixEscalationDecision({
-      reason: readyFixPrLocationReason(location),
+      reason: pendingEscalationReason || readyFixPrLocationReason(location),
       priorRunId,
       location,
       repoIdentity: resolvedRepoIdentity,
       priorRun,
       hasPr: false,
+      ...(pendingEscalationError ? { error: pendingEscalationError } : {}),
+    });
+  }
+
+  if (pendingEscalationReason) {
+    return readyFixEscalationDecision({
+      reason: pendingEscalationReason,
+      priorRunId,
+      location,
+      repoIdentity: resolvedRepoIdentity,
+      priorRun,
+      hasPr: true,
+      ...(pendingEscalationError ? { error: pendingEscalationError } : {}),
     });
   }
 
@@ -1758,7 +2779,6 @@ async function decideReadyIssueFixMode({
     reviewState = await inspectReadyFixReviewState({
       adapter,
       pr: location.pr,
-      maxAutonomousFixRounds: roundLimit.value,
     });
   } catch (error) {
     return readyFixEscalationDecision({
@@ -1772,8 +2792,9 @@ async function decideReadyIssueFixMode({
     });
   }
 
-  if (reviewState.status === "not_failure") return null;
-  if (reviewState.status !== "found") {
+  if (reviewState.status === "not_failure") {
+    if (!isReadyFixTodoReentry({ issueContext, cache })) return null;
+  } else if (reviewState.status !== "found") {
     return readyFixEscalationDecision({
       reason: readyFixReviewStateReason(reviewState),
       priorRunId,
@@ -1781,18 +2802,6 @@ async function decideReadyIssueFixMode({
       repoIdentity: resolvedRepoIdentity,
       priorRun,
       reviewState,
-      hasPr: true,
-    });
-  }
-  if (reviewState.roundState?.status === "over_bound") {
-    return readyFixEscalationDecision({
-      reason: "ready_fix_review_round_bound_exceeded",
-      priorRunId,
-      location,
-      repoIdentity: resolvedRepoIdentity,
-      priorRun,
-      reviewState,
-      roundState: reviewState.roundState,
       hasPr: true,
     });
   }
@@ -1805,6 +2814,9 @@ async function decideReadyIssueFixMode({
       prNumber: location.pr.number,
       headSha: location.pr.head_sha,
     }),
+    resumeContextProvenanceTag: reviewState.status === "found"
+      ? WARM_RESUME_REVIEW_FAILURE_TAG
+      : WARM_RESUME_LINEAR_REENTRY_TAG,
   };
   if (!coldReconstructReason) return decision;
   return {
@@ -1830,6 +2842,7 @@ export async function decideReviewIssue({
   issueContext,
   domainContext,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   repoIdentity = null,
   prAdapter = null,
@@ -1950,6 +2963,7 @@ export async function replayPendingMutation({
   pending,
   domainContext,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   runDecompositionFn = runDecomposition,
   clearMutationIntent = triggerIdempotency.clearMutationIntent,
@@ -1966,6 +2980,7 @@ export async function replayPendingMutation({
       projectId,
       runId: pending.runId,
       repoRoot,
+      home,
       runStoreDir,
       retryCommit: true,
       domainContext,
@@ -1981,6 +2996,7 @@ export async function replayPendingMutation({
         projectId,
         runId: pending.runId,
         repoRoot,
+        home,
         runStoreDir,
       });
       return {
@@ -2021,9 +3037,10 @@ export async function replayPendingMutation({
 export async function runFreshSyntheticWake({
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   registry,
   domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot }),
+  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
   projectId,
   createStore = createLocalTriggerStore,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
@@ -2039,7 +3056,7 @@ export async function runFreshSyntheticWake({
     domainContext,
   });
   const runnerId = `local-runner:${domainContext.domainId}`;
-  const store = createStore({ repoRoot });
+  const store = createStore({ repoRoot, home });
   const claim = await store.claimSyntheticWake({
     domainId: domainContext.domainId,
     workspaceId: domainContext.linear.workspaceId,
@@ -2054,7 +3071,7 @@ export async function runFreshSyntheticWake({
     };
   }
 
-  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
+  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
   const runtimeExecutor = createRuntimeExecutor({
     smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
     repoRoot,
@@ -2076,6 +3093,7 @@ export async function runFreshSyntheticWake({
       cache,
       runtimeExecutor,
       repoRoot,
+      home,
       leaseDurationMs: config?.runner?.lease_duration_ms,
       runnerVersion: process.version,
       capabilities: config?.runner?.required_capabilities || DECOMPOSITION_REQUIRED_CAPABILITIES,
@@ -2098,6 +3116,7 @@ export async function replayPendingExecutionIssue(options = {}) {
     pending,
     domainContext,
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     runDeps = {},
     idempotency = triggerIdempotency,
@@ -2106,6 +3125,7 @@ export async function replayPendingExecutionIssue(options = {}) {
     domainId: domainContext?.domainId,
     objectId: issueId,
     repoRoot,
+    home,
     runStoreDir,
   });
   if (!target) {
@@ -2114,6 +3134,7 @@ export async function replayPendingExecutionIssue(options = {}) {
   const artifact = readRunArtifact({
     runId: target.runId,
     repoRoot,
+    home,
     runStoreDir,
   });
   if (!artifact) {
@@ -2158,8 +3179,10 @@ export async function replayPendingExecutionIssue(options = {}) {
     trace,
     runId: target.runId,
     repoRoot,
+    home,
     runStoreDir,
     retry: true,
+    executionReadiness: options.executionReadiness,
     pending: target,
     pendingGitIntent: target,
     runDeps,
@@ -2205,10 +3228,11 @@ export async function replayPendingExecutionIssue(options = {}) {
 export async function runFreshIssueSyntheticWake({
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   registry,
   domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot }),
+  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
   issueId,
   retry = false,
   killPoint = null,
@@ -2233,7 +3257,7 @@ export async function runFreshIssueSyntheticWake({
     domainContext,
   });
   const runnerId = `local-runner:${domainContext.domainId}`;
-  const store = createStore({ repoRoot });
+  const store = createStore({ repoRoot, home });
   const claim = await store.claimSyntheticIssueWake({
     domainId: domainContext.domainId,
     workspaceId: domainContext.linear.workspaceId,
@@ -2251,7 +3275,7 @@ export async function runFreshIssueSyntheticWake({
     };
   }
 
-  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
+  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
   const runtimeExecutor = createRuntimeExecutor({
     smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
     repoRoot,
@@ -2289,6 +3313,7 @@ export async function runFreshIssueSyntheticWake({
       cache,
       runtimeExecutor,
       repoRoot,
+      home,
       runStoreDir,
       leaseDurationMs: config?.runner?.lease_duration_ms,
       runnerVersion: process.version,
@@ -2309,10 +3334,11 @@ export async function runFreshIssueSyntheticWake({
 export async function runWarmResumeIssueSyntheticWake({
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   registry,
   domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot }),
+  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
   issueId,
   issueContext = null,
   priorRunId = null,
@@ -2370,7 +3396,7 @@ export async function runWarmResumeIssueSyntheticWake({
   if (!effectiveIssueId) return escalate("warm_resume_issue_id_required");
   if (!effectiveHeadSha) return escalate("warm_resume_head_sha_required");
 
-  const store = providedStore || runDeps?.store || createStore({ repoRoot });
+  const store = providedStore || runDeps?.store || createStore({ repoRoot, home });
   const priorRun = latestExecutionRunForReadyFix({ store, issueId: effectiveIssueId });
   const durableIdentity = readyFixDurableIdentity({
     priorRun,
@@ -2462,6 +3488,24 @@ export async function runWarmResumeIssueSyntheticWake({
         sessionHandle,
       });
     }
+
+    // A session handle can resolve and still be un-continuable: the prior
+    // run's own assignment records whether its runtime persists sessions.
+    // Handing an unpersisted session to the engine ends in a guaranteed
+    // failed_closed (warm_continuation_unavailable) first turn — route to
+    // cold reconstruct up front instead.
+    if (sessionHandle && !priorRunSessionIsContinuable({ run: priorRun, repoRoot, runStoreDir })) {
+      if (!coldAnchor.ok) {
+        return escalate("warm_resume_session_not_continuable", {
+          priorRunId: resolvedPriorRunId,
+          priorRun,
+          sessionHandle,
+          coldReconstruct: coldAnchor,
+        });
+      }
+      sessionHandle = null;
+      coldReconstructReason = "warm_resume_session_not_continuable";
+    }
   }
 
   if (coldReconstructReason && !coldAnchor.ok) {
@@ -2472,29 +3516,6 @@ export async function runWarmResumeIssueSyntheticWake({
     });
   }
 
-  let reviewerNotes;
-  try {
-    reviewerNotes = await fetchWarmResumeReviewerNotes({
-      domainContext,
-      runDeps,
-      prNumber: effectivePrNumber,
-      headSha: effectiveHeadSha,
-      resourceId: durableIdentity.resource_id,
-    });
-  } catch (error) {
-    return escalate("warm_resume_review_notes_unresolved", {
-      priorRunId: resolvedPriorRunId,
-      priorRun,
-      error,
-    });
-  }
-  if (typeof reviewerNotes !== "string" || reviewerNotes === "") {
-    return escalate("warm_resume_review_notes_missing", {
-      priorRunId: resolvedPriorRunId,
-      priorRun,
-    });
-  }
-
   const domainConfig = configWithDomainLinearTeam(config, domainContext);
   const cache = readLinearCache(domainContext.linear.cachePath);
   const credentialStore = createLinearCredentialStore({
@@ -2502,8 +3523,28 @@ export async function runWarmResumeIssueSyntheticWake({
     repoRoot,
     domainContext,
   });
+  const resumeContext = await buildWarmResumeContextBlock({
+    config,
+    repoRoot,
+    domainContext,
+    credentialStore,
+    createSetupGraphqlClient,
+    cache,
+    store,
+    runDeps,
+    issueId: effectiveIssueId,
+    prNumber: effectivePrNumber,
+    headSha: effectiveHeadSha,
+    resourceId: durableIdentity.resource_id,
+    provenanceTag: warmResumeDecision?.resumeContextProvenanceTag,
+    headMovedSinceProduced: Boolean(
+      stringOrNull(durableIdentity.head_sha) &&
+      effectiveHeadSha &&
+      durableIdentity.head_sha !== effectiveHeadSha,
+    ),
+  });
   const runnerId = `local-runner:${domainContext.domainId}`;
-  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
+  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
   const smokeTests = smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache);
   const runtimeVersions = runtimeVersionsFromRuntimeSmokeCache(runtimeSmokeCache);
   const runtimeExecutor = createRuntimeExecutor({
@@ -2544,6 +3585,7 @@ export async function runWarmResumeIssueSyntheticWake({
       cache,
       runtimeExecutor,
       repoRoot,
+      home,
       runStoreDir,
       leaseDurationMs: config?.runner?.lease_duration_ms,
       runnerVersion: process.version,
@@ -2555,7 +3597,7 @@ export async function runWarmResumeIssueSyntheticWake({
       ...gitRemoteResolution,
       resumeFrom: {
         ...(sessionHandle ? { sessionHandle } : {}),
-        reviewerNotes,
+        resumeContext,
         priorRunId: resolvedPriorRunId,
         smokeTests,
         runtimeVersion: sessionHandle ? runtimeVersions?.[sessionHandle.runtime] || null : null,
@@ -2589,10 +3631,11 @@ export const runWarmResumeIssueNotImplemented = runWarmResumeIssueSyntheticWake;
 export async function runFreshReviewSyntheticWake({
   config,
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runStoreDir = null,
   registry,
   domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot }),
+  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
   issueId,
   reviewDecision = null,
   createStore = createLocalTriggerStore,
@@ -2611,7 +3654,7 @@ export async function runFreshReviewSyntheticWake({
     domainContext,
   });
   const runnerId = `local-runner:${domainContext.domainId}`;
-  const store = runDeps?.store || createStore({ repoRoot });
+  const store = runDeps?.store || createStore({ repoRoot, home });
   const claim = await store.claimSyntheticIssueWake({
     domainId: domainContext.domainId,
     workspaceId: domainContext.linear.workspaceId,
@@ -2629,7 +3672,7 @@ export async function runFreshReviewSyntheticWake({
     };
   }
 
-  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, repoRoot));
+  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
   const runtimeExecutor = createRuntimeExecutor({
     smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
     repoRoot,
@@ -2657,6 +3700,7 @@ export async function runFreshReviewSyntheticWake({
       cache,
       runtimeExecutor,
       repoRoot,
+      home,
       runStoreDir,
       leaseDurationMs: config?.runner?.lease_duration_ms,
       runnerVersion: process.version,
@@ -2836,12 +3880,57 @@ function readyFixEscalationDecision({
 }
 
 function latestExecutionRunForReadyFix({ store, issueId } = {}) {
+  // A rejected run failed closed before any mutation — it left nothing to
+  // resume, so it must not shadow the run that actually produced the work
+  // (a rejected warm-resume attempt would otherwise demote every later
+  // send-back of the issue to a human escalation).
+  if (typeof store?.findRunsForObject === "function") {
+    try {
+      const runs = store.findRunsForObject(issueId);
+      for (const run of Array.isArray(runs) ? runs : []) {
+        if (String(run?.status || "") !== "rejected") return run;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
   if (typeof store?.findLatestRunForObject !== "function") return null;
   try {
     return store.findLatestRunForObject(issueId);
   } catch {
     return null;
   }
+}
+
+// A failed resume run produces nothing, so the issue's latest run can hide the
+// produced-PR identity behind it — and with the identity hidden, PR location
+// would fall back to branch-name discovery and go ambiguous again. Walk the
+// issue's run history (latest first) to the most recent run that recorded a
+// produced PR.
+function latestProducedPrIdentityForReadyFix({
+  store = null,
+  priorRun = null,
+  issueId,
+  repoRoot = process.cwd(),
+  runStoreDir = null,
+} = {}) {
+  const direct = producedPrIdentityForRun({ run: priorRun, repoRoot, runStoreDir });
+  if (direct) return direct;
+  if (typeof store?.findRunsForObject !== "function") return null;
+  let runs;
+  try {
+    runs = store.findRunsForObject(issueId);
+  } catch {
+    return null;
+  }
+  const priorRunId = stringOrNull(priorRun?.run_id || priorRun?.runId);
+  for (const run of Array.isArray(runs) ? runs : []) {
+    if (priorRunId && stringOrNull(run?.run_id || run?.runId) === priorRunId) continue;
+    const produced = producedPrIdentityForRun({ run, repoRoot, runStoreDir });
+    if (produced) return produced;
+  }
+  return null;
 }
 
 async function latestExecutionWakeLeaseIsLive({ store, run, now = () => new Date() } = {}) {
@@ -2892,6 +3981,12 @@ function readyIssueSuppressionStateIds(cache = null) {
   ].filter(Boolean);
 }
 
+function isReadyFixTodoReentry({ issueContext = null, cache = null } = {}) {
+  const stateId = stringOrNull(issueContext?.state?.id || issueContext?.stateId || issueContext?.state_id);
+  const todoStateId = stringOrNull(cache?.issueStatuses?.todo);
+  return Boolean(stateId && todoStateId && stateId === todoStateId);
+}
+
 function readyIssueSuppressionFingerprintMatches({
   current,
   issueContext,
@@ -2915,34 +4010,6 @@ function readyIssueSuppressionFingerprintMatches({
   }) === fingerprint;
 }
 
-function readyFixMaxAutonomousRounds({
-  config = null,
-  maxAutonomousFixRounds = null,
-} = {}) {
-  const configured = maxAutonomousFixRounds ?? config?.workflows?.review?.max_autonomous_fix_rounds;
-  if (configured === null || configured === undefined) {
-    return {
-      ok: true,
-      value: DEFAULT_READY_FIX_MAX_AUTONOMOUS_ROUNDS,
-      source: "default",
-    };
-  }
-  if (!Number.isInteger(configured) || configured < 0) {
-    return {
-      ok: false,
-      reason: "ready_fix_review_round_limit_invalid",
-      value: configured,
-    };
-  }
-  return {
-    ok: true,
-    value: configured,
-    source: maxAutonomousFixRounds !== null && maxAutonomousFixRounds !== undefined
-      ? "option"
-      : "config",
-  };
-}
-
 function readyFixResumeRecordForRun({
   run,
   repoRoot = process.cwd(),
@@ -2958,6 +4025,18 @@ function readyFixResumeRecordForRun({
 
   const artifact = readReadyFixRunArtifact({ run, repoRoot, runStoreDir });
   return warmResumeRecord(artifact?.resume) || warmResumeRecord(artifact?.payload?.resume);
+}
+
+function priorRunSessionIsContinuable({
+  run,
+  repoRoot = process.cwd(),
+  runStoreDir = null,
+} = {}) {
+  const artifact = readReadyFixRunArtifact({ run, repoRoot, runStoreDir });
+  const capability = artifact?.runtime_assignments?.orchestrator?.capabilities?.persisted_session_handles;
+  // Only an explicit "not persisted" declaration blocks the warm path; absent
+  // capability data preserves the existing warm-first behavior.
+  return capability !== false;
 }
 
 function readReadyFixRunArtifact({
@@ -3212,7 +4291,6 @@ async function resolveReadyFixPrAdapter({ repoIdentity, prAdapter, createPrAdapt
 async function inspectReadyFixReviewState({
   adapter,
   pr,
-  maxAutonomousFixRounds = DEFAULT_READY_FIX_MAX_AUTONOMOUS_ROUNDS,
 } = {}) {
   requireReadyFixAdapterMethod(adapter, "getCommitStatuses");
   const statuses = await adapter.getCommitStatuses(pr?.head_sha);
@@ -3234,18 +4312,10 @@ async function inspectReadyFixReviewState({
       markerLookup,
     };
   }
-  const roundState = await inspectReadyFixReviewRounds({
-    adapter,
-    comments,
-    currentHeadSha: pr?.head_sha,
-    currentHeadStatuses: statuses,
-    maxAutonomousFixRounds,
-  });
   return {
     status: "found",
     af_review_status: teamiReviewStatus,
     markerLookup,
-    roundState,
   };
 }
 
@@ -3255,60 +4325,6 @@ function lookupReadyFixReviewMarker({ comments, pr } = {}) {
     head_sha: pr?.head_sha,
     disposition: READY_FIX_REVIEW_DISPOSITION,
   });
-}
-
-async function inspectReadyFixReviewRounds({
-  adapter,
-  comments = [],
-  currentHeadSha = null,
-  currentHeadStatuses = null,
-  maxAutonomousFixRounds = DEFAULT_READY_FIX_MAX_AUTONOMOUS_ROUNDS,
-} = {}) {
-  const candidateHeadShas = readyFixFailureMarkerHeadShas(comments);
-  const verifiedHeadShas = [];
-  const skippedHeadShas = [];
-  for (const headSha of candidateHeadShas) {
-    const statuses = headSha === currentHeadSha ? currentHeadStatuses : await adapter.getCommitStatuses(headSha);
-    const teamiReviewStatus = latestReadyFixAfReviewStatus(statuses);
-    if (teamiReviewStatus?.state === "failure") {
-      verifiedHeadShas.push(headSha);
-    } else {
-      skippedHeadShas.push(headSha);
-    }
-  }
-  const count = verifiedHeadShas.length;
-  return {
-    status: count > maxAutonomousFixRounds ? "over_bound" : "within_bound",
-    count,
-    max: maxAutonomousFixRounds,
-    head_shas: verifiedHeadShas,
-    skipped_head_shas: skippedHeadShas,
-  };
-}
-
-function readyFixFailureMarkerHeadShas(comments = []) {
-  const headShas = new Set();
-  for (const comment of Array.isArray(comments) ? comments : []) {
-    if (!isBotAuthoredAfReviewComment(comment)) continue;
-    const parsed = parseAfReviewCommentMarker(comment?.body);
-    if (!parsed.ok) continue;
-    if (parsed.marker.context !== AF_REVIEW_STATUS_CONTEXT) continue;
-    if (!READY_FIX_FAILURE_REVIEW_DISPOSITIONS.has(parsed.marker.disposition)) continue;
-    const headSha = stringOrNull(parsed.marker.head_sha);
-    if (headSha) headShas.add(headSha);
-  }
-  return [...headShas];
-}
-
-function isBotAuthoredAfReviewComment(comment) {
-  const authorType = stringOrNull(
-    comment?.user?.type ||
-    comment?.author?.type ||
-    comment?.author?.__typename ||
-    comment?.actor?.type,
-  );
-  if (!authorType) return true;
-  return authorType.toLowerCase() === "bot";
 }
 
 async function fetchWarmResumeReviewerNotes({
@@ -3336,6 +4352,179 @@ async function fetchWarmResumeReviewerNotes({
     throw new Error(`warm_resume_review_marker_${lookup?.status || "missing"}`);
   }
   return match.comment.body;
+}
+
+async function buildWarmResumeContextBlock({
+  config = null,
+  repoRoot = process.cwd(),
+  domainContext = null,
+  credentialStore = null,
+  createSetupGraphqlClient = createLinearSetupGraphqlClient,
+  cache = null,
+  store = null,
+  runDeps = null,
+  issueId,
+  prNumber,
+  headSha,
+  resourceId = null,
+  provenanceTag = null,
+  headMovedSinceProduced = false,
+} = {}) {
+  const reviewerNotes = await fetchWarmResumeReviewerNotesIfPresent({
+    domainContext,
+    runDeps,
+    prNumber,
+    headSha,
+    resourceId,
+  });
+  const mergeRun = latestWarmResumeMergeRun({ store, issueId, prNumber, headSha });
+  const humanComments = await fetchWarmResumeHumanLinearComments({
+    config,
+    repoRoot,
+    domainContext,
+    credentialStore,
+    createSetupGraphqlClient,
+    cache,
+    runDeps,
+    issueId,
+  });
+
+  const tag = stringOrNull(provenanceTag) ||
+    (reviewerNotes ? WARM_RESUME_REVIEW_FAILURE_TAG : WARM_RESUME_LINEAR_REENTRY_TAG);
+  const lines = [
+    "Resume this Linear issue on the existing pull request.",
+    `- Pull request: #${prNumber || "unknown"}`,
+    `- Expected head: ${headSha || "unknown"}`,
+    "- Continue on this branch/PR. Do not open a second PR.",
+  ];
+
+  if (headMovedSinceProduced) {
+    lines.push(
+      "- The branch has changed since the previous run — commits were added that the factory did not make. Review the branch's current state before building on it.",
+    );
+  }
+
+  if (reviewerNotes) {
+    lines.push("", "Reviewer feedback:", indentWarmResumeBlock(reviewerNotes));
+  }
+
+  if (mergeRun?.merge_outcome?.outcome === "failed") {
+    const outcome = mergeRun.merge_outcome;
+    lines.push(
+      "",
+      "Latest merge failure:",
+      `- Run: ${mergeRun.run_id || "unknown"}`,
+      `- PR: #${outcome.pr_number}`,
+      `- Head: ${outcome.head_sha}`,
+      `- Observed: ${outcome.observed_at}`,
+      `- Reason: ${outcome.reason}`,
+    );
+  }
+
+  if (humanComments.length > 0) {
+    lines.push("", "Linear comments from people:");
+    for (const comment of humanComments) {
+      lines.push(formatWarmResumeLinearComment(comment));
+    }
+  }
+
+  return {
+    text: lines.join("\n"),
+    provenance_tag: tag,
+  };
+}
+
+async function fetchWarmResumeReviewerNotesIfPresent(options = {}) {
+  try {
+    const notes = await fetchWarmResumeReviewerNotes(options);
+    return typeof notes === "string" && notes.trim() !== "" ? notes : null;
+  } catch {
+    return null;
+  }
+}
+
+function latestWarmResumeMergeRun({ store = null, issueId, prNumber, headSha } = {}) {
+  if (typeof store?.findLatestMergeRunForIssuePrHead !== "function") return null;
+  const normalizedIssueId = stringOrNull(issueId);
+  const normalizedHeadSha = stringOrNull(headSha);
+  const normalizedPrNumber = Number(prNumber);
+  if (!normalizedIssueId || !normalizedHeadSha || !Number.isInteger(normalizedPrNumber)) return null;
+  try {
+    return store.findLatestMergeRunForIssuePrHead({
+      issueId: normalizedIssueId,
+      prNumber: normalizedPrNumber,
+      headSha: normalizedHeadSha,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWarmResumeHumanLinearComments({
+  config = null,
+  repoRoot = process.cwd(),
+  domainContext = null,
+  credentialStore = null,
+  createSetupGraphqlClient = createLinearSetupGraphqlClient,
+  cache = null,
+  runDeps = null,
+  issueId,
+} = {}) {
+  const appIdentityId = stringOrNull(cache?.app_identity_id);
+  if (!appIdentityId) return [];
+  try {
+    const client = await warmResumeLinearClient({
+      config,
+      repoRoot,
+      domainContext,
+      credentialStore,
+      createSetupGraphqlClient,
+      runDeps,
+    });
+    if (typeof client?.listIssueComments !== "function") return [];
+    const comments = await client.listIssueComments(issueId);
+    return (Array.isArray(comments) ? comments : [])
+      .filter((comment) => stringOrNull(comment?.user?.id) !== appIdentityId);
+  } catch {
+    return [];
+  }
+}
+
+async function warmResumeLinearClient({
+  config = null,
+  repoRoot = process.cwd(),
+  domainContext = null,
+  credentialStore = null,
+  createSetupGraphqlClient = createLinearSetupGraphqlClient,
+  runDeps = null,
+} = {}) {
+  if (runDeps?.linearClient) return runDeps.linearClient;
+  if (typeof runDeps?.linearClientFactory === "function") return runDeps.linearClientFactory();
+  return createSetupGraphqlClient({
+    config,
+    repoRoot,
+    credentialStore,
+    domainContext,
+    allowBrowserAuth: false,
+    allowRefresh: true,
+  }).client;
+}
+
+function formatWarmResumeLinearComment(comment = {}) {
+  const createdAt = stringOrNull(comment.createdAt || comment.created_at) || "unknown time";
+  const userId = stringOrNull(comment.user?.id) || "unknown-user";
+  const userName = stringOrNull(comment.user?.displayName || comment.user?.name) || userId;
+  const body = typeof comment.body === "string" && comment.body.trim() !== ""
+    ? comment.body
+    : "(empty comment)";
+  return `- ${createdAt} ${userName} (${userId}):\n${indentWarmResumeBlock(body)}`;
+}
+
+function indentWarmResumeBlock(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => `  ${line}`)
+    .join("\n");
 }
 
 function latestReadyFixReviewMarkerMatch(lookup) {
@@ -3418,6 +4607,12 @@ function readyFixPrLocationReason(location) {
   return `ready_fix_pr_${status || "unresolved"}`;
 }
 
+// locatePr folds its own internal failures into status "none" WITH a reason;
+// only a reason-less "none" is a probe that actually listed PRs and found zero.
+function readyFixPrAbsenceConfirmed(location) {
+  return location?.status === "none" && !stringOrNull(location?.reason);
+}
+
 function readyFixReviewStateReason(reviewState) {
   if (reviewState?.status === "marker_missing") return "ready_fix_review_marker_missing";
   if (reviewState?.status === "marker_multiple") return "ready_fix_review_marker_multiple";
@@ -3471,6 +4666,17 @@ function latestExecutionRunForReview({ store, issueId } = {}) {
   } catch {
     return null;
   }
+}
+
+function mergeGateProducedPrNumber({ store, issueId, repoRoot, runStoreDir } = {}) {
+  const produced = producedPrIdentityForRun({
+    run: latestExecutionRunForReview({ store, issueId }),
+    repoRoot,
+    runStoreDir,
+  });
+  return positiveIntegerValue(
+    produced?.pull_request_number ?? produced?.pr_number ?? produced?.number,
+  );
 }
 
 function isExecutionRunInFlightOrRecent(run, {
@@ -3693,6 +4899,11 @@ function processReplayIssueDecision(options = {}) {
 function processWarmResumeIssueDecision(options = {}) {
   const {
     domain,
+    client,
+    config = null,
+    cache = null,
+    issueContext = null,
+    domainContext = null,
     issueId,
     decision,
     runWarmResumeIssue,
@@ -3723,11 +4934,44 @@ function processWarmResumeIssueDecision(options = {}) {
         warmResumeDecision: decision,
       });
       if (isRateLimitedError(options, warmResume?.error)) throw warmResume.error;
+      // A resume that failed closed produced nothing a later poll could pick
+      // up differently — without a Linear signal the issue strands silently.
+      const failedClosedReason = warmResumeFailedClosedReason(warmResume);
+      if (!failedClosedReason) {
+        return {
+          action: "warm_resume",
+          issueId,
+          decision,
+          result: warmResume,
+        };
+      }
+      const escalation = await applyReadyIssueNeedsPrincipalEscalation({
+        client,
+        config,
+        cache,
+        issueId,
+        issueContext,
+        domainContext,
+        decision: {
+          action: "escalate",
+          reason: failedClosedReason,
+          location: decision.prNumber ? { pr: { number: decision.prNumber } } : null,
+          hasPr: Boolean(decision.prNumber),
+        },
+      });
+      emitStatus({
+        domainId: domain.id,
+        issueId,
+        state: "resume_attention",
+        reason: failedClosedReason,
+        note: { decision, escalation },
+      });
       return {
         action: "warm_resume",
         issueId,
         decision,
         result: warmResume,
+        escalation,
       };
     },
   });
@@ -3739,6 +4983,17 @@ function processWarmResumeIssueDecision(options = {}) {
   };
 }
 
+function warmResumeFailedClosedReason(result = {}) {
+  if (result?.status === "failed_closed") {
+    return stringOrNull(result.reason) || "warm_resume_failed_closed";
+  }
+  if (result?.status === "rejected") {
+    const reason = String(result.reason || "");
+    if (reason.startsWith("runner_failed_closed:")) return reason;
+  }
+  return null;
+}
+
 async function applyReadyIssueNeedsPrincipalEscalation({
   client,
   config = null,
@@ -3748,27 +5003,64 @@ async function applyReadyIssueNeedsPrincipalEscalation({
   domainContext = null,
   decision = null,
 } = {}) {
-  return applyCommitEffects({
-    effects: [issueNeedsPrincipalEscalationEffect],
-    ctx: {
-      client,
-      config,
-      cache,
-      issue: issueContext,
-      issueId,
-      linearIssueId: issueId,
-      domainContext,
-      teamId: issueContext?.team?.id || domainContext?.linear?.teamId || null,
-      trace: {
-        name: "ready_fix_escalation",
-        attributes: {
-          source_object_id: issueId,
-          reason: decision?.reason || null,
-        },
-        spans: [],
+  const reason = stringOrNull(decision?.reason) || "ready_fix_escalation_required";
+  return applyNeedsPrincipalEscalationPair({
+    client,
+    config,
+    cache,
+    issueId,
+    issue: issueContext,
+    domainContext,
+    trace: {
+      name: "ready_fix_escalation",
+      attributes: {
+        source_object_id: issueId,
+        reason,
       },
+      spans: [],
     },
+    site: "ready_fix",
+    reason,
+    siteContent: needsPrincipalEscalationReasonSentence(decision),
   });
+}
+
+function needsPrincipalEscalationReasonSentence(decision = null) {
+  const reason = stringOrNull(decision?.reason) || "ready_fix_escalation_required";
+  const pr = decision?.location?.pr || null;
+  const prNumber = pr?.number;
+  // The reader arrives cold: a clickable link beats a bare PR number.
+  const prMention = prNumber
+    ? (pr?.owner && pr?.repo
+        ? ` ([pull request #${prNumber}](https://github.com/${pr.owner}/${pr.repo}/pull/${prNumber}))`
+        : ` (pull request #${prNumber})`)
+    : "";
+  if (reason.startsWith("runner_failed_closed:")) {
+    return reason.includes("git_repo_remote_branch_not_owned")
+      ? `Teami went back to continue its earlier work on this issue, but the branch no longer matches the last state Teami produced${prMention} — someone has pushed to it since. Teami stopped rather than touch changes it did not make, so a human needs to decide how the work continues.`
+      : `Teami tried to pick this issue back up, but the attempt failed before any work started${prMention}.`;
+  }
+  switch (reason) {
+    case "ready_fix_prior_run_id_missing":
+    case "ready_fix_prior_run_not_resumable":
+    case "ready_fix_prior_run_session_unresolved":
+      return decision?.hasPr
+        ? `A previous automated attempt on this issue cannot be resumed, but work from it still exists${prMention}. A human needs to decide whether that work is kept, finished by hand, or discarded.`
+        : "A previous automated attempt on this issue cannot be resumed, and Teami could not confirm whether it left work behind, so it will not start over on its own.";
+    case "ready_fix_resume_paused":
+      return "Automated work on this issue paused itself partway and needs a human look before it continues.";
+    case "ready_fix_pr_missing":
+      return "Teami expected an existing pull request for this issue but could not find one.";
+    case "ready_fix_pr_closed":
+      return `The pull request previously opened for this issue is closed${prMention}, so Teami cannot continue from it.`;
+    case "ready_fix_pr_multiple":
+      return "More than one pull request matches this issue, so Teami cannot tell which one is current.";
+    case "ready_fix_pr_probe_unavailable":
+    case "ready_fix_pr_probe_failed":
+      return "Teami could not reach GitHub to check whether work for this issue already exists.";
+    default:
+      return "Teami stopped automated work on this issue because it hit a state it will not resolve on its own.";
+  }
 }
 
 function processFreshIssueDecision(options = {}) {
@@ -3916,9 +5208,11 @@ async function maybeWriteFreshSuppression(options = {}) {
     fingerprint,
     fresh,
     client,
+    cache = null,
     idempotency = triggerIdempotency,
     computeFingerprint = idempotency.computeTriggerFingerprint,
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     now = () => new Date(),
   } = options;
@@ -3932,7 +5226,8 @@ async function maybeWriteFreshSuppression(options = {}) {
   }
   const currentFingerprint = computeFingerprint(current);
   if (currentFingerprint !== fingerprint) return null;
-  if (current?.status?.type !== "planned") return null;
+  const plannedStateId = cache?.projectStatuses?.planned || null;
+  if (!plannedStateId || current?.status?.id !== plannedStateId) return null;
   return idempotency.writeSuppression({
     domainId,
     projectId,
@@ -3942,6 +5237,7 @@ async function maybeWriteFreshSuppression(options = {}) {
     reason: fresh.reason || fresh.result?.reason || "rejected",
     createdAt: toDate(now()).toISOString(),
     repoRoot,
+    home,
     runStoreDir,
   });
 }
@@ -3961,6 +5257,7 @@ async function maybeWriteReadyIssueFreshSuppression(options = {}) {
     idempotency = triggerIdempotency,
     computeFingerprint = computeIssueTriggerFingerprint,
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     now = () => new Date(),
   } = options;
@@ -3998,6 +5295,7 @@ async function maybeWriteReadyIssueFreshSuppression(options = {}) {
     reason: readyIssueResultReason(fresh),
     createdAt: toDate(now()).toISOString(),
     repoRoot,
+    home,
     runStoreDir,
   });
 }
@@ -4005,6 +5303,7 @@ async function maybeWriteReadyIssueFreshSuppression(options = {}) {
 async function drainReplayPendingForDomain(options = {}) {
   const {
     repoRoot = process.cwd(),
+    home = resolveTeamiHome(),
     runStoreDir = null,
     config,
     domain,
@@ -4017,11 +5316,12 @@ async function drainReplayPendingForDomain(options = {}) {
   const pending = await idempotency.listReplayPending({
     domainId: domain.id,
     repoRoot,
+    home,
     runStoreDir,
   });
   if (pending.length === 0) return [];
 
-  const domainContext = buildDomainContext({ domain, config, repoRoot });
+  const domainContext = buildDomainContext({ domain, config, repoRoot, home });
   const client = await createLinearClient({ config, repoRoot, domain, domainContext });
   const results = [];
   for (const item of pending) {
@@ -4121,22 +5421,6 @@ function handleRateLimitedDomain(options = {}) {
     nextAttemptAt: resetAt,
     error,
   };
-}
-
-function emitResumeReconciliationStatus({ report, emitStatus }) {
-  for (const item of report?.items || []) {
-    emitStatus({
-      domainId: null,
-      projectId: null,
-      state: item.pm_state === "Working" ? "resume_working" : "resume_attention",
-      reason: item.reason,
-      ref: item.ref,
-      source: item.source,
-      classification: item.classification,
-      pmState: item.pm_state,
-      detail: item.detail ?? null,
-    });
-  }
 }
 
 function createStatusEmitter({ onStatus = null } = {}) {
@@ -4244,6 +5528,11 @@ function stringOrNull(value) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
   return text || null;
+}
+
+function positiveIntegerValue(value) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
 }
 
 function shouldWriteSuppressionForReadyIssueResult(result) {

@@ -7,6 +7,7 @@ import {
   evaluatePauseState,
 } from "./quality.mjs";
 import { readRunArtifact } from "../../../engine/run-store.mjs";
+import { resolveTeamiHome } from "./app-home.mjs";
 import {
   isInvalidTraceReceiptResult,
   readTraceReceipt,
@@ -227,7 +228,7 @@ export function runDeterministicChecksForArtifact({ artifact = null, checkInputs
       "pause_state_correctness",
       "pause_state_correctness_offline_v1",
       "post_mutation_project_state_not_recorded_in_run_artifact",
-      ["project", "hasOpenQuestionsLabelId", "backlogStatusId"],
+      ["project", "attentionStatusId", "appIdentityId"],
     ));
   } else {
     checks.push(skipped(
@@ -254,14 +255,17 @@ export function acceptedPacketSufficiencyInputFromArtifact(artifact) {
 function terminalOutputSufficiencyView(artifact) {
   const terminalOutput = artifact.terminal_output;
   const pausePacket = isRecord(artifact.pause_packet) ? artifact.pause_packet : {};
-  return {
+  const needsProjectUpdate =
+    terminalOutput.outcome === "commit" || terminalOutput.outcome === "failed_closed";
+  const view = {
     ...terminalOutput,
-    project_update_markdown:
-      artifact.project_update_markdown ?? pausePacket.project_update_markdown,
     open_questions_markdown: pausePacket.open_questions_markdown,
-    discovery_issues:
-      artifact.discovery_issues ?? pausePacket.discovery_issues ?? terminalOutput.discovery_issues,
   };
+  if (needsProjectUpdate) {
+    view.project_update_markdown =
+      artifact.project_update_markdown ?? pausePacket.project_update_markdown;
+  }
+  return view;
 }
 
 function isRecord(value) {
@@ -307,6 +311,7 @@ export function assertCodeCheckResult(annotation) {
 // must treat ok:false as fail-closed (failed_closed is set for them).
 export async function emitDeterministicCheckResults({
   repoRoot = process.cwd(),
+  home = resolveTeamiHome(),
   runId = null,
   artifact = null,
   receipt = null,
@@ -325,7 +330,7 @@ export async function emitDeterministicCheckResults({
   let artifactFailure = null;
   if (!resolvedArtifact && runId) {
     try {
-      resolvedArtifact = readRunArtifact({ runId, repoRoot, runStoreDir });
+      resolvedArtifact = readRunArtifact({ runId, repoRoot, home, runStoreDir });
       if (!resolvedArtifact) artifactFailure = "missing_run_artifact";
     } catch (error) {
       artifactFailure = "invalid_run_artifact";

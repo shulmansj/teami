@@ -84,8 +84,9 @@ test("general Judge writes quality tagged review for a Reviewer verdict fixture 
   assert.equal(result.storage, "phoenix_native");
   assert.deepEqual(result.annotation_ids, ["review-quality-annotation-1"]);
   assert.equal(invocations.length, 1);
-  assert.match(invocations[0][0].args.at(-1), /"reviewer_review"/);
-  assert.match(invocations[0][0].args.at(-1), /"verdict": "request-changes"/);
+  const prompt = runtimePromptFromCommand(invocations[0][0]);
+  assert.match(prompt, /"reviewer_review"/);
+  assert.match(prompt, /"verdict": "request-changes"/);
 
   assert.equal(posts.length, 1);
   const wire = posts[0].data[0];
@@ -202,6 +203,19 @@ function reviewGoldFixture(contract) {
   };
 }
 
+function runtimePromptFromCommand(command) {
+  if (typeof command.stdinInput === "string") return command.stdinInput;
+  const index = command.args.indexOf("-p");
+  if (index >= 0) {
+    const promptArg = command.args[index + 1];
+    if (typeof promptArg === "string" && promptArg.startsWith("@")) {
+      return fs.readFileSync(promptArg.slice(1), "utf8");
+    }
+    return promptArg;
+  }
+  return command.args.at(-1);
+}
+
 function reviewJudgeConfig() {
   return {
     runtime: {
@@ -221,3 +235,17 @@ function reviewJudgeConfig() {
     },
   };
 }
+
+test("review commit payload treats explicit null comments as absent (strict-schema null-union convention)", async () => {
+  const { assembleCommitPayload, validateCommitPayload } = await import("../src/workflows/review/commit-payload.mjs");
+  const payload = assembleCommitPayload({
+    disposition: "approve",
+    body: "looks good",
+    reviewed_head_sha: "de6a10a87b0ccc7468f327e7d590dff0e1d40267",
+    comments: null,
+    human_briefing: null,
+  });
+  assert.equal(Object.hasOwn(payload, "comments"), false, "null comments must not ride the payload");
+  const verdict = validateCommitPayload(payload);
+  assert.deepEqual(verdict, { ok: true, failureReasons: [] });
+});

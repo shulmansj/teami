@@ -40,6 +40,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Static quality
+        run: npm run quality:static
+
       - name: Test
         run: npm test
 
