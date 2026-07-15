@@ -1,7 +1,8 @@
 import path from "node:path";
 
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
-const CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS = Object.freeze([250, 750]);
+const CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS = Object.freeze([250, 750, 2_000, 5_000]);
+const CLAUDE_PLUGIN_READ_COMMAND_TIMEOUT_MS = 10_000;
 
 export async function readClaudePluginHealth({
   repoRoot = process.cwd(),
@@ -11,12 +12,20 @@ export async function readClaudePluginHealth({
   marketplaceName = "teami",
   marketplaceSource,
   scope = "user",
+  readRetryDelaysMs = CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS,
 } = {}) {
+  let retryDelaysMs;
+  try {
+    retryDelaysMs = normalizedRetryDelays(readRetryDelaysMs);
+  } catch {
+    return failure("claude_plugin_read_policy_invalid", "Claude plugin health retry policy is invalid");
+  }
   const marketplace = await readTrustedMarketplace({
     repoRoot,
     runCommand,
     marketplaceName,
     marketplaceSource,
+    retryDelaysMs,
   });
   if (!marketplace.ok) return marketplace;
 
@@ -24,6 +33,7 @@ export async function readClaudePluginHealth({
     runCommand,
     repoRoot,
     args: ["plugin", "list", "--json"],
+    retryDelaysMs,
   });
   if (!listed.ok) return failure("claude_plugin_list_failed", safeClaudeCliDetail(listed));
 
@@ -58,8 +68,21 @@ export async function ensureTrustedClaudeMarketplace({
   marketplaceName = "teami",
   marketplaceSource,
   scope = "user",
+  readRetryDelaysMs = CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS,
 } = {}) {
-  let current = await readTrustedMarketplace({ repoRoot, runCommand, marketplaceName, marketplaceSource });
+  let retryDelaysMs;
+  try {
+    retryDelaysMs = normalizedRetryDelays(readRetryDelaysMs);
+  } catch {
+    return failure("claude_plugin_read_policy_invalid", "Claude plugin health retry policy is invalid");
+  }
+  let current = await readTrustedMarketplace({
+    repoRoot,
+    runCommand,
+    marketplaceName,
+    marketplaceSource,
+    retryDelaysMs,
+  });
   if (current.ok) {
     const updated = await runClaudePluginCommand({
       runCommand,
@@ -67,7 +90,13 @@ export async function ensureTrustedClaudeMarketplace({
       args: ["plugin", "marketplace", "update", marketplaceName],
     });
     if (!updated.ok) return failure("claude_plugin_marketplace_update_failed", safeClaudeCliDetail(updated));
-    current = await readTrustedMarketplace({ repoRoot, runCommand, marketplaceName, marketplaceSource });
+    current = await readTrustedMarketplace({
+      repoRoot,
+      runCommand,
+      marketplaceName,
+      marketplaceSource,
+      retryDelaysMs,
+    });
     return current.ok ? { ...current, status: "updated" } : current;
   }
   if (current.reason !== "claude_plugin_marketplace_missing") return current;
@@ -79,21 +108,40 @@ export async function ensureTrustedClaudeMarketplace({
   });
   if (!added.ok) {
     // A concurrent add is safe only if read-back proves the exact trusted identity.
-    const raced = await readTrustedMarketplace({ repoRoot, runCommand, marketplaceName, marketplaceSource });
+    const raced = await readTrustedMarketplace({
+      repoRoot,
+      runCommand,
+      marketplaceName,
+      marketplaceSource,
+      retryDelaysMs,
+    });
     if (!raced.ok) {
       return failure("claude_plugin_marketplace_add_failed", safeClaudeCliDetail(added) || raced.detail);
     }
     return { ...raced, status: "existing" };
   }
-  const verified = await readTrustedMarketplace({ repoRoot, runCommand, marketplaceName, marketplaceSource });
+  const verified = await readTrustedMarketplace({
+    repoRoot,
+    runCommand,
+    marketplaceName,
+    marketplaceSource,
+    retryDelaysMs,
+  });
   return verified.ok ? { ...verified, status: "added" } : verified;
 }
 
-async function readTrustedMarketplace({ repoRoot, runCommand, marketplaceName, marketplaceSource } = {}) {
+async function readTrustedMarketplace({
+  repoRoot,
+  runCommand,
+  marketplaceName,
+  marketplaceSource,
+  retryDelaysMs = CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS,
+} = {}) {
   const listed = await runClaudePluginReadCommand({
     runCommand,
     repoRoot,
     args: ["plugin", "marketplace", "list", "--json"],
+    retryDelaysMs,
   });
   if (!listed.ok) return failure("claude_plugin_marketplace_list_failed", safeClaudeCliDetail(listed));
   let entries;
@@ -195,16 +243,21 @@ function arrayField(value) {
   return Array.isArray(value) ? value : [];
 }
 
-async function runClaudePluginCommand({ runCommand, repoRoot, args } = {}) {
+async function runClaudePluginCommand({ runCommand, repoRoot, args, timeoutMs = null } = {}) {
   if (typeof runCommand !== "function") return failure("claude_plugin_command_unavailable", "Claude command runner is unavailable");
   try {
-    const result = await runCommand("claude", args, { cwd: repoRoot });
+    const result = await runCommand("claude", args, {
+      cwd: repoRoot,
+      ...(timeoutMs === null ? {} : { timeoutMs }),
+    });
     const status = Number.isInteger(result?.status) ? result.status : result?.ok === true ? 0 : 1;
     return {
       ok: result?.ok === true || status === 0,
       status,
       stdout: result?.stdout ?? "",
       stderr: result?.stderr ?? "",
+      timedOut: result?.timedOut === true,
+      outputTruncated: result?.outputTruncated === true,
     };
   } catch (error) {
     return { ok: false, status: 1, stdout: "", stderr: error.message };
@@ -212,13 +265,33 @@ async function runClaudePluginCommand({ runCommand, repoRoot, args } = {}) {
 }
 
 async function runClaudePluginReadCommand(options = {}) {
-  let result = await runClaudePluginCommand(options);
-  for (const delayMs of CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS) {
-    if (result.ok) return result;
+  let retryDelaysMs;
+  try {
+    retryDelaysMs = normalizedRetryDelays(options.retryDelaysMs);
+  } catch {
+    return { ok: false, status: 1, stdout: "", stderr: "Claude plugin health retry policy is invalid" };
+  }
+  const commandOptions = { ...options, timeoutMs: CLAUDE_PLUGIN_READ_COMMAND_TIMEOUT_MS };
+  let result = await runClaudePluginCommand(commandOptions);
+  for (const delayMs of retryDelaysMs) {
+    if (!claudeReadShouldRetry(result)) return result;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
-    result = await runClaudePluginCommand(options);
+    result = await runClaudePluginCommand(commandOptions);
   }
   return result;
+}
+
+function claudeReadShouldRetry(result) {
+  if (result.ok || result.timedOut || result.outputTruncated) return false;
+  return !/command could not start/i.test(String(result.stderr || ""));
+}
+
+function normalizedRetryDelays(value) {
+  const delays = value ?? CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS;
+  if (!Array.isArray(delays) || delays.length > 8 || delays.some((delay) => !Number.isInteger(delay) || delay < 0 || delay > 10_000)) {
+    throw new Error("claude_plugin_read_retry_delays_invalid");
+  }
+  return delays;
 }
 
 function failure(reason, detail = "") {

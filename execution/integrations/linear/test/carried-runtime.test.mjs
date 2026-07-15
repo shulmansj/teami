@@ -118,8 +118,9 @@ test("carried runtime rejects a completed download whose checksum does not match
 
   assert.equal(result.ok, false);
   assert.equal(result.reason, "runtime_fetch_failed");
-  assert.match(result.repairHint, /checksum mismatch/);
+  assert.match(result.repairHint, /did not match its pinned manifest/i);
   assert.equal(fs.existsSync(path.join(runtimeDir, "current")), false);
+  assert.equal(fs.existsSync(path.join(runtimeDir, ".download", "fixture-runtime.tar.gz.part")), false);
 });
 
 test("carried runtime aborts a stalled download within its configured bound", async () => {
@@ -162,6 +163,13 @@ test("Windows carried runtime fixture preserves side-by-side VC++ runtime DLLs",
     archive,
     platformKey: "win32-x64",
   });
+  const staleExtractDir = path.join(
+    runtimeDir,
+    ".download",
+    `fixture-runtime.tar.gz.extract-2147483647-${Date.now() - 60_000}`,
+  );
+  fs.mkdirSync(staleExtractDir, { recursive: true });
+  fs.writeFileSync(path.join(staleExtractDir, "partial"), "stale extraction");
 
   const result = await ensureCarriedRuntime({
     runtimeDir,
@@ -175,6 +183,205 @@ test("Windows carried runtime fixture preserves side-by-side VC++ runtime DLLs",
   assert.equal(fs.existsSync(path.join(runtimeDir, "current", "Scripts", "phoenix.exe")), true);
   assert.equal(fs.existsSync(path.join(runtimeDir, "current", "vcruntime140.dll")), true);
   assert.equal(fs.existsSync(path.join(runtimeDir, "current", "vcruntime140_1.dll")), true);
+  assert.equal(fs.existsSync(staleExtractDir), false);
+});
+
+test("carried runtime honors PAX paths instead of truncating long Python package entries", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-pax-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const longDir = "python/Lib/site-packages/google/genai/_gaos/resources/interactions/codeexecutioncallstep/__pycache__";
+  const longFile = `${longDir}/__init__.cpython-312.pyc`;
+  const archive = buildPaxFixtureArchive({
+    [longDir]: { type: "5", content: "" },
+    [longFile]: { type: "0", content: "fixture bytecode" },
+  });
+  const { manifestPath } = writeFixtureManifest({
+    tempDir,
+    archive,
+    platformKey: "win32-x64",
+  });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "win32-x64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, true, result.repairHint);
+  assert.equal(fs.readFileSync(path.join(runtimeDir, "current", longFile), "utf8"), "fixture bytecode");
+  assert.deepEqual(
+    fs.readdirSync(path.join(runtimeDir, ".download")).filter((name) => name.includes(".extract-")),
+    [],
+  );
+});
+
+test("carried runtime applies PAX size overrides to regular files", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-pax-size-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildPaxSizeOverrideArchive({
+    name: "python/file.txt",
+    content: "content",
+    headerSize: 0,
+  });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, true, result.repairHint);
+  assert.equal(fs.readFileSync(path.join(runtimeDir, "current", "python", "file.txt"), "utf8"), "content");
+});
+
+test("local empty PAX values suppress inherited global overrides", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-pax-delete-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildGlobalPaxDeletionArchive({ rawName: "python/raw.txt", content: "raw path" });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, true, result.repairHint);
+  assert.equal(fs.readFileSync(path.join(runtimeDir, "current", "python", "raw.txt"), "utf8"), "raw path");
+  assert.equal(fs.existsSync(path.join(runtimeDir, "current", "global.txt")), false);
+});
+
+test("carried runtime creates confined hardlinks instead of silently skipping them", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-hardlink-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildPaxFixtureArchive({
+    "python/source.txt": { type: "0", content: "shared content" },
+    "python/copy.txt": { type: "1", content: "", linkName: "python/source.txt" },
+  });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, true, result.repairHint);
+  assert.equal(fs.readFileSync(path.join(runtimeDir, "current", "python", "copy.txt"), "utf8"), "shared content");
+});
+
+test("carried runtime rejects unsupported tar entry types instead of reporting a partial install", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-unsupported-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildPaxFixtureArchive({
+    "python/device": { type: "3", content: "" },
+  });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "runtime_extract_failed");
+  assert.equal(fs.existsSync(path.join(runtimeDir, "current")), false);
+});
+
+test("carried runtime rejects escaping symlink targets before creating them", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-symlink-unsafe-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildPaxFixtureArchive({
+    "python/escape": { type: "2", content: "", linkName: "../../../outside-runtime" },
+  });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "runtime_extract_failed");
+  assert.equal(fs.existsSync(path.join(runtimeDir, ".download", "outside-runtime")), false);
+  assert.equal(fs.existsSync(path.join(runtimeDir, "outside-runtime")), false);
+});
+
+test("carried runtime closes truncated entries and returns structured repair guidance", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-truncated-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildTruncatedFixtureArchive({ name: "python/partial.bin", declaredSize: 64, content: "partial" });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "runtime_extract_failed");
+  assert.match(result.repairHint, /cleared the partial extraction/i);
+  assert.doesNotMatch(result.repairHint, /partial\.bin|\.download|ended mid-entry/i);
+  assert.deepEqual(
+    fs.readdirSync(path.join(runtimeDir, ".download")).filter((name) => name.includes(".extract-")),
+    [],
+  );
+});
+
+test("carried runtime preserves executable modes without privileged mode bits", { skip: process.platform === "win32" }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-mode-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildPaxFixtureArchive({
+    "python/bin/python": { type: "0", content: "fixture executable", mode: 0o6755 },
+  });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, true, result.repairHint);
+  assert.equal(fs.statSync(path.join(runtimeDir, "current", "python", "bin", "python")).mode & 0o7777, 0o755);
+});
+
+test("carried runtime cleans a failed extraction and gives product-readable repair guidance", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-pax-unsafe-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildPaxFixtureArchive({
+    "../outside-runtime": { type: "0", content: "must not escape" },
+  });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    fetchImpl: async () => new Response(archive, { status: 200 }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "runtime_extract_failed");
+  assert.match(result.repairHint, /cleared the partial extraction/i);
+  assert.doesNotMatch(result.repairHint, /outside-runtime|\.download|EISDIR/i);
+  assert.equal(fs.existsSync(path.join(runtimeDir, ".download", "outside-runtime")), false);
+  assert.deepEqual(
+    fs.readdirSync(path.join(runtimeDir, ".download")).filter((name) => name.includes(".extract-")),
+    [],
+  );
 });
 
 test("Phoenix config points python and phoenix at the carried runtime, not the old venv", () => {
@@ -228,16 +435,95 @@ function buildFixtureArchive(entries) {
   return zlib.gzipSync(Buffer.concat(chunks));
 }
 
-function tarHeader({ name, size }) {
+function buildPaxFixtureArchive(entries) {
+  const chunks = [];
+  let index = 0;
+  for (const [name, entry] of Object.entries(entries)) {
+    const paxBody = paxRecord("path", name);
+    chunks.push(tarHeader({ name: `PaxHeaders/${index}`, size: paxBody.length, type: "x" }));
+    chunks.push(paxBody);
+    chunks.push(Buffer.alloc((512 - (paxBody.length % 512)) % 512));
+
+    const body = Buffer.from(entry.content, "utf8");
+    chunks.push(tarHeader({
+      name: name.slice(0, 100),
+      size: body.length,
+      type: entry.type,
+      linkName: entry.linkName,
+      mode: entry.mode,
+    }));
+    chunks.push(body);
+    chunks.push(Buffer.alloc((512 - (body.length % 512)) % 512));
+    index += 1;
+  }
+  chunks.push(Buffer.alloc(1024));
+  return zlib.gzipSync(Buffer.concat(chunks));
+}
+
+function buildTruncatedFixtureArchive({ name, declaredSize, content }) {
+  return zlib.gzipSync(Buffer.concat([
+    tarHeader({ name, size: declaredSize }),
+    Buffer.from(content, "utf8"),
+  ]));
+}
+
+function buildPaxSizeOverrideArchive({ name, content, headerSize }) {
+  const body = Buffer.from(content, "utf8");
+  const paxBody = Buffer.concat([
+    paxRecord("path", name),
+    paxRecord("size", String(body.length)),
+  ]);
+  return zlib.gzipSync(Buffer.concat([
+    tarHeader({ name: "PaxHeaders/size", size: paxBody.length, type: "x" }),
+    paxBody,
+    Buffer.alloc((512 - (paxBody.length % 512)) % 512),
+    tarHeader({ name: name.slice(0, 100), size: headerSize }),
+    body,
+    Buffer.alloc((512 - (body.length % 512)) % 512),
+    Buffer.alloc(1024),
+  ]));
+}
+
+function buildGlobalPaxDeletionArchive({ rawName, content }) {
+  const globalBody = paxRecord("path", "global.txt");
+  const localBody = paxRecord("path", "");
+  const body = Buffer.from(content, "utf8");
+  return zlib.gzipSync(Buffer.concat([
+    tarHeader({ name: "PaxHeaders/global", size: globalBody.length, type: "g" }),
+    globalBody,
+    Buffer.alloc((512 - (globalBody.length % 512)) % 512),
+    tarHeader({ name: "PaxHeaders/local", size: localBody.length, type: "x" }),
+    localBody,
+    Buffer.alloc((512 - (localBody.length % 512)) % 512),
+    tarHeader({ name: rawName, size: body.length }),
+    body,
+    Buffer.alloc((512 - (body.length % 512)) % 512),
+    Buffer.alloc(1024),
+  ]));
+}
+
+function paxRecord(key, value) {
+  const payload = `${key}=${value}\n`;
+  let length = Buffer.byteLength(payload) + 2;
+  while (true) {
+    const record = `${length} ${payload}`;
+    const actual = Buffer.byteLength(record);
+    if (actual === length) return Buffer.from(record, "utf8");
+    length = actual;
+  }
+}
+
+function tarHeader({ name, size, type = "0", linkName = "", mode = 0o777 }) {
   const header = Buffer.alloc(512, 0);
   writeTarString(header, name, 0, 100);
-  writeTarString(header, "0000777", 100, 8);
+  writeTarString(header, mode.toString(8).padStart(7, "0"), 100, 8);
   writeTarString(header, "0000000", 108, 8);
   writeTarString(header, "0000000", 116, 8);
   writeTarString(header, size.toString(8).padStart(11, "0"), 124, 12);
   writeTarString(header, "00000000000", 136, 12);
   header.fill(0x20, 148, 156);
-  writeTarString(header, "0", 156, 1);
+  writeTarString(header, type, 156, 1);
+  writeTarString(header, linkName, 157, 100);
   writeTarString(header, "ustar", 257, 6);
   writeTarString(header, "00", 263, 2);
   const checksum = [...header].reduce((sum, byte) => sum + byte, 0);

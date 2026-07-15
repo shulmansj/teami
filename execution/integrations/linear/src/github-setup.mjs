@@ -292,7 +292,7 @@ export function createMockGitHubSetupTransport({
   };
 }
 
-export async function defaultRunCommand(command, args, { cwd, env } = {}) {
+export async function defaultRunCommand(command, args, { cwd, env, timeoutMs = null, maxOutputBytes = null } = {}) {
   const childEnv = env?.[SCRUBBED_GITHUB_ENV]
     ? { ...env }
     : {
@@ -305,6 +305,8 @@ export async function defaultRunCommand(command, args, { cwd, env } = {}) {
     operation: command === "git" ? gitOperationForArgs(args) : ghSetupOperation(args),
     cwd,
     env: childEnv,
+    timeoutMs,
+    maxOutputBytes,
     classifyFailure: ({ stdout, stderr }) => classifySetupCommandFailure(`${stderr}\n${stdout}`),
   });
 }
