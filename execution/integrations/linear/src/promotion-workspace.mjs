@@ -52,8 +52,8 @@ export function promotionWorkspaceCloneDir(workspaceDir) {
   return path.join(workspaceDir, "repo");
 }
 
-export function defaultRunGit(args, { cwd, env, exactEnv = false } = {}) {
-  return runBoundedGit(args, { cwd, env, exactEnv });
+export function defaultRunGit(args, { cwd, env, exactEnv = false, classifyFailure = null } = {}) {
+  return runBoundedGit(args, { cwd, env, exactEnv, classifyFailure });
 }
 
 // Deterministic branch namespace (CONSTRAINTS #15):

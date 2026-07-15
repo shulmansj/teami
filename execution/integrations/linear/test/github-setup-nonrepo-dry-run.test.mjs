@@ -8,6 +8,7 @@ import { formatCommand } from "../src/cli/operator-output.mjs";
 import {
   createMockGitHubSetupTransport,
   githubConnectionDoctorChecks,
+  listGitRemotes,
   readGitHubConnectionState,
   runGitHubInitPhase,
   TEAMI_WORKSPACE_REPO_MARKER_PATH,
@@ -52,11 +53,54 @@ function fail(stderr) {
   return { ok: false, status: 1, stdout: "", stderr };
 }
 
+test("bounded Git preserves the non-repository classification without exposing failure output", async (t) => {
+  const { root, cwd } = plainWorkspace();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const result = await listGitRemotes({ repoRoot: cwd });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "git_remote_listing_failed");
+  assert.equal(result.failure_code, "not_repository");
+  assert.match(result.detail, /^\[captured failure output redacted/);
+});
+
+test("an unrelated redacted Git failure never enters checkoutless setup", async (t) => {
+  const { root, cwd, home, statePath } = plainWorkspace();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const transport = {
+    ...createMockGitHubSetupTransport(),
+    kind: "real",
+  };
+
+  const result = await runGitHubInitPhase({
+    repoRoot: cwd,
+    home,
+    statePath,
+    config: configWithBehaviorRepo(),
+    transport,
+    runGit: async () => ({
+      ok: false,
+      status: 1,
+      stdout: "",
+      stderr: "[captured failure output redacted]",
+      failureCode: null,
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "git_remote_listing_failed");
+  assert.equal(transport.calls.length, 0);
+});
+
 function createCheckoutlessSeedRunGit({ cwd, calls, headSha = "seedabc123" }) {
   return (args, options = {}) => {
     calls.push({ args, cwd: options.cwd, env: options.env ?? null });
     if (options.cwd === cwd && args[0] === "remote" && args[1] === "-v") {
-      return fail("fatal: not a git repository");
+      return {
+        ...fail("[captured failure output redacted]"),
+        failureCode: "not_repository",
+      };
     }
     if (args[0] === "init") return ok("Initialized empty Git repository\n");
     if (args[0] === "add" && args[1] === "README.md") {
