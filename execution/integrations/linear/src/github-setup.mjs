@@ -813,11 +813,15 @@ function normalizeGitHubRemoteParts(owner, repoWithSuffix) {
 }
 
 export async function listGitRemotes({ repoRoot = process.cwd(), runGit = defaultRunGit } = {}) {
-  const result = await runGit(["remote", "-v"], { cwd: repoRoot });
+  const result = await runGit(["remote", "-v"], {
+    cwd: repoRoot,
+    classifyFailure: classifyGitRemoteListingFailure,
+  });
   if (!result.ok) {
     return {
       ok: false,
       reason: "git_remote_listing_failed",
+      failure_code: result.failureCode ?? null,
       detail: result.stderr.trim() || result.stdout.trim(),
     };
   }
@@ -827,6 +831,10 @@ export async function listGitRemotes({ repoRoot = process.cwd(), runGit = defaul
     if (match && !remotes.has(match[1])) remotes.set(match[1], match[2]);
   }
   return { ok: true, remotes: [...remotes.entries()].map(([name, url]) => ({ name, url })) };
+}
+
+function classifyGitRemoteListingFailure({ stdout = "", stderr = "" } = {}) {
+  return /not a git repository/i.test(`${stderr}\n${stdout}`) ? "not_repository" : null;
 }
 
 async function recordDryRunGitHubIntentWithoutLocalGit({
@@ -966,7 +974,9 @@ async function recordDryRunGitHubIntentWithoutLocalGit({
 
 function isNotGitRepositoryListing(remoteListing) {
   const detail = String(remoteListing?.detail || "");
-  return remoteListing?.reason === "git_remote_listing_failed" && /not a git repository/i.test(detail);
+  return remoteListing?.reason === "git_remote_listing_failed" && (
+    remoteListing.failure_code === "not_repository" || /not a git repository/i.test(detail)
+  );
 }
 
 function checkoutlessLocalMarker() {
