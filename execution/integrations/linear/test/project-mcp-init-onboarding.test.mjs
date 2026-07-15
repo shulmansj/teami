@@ -896,12 +896,80 @@ test("init_onboarding treats an already-installed Claude plugin as a successful 
   assert.equal(result.steps.plugin.status, "already_installed");
   assert.equal(result.steps.plugin.installed, false);
   assert.equal(result.steps.plugin.already_installed, true);
+  assert.equal(result.steps.plugin.version, PACKAGED_PLUGIN_VERSION);
   assert.deepEqual(
     harness.fakeClaude.calls.map((call) => call.args),
     [
       ["plugin", "marketplace", "list", "--json"],
       ["plugin", "list", "--json"],
     ],
+  );
+});
+
+test("init_onboarding reuses the exact plugin proof instead of repeating a flaky Claude read", async (t) => {
+  let doctorOptions = null;
+  const harness = createProgrammaticHarness(t, {
+    runSetupDoctor: async (options) => {
+      doctorOptions = options;
+      return options.includeClaudePlugin === false
+        ? [{ name: "fixture health", ok: true }]
+        : [{
+            name: "Claude plugin launch contract",
+            ok: false,
+            message: "claude_plugin_marketplace_list_failed",
+          }];
+    },
+  });
+
+  const { result } = await startAndResume(harness, {
+    domain: "Plugin Proof",
+    workspace: "Example Workspace",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-plugin-proof",
+  });
+
+  assert.equal(result.status, "complete", JSON.stringify(result));
+  assert.equal(doctorOptions.includeClaudePlugin, false);
+  assert.equal(result.steps.plugin.version, PACKAGED_PLUGIN_VERSION);
+  assert.deepEqual(
+    result.steps.doctor.checks.find((check) => check.name === "Claude plugin launch contract"),
+    {
+      name: "Claude plugin launch contract",
+      state: "ok",
+      message: `verified during this setup run at ${PACKAGED_PLUGIN_VERSION}`,
+    },
+  );
+});
+
+test("init_onboarding keeps the final Claude doctor check when plugin proof has no concrete version", async (t) => {
+  let doctorOptions = null;
+  const harness = createProgrammaticHarness(t, {
+    runClaudePluginRegistration: async () => ({
+      ok: true,
+      status: "already_installed",
+      pluginName: "teami",
+    }),
+    runSetupDoctor: async (options) => {
+      doctorOptions = options;
+      return [{ name: "fixture health", ok: options.includeClaudePlugin === true }];
+    },
+  });
+
+  const { result } = await startAndResume(harness, {
+    domain: "Unproven Plugin",
+    workspace: "Example Workspace",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-unproven-plugin",
+  });
+
+  assert.equal(result.status, "complete", JSON.stringify(result));
+  assert.equal(doctorOptions.includeClaudePlugin, true);
+  assert.equal(Object.hasOwn(result.steps.plugin, "version"), false);
+  assert.equal(
+    result.steps.doctor.checks.some((check) => check.name === "Claude plugin launch contract"),
+    false,
   );
 });
 
@@ -1311,6 +1379,8 @@ function createProgrammaticHarness(
     credentialControl = null,
     existingTeams = [],
     teamCreateError = null,
+    runSetupDoctor = null,
+    runClaudePluginRegistration = null,
   } = {},
 ) {
   const home = tempHome(t, "teami-mcp-init-full-");
@@ -1340,6 +1410,7 @@ function createProgrammaticHarness(
     githubDiscoveryRunCommand: fakeGithubDiscoveryRunCommand({ repos: githubDiscoveryRepos }),
     ...(githubSetupTransport === null ? {} : { githubSetupTransport }),
     runGit,
+    ...(runClaudePluginRegistration ? { runClaudePluginRegistration } : {}),
     claudePluginRunCommand: fakeClaude.runCommand,
     ensurePhoenix: async () => phoenixOk
       ? ({ ok: true, appUrl: "http://127.0.0.1:6006" })
@@ -1348,7 +1419,7 @@ function createProgrammaticHarness(
     runRuntimeSmoke: async () => runtimeOk
       ? ({ ok: true, results: [{ ok: true }] })
       : ({ ok: false, results: [], error: "runtime fixture failed" }),
-    runSetupDoctor: async () => [{ name: "fixture health", ok: doctorOk }],
+    runSetupDoctor: runSetupDoctor || (async () => [{ name: "fixture health", ok: doctorOk }]),
     ...(onSetupProgress ? { onSetupProgress } : {}),
   });
   return {

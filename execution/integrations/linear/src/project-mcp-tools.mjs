@@ -1465,6 +1465,7 @@ async function runInitOnboardingSetup({
           home,
           cachePath: linearResult.context?.linear?.cachePath,
           domainId: linearResult.domain.id,
+          pluginStep,
           runSetupDoctor,
           claudePluginRunCommand,
           claudePluginMarketplaceSource,
@@ -1591,13 +1592,15 @@ async function runInitOnboardingDoctorStep({
   home,
   cachePath,
   domainId,
+  pluginStep,
   runSetupDoctor,
   claudePluginRunCommand,
   claudePluginMarketplaceSource,
 } = {}) {
   let checks;
   try {
-    checks = normalizeDoctorChecks(await runSetupDoctor({
+    const pluginVersion = verifiedSetupPluginVersion(pluginStep);
+    const doctorChecks = await runSetupDoctor({
       config,
       repoRoot,
       home,
@@ -1605,9 +1608,20 @@ async function runInitOnboardingDoctorStep({
       domainId,
       includeRuntimeSmoke: false,
       includePhoenix: false,
+      includeClaudePlugin: pluginVersion === null,
       claudePluginRunCommand,
       claudePluginMarketplaceSource,
-    }));
+    });
+    checks = normalizeDoctorChecks([
+      ...doctorChecks,
+      ...(pluginVersion === null
+        ? []
+        : [{
+            name: "Claude plugin launch contract",
+            ok: true,
+            message: `verified during this setup run at ${pluginVersion}`,
+          }]),
+    ]);
   } catch (error) {
     return {
       ok: false,
@@ -1630,6 +1644,12 @@ async function runInitOnboardingDoctorStep({
       ...(check.state !== "ok" && check.fix ? { repair: check.fix } : {}),
     })),
   };
+}
+
+function verifiedSetupPluginVersion(pluginStep = {}) {
+  const version = typeof pluginStep.version === "string" ? pluginStep.version.trim() : "";
+  if (pluginStep.ok !== true || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) return null;
+  return version;
 }
 
 function normalizeInitOnboardingInput(args = {}) {
@@ -1801,6 +1821,7 @@ function publicInitOnboardingPluginStep(result = {}) {
       installed: result.status === "installed",
       already_installed: result.status === "already_installed",
       plugin_name: result.pluginName || "teami",
+      ...(result.version ? { version: result.version } : {}),
       ...(result.marketplaceName ? { marketplace_name: result.marketplaceName } : {}),
       ...(result.marketplace ? { marketplace: result.marketplace } : {}),
     };

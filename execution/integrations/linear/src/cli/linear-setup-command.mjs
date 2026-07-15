@@ -1426,7 +1426,7 @@ export async function runClaudePluginRegistrationStep({
   if (current.ok && current.version === expectedVersion) {
     output.success(`Claude plugin already installed: ${pluginName}`);
     output.info(`Claude command available: /${pluginName}:plan`);
-    return { ok: true, status: "already_installed", pluginName };
+    return { ok: true, status: "already_installed", version: current.version, pluginName };
   }
   const needsUpdate = (current.ok && current.version !== expectedVersion) ||
     current.reason === "claude_plugin_launch_contract_mismatch";
