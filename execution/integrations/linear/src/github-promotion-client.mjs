@@ -16,6 +16,11 @@ import { validatePromotionBranchRef } from "./promotion-workspace.mjs";
 //
 export const GITHUB_PROMOTION_ENDPOINT_ALLOWLIST = Object.freeze([
   Object.freeze({
+    id: "get_repository_identity",
+    method: "GET",
+    path: "/repos/{owner}/{repo}",
+  }),
+  Object.freeze({
     id: "list_open_pull_requests",
     method: "GET",
     path: "/repos/{owner}/{repo}/pulls",
@@ -66,10 +71,11 @@ export function assertPromotionPullRequestHead(head) {
   }
 }
 
-// The client exposes exactly the five allowlisted operations. There is
+// The client exposes exactly the five PR operations. The sixth allowlisted
+// endpoint is an internal immutable-repository identity read before writes. There is
 // deliberately no mergePullRequest, no markReadyForReview, no createReview,
 // no approve — not as disabled stubs, but absent codepaths.
-export function createGitHubPromotionClient({ transport, repo } = {}) {
+export function createGitHubPromotionClient({ transport, repo, expectedRepoId = null } = {}) {
   if (!transport || typeof transport.request !== "function") {
     throw new Error("github_transport_required");
   }
@@ -78,6 +84,9 @@ export function createGitHubPromotionClient({ transport, repo } = {}) {
   }
   const call = async (endpointId, params = {}) => {
     const endpoint = endpointById(endpointId);
+    if (["create_pull_request", "update_pull_request_body"].includes(endpointId) && expectedRepoId) {
+      await verifyGitHubPromotionRepositoryIdentity({ transport, repo, expectedRepoId });
+    }
     return transport.request({
       endpointId: endpoint.id,
       method: endpoint.method,
@@ -109,6 +118,28 @@ export function createGitHubPromotionClient({ transport, repo } = {}) {
   };
 }
 
+export async function verifyGitHubPromotionRepositoryIdentity({ transport, repo, expectedRepoId } = {}) {
+  if (!transport || typeof transport.request !== "function") throw new Error("github_transport_required");
+  if (!repo?.owner || !repo?.repo || !expectedRepoId) throw new Error("github_durable_repo_identity_required");
+  const endpoint = endpointById("get_repository_identity");
+  const response = await transport.request({
+    endpointId: endpoint.id,
+    method: endpoint.method,
+    path: endpoint.path,
+    owner: repo.owner,
+    repo: repo.repo,
+    params: {},
+  });
+  const liveId = response?.data?.id;
+  if (String(liveId || "") !== String(expectedRepoId)) {
+    throw new Error("github_workspace_repo_identity_changed");
+  }
+  if (response?.data?.private !== true) {
+    throw new Error("github_workspace_repo_not_private");
+  }
+  return { ok: true, repo_id: String(liveId), private: true };
+}
+
 // Dry-run transport: records every call, returns canned shapes, marks
 // everything dry_run: true, touches no network and no credentials.
 export function createDryRunGitHubTransport({ now = () => new Date() } = {}) {
@@ -123,6 +154,9 @@ export function createDryRunGitHubTransport({ now = () => new Date() } = {}) {
       calls.push(call);
       if (endpointId === "list_open_pull_requests" || endpointId === "list_closed_pull_requests") {
         return { dry_run: true, data: [] };
+      }
+      if (endpointId === "get_repository_identity") {
+        return { dry_run: true, data: { id: `dry-run:${owner}/${repo}`, private: true } };
       }
       if (endpointId === "get_pull_request") {
         return { dry_run: true, data: null };
@@ -160,6 +194,8 @@ export function createMockGitHubTransport({
   openPullRequests = [],
   closedPullRequests = [],
   failures = {},
+  repositoryId = "repo-test-1",
+  repositoryPrivate = true,
   now = () => new Date("2026-06-10T03:00:00.000Z"),
 } = {}) {
   const calls = [];
@@ -185,6 +221,9 @@ export function createMockGitHubTransport({
       assertGitHubPromotionEndpointShape({ endpointId, method, path });
       calls.push({ endpointId, method, path, owner, repo, params });
       maybeFail(endpointId);
+      if (endpointId === "get_repository_identity") {
+        return { data: { id: repositoryId, name: repo, owner: { login: owner }, private: repositoryPrivate } };
+      }
       if (endpointId === "list_open_pull_requests") {
         return { data: [...openPullRequests, ...created.filter((pr) => pr.state === "open")] };
       }

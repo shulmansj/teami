@@ -66,28 +66,30 @@ export function registerTeamiProjectTools(server, actions, z) {
   });
 
   // init_onboarding is intentionally part of the standing tool set (not gated to a separate
-  // setup-only surface): it is the conversational setup AND repair entry. A bare call teaches
-  // the agent what to ask; a call with a domain runs the real setup pipeline end to end.
+  // setup-only surface): it is the conversational setup AND repair entry. A bare call returns
+  // the disclosure and safe defaults; a confirmed call runs the real setup pipeline end to end.
   server.registerTool(
     "init_onboarding",
     {
       title: "Set up Teami",
-      description: "Run full Teami setup through MCP after the agent gathers the domain, repo allowlist, and optional workspace.",
+      description: "Run full Teami setup; onboarding leaves every product repository disconnected.",
       inputSchema: {
         setup_id: z.string().uuid().optional().describe("Resume or poll an in-process setup authorization session."),
-        domain: z.string().min(1).optional().describe("Required to run setup; omit only to get guidance for what to ask."),
+        domain: z.string().min(1).optional().describe("Advanced override. Fresh setup uses the single default Teami team."),
         workspace: z.string().min(1).optional().describe("Expected Linear workspace name or id."),
-        repo_intent: z.union([
-          z.object({ mode: z.literal("non_code") }),
-          z.object({ mode: z.literal("allowlist"), repos: z.array(z.string().min(1)).min(1) }),
-        ]).optional().describe("Required on setup start: explicitly choose a non-code team or an owner/repo allowlist."),
+        repo_intent: z.object({ mode: z.literal("non_code") }).optional()
+          .describe("Compatibility field. Omit it; onboarding leaves every product repository disconnected."),
         confirm: z.boolean().optional().describe("Must be true only after the adopter explicitly accepts the current setup disclosure."),
         disclosure_version: z.string().min(1).optional().describe("Exact disclosure version returned by the bare call."),
         disclosure_hash: z.string().length(64).optional().describe("Exact disclosure hash returned by the bare call."),
         admin_confirm: z.boolean().optional().describe("Separate just-in-time confirmation for a conditional one-shot Linear admin grant."),
+        linear_team_id: z.string().min(1).optional()
+          .describe("Resume-only protocol field: exact existing Linear team offered after a workspace team-limit block."),
+        linear_team_confirm: z.boolean().optional()
+          .describe("Resume-only explicit confirmation that Teami may configure the selected existing Linear team."),
         repair_admin_revocation: z.boolean().optional().describe("Returns fail-closed recovery guidance for an interrupted one-shot admin flow. Teami cannot clear a lost-token marker by revoking a fresh token."),
-        github_repo: z.string().min(1).optional().describe("Behavior repo name override."),
-        github_owner: z.string().min(1).optional().describe("Behavior repo owner/org override."),
+        github_repo: z.string().min(1).optional().describe("Private Teami workspace-repository name override."),
+        github_owner: z.string().min(1).optional().describe("Private Teami workspace-repository owner/org override."),
         github_dry_run: z.boolean().optional().describe("Record the GitHub setup intent without real GitHub writes."),
       },
     },

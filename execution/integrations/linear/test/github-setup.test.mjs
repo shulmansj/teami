@@ -18,6 +18,9 @@ const {
   DRY_RUN_GITHUB_SETUP_BANNER,
   GITHUB_CONNECTION_SCHEMA_VERSION,
   GITHUB_SETUP_ENDPOINT_ALLOWLIST,
+  TEAMI_WORKSPACE_REPO_DESCRIPTION,
+  TEAMI_WORKSPACE_REPO_MARKER_PATH,
+  TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION,
   applyRemotePlan,
   githubConnectionDoctorChecks,
   githubConnectionStatePath,
@@ -268,9 +271,9 @@ test("real setup resolves missing behavior repo owner from gh login, prompting i
   assert.deepEqual(prompts, [{
     defaultOwner: "octocat",
     message: [
-      "  Teami needs a private GitHub repo named \"teami\" where generated PRs will live.",
-      "  Press Enter to create it under octocat (your signed-in GitHub CLI account), or type a different GitHub user/org.",
-      "  Create repo under [octocat]: ",
+      "  Teami will use a private GitHub repository named \"teami-workspace\" for its own configuration and improvement proposals.",
+      "  Press Enter to use octocat (your signed-in GitHub account), or type a different GitHub user or organization.",
+      "  GitHub account [octocat]: ",
     ].join("\n"),
   }]);
 
@@ -284,6 +287,19 @@ test("real setup resolves missing behavior repo owner from gh login, prompting i
   assert.equal(ttyOverride.ok, true);
   assert.equal(ttyOverride.owner, "acme-org");
   assert.equal(ttyOverride.ownerSource, "prompt");
+});
+
+test("setup refuses a public Teami workspace repository", async () => {
+  const settings = await resolveGitHubSetupSettings({
+    config: configWithStarter(),
+    requestedVisibility: "public",
+    connectionMode: "real",
+    isTTY: false,
+    resolveAuthenticatedGitHubLogin: async () => "octocat",
+  });
+  assert.equal(settings.ok, false);
+  assert.equal(settings.reason, "behavior_repo_must_be_private");
+  assert.match(settings.detail, /must be private/);
 });
 
 test("real init emits visible progress immediately after GitHub owner selection", async () => {
@@ -328,14 +344,175 @@ test("real init emits visible progress immediately after GitHub owner selection"
   });
 
   assert.equal(result.ok, true);
-  const targetIndex = events.indexOf("progress:GitHub repo target: octocat/teami (private)");
+  const targetIndex = events.indexOf("progress:GitHub repo target: octocat/teami-workspace (private)");
   const localRemotesIndex = events.indexOf("progress:GitHub progress: Checking local Git remotes...");
-  const repoCheckIndex = events.indexOf("progress:GitHub progress: Checking whether octocat/teami is available on GitHub...");
+  const repoCheckIndex = events.indexOf("progress:GitHub progress: Checking whether octocat/teami-workspace is available on GitHub...");
   const transportIndex = events.indexOf("transport:get_repository");
   assert.ok(targetIndex >= 0, `missing target progress: ${events.join("\n")}`);
   assert.ok(localRemotesIndex >= 0 && localRemotesIndex < targetIndex, `missing local-remotes progress: ${events.join("\n")}`);
   assert.ok(repoCheckIndex > targetIndex, `missing repo-check progress: ${events.join("\n")}`);
   assert.ok(repoCheckIndex < transportIndex, `repo-check progress must print before network lookup: ${events.join("\n")}`);
+});
+
+test("implicit workspace repo names never attach an adopter's existing repository", async () => {
+  const root = tempRoot();
+  const mock = createMockGitHubSetupTransport({
+    existingRepos: ["octocat/teami-workspace"],
+  });
+  const transport = { ...mock, kind: "real" };
+  const progress = [];
+
+  const result = await runGitHubInitPhase({
+    repoRoot: root,
+    config: configWithStarter({
+      behavior_repo: { owner: null, name: null, visibility: "private" },
+    }),
+    transport,
+    runGit: createInMemoryRunGit({ remotes: { upstream: STARTER_URL } }),
+    isTTY: false,
+    resolveAuthenticatedGitHubLogin: async () => "octocat",
+    onProgress: (line) => progress.push(line),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.connection.repo.full_name, "octocat/teami-workspace-2");
+  assert.deepEqual(
+    mock.calls.filter((call) => call.endpointId === "get_repository").map((call) => call.repo),
+    ["teami-workspace", "teami-workspace-2"],
+  );
+  assert.equal(
+    mock.calls.some((call) => call.endpointId === "create_repository" && call.repo === "teami-workspace-2"),
+    true,
+  );
+  assert.equal(
+    mock.calls.find((call) => call.endpointId === "create_repository")?.params.description,
+    TEAMI_WORKSPACE_REPO_DESCRIPTION,
+  );
+  assert.equal(
+    mock.calls.some((call) => call.endpointId === "create_repository" && call.repo === "teami-workspace"),
+    false,
+  );
+  assert.match(progress.join("\n"), /selected octocat\/teami-workspace-2 instead/);
+});
+
+test("implicit setup reconnects a self-identifying Teami workspace repository after local state is lost", async () => {
+  const root = tempRoot();
+  const fullName = "octocat/teami-workspace";
+  const mock = createMockGitHubSetupTransport({
+    existingRepos: [fullName],
+    existingRepoDetails: {
+      [fullName]: {
+        id: "repo-teami-workspace-1",
+        owner: "octocat",
+        name: "teami-workspace",
+        full_name: fullName,
+        visibility: "private",
+        default_branch: "main",
+        empty: false,
+        html_url: `https://github.com/${fullName}`,
+        description: TEAMI_WORKSPACE_REPO_DESCRIPTION,
+        workspace_marker: {
+          schema_version: TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION,
+          repo_id: "repo-teami-workspace-1",
+          full_name: fullName,
+        },
+      },
+    },
+  });
+  const transport = { ...mock, kind: "real" };
+  const progress = [];
+
+  const result = await runGitHubInitPhase({
+    repoRoot: root,
+    config: configWithStarter({
+      behavior_repo: { owner: null, name: null, visibility: "private" },
+    }),
+    transport,
+    runGit: createInMemoryRunGit({ remotes: { upstream: STARTER_URL } }),
+    isTTY: false,
+    resolveAuthenticatedGitHubLogin: async () => "octocat",
+    onProgress: (line) => progress.push(line),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.connection.repo.full_name, fullName);
+  assert.equal(mock.calls.some((call) => call.endpointId === "create_repository"), false);
+  assert.match(progress.join("\n"), /Found Teami's existing private workspace repository/);
+});
+
+test("checkoutless implicit setup also reconnects a self-identifying Teami workspace repository", async () => {
+  const root = tempRoot();
+  const fullName = "octocat/teami-workspace";
+  const mock = createMockGitHubSetupTransport({
+    existingRepos: [fullName],
+    existingRepoDetails: {
+      [fullName]: {
+        id: "repo-checkoutless-1",
+        owner: "octocat",
+        name: "teami-workspace",
+        full_name: fullName,
+        visibility: "private",
+        default_branch: "main",
+        empty: false,
+        html_url: `https://github.com/${fullName}`,
+        description: TEAMI_WORKSPACE_REPO_DESCRIPTION,
+        workspace_marker: {
+          schema_version: TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION,
+          repo_id: "repo-checkoutless-1",
+          full_name: fullName,
+        },
+      },
+    },
+  });
+  const result = await runGitHubInitPhase({
+    repoRoot: root,
+    config: configWithStarter({
+      behavior_repo: { owner: null, name: null, visibility: "private" },
+    }),
+    transport: { ...mock, kind: "real" },
+    runGit: async (args) => args[0] === "remote" && args[1] === "-v"
+      ? { ok: false, status: 128, stdout: "", stderr: "fatal: not a git repository" }
+      : { ok: true, status: 0, stdout: "", stderr: "" },
+    isTTY: false,
+    resolveAuthenticatedGitHubLogin: async () => "octocat",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.checkoutless, true);
+  assert.equal(result.connection.repo.full_name, fullName);
+  assert.equal(mock.calls.some((call) => call.endpointId === "create_repository"), false);
+});
+
+test("an exact-description lookalike without Teami's durable marker is never auto-connected", async () => {
+  const root = tempRoot();
+  const fullName = "octocat/teami-workspace";
+  const mock = createMockGitHubSetupTransport({
+    existingRepos: [fullName],
+    existingRepoDetails: {
+      [fullName]: {
+        id: "repo-lookalike-1",
+        owner: "octocat",
+        name: "teami-workspace",
+        full_name: fullName,
+        visibility: "private",
+        default_branch: "main",
+        empty: false,
+        description: TEAMI_WORKSPACE_REPO_DESCRIPTION,
+      },
+    },
+  });
+  const result = await runGitHubInitPhase({
+    repoRoot: root,
+    config: configWithStarter({ behavior_repo: { owner: null, name: null, visibility: "private" } }),
+    transport: { ...mock, kind: "real" },
+    runGit: createInMemoryRunGit({ remotes: { upstream: STARTER_URL } }),
+    isTTY: false,
+    resolveAuthenticatedGitHubLogin: async () => "octocat",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.connection.repo.full_name, "octocat/teami-workspace-2");
+  assert.ok(mock.calls.some((call) => call.endpointId === "get_workspace_marker" && call.repo === "teami-workspace"));
 });
 
 test("explicit blank github owner (flag or config) fails closed, never defaults to gh login", async () => {
@@ -443,6 +620,35 @@ test("the local ambient GitHub setup transport ignores renamed-repo redirects du
   assert.equal(result.redirected_repo, "shulmansj/teami-prevalidation-20260614");
 });
 
+test("the local ambient transport never normalizes GitHub INTERNAL visibility to private", async () => {
+  const transport = createLocalAmbientGitHubSetupTransport({
+    runCommand: (command, args) => {
+      if (command === "gh" && args.join(" ") === "auth status --hostname github.com") {
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      }
+      if (command === "gh" && args[0] === "repo" && args[1] === "view") {
+        return {
+          ok: true,
+          status: 0,
+          stdout: JSON.stringify({
+            id: "repo-internal-1",
+            nameWithOwner: "acme/teami-workspace",
+            visibility: "INTERNAL",
+            url: "https://github.com/acme/teami-workspace",
+            defaultBranchRef: { name: "main" },
+          }),
+          stderr: "",
+        };
+      }
+      return { ok: false, status: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+    },
+  });
+
+  const result = await transport.request({ endpointId: "get_repository", owner: "acme", repo: "teami-workspace" });
+  assert.equal(result.repo.visibility, "internal");
+  assert.equal(result.repo.private, false);
+});
+
 test("the local ambient GitHub setup transport uses gh for repo setup and local git for push/probes", async () => {
   const root = tempRoot();
   const commandCalls = [];
@@ -503,13 +709,45 @@ test("the local ambient GitHub setup transport uses gh for repo setup and local 
   assert.equal(pushed.pushed, true);
   assert.ok(commandCalls.some((call) =>
     call.command === "gh"
-    && call.args.join(" ") === "repo create shulmansj/teami --private --disable-issues --disable-wiki",
+    && call.args.join(" ") === `repo create shulmansj/teami --private --description ${TEAMI_WORKSPACE_REPO_DESCRIPTION} --disable-issues --disable-wiki`,
   ));
   const gitPush = commandCalls.find((call) => call.command === "git" && call.args[0] === "push");
   assert.equal(gitPush.options.cwd, root);
   assert.equal(gitPush.options.env.GIT_TERMINAL_PROMPT, "0");
   assert.ok(!("TEAMI_GITHUB_INSTALLATION_TOKEN" in gitPush.options.env));
   assert.ok(!JSON.stringify(commandCalls).includes("ghs_setup"));
+});
+
+test("the local ambient transport reads Teami's durable workspace marker", async () => {
+  const marker = {
+    schema_version: TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION,
+    repo_id: "repo-123",
+    full_name: "octocat/teami-workspace",
+  };
+  const transport = createLocalAmbientGitHubSetupTransport({
+    runCommand: (command, args) => {
+      if (command === "gh" && args.join(" ") === "auth status --hostname github.com") {
+        return { ok: true, status: 0, stdout: "", stderr: "" };
+      }
+      if (command === "gh" && args[0] === "api") {
+        assert.equal(args[1], `repos/octocat/teami-workspace/contents/${TEAMI_WORKSPACE_REPO_MARKER_PATH}`);
+        return {
+          ok: true,
+          status: 0,
+          stdout: JSON.stringify({ content: Buffer.from(JSON.stringify(marker)).toString("base64") }),
+          stderr: "",
+        };
+      }
+      return { ok: false, status: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+    },
+  });
+
+  const result = await transport.request({
+    endpointId: "get_workspace_marker",
+    owner: "octocat",
+    repo: "teami-workspace",
+  });
+  assert.deepEqual(result, { exists: true, marker });
 });
 
 test("setup transport exposes reconciliation-required mutation timeouts", async () => {
@@ -559,6 +797,7 @@ test("setup endpoint allowlist names local ambient auth surfaces and has no merg
   assert.deepEqual(Object.keys(byId).sort(), [
     "create_repository",
     "get_repository",
+    "get_workspace_marker",
     "push_initial_branch",
     "verify_default_branch",
   ]);
@@ -614,7 +853,7 @@ test("starter-remote-only checkout: starter origin is preserved as upstream and 
   assert.deepEqual(actions, ["rename_remote", "set_origin"]);
   assert.equal(result.connection.remotes.upstream.url, `${STARTER_URL}.git`);
   assert.equal(result.connection.remotes.upstream.preserved_from, "origin");
-  assert.match(result.connection.remotes.origin.url, /your-github-owner\/teami$/);
+  assert.match(result.connection.remotes.origin.url, /your-github-owner\/teami-workspace$/);
   // Dry-run mode applies nothing to the checkout: the starter remote is still
   // literally `origin` on disk.
   assert.equal(result.connection.remotes.origin.applied, false);
@@ -1279,6 +1518,7 @@ test("doctor reports behavior repo reachability and local write auth", async () 
   writeStateFixture(root, verifiedRealStateFixture());
   const transport = createMockGitHubSetupTransport({
     existingRepos: ["real-owner/real-behavior-repo"],
+    repositoryId: "repo-real-1",
   });
   const checks = await githubConnectionDoctorChecks({
     repoRoot: root,
@@ -1333,7 +1573,10 @@ test("doctor fails closed when local git write auth cannot push a behavior branc
   const checks = await githubConnectionDoctorChecks({
     repoRoot: root,
     runGit,
-    transport: createMockGitHubSetupTransport({ existingRepos: ["real-owner/real-behavior-repo"] }),
+    transport: createMockGitHubSetupTransport({
+      existingRepos: ["real-owner/real-behavior-repo"],
+      repositoryId: "repo-real-1",
+    }),
   });
   const byName = Object.fromEntries(checks.map((check) => [check.name, check]));
   assert.equal(byName["GitHub behavior repo reachable"].ok, true);
@@ -1400,15 +1643,14 @@ test("cli init runs the GitHub phase and fails init (no silent eval-only complet
   assert.doesNotMatch(dispatchSource, /githubInstallIntent|githubInstallStatus/);
   assert.doesNotMatch(setupSource, /githubInstallIntent: \(input\)|githubInstallStatus: \(input\)/);
   const initIndex = setupSource.indexOf("runGitHubInitPhase(");
-  const pendingIndex = setupSource.indexOf('Move a Linear project to "Planned" to start your first run');
-  assert.ok(initIndex >= 0 && initIndex < pendingIndex, "GitHub phase must gate the pending init completion");
+  const nextStepIndex = setupSource.indexOf("Run /teami:plan in a new Claude Code session");
+  assert.ok(initIndex >= 0 && initIndex < nextStepIndex, "GitHub phase must gate the init completion");
   assert.ok(
-    setupSource.includes('Move a Linear project to "Planned" to start your first run') &&
-      setupSource.includes('factoryLauncherCommand("gateway start")') &&
-      setupSource.includes('factoryLauncherCommand("doctor")') &&
-      setupSource.includes("Setup complete."),
-    "init must end with the platform-aware teami gateway start next step and the teami doctor command",
+    setupSource.includes("Run /teami:plan in a new Claude Code session") &&
+      setupSource.includes("Teami is ready."),
+    "init must end with one clear /teami:plan next step",
   );
+  assert.doesNotMatch(setupSource, /moving to Planned starts the factory now/);
   assert.doesNotMatch(setupSource, /running/);
   assert.doesNotMatch(setupSource, /requestSetupGrant|writeInboxSetupGrant|setup_grant_conflict/);
   assert.ok(setupSource.includes('output.info("GitHub connected.")'), "init should surface the GitHub connected state");

@@ -42,7 +42,7 @@ function formatCommandForContext(subcommand = "", {
   platform = process.platform,
 } = {}) {
   if (installedPackageContext) {
-    return subcommand ? `npx @shulmansj/teami@release ${subcommand}` : "npx @shulmansj/teami@release";
+    return subcommand ? `npx @shulmansj/teami ${subcommand}` : "npx @shulmansj/teami";
   }
 
   const launcher = platform === "win32" ? ".\\teami.cmd" : "./teami";

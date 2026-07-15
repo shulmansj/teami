@@ -248,7 +248,7 @@ function writeVerifiedGitHubState(root, {
     connection_mode: connectionMode,
     status: "verified",
     repo: {
-      id: "repo-proof-01",
+      id: connectionMode === "real" ? "repo-proof-01" : "repo-test-1",
       owner: "factory-owner",
       name: "behavior-rules",
       full_name: "factory-owner/behavior-rules",
@@ -855,7 +855,7 @@ async function runController({
   return { result, fetchImpl, githubTransport };
 }
 
-function createControllerGhSpawnMock() {
+function createControllerGhSpawnMock({ repositoryNodeId = "repo-proof-01", repositoryPrivate = true } = {}) {
   const calls = [];
   const spawnImpl = (command, args, options) => {
     const call = { command, args: [...args], options, stdin: "" };
@@ -872,7 +872,7 @@ function createControllerGhSpawnMock() {
       },
     };
     setImmediate(() => {
-      const response = controllerGhResponse(call);
+      const response = controllerGhResponse(call, { repositoryNodeId, repositoryPrivate });
       if (response.stdout) child.stdout.emit("data", Buffer.from(response.stdout, "utf8"));
       if (response.stderr) child.stderr.emit("data", Buffer.from(response.stderr, "utf8"));
       child.emit("close", response.code ?? 0, response.signal ?? null);
@@ -882,7 +882,7 @@ function createControllerGhSpawnMock() {
   return { spawnImpl, calls };
 }
 
-function controllerGhResponse(call) {
+function controllerGhResponse(call, { repositoryNodeId = "repo-proof-01", repositoryPrivate = true } = {}) {
   if (call.command !== "gh") {
     return { code: 1, stderr: `unexpected command: ${call.command}` };
   }
@@ -894,6 +894,16 @@ function controllerGhResponse(call) {
   }
   const method = argAfter(call.args, "--method");
   const apiPath = call.args.find((arg) => arg.startsWith("repos/"));
+  if (method === "GET" && apiPath === "repos/factory-owner/behavior-rules") {
+    return {
+      stdout: JSON.stringify({
+        id: 12345,
+        node_id: repositoryNodeId,
+        name: "behavior-rules",
+        private: repositoryPrivate,
+      }),
+    };
+  }
   if (method === "GET" && apiPath === "repos/factory-owner/behavior-rules/pulls") {
     if (call.args.includes("state=open")) return { stdout: JSON.stringify([[]]) };
     if (call.args.includes("state=closed")) return { stdout: JSON.stringify([[]]) };
@@ -5026,7 +5036,11 @@ test("controller resolves the behavior-repo identity from the local GitHub conne
       verified_at: "2026-06-10T03:00:00.000Z",
     }, null, 2)}\n`,
   );
-  const { result, githubTransport } = await runController({ root, fixture: passFixture() });
+  const { result, githubTransport } = await runController({
+    root,
+    fixture: passFixture(),
+    transport: createMockGitHubTransport({ repositoryId: "state-repo-1" }),
+  });
   assert.equal(result.ok, true);
   assert.equal(result.outcome, "route_to_hitl");
   // Every GitHub call carried the connection-state repo identity, not the
@@ -5104,7 +5118,7 @@ test("controller real local-ambient mode pushes the promotion branch with scrubb
   const createPrInput = JSON.parse(createPrGhCall.stdin);
   assert.equal(createPrInput.head, result.branch);
   assert.equal(createPrInput.base, "main");
-  assert.equal(createPrInput.draft, false);
+  assert.equal(createPrInput.draft, true);
   const pushCall = gitCalls.find((call) => call.args[0] === "push");
   assert.ok(pushCall, "real local-ambient mode must run git push");
   assert.deepEqual(pushCall.args, [
@@ -5118,6 +5132,89 @@ test("controller real local-ambient mode pushes the promotion branch with scrubb
   assert.equal(pushCall.options.env.GH_TOKEN, undefined);
   assert.equal(pushCall.options.env.GIT_ASKPASS, undefined);
   assert.equal(pushCall.options.env.SSH_AUTH_SOCK, "/tmp/teami-ssh.sock");
+});
+
+test("a changed GitHub repository identity blocks before branch push or pull-request creation", async () => {
+  const root = tempRoot();
+  initGitRepo(root);
+  runGitOrThrow(["remote", "add", "origin", "git@github.com:factory-owner/behavior-rules.git"], root);
+  writeVerifiedGitHubState(root, { connectionMode: "real", realPushEnabled: true, pushAuth: "ssh" });
+  writeReceiptFixture(root);
+  const fixture = passFixture();
+  const fetchImpl = fetchRouter(
+    controllerRoutes(fixture),
+    { annotationsByTrace: fixture.annotationsByTrace },
+  );
+  const gitCalls = [];
+  const { spawnImpl: githubSpawnImpl, calls: ghCalls } = createControllerGhSpawnMock({
+    repositoryNodeId: "repo-recreated-under-same-name",
+  });
+  const harness = createPromoteCandidateTestHarness({
+    ensureReady: readyUp,
+    fetchImpl,
+    baselineExperimentOverride: { experiment_id: "BASE1" },
+    githubSpawnImpl,
+    env: { PATH: "test-path", SSH_AUTH_SOCK: "/tmp/teami-ssh.sock" },
+    runGit: (args, options = {}) => {
+      gitCalls.push({ args, options });
+      if (args[0] === "push") return { ok: true, stdout: "", stderr: "" };
+      return defaultRunGit(args, options);
+    },
+  });
+
+  const result = await harness.promoteCandidate({
+    repoRoot: root,
+    request: promotionRequest(),
+    invocation: { transport: "cli_local_session" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "github_workspace_repo_identity_changed");
+  assert.equal(result.retryable, true);
+  assert.equal(gitCalls.some((call) => call.args[0] === "push"), false);
+  assert.equal(ghCalls.some((call) => call.args.includes("POST")), false);
+});
+
+test("a public GitHub repository blocks before branch push or pull-request creation", async () => {
+  const root = tempRoot();
+  initGitRepo(root);
+  runGitOrThrow(["remote", "add", "origin", "git@github.com:factory-owner/behavior-rules.git"], root);
+  writeVerifiedGitHubState(root, { connectionMode: "real", realPushEnabled: true, pushAuth: "ssh" });
+  writeReceiptFixture(root);
+  const fixture = passFixture();
+  const fetchImpl = fetchRouter(
+    controllerRoutes(fixture),
+    { annotationsByTrace: fixture.annotationsByTrace },
+  );
+  const gitCalls = [];
+  const { spawnImpl: githubSpawnImpl, calls: ghCalls } = createControllerGhSpawnMock({
+    repositoryPrivate: false,
+  });
+  const harness = createPromoteCandidateTestHarness({
+    ensureReady: readyUp,
+    fetchImpl,
+    baselineExperimentOverride: { experiment_id: "BASE1" },
+    githubSpawnImpl,
+    env: { PATH: "test-path", SSH_AUTH_SOCK: "/tmp/teami-ssh.sock" },
+    runGit: (args, options = {}) => {
+      gitCalls.push({ args, options });
+      if (args[0] === "push") return { ok: true, stdout: "", stderr: "" };
+      return defaultRunGit(args, options);
+    },
+  });
+
+  const result = await harness.promoteCandidate({
+    repoRoot: root,
+    request: promotionRequest(),
+    invocation: { transport: "cli_local_session" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "github_workspace_repo_not_private");
+  assert.equal(result.retryable, true);
+  assert.equal(gitCalls.some((call) => call.args[0] === "push"), false);
+  assert.equal(ghCalls.some((call) => call.args.includes("POST")), false);
+  assert.equal(ghCalls.some((call) => call.args.includes("PATCH")), false);
 });
 
 test("without a verified GitHub connection the controller falls back to the neutral placeholder identity", async () => {

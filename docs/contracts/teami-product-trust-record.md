@@ -48,9 +48,10 @@ confirmation for:
 
 1. workspace-wide Linear read/write access;
 2. the possible one-time, non-retained admin grant described above;
-3. the selected product-repository allowlist, including an explicit non-code
-   choice;
-4. behavior-repository creation or connection through ambient git/`gh`;
+3. no product-repository access; repair may preserve previously approved
+   connections, but setup neither uses nor expands them;
+4. private Teami workspace-repository creation or reconnection through ambient
+   git/`gh`;
 5. Claude plugin marketplace registration and installation; and
 6. local Teami, runtime, and Phoenix state creation.
 
@@ -59,8 +60,9 @@ and recovery guidance must reach the user while authorization is pending. A
 client that cannot surface in-flight communication must receive a resumable
 state, never a silent wait or a success claim after a dead end.
 
-Required setup phases are Linear authorization/domain setup, product-repo
-allowlisting, behavior-repo setup, Claude plugin registration, Phoenix
+Required setup phases are Linear authorization/domain setup,
+product-repository boundary verification (no new access during setup), private
+Teami workspace-repository setup, Claude plugin registration, Phoenix
 preparation and trace preflight, runtime readiness, and final doctor
 verification. `ok: true` or `setup complete` is valid only when every required
 phase is healthy. An allowed non-blocking failure must be an explicit degraded
@@ -79,10 +81,11 @@ step with accurate repair guidance.
   domain/team. Foreign-team and ambiguous multi-team targets fail closed before
   mutation. A wake cannot run while its domain is unresolved, including when a
   project spans teams belonging to two active domains.
-- Behavior-repo process-change proposals remain human-reviewed.
+- Teami workspace-repository process-change proposals remain human-reviewed.
 
 Product-repo write-capable execution and PR effects are not shipped. Repository
-binding records scope; dormant materializer or workflow modules are not
+binding records scope. A separate post-setup product-repository grant records
+that scope only; dormant materializer or workflow modules are not
 activation. A future activation requires explicit product approval plus
 credible isolation, domain confinement, bounded Git behavior, staged-content
 guards, and no push after a failed safety gate.

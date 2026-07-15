@@ -16,7 +16,7 @@ The grant records scope only; product-repo execution is not shipped.
 
 `npm run init` authorizes Linear in the browser with the Teami OAuth
 app, then uses Linear GraphQL to provision the workspace: browser
-authorization, dedicated team, required labels, project status mappings,
+authorization, a dedicated team or explicitly selected existing team, required labels, project status mappings,
 project template, local gateway state, managed or reused local Phoenix, and
 local cache. The public poll knob is `poll.interval_ms`. No Linear API key is
 required. Teami does not require or retain Linear admin scope for ordinary
@@ -59,6 +59,12 @@ gateway, and proposal paths fail closed or report the local authorization
 problem. `npm run trigger-status` is local/operator state, not a PM-facing
 dashboard or support console.
 
+Fresh setup normally creates the dedicated Linear `Teami` team. If Linear
+reports that the workspace plan is at its team limit, setup returns an explicit
+existing-team selection step with the same setup id. It continues only after
+the adopter selects a team knowing Teami will add or reconcile its labels and
+workflow statuses there; no existing team is inferred by name or count.
+
 Revocation is local. `npm run uninstall` removes local Linear OAuth
 credentials and generated local setup state. GitHub behavior-repo access can be
 stopped by revoking the adopter's local GitHub session or removing that
@@ -97,17 +103,18 @@ npm run uninstall
 npm run doctor:linear
 ```
 
-`npm run init` is the runnable setup path. The GitHub phase connects the Teami
-behavior repo: create or verify the dedicated behavior repo, preserve
+`npm run init` is the runnable setup path. The GitHub phase connects the private
+Teami workspace repository: create or verify the dedicated repository, preserve
 starter/upstream remotes only as template state, verify local git/`gh` access
 to the configured repo, and check PR-generation readiness. Init does not grant
-product repos through that behavior-repo connection.
+product repos through that workspace-repository connection.
 Product repos are granted per domain as GitHub coordinates: `owner/repo` and
-default branch, with no local checkout path. Setup can discover the initial
-allowlist, and later scripted changes use `teami domain grant <id>
+default branch, with no local checkout path. Setup never discovers or records
+an initial product-repository allowlist. Product repositories can be connected
+later through the separate explicit `teami domain grant <id>
 --repo <owner/name>` or `teami domain revoke <id> --repo <owner/name>`.
-That product-repo grant set is distinct from the behavior-repo setup under
-`config.github`. Behavior-repo proposal writing is not product-repo access and
+That product-repo grant set is distinct from the Teami workspace-repository setup under
+`config.github`. Workspace-repository proposal writing is not product-repo access and
 does not prove local `git_repo` resource access.
 
 The current runnable workflow still uses foreground commands for smoke testing,
@@ -174,7 +181,8 @@ Remote destructive cleanup is not part of the default command.
 
 Init creates or resolves:
 
-- the configured team, defaulting to `Teami` with key `AF`
+- the configured team, normally a new `Teami` team; an existing team is used
+  only after an explicit team-limit recovery choice
 - issue labels `Discovery` and `Needs Principal`
 - project status mappings for `backlog`, `planned`, `in_progress`, and `completed`
 - project template `Teami Roadmap Item`
@@ -429,7 +437,8 @@ idempotently.
 
 ## Implemented Service Semantics
 
-- The init service creates or resolves the `Teami` team, `Has Open
+- The init service creates the `Teami` team or uses an explicitly selected
+  existing team after a plan-limit block, then resolves `Has Open
   Questions` project label, `Discovery` issue label, agreed project status
   mappings, and Linear project template when backed by a client that exposes
   those setup operations.

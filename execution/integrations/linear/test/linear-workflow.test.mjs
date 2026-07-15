@@ -633,9 +633,8 @@ test("typing R to reopen the workspace picker forces Linear's consent screen on 
     log: () => {},
   });
 
-  // The first browser open must NOT force consent (an already-installed app auto-redirects
-  // instantly instead of dead-ending on Linear's "already installed" page); typing R is the
-  // explicit ask for the workspace dropdown, so the reopen must force the consent screen.
+  // The first browser open avoids an unnecessary repeated consent screen. Typing R is the
+  // explicit ask for the workspace dropdown, so the reopen must request the consent screen.
   assert.deepEqual(authPrompts, [null, "consent"]);
   assert.match(reauthorizeMessages[0], /workspace dropdown/);
   assert.equal(authorization.workspace.id, "workspace-1");
@@ -2123,7 +2122,7 @@ test("complete-domain init resumes non-interactively with the domain credential 
   registry = readDomainRegistry({ home: tempRoot });
   const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
   const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, domain.linear.cache_path), "utf8"));
-  assert.equal(authCalls, 1);
+  assert.equal(authCalls, 2, "the saved grant is validated before the resumable setup uses it");
   assert.equal(repoDiscoveryCalled, false);
   assert.equal(client.teams.length, 1);
   assert.equal(domain.status, "active");
@@ -2135,7 +2134,9 @@ test("complete-domain init resumes non-interactively with the domain credential 
   assert.equal(await bootstrapStore.readTokenSet(), null);
   assert.doesNotMatch(output.text(), /Repository access/);
   assert.doesNotMatch(output.text(), /GitHub repos were found/);
-  assert.match(output.text(), /Setup verified/);
+  assert.match(output.text(), /Teami is ready/);
+  assert.match(output.text(), /Open a new Claude Code session/);
+  assert.match(output.text(), /Product repositories: none/);
 });
 
 test("complete-domain init deleted team renders guided recovery and preserves machine prefix", async (t) => {
@@ -2341,7 +2342,7 @@ test("complete-domain init repairs a deleted cached Principal Escalation status 
   registry = readDomainRegistry({ home: tempRoot });
   const repairedDomain = registry.domains.find((candidate) => candidate.id === "support-ops");
   const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, repairedDomain.linear.cache_path), "utf8"));
-  assert.equal(appAuthCalls, 2, "the stored app authorization is revalidated after just-in-time admin consent");
+  assert.equal(appAuthCalls, 3, "the saved grant is validated before setup and revalidated after just-in-time admin consent");
   assert.equal(adminAuthCalls, 1);
   assert.equal(teardownCalls, 1);
   assert.deepEqual(promptMessages, ["Type YES to approve the one-time Linear admin grant now: "]);
@@ -3585,6 +3586,104 @@ test("Each taxonomy failure leaves setup_incomplete with the right cause and no 
       assert.equal(writtenRegistry.domains[0].setup_incomplete_cause, item.cause);
       assert.equal(writtenRegistry.domains.some((domain) => domain.status === "active"), false);
     });
+  }
+});
+
+test("team-limit recovery offers existing teams but adopts one only after exact selection", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({
+    workflowStates: [
+      { id: "state-backlog", name: "Backlog", type: "backlog", position: 10 },
+      { id: "state-todo", name: "Todo", type: "unstarted", position: 20 },
+      { id: "state-in-progress", name: "In Progress", type: "started", position: 30 },
+      { id: "state-in-review", name: "In Review", type: "started", position: 40 },
+      { id: "state-human-review", name: "Human Review", type: "started", position: 50 },
+      { id: "state-needs-principal", name: "Principal Escalation", type: "started", position: 60 },
+      { id: "state-done", name: "Done", type: "completed", position: 70 },
+    ],
+  });
+  const existing = await client.createTeam({ name: "Agent Platform", key: "AP" });
+  client.teamCreateError = {
+    errors: [{
+      message: "You have reached the limit of teams allowed in your current plan.",
+      path: ["teamCreate"],
+    }],
+  };
+  let registry = emptyDomainRegistry();
+  let offeredError = null;
+  await assert.rejects(
+    () => setupLinearDomain({
+      client,
+      config,
+      registry,
+      repoRoot,
+      domainName: "Teami",
+      writeCache: async () => {},
+      writeRegistry: async (nextRegistry) => { registry = nextRegistry; },
+    }),
+    (error) => {
+      offeredError = error;
+      assert.equal(error.setupIncompleteCause, "linear_team_limit_reached");
+      assert.deepEqual(error.availableTeams, [{ id: existing.id, key: "AP", name: "Agent Platform" }]);
+      return true;
+    },
+  );
+  assert.equal(client.teams.length, 1, "setup must never auto-adopt even the only existing team");
+  assert.equal(client.projectLabels.length, 0);
+  assert.equal(registry.domains[0].status, "setup_incomplete");
+  assert.equal(offeredError.workspace.id, "workspace-1");
+
+  client.teamCreateError = null;
+  const result = await setupLinearDomain({
+    client,
+    config,
+    registry,
+    repoRoot,
+    domainName: "Teami",
+    selectedExistingTeamId: existing.id,
+    writeCache: async () => {},
+    writeRegistry: async (nextRegistry) => { registry = nextRegistry; },
+  });
+
+  assert.equal(client.teams.length, 1);
+  assert.equal(result.domain.linear.team_id, existing.id);
+  assert.equal(result.domain.linear.provisioned_by_teami, false);
+  assert.equal(client.workflowStates.some((state) => state.name === "Human Review"), true);
+  assert.equal(client.workflowStates.some((state) => state.name === "Principal Review"), true);
+});
+
+test("existing-team selection rejects stale and already-bound team IDs before workflow mutation", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const existing = await client.createTeam({ name: "Shared Team", key: "SHR" });
+  const boundRegistry = upsertDomainRecord(emptyDomainRegistry(), makeDomainRecord({
+    domainId: "other-domain",
+    status: "active",
+    adopterProvidedName: "Other Domain",
+    workspaceId: "workspace-1",
+    workspaceName: "Example Workspace",
+    teamId: existing.id,
+    teamKey: existing.key,
+    teamName: existing.name,
+  }));
+
+  for (const selectedExistingTeamId of ["team-missing", existing.id]) {
+    await assert.rejects(
+      () => setupLinearDomain({
+        client,
+        config,
+        registry: boundRegistry,
+        repoRoot,
+        domainName: "Teami",
+        selectedExistingTeamId,
+        writeCache: async () => { throw new Error("must not write cache"); },
+        writeRegistry: async () => {},
+      }),
+      selectedExistingTeamId === existing.id ? /linear_team_already_bound/ : /linear_team_selection_invalid/,
+    );
+    assert.equal(client.projectLabels.length, 0);
+    assert.equal(client.issueLabels.length, 0);
+    assert.equal(client.workflowStateUpdates.length, 0);
   }
 });
 

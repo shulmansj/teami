@@ -60,7 +60,11 @@ async function assertAllMcpToolsWorkFromNoCheckoutCwd(fixture) {
     });
     assert.equal(onboarding.isError, undefined, JSON.stringify(onboarding.structuredContent));
     assert.equal(onboarding.structuredContent.ok, false);
-    assert.deepEqual(onboarding.structuredContent.needs.map((need) => need.field), ["domain", "repo_intent", "workspace", "confirm"]);
+    assert.deepEqual(onboarding.structuredContent.needs.map((need) => need.field), ["confirm"]);
+    assert.deepEqual(onboarding.structuredContent.defaults, {
+      team: fixture.domain.domainId,
+      product_repositories: "none",
+    });
     assert.equal(Object.hasOwn(onboarding.structuredContent, "authorization_url"), false);
 
     const resolved = await mcp.client.callTool({

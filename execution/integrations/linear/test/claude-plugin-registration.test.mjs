@@ -7,12 +7,17 @@ import test from "node:test";
 import { cachePathForConfig, loadLinearConfig } from "../src/config.mjs";
 import {
   resolveClaudePluginPhaseResumeDomain,
+  resolveInitDomainName,
   runLinearSetupCommand,
   runClaudePluginRegistrationStep,
 } from "../src/cli/linear-setup-command.mjs";
 import {
   DOMAIN_REGISTRY_SCHEMA_VERSION,
+  emptyDomainRegistry,
+  makeDomainRecord,
   readDomainRegistry,
+  upsertDomainRecord,
+  writeDomainRegistry,
 } from "../src/domain-registry.mjs";
 import {
   GITHUB_CONNECTION_SCHEMA_VERSION,
@@ -66,38 +71,37 @@ test("Claude plugin registration refreshes an existing marketplace source before
   assert.ok(commands.includes("plugin install teami@teami --scope user"));
 });
 
-test("Claude plugin registration rejects an installed publication placeholder", async (t) => {
-  const previousExitCode = process.exitCode;
-  process.exitCode = undefined;
-  t.after(() => {
-    process.exitCode = previousExitCode;
+test("Claude plugin registration upgrades a stale installed version and verifies exact read-back", async () => {
+  const fakeClaude = createFakeClaudeRunner({ addMarketplaceOk: false, installedVersion: "0.3.19" });
+  const result = await runClaudePluginRegistrationStep({
+    repoRoot,
+    output: captureOutput(),
+    runCommand: fakeClaude.runCommand,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "updated");
+  assert.equal(result.version, "0.3.20");
+  assert.ok(fakeClaude.calls.some((call) =>
+    call.args.join(" ") === "plugin update teami@teami --scope user"));
+});
+
+test("Claude plugin registration repairs a stale launcher even when its display version matches", async () => {
+  const fakeClaude = createFakeClaudeRunner({
+    addMarketplaceOk: false,
+    installedVersion: "0.3.20",
+    installedPackageRef: "__TEAMI_VERSION__",
   });
   const result = await runClaudePluginRegistrationStep({
     repoRoot,
     output: captureOutput(),
-    runCommand: async (command, args) => {
-      assert.equal(command, "claude");
-      if (args.join(" ") === "plugin marketplace list --json") {
-        return ok(JSON.stringify([{ name: "teami", source: "directory", path: repoRoot }]));
-      }
-      assert.deepEqual(args, ["plugin", "list", "--json"]);
-      return ok(JSON.stringify({ plugins: [{
-        id: "teami@teami",
-        name: "teami",
-        version: "0.3.20",
-        scope: "user",
-        enabled: true,
-        mcpServers: {
-          teami: { command: "npx", args: ["-y", "@shulmansj/teami@__TEAMI_VERSION__", "mcp"] },
-        },
-      }] }));
-    },
+    runCommand: fakeClaude.runCommand,
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "claude_plugin_launch_contract_mismatch");
-  assert.match(result.detail, /no publication placeholder/);
-  assert.equal(process.exitCode, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "updated");
+  assert.ok(fakeClaude.calls.some((call) =>
+    call.args.join(" ") === "plugin update teami@teami --scope user"));
 });
 
 test("Claude plugin registration rejects a same-name plugin from another marketplace", async (t) => {
@@ -197,6 +201,67 @@ test("bare init can resume only the Claude plugin phase after Linear and GitHub 
   );
 });
 
+test("bare CLI repair preserves a single existing team without asking the adopter to retype it", async () => {
+  const result = await resolveInitDomainName([], {
+    command: "init",
+    registry: {
+      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
+      domains: [{
+        id: "support-ops",
+        status: "active",
+        adopter_provided_name: "Support Ops",
+      }],
+    },
+    isTTY: true,
+    prompt: async () => {
+      throw new Error("single-team repair must not prompt for a name Teami already knows");
+    },
+  });
+
+  assert.equal(result, "Support Ops");
+});
+
+test("bare CLI asks for a team name only when multiple existing teams are ambiguous", async () => {
+  const prompts = [];
+  const result = await resolveInitDomainName([], {
+    command: "init",
+    registry: {
+      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
+      domains: [
+        { id: "support-ops", status: "active", adopter_provided_name: "Support Ops" },
+        { id: "growth", status: "active", adopter_provided_name: "Growth" },
+      ],
+    },
+    isTTY: true,
+    prompt: async (message) => {
+      prompts.push(message);
+      return "Growth";
+    },
+  });
+
+  assert.equal(result, "Growth");
+  assert.deepEqual(prompts, ["Linear team name: "]);
+});
+
+test("bare domain add asks for the new team even when one existing team is known", async () => {
+  const prompts = [];
+  const result = await resolveInitDomainName([], {
+    command: "domain:add",
+    registry: {
+      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
+      domains: [{ id: "support-ops", status: "active", adopter_provided_name: "Support Ops" }],
+    },
+    isTTY: true,
+    prompt: async (message) => {
+      prompts.push(message);
+      return "Sales Ops";
+    },
+  });
+
+  assert.equal(result, "Sales Ops");
+  assert.deepEqual(prompts, ["Linear team name: "]);
+});
+
 test("published package exposes the scoped npx Teami init entrypoint", () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const cliSource = fs.readFileSync(path.join(repoRoot, "execution", "integrations", "linear", "cli.mjs"), "utf8");
@@ -208,7 +273,7 @@ test("published package exposes the scoped npx Teami init entrypoint", () => {
   assert.match(cliSource, /runCliCommand\(\{ repoRoot, command, args: process\.argv\.slice\(3\) \}\)/);
 });
 
-test("teami init uses the published marketplace, records git_repo, and resumes plugin install", async (t) => {
+test("bare teami init defaults the visible team name, skips product-repo discovery, rechecks GitHub, and resumes plugin install", async (t) => {
   const home = tempHome(t, "teami-init-plugin-registration-");
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const output = captureOutput();
@@ -217,20 +282,13 @@ test("teami init uses the published marketplace, records git_repo, and resumes p
     workspaceName: "Workspace One",
   });
   const fakeClaude = createFakeClaudeRunner({ failInstallOnce: true });
-  const githubDiscovery = fakeGhRunner({
-    repos: [ghRepo("Acme/app", "trunk")],
-    packageJsonByRepo: {
-      "Acme/app": { scripts: { setup: "npm ci", test: "npm test" } },
-    },
-  });
-  const prompts = [];
   const phaseCalls = [];
   const previousExitCode = process.exitCode;
   process.exitCode = undefined;
   try {
     await runLinearSetupCommand({
       command: "init",
-      args: ["--domain", "Product Ops"],
+      args: [],
       context: {
         config,
         repoRoot: home,
@@ -239,6 +297,9 @@ test("teami init uses the published marketplace, records git_repo, and resumes p
         output,
         confirmSetupEffects: async () => true,
         isTTY: true,
+        promptDomainName: async () => {
+          throw new Error("fresh bare init must use the safe default without prompting");
+        },
         // Auto-continue the "Authorized workspace … Press Enter to continue" confirmation so the
         // TTY init flow does not block on real stdin in the test.
         promptReauthorize: async () => "",
@@ -248,8 +309,9 @@ test("teami init uses the published marketplace, records git_repo, and resumes p
           assert.equal(deferTokenPersistence, true);
           return fakeSetupAuth(client, { tokenSource: "browser" });
         },
-        githubDiscoveryRunCommand: githubDiscovery.runCommand,
-        githubRepoAllowlistPrompt: promptAnswers([""], prompts),
+        githubDiscoveryRunCommand: () => {
+          throw new Error("fresh onboarding must not inspect product repositories");
+        },
         ensurePhoenixReady: async () => ({ ok: false, reason: "phoenix skipped in test" }),
         githubInitTransportFromFlags: async () => ({}),
         runGitHubInitPhase: async ({ home: phaseHome }) => {
@@ -264,26 +326,12 @@ test("teami init uses the published marketplace, records git_repo, and resumes p
 
     assert.equal(process.exitCode, 1);
     assert.deepEqual(phaseCalls, ["github"]);
-    assert.equal(prompts.length, 1);
-    assert.match(prompts[0], /Allow this team to work in Acme\/app/);
-    assert.match(output.text(), /Build\/test auto-detected for Acme\/app: npm run setup -> npm test/);
+    assert.match(output.text(), /Product repositories: none/);
 
     let registry = readDomainRegistry({ home });
-    let domain = registry.domains.find((candidate) => candidate.id === "product-ops");
+    let domain = registry.domains.find((candidate) => candidate.id === "teami");
     assert.equal(domain.status, "active");
-    assert.deepEqual(domain.resources, [
-      {
-        id: "git_repo:acme/app",
-        kind: "git_repo",
-        role: "primary",
-        binding: {
-          owner: "Acme",
-          repo: "app",
-          default_branch: "trunk",
-        },
-      },
-    ]);
-    assert.equal(Object.hasOwn(domain.resources[0].binding, "local_checkout_path"), false);
+    assert.deepEqual(domain.resources, []);
 
     process.exitCode = undefined;
     await runLinearSetupCommand({
@@ -297,16 +345,19 @@ test("teami init uses the published marketplace, records git_repo, and resumes p
         output,
         confirmSetupEffects: async () => true,
         isTTY: false,
+        promptDomainName: async () => {
+          throw new Error("plugin-phase resume must not ask for the team name again");
+        },
         startLinearBrowserAuthorization: instantBrowserAuthorization(),
         createLinearSetupAuth: () => fakeSetupAuth(client, { tokenSource: "stored" }),
         githubDiscoveryRunCommand: () => {
           throw new Error("repo discovery must be skipped on plugin-phase resume");
         },
-        githubInitTransportFromFlags: async () => {
-          throw new Error("GitHub transport must be skipped on plugin-phase resume");
-        },
-        runGitHubInitPhase: async () => {
-          throw new Error("GitHub phase must be skipped on plugin-phase resume");
+        githubInitTransportFromFlags: async () => ({ kind: "real" }),
+        runGitHubInitPhase: async ({ home: phaseHome }) => {
+          phaseCalls.push("github");
+          const connection = writeVerifiedGitHubConnection(phaseHome);
+          return { ok: true, status: "verified", connection };
         },
         claudePluginRunCommand: fakeClaude.runCommand,
         finalGate: async () => ({ ok: true, smokeOk: true, doctorOk: true }),
@@ -314,13 +365,10 @@ test("teami init uses the published marketplace, records git_repo, and resumes p
     });
 
     assert.equal(process.exitCode, 0, output.text());
+    assert.deepEqual(phaseCalls, ["github", "github"]);
     registry = readDomainRegistry({ home });
-    domain = registry.domains.find((candidate) => candidate.id === "product-ops");
-    assert.deepEqual(domain.resources[0].binding, {
-      owner: "Acme",
-      repo: "app",
-      default_branch: "trunk",
-    });
+    domain = registry.domains.find((candidate) => candidate.id === "teami");
+    assert.deepEqual(domain.resources, []);
     assert.deepEqual(
       fakeClaude.calls
         .filter((call) => call.args[0] === "plugin" && call.args[1] === "marketplace" && call.args[2] === "add")
@@ -344,14 +392,158 @@ test("teami init uses the published marketplace, records git_repo, and resumes p
   }
 });
 
+test("domain add uses shared onboarding and never discovers or expands product-repository access", async (t) => {
+  const home = tempHome(t, "teami-domain-add-shared-onboarding-");
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const output = captureOutput();
+  writeDomainRegistry({ home }, upsertDomainRecord(
+    emptyDomainRegistry(),
+    makeDomainRecord({
+      domainId: "support-ops",
+      status: "active",
+      adopterProvidedName: "Support Ops",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+      teamId: "team-support",
+      teamKey: "SUP",
+      teamName: "Support Ops",
+      resources: [],
+    }),
+  ));
+  let discoveryCalls = 0;
+  const onboardingCalls = [];
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    const result = await runLinearSetupCommand({
+      command: "domain:add",
+      args: ["--domain", "Sales Ops"],
+      context: {
+        config,
+        repoRoot: home,
+        home,
+        cachePath: cachePathForConfig(config, home),
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        createProjectMcpToolActions: () => ({
+          init_onboarding: async (input) => {
+            onboardingCalls.push(input);
+            return {
+              ok: true,
+              status: "complete",
+              steps: {
+                linear: { ok: true, workspace: { id: "workspace-2", name: "Workspace Two" } },
+                product_repos: { ok: true, repos: [] },
+                github: { ok: true },
+                plugin: { ok: true },
+                phoenix: { ok: true },
+                runtime: { ok: true },
+                doctor: { ok: true, checks: [] },
+              },
+            };
+          },
+        }),
+        githubDiscoveryRunCommand: () => {
+          discoveryCalls += 1;
+          throw new Error("domain add must not inspect product repositories");
+        },
+      },
+    });
+
+    assert.equal(result.ok, true, output.text());
+    assert.equal(process.exitCode, 0, output.text());
+    assert.equal(discoveryCalls, 0);
+    assert.equal(onboardingCalls.length, 1);
+    assert.equal(onboardingCalls[0].domain, "Sales Ops");
+    assert.deepEqual(onboardingCalls[0].repo_intent, { mode: "non_code" });
+    const registry = readDomainRegistry({ home });
+    const existing = registry.domains.find((domain) => domain.id === "support-ops");
+    assert.deepEqual(existing.resources, []);
+    assert.match(output.text(), /Product repositories: none/);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
+test("bare CLI renders the shared existing-team chooser and resumes with explicit selection", async (t) => {
+  const home = tempHome(t, "teami-cli-team-limit-choice-");
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const output = captureOutput();
+  const onboardingCalls = [];
+  const promptAnswers = ["9", "1"];
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    const result = await runLinearSetupCommand({
+      command: "init",
+      args: [],
+      context: {
+        config,
+        repoRoot: home,
+        home,
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        promptLinearTeamSelection: async () => promptAnswers.shift(),
+        createProjectMcpToolActions: () => ({
+          init_onboarding: async (input) => {
+            onboardingCalls.push(input);
+            if (onboardingCalls.length === 1) {
+              return {
+                ok: false,
+                status: "team_selection_required",
+                setup_id: "11111111-1111-4111-8111-111111111111",
+                reason: "linear_team_limit_reached",
+                teams: [{ id: "team-agent-platform", key: "AP", name: "Agent Platform" }],
+              };
+            }
+            return {
+              ok: true,
+              status: "complete",
+              steps: {
+                linear: { ok: true, workspace: { name: "Workspace One" } },
+                product_repos: { ok: true, repos: [] },
+                github: { ok: true },
+                plugin: { ok: true },
+                phoenix: { ok: true },
+                runtime: { ok: true },
+                doctor: { ok: true, checks: [] },
+              },
+            };
+          },
+        }),
+      },
+    });
+
+    assert.equal(result.ok, true, output.text());
+    assert.equal(process.exitCode, 0, output.text());
+    assert.equal(onboardingCalls.length, 2);
+    assert.deepEqual(onboardingCalls[1], {
+      setup_id: "11111111-1111-4111-8111-111111111111",
+      linear_team_id: "team-agent-platform",
+      linear_team_confirm: true,
+    });
+    assert.match(output.text(), /Linear can't create another team/);
+    assert.match(output.text(), /Agent Platform \(AP\)/);
+    assert.match(output.text(), /Enter a number from 0 to 1/);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
 function createFakeClaudeRunner({
   addMarketplaceOk = true,
   failInstallOnce = false,
+  installedVersion = null,
+  installedPackageRef = null,
 } = {}) {
   const state = {
     marketplaceReady: !addMarketplaceOk,
     marketplaceSource: !addMarketplaceOk ? repoRoot : null,
-    installed: false,
+    installed: Boolean(installedVersion),
+    installedVersion: installedVersion || "0.3.20",
+    installedPackageRef: installedPackageRef || installedVersion || "0.3.20",
     installFailed: false,
   };
   const calls = [];
@@ -375,11 +567,11 @@ function createFakeClaudeRunner({
           plugins: state.installed ? [{
             id: "teami@teami",
             name: "teami",
-            version: "0.3.20",
+            version: state.installedVersion,
             scope: "user",
             enabled: true,
             mcpServers: {
-              teami: { command: "npx", args: ["-y", "@shulmansj/teami@0.3.20", "mcp"] },
+              teami: { command: "npx", args: ["-y", `@shulmansj/teami@${state.installedPackageRef}`, "mcp"] },
             },
           }] : [],
         }));
@@ -395,7 +587,15 @@ function createFakeClaudeRunner({
           return fail("injected plugin install failure");
         }
         state.installed = true;
+        state.installedVersion = "0.3.20";
+        state.installedPackageRef = "0.3.20";
         return ok("installed teami");
+      case "plugin update teami@teami --scope user":
+        assert.equal(state.marketplaceReady, true, "marketplace source must be refreshed before update");
+        state.installed = true;
+        state.installedVersion = "0.3.20";
+        state.installedPackageRef = "0.3.20";
+        return ok("updated teami");
       default:
         if (args[0] === "plugin" && args[1] === "marketplace" && args[2] === "add") {
           assert.equal(args[4], "--scope");
@@ -517,50 +717,6 @@ function writeVerifiedGitHubConnection(home) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   fs.writeFileSync(statePath, `${JSON.stringify(connection, null, 2)}\n`, "utf8");
   return connection;
-}
-
-function fakeGhRunner({
-  repos = [],
-  packageJsonByRepo = {},
-} = {}) {
-  const calls = [];
-  const runCommand = (command, args) => {
-    calls.push({ command, args: [...args] });
-    if (command !== "gh") return fail(`unexpected command: ${command}`);
-    if (args.join(" ") === "auth status --hostname github.com") {
-      return ok("github.com\n  ✓ Logged in to github.com");
-    }
-    if (args.join(" ") === "repo list --limit 50 --json nameWithOwner,defaultBranchRef") {
-      return ok(JSON.stringify(repos));
-    }
-    if (args[0] === "api") {
-      const match = String(args[1] || "").match(/^repos\/([^/]+)\/([^/]+)\/contents\/package\.json\?/);
-      if (!match) return fail(`unexpected gh api endpoint: ${args[1]}`);
-      const key = `${match[1]}/${match[2]}`;
-      if (!Object.hasOwn(packageJsonByRepo, key)) return fail("HTTP 404: Not Found");
-      return ok(JSON.stringify({
-        encoding: "base64",
-        content: Buffer.from(JSON.stringify(packageJsonByRepo[key]), "utf8").toString("base64"),
-      }));
-    }
-    return fail(`unexpected gh command: ${args.join(" ")}`);
-  };
-  return { calls, runCommand };
-}
-
-function ghRepo(nameWithOwner, defaultBranch) {
-  return {
-    nameWithOwner,
-    defaultBranchRef: { name: defaultBranch },
-  };
-}
-
-function promptAnswers(answers, prompts = []) {
-  const remaining = [...answers];
-  return async (message) => {
-    prompts.push(message);
-    return remaining.length > 0 ? remaining.shift() : "";
-  };
 }
 
 function generatedTeamKey(name, fallbackNumber) {

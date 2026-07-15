@@ -41,9 +41,9 @@ test("formatCommand renders the Windows launcher form on win32", () => {
 test("formatCommandForContext renders the package launcher under node_modules", () => {
   const packagedPath = String.raw`C:\Users\example\project\node_modules\@shulmansj\teami\src\cli\operator-output.mjs`;
   assert.equal(isInstalledPackageModulePath(packagedPath), true);
-  assert.equal(formatCommandForContext("doctor", { installedPackageContext: true, platform: "win32" }), "npx @shulmansj/teami@release doctor");
-  assert.equal(formatCommandForContext("gateway status", { installedPackageContext: true, platform: "linux" }), "npx @shulmansj/teami@release gateway status");
-  assert.equal(formatCommandForContext("", { installedPackageContext: true, platform: "darwin" }), "npx @shulmansj/teami@release");
+  assert.equal(formatCommandForContext("doctor", { installedPackageContext: true, platform: "win32" }), "npx @shulmansj/teami doctor");
+  assert.equal(formatCommandForContext("gateway status", { installedPackageContext: true, platform: "linux" }), "npx @shulmansj/teami gateway status");
+  assert.equal(formatCommandForContext("", { installedPackageContext: true, platform: "darwin" }), "npx @shulmansj/teami");
 });
 
 test("formatCommandForContext keeps checkout launcher outside node_modules", () => {

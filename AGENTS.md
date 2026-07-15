@@ -30,17 +30,17 @@ is red, translate it (see Repair below); don't dump the raw output.
 ## The three surfaces
 
 1. Setup and repair: `init_onboarding` through MCP after the agent gathers the
-   setup answers, or `teami init` / `teami doctor` through the thin CLI.
+   adopter's consent, or `teami init` / `teami doctor` through the thin CLI.
 2. Planning work: MCP tools `resolve_domain`, `project_create`,
    `project_write_body`, and `project_move_status`.
 3. Running work: `teami gateway start` to listen for Planned projects, and
    `teami gateway status` for a read-only snapshot.
 
-The CLI does not replace the MCP workflow. Use MCP `init_onboarding` for full
-setup when the agent has gathered the domain, repo allowlist/non-code answer,
-and optional workspace. Use the CLI for fallback setup, health, and the
-foreground gateway. Use MCP for creating a project, writing the canonical body,
-and moving it to Planned after the adopter confirms.
+The CLI does not replace the MCP workflow. Start MCP `init_onboarding` without
+arguments and use its safe defaults. Product repositories stay disconnected
+during setup. Use the CLI for fallback setup, health, and the foreground
+gateway. Use MCP for creating a project, writing the canonical body, and moving
+it to Planned after the adopter confirms.
 
 ## What you can help with
 
@@ -70,23 +70,43 @@ notes.
 
 ## Job 1 - Setup or repair
 
-If Teami is not set up, first call `init_onboarding` with no arguments to get
-its structured `needs` list, ask the adopter for the domain/team name, whether
-this is a non-code team or which `owner/repo` repos to allow, and optional
-workspace name/id, then call `init_onboarding` again with those answers. That
-second call runs the full setup pipeline: Linear browser authorization with a
-live local callback listener, Linear team/labels/status setup, GitHub behavior
-repo setup, and Claude plugin registration. The result includes the Linear
-authorization URL when browser auth runs so you can relay it if the browser did
-not come forward. As a direct fallback, run `teami init`.
+If Teami is not set up, first call `init_onboarding` with no arguments. It
+returns a plain-language disclosure and safe defaults: a Linear team named
+`Teami` for a fresh installation, and no product-repository access. Summarize
+the actual changes and ask for one explicit confirmation. Ask about the team
+name only if the adopter wants a different visible name or the tool reports
+that an existing multi-team installation is ambiguous. Do not ask about
+product repositories during onboarding.
+
+After confirmation, call `init_onboarding` again with the returned disclosure
+version/hash and `confirm: true`. That call runs the full setup pipeline:
+Linear browser authorization with a live local callback listener, Linear
+team/labels/status setup, a private Teami workspace repository through the
+adopter's signed-in GitHub account, Claude plugin registration, and local
+runtime checks. Always give the concrete Linear authorization URL as a fallback
+while authorization is pending: "If the browser is not visible, open this link."
+Keep the returned
+`setup_id`, then call `init_onboarding` with that `setup_id` after approval and
+continue resuming until it returns a terminal result. A pending result is never
+setup complete. If one-time admin consent is requested, explain it, get the
+separate explicit confirmation, and resume the same setup. As a direct fallback,
+tell the adopter to run
+`npx @shulmansj/teami init`.
 
 Tell them first: Linear authorization opens in their browser, uses Linear's
 workspace-wide read/write OAuth scope, and is resumable. Show the complete
 versioned disclosure returned by the first tool call and obtain explicit
 confirmation before the second call. In plain language, cover the possible
-one-time non-retained admin grant, product-repo allowlisting, behavior-repo
-creation or connection through ambient GitHub authority, Claude plugin
-registration, and local Teami/Phoenix state. Teami does not ask for an API key.
+one-time non-retained admin grant, the fact that product repositories remain
+disconnected, private Teami workspace-repo creation through ambient GitHub
+authority, Claude plugin registration, and local Teami/Phoenix state. Teami
+does not ask for an API key.
+
+If setup returns `team_selection_required`, explain that the workspace plan
+cannot add the dedicated Teami team. Show the returned existing teams and the
+listed effects, then resume with the same `setup_id`, selected `linear_team_id`,
+and `linear_team_confirm: true` only after the adopter chooses. Never select a
+team on their behalf.
 
 For repair, run `teami doctor`, translate the specific red check into one plain
 sentence and the fix, then offer to run the fix.
@@ -96,7 +116,7 @@ Known repair translations:
 - Linear sign-in expired or the team is not visible: re-run `teami init`.
 - Runtime check failed: run `teami runtime-smoke`; if it keeps failing, confirm
   `claude` or `codex` is installed and the configured model is available.
-- GitHub behavior repo not reachable: repair local `gh`/git auth, then re-run
+- Private Teami workspace repository not reachable: repair local `gh`/git auth, then re-run
   `teami init`.
 - GitHub local write blocked: repair local git credentials for `origin`, then
   re-run `teami doctor`.

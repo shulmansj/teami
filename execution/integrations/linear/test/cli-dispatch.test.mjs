@@ -10,7 +10,9 @@ import { COMMAND_REGISTRY } from "../src/cli/dispatch.mjs";
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const cliPath = path.join(repoRoot, "execution", "integrations", "linear", "cli.mjs");
 const exampleConfigPath = path.join(repoRoot, "execution", "integrations", "linear", "config.example.json");
-const DISPATCH_TIMEOUT_MS = 15_000;
+// This matrix detects commands that hang or crash; it is not a performance
+// budget. Keep enough margin for a fully parallel test run on slower hosts.
+const DISPATCH_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 512 * 1024;
 
 const DISPATCH_CASES = Object.freeze([
@@ -55,7 +57,7 @@ const DISPATCH_CASES = Object.freeze([
 
 const HELP_CASES = Object.freeze([
   // <command> --help renders in the platform launcher form, not "npm run ...".
-  { command: "init", args: ["--help"], expected: /teami(?:\.cmd)? init --domain <name>/ },
+  { command: "init", args: ["--help"], expected: /teami(?:\.cmd)? init \[--domain <name>\]/ },
   { command: "doctor", args: ["--help"], expected: /teami(?:\.cmd)? doctor/ },
   { command: "domain:grant", args: ["--help"], expected: /teami(?:\.cmd)? domain grant <id> --repo <owner\/name>/ },
   { command: "domain:revoke", args: ["--help"], expected: /teami(?:\.cmd)? domain revoke <id> --repo <owner\/name>/ },

@@ -1,6 +1,6 @@
 {
   "name": "teami",
-  "version": "0.3.20",
+  "version": "0.3.20-sha159253e6f89c871b352d6bc06ab73dfb2c3d7f3c",
   "description": "Teami planning adapter for Claude Code.",
   "author": {
     "name": "Teami"
@@ -10,7 +10,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@shulmansj/teami@0.3.20-shac7216ee9ead2a101994c8636ef302687a4038667",
+        "@shulmansj/teami@0.3.20-sha159253e6f89c871b352d6bc06ab73dfb2c3d7f3c",
         "mcp"
       ]
     }

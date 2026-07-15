@@ -158,8 +158,8 @@ const ADOPTER_COMMANDS = Object.freeze([
     invokeCommand: "init",
     handler: runLinearSetupCommand,
     tier: "adopter",
-    summary: "set up your factory (Linear auth, first domain, GitHub)",
-    usageTail: "--domain <name> [--workspace <name-or-id>] [--github-dry-run] [--verbose]",
+    summary: "connect Linear and prepare Teami on this computer",
+    usageTail: "[--domain <name>] [--workspace <name-or-id>] [--verbose]",
     helpGroup: "Setup",
     helpOrder: 1,
     aliases: [],
@@ -818,8 +818,8 @@ const HOME_SCREEN = {
     steps: () => [{ text: formatCommand("init"), hint: "set up your factory (Linear, first domain, GitHub)" }],
   },
   idle: {
-    headline: "ready - not running",
-    steps: () => [{ text: formatCommand("gateway start"), hint: "turn the factory on" }],
+    headline: "ready",
+    steps: () => [{ text: "/teami:plan", hint: "shape your first project in Claude Code" }],
   },
   listening: {
     headline: "running",
@@ -913,6 +913,7 @@ export async function runGithubInitCommand({ context, command, args }) {
       requestedOwner: flags["github-owner"] || null,
       requestedRepoName: flags["github-repo"] || null,
       requestedVisibility: flags["github-visibility"] || null,
+      replacementExplicit: Boolean(flags["github-owner"] && flags["github-repo"]),
       onProgress: githubProgress,
     });
     if (!result.ok) {

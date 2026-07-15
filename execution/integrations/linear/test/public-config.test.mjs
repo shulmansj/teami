@@ -146,7 +146,7 @@ test("public config separates behavior-repo GitHub setup from domain git repo bi
 
   assert.equal(Object.hasOwn(config.github, "behavior_repo"), true);
   assert.equal(config.github.behavior_repo.owner, null);
-  assert.equal(config.github.behavior_repo.name, "teami");
+  assert.equal(config.github.behavior_repo.name, null);
   assert.equal(config.github.behavior_repo.visibility, "private");
   assert.equal(Object.hasOwn(config.github, ["token", "broker"].join("_")), false);
   assert.equal(Object.hasOwn(config.github, "git_repo"), false);

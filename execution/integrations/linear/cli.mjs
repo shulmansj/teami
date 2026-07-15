@@ -52,7 +52,7 @@ export {
 // True when this module is the process entrypoint. The Windows npm bin runs `node cli.mjs`
 // (argv[1] is the cli.mjs path), but the Linux/macOS npm bin is a SYMLINK (node_modules/.bin/teami
 // -> cli.mjs), so argv[1] is the symlink — the plain suffix check misses it and the CLI would never
-// run under `npx @shulmansj/teami@release …` on those platforms. Fall back to a realpath comparison for the symlink case.
+// run under `npx @shulmansj/teami …` on those platforms. Fall back to a realpath comparison for the symlink case.
 function isCliEntrypoint() {
   const invoked = process.argv[1];
   if (!invoked) return false;
