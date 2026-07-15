@@ -3,7 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
-import { ensureCarriedRuntime } from "./runtime/carried-runtime.mjs";
+import {
+  CARRIED_RUNTIME_CURRENT_DIRNAME,
+  ensureCarriedRuntime,
+} from "./runtime/carried-runtime.mjs";
 
 export const DEFAULT_PHOENIX_APP_URL = "http://127.0.0.1:6006";
 export const DEFAULT_PHOENIX_PROJECT = "teami";
@@ -55,10 +58,18 @@ export function resolvePhoenixConfig({
 
 function resolvePhoenixHome({ home, repoRoot, env }) {
   if (home !== undefined) return home;
-  if (hasTeamiHomeOverride(env) || path.resolve(repoRoot) === path.resolve(process.cwd())) {
+  if (hasTeamiHomeOverride(env) || isInstalledPackageRoot(repoRoot) || path.resolve(repoRoot) === path.resolve(process.cwd())) {
     return resolveTeamiHome({ env });
   }
   return repoRoot;
+}
+
+function isInstalledPackageRoot(repoRoot) {
+  const segments = path.resolve(repoRoot).split(path.sep).map((segment) => segment.toLowerCase());
+  const nodeModulesIndex = segments.lastIndexOf("node_modules");
+  return nodeModulesIndex >= 0 &&
+    segments[nodeModulesIndex + 1] === "@shulmansj" &&
+    segments[nodeModulesIndex + 2] === "teami";
 }
 
 function hasTeamiHomeOverride(env) {
@@ -146,16 +157,24 @@ export async function ensurePhoenixReady({
     platformKey,
   });
   if (!installed.ok) {
+    const failureReason = installed.reason || "runtime_prepare_failed";
     const metadata = serviceMetadata({
       config,
       managed: false,
       pid: null,
-      status: "runtime_fetch_failed",
-      lastErrorReason: installed.reason || "runtime_fetch_failed",
+      status: failureReason === "runtime_fetch_failed" ? "runtime_fetch_failed" : "runtime_prepare_failed",
+      lastErrorReason: failureReason,
       repairHint: installed.repairHint || runtimeFetchDegradationNotice(),
     });
     writeServiceMetadata(config.serviceFile, metadata);
-    return { ok: false, reason: "runtime_fetch_failed", repairHint: metadata.repair_hint, ...config, metadata };
+    return {
+      ok: false,
+      reason: failureReason,
+      detail: installed.detail || null,
+      repairHint: metadata.repair_hint,
+      ...config,
+      metadata,
+    };
   }
   const child = startProcess({ config, spawnImpl, env });
   const metadata = serviceMetadata({
@@ -178,7 +197,9 @@ export async function ensurePhoenixReady({
     status: ready.ok ? "running" : "failed",
     lastSuccessfulPreflightAt: ready.ok ? now().toISOString() : null,
     lastErrorReason: ready.ok ? null : ready.reason,
-    repairHint: ready.ok ? null : "Check .agent-shell/logs/phoenix-server.err.log and rerun npm run phoenix:start.",
+    repairHint: ready.ok
+      ? null
+      : `Rerun npx @shulmansj/teami init. If startup still fails, inspect ${path.join(config.logsDir, "phoenix-server.err.log")}.`,
   });
   writeServiceMetadata(config.serviceFile, finalMetadata);
   return ready.ok
@@ -307,17 +328,71 @@ async function ensurePhoenixInstalled({
   });
   if (!runtime.ok) return runtime;
   onProgress(`Checking carried Phoenix runtime (${config.packageSpec})...`);
-  await runCommand(phoenixPythonPath(config), ["-c", "import phoenix"], {
-    env,
-    timeoutMs: commandTimeoutMs,
-  });
+  const python = phoenixPythonPath(config);
+  try {
+    await runCommand(python, [
+      "-c",
+      "import importlib.metadata as m; import phoenix; assert m.version('arize-phoenix') == '14.13.0'",
+    ], {
+      env,
+      timeoutMs: commandTimeoutMs,
+    });
+  } catch (error) {
+    const validation = runtimeValidationFailure(error);
+    const invalidation = invalidateCarriedRuntime(config);
+    return {
+      ok: false,
+      reason: validation.reason,
+      detail: validation.detail,
+      repairHint: invalidation.ok
+        ? "Teami removed the unusable local trace runtime. Rerun npx @shulmansj/teami init to download and verify a clean replacement."
+        : `Teami could not replace the unusable local trace runtime. Close Teami and remove ${path.join(config.runtimeDir, CARRIED_RUNTIME_CURRENT_DIRNAME)}, then rerun npx @shulmansj/teami init.`,
+    };
+  }
   return { ok: true, manifestEntry: runtime.manifestEntry };
+}
+
+function runtimeValidationFailure(error) {
+  const detail = String(error?.message || error || "Phoenix runtime validation failed").slice(0, 1_000);
+  if (error?.code === "ENOENT" || /\bENOENT\b|not found/i.test(detail)) {
+    return { reason: "phoenix_runtime_python_missing", detail };
+  }
+  if (/timed out/i.test(detail)) {
+    return { reason: "phoenix_runtime_validation_timeout", detail };
+  }
+  return { reason: "phoenix_runtime_bundle_invalid", detail };
+}
+
+function invalidateCarriedRuntime(config) {
+  const currentDir = path.join(config.runtimeDir, CARRIED_RUNTIME_CURRENT_DIRNAME);
+  const cachedManifest = path.join(config.runtimeDir, "runtime-manifest.json");
+  if (!fs.existsSync(currentDir)) {
+    fs.rmSync(cachedManifest, { force: true });
+    return { ok: true };
+  }
+  const quarantineDir = path.join(config.runtimeDir, `.invalid-${process.pid}-${Date.now()}`);
+  try {
+    fs.renameSync(currentDir, quarantineDir);
+    fs.rmSync(cachedManifest, { force: true });
+  } catch (error) {
+    return { ok: false, error };
+  }
+  fs.rmSync(quarantineDir, { recursive: true, force: true });
+  return { ok: true };
 }
 
 function startPhoenixProcess({ config, spawnImpl, env }) {
   const out = fs.openSync(path.join(config.logsDir, "phoenix-server.log"), "a");
   const err = fs.openSync(path.join(config.logsDir, "phoenix-server.err.log"), "a");
-  const child = spawnImpl(phoenixExecutablePath(config), ["serve", "--host", "127.0.0.1", "--port", String(config.port)], {
+  const child = spawnImpl(phoenixPythonPath(config), [
+    "-m",
+    "phoenix.server.main",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(config.port),
+  ], {
     cwd: config.root,
     detached: true,
     windowsHide: true,
@@ -421,16 +496,37 @@ function serviceMetadata({
 
 export function phoenixPythonPath(config) {
   const runtimeRoot = path.join(config.runtimeDir, "current");
-  return process.platform === "win32"
-    ? path.join(runtimeRoot, "Scripts", "python.exe")
-    : path.join(runtimeRoot, "bin", "python");
+  const nestedRuntimeExists = fs.existsSync(path.join(runtimeRoot, "python"));
+  const candidates = process.platform === "win32"
+    ? [
+        path.join(runtimeRoot, "python", "python.exe"),
+        path.join(runtimeRoot, "Scripts", "python.exe"),
+      ]
+    : [
+        path.join(runtimeRoot, "python", "bin", "python3"),
+        path.join(runtimeRoot, "python", "bin", "python"),
+        path.join(runtimeRoot, "bin", "python"),
+      ];
+  return firstExistingOrPreferred(candidates, nestedRuntimeExists ? 0 : candidates.length - 1);
 }
 
 export function phoenixExecutablePath(config) {
   const runtimeRoot = path.join(config.runtimeDir, "current");
-  return process.platform === "win32"
-    ? path.join(runtimeRoot, "Scripts", "phoenix.exe")
-    : path.join(runtimeRoot, "bin", "phoenix");
+  const nestedRuntimeExists = fs.existsSync(path.join(runtimeRoot, "python"));
+  const candidates = process.platform === "win32"
+    ? [
+        path.join(runtimeRoot, "python", "Scripts", "phoenix.exe"),
+        path.join(runtimeRoot, "Scripts", "phoenix.exe"),
+      ]
+    : [
+        path.join(runtimeRoot, "python", "bin", "phoenix"),
+        path.join(runtimeRoot, "bin", "phoenix"),
+      ];
+  return firstExistingOrPreferred(candidates, nestedRuntimeExists ? 0 : candidates.length - 1);
+}
+
+function firstExistingOrPreferred(candidates, preferredIndex = 0) {
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[preferredIndex];
 }
 
 function isLoopbackHostname(hostname) {
@@ -467,7 +563,7 @@ function killPid(pid) {
 
 function repairHintForProbe(probe) {
   if (probe.reason === "port_collision") return "Stop the non-Phoenix service on the configured Phoenix port.";
-  if (probe.reason === "unreachable") return "Run npm run phoenix:start or npm run init to start local Phoenix.";
+  if (probe.reason === "unreachable") return "Rerun npx @shulmansj/teami init to start local Phoenix.";
   return "Run npm run phoenix:doctor for local Phoenix repair guidance.";
 }
 

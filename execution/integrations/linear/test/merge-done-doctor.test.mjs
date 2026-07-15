@@ -255,15 +255,15 @@ test("GitHub merge-path doctor check fails closed when PR API is unreachable", a
   assert.match(check.message, /Merge permission is proven at the first real merge/);
 });
 
-test("GitHub merge-path doctor check is a warning for domains without a code repo", async () => {
+test("GitHub merge-path doctor check is healthy and not applicable for domains without a code repo", async () => {
   const check = await doctorMergePathGitHubCheck({
     repoIdentityError: "review_git_repo_resource_missing",
   });
 
   assert.equal(check.name, MERGE_PATH_GITHUB_CHECK_NAME);
-  assert.equal(check.state, "warn");
+  assert.equal(check.state, "ok");
   assert.equal(check.ok, true);
-  assert.match(check.message, /no code merge path is checkable/);
+  assert.match(check.message, /not applicable/);
 });
 
 function healthyCache() {
