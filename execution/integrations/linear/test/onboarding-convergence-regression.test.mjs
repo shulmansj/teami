@@ -69,6 +69,107 @@ test("Claude plugin health retries a transient read before blocking setup", asyn
   assert.equal(marketplaceReads, 2);
 });
 
+test("Claude plugin health survives a short run of transient read failures", async () => {
+  let marketplaceReads = 0;
+  const readTimeouts = [];
+  const health = await readClaudePluginHealth({
+    repoRoot,
+    marketplaceSource: "https://github.com/shulmansj/teami",
+    readRetryDelaysMs: [0, 0, 0, 0],
+    runCommand: async (_command, args, options) => {
+      readTimeouts.push(options.timeoutMs);
+      if (args.join(" ") === "plugin marketplace list --json") {
+        marketplaceReads += 1;
+        if (marketplaceReads < 5) {
+          return { ok: false, status: 1, stdout: "", stderr: "transient read failure" };
+        }
+        return {
+          ok: true,
+          status: 0,
+          stdout: JSON.stringify([{
+            name: "teami",
+            source: "git",
+            url: "https://github.com/shulmansj/teami.git",
+          }]),
+          stderr: "",
+        };
+      }
+      return {
+        ok: true,
+        status: 0,
+        stdout: JSON.stringify([{
+          id: "teami@teami",
+          version: "0.3.20",
+          scope: "user",
+          enabled: true,
+          mcpServers: {
+            teami: {
+              command: "npx",
+              args: ["-y", "@shulmansj/teami@0.3.20", "mcp"],
+            },
+          },
+        }]),
+        stderr: "",
+      };
+    },
+  });
+
+  assert.equal(health.ok, true);
+  assert.equal(marketplaceReads, 5);
+  assert.deepEqual(readTimeouts, Array(6).fill(10_000));
+});
+
+test("Claude plugin health still blocks after its bounded retry budget", async () => {
+  let marketplaceReads = 0;
+  const health = await readClaudePluginHealth({
+    repoRoot,
+    marketplaceSource: "https://github.com/shulmansj/teami",
+    readRetryDelaysMs: [0, 0, 0, 0],
+    runCommand: async () => {
+      marketplaceReads += 1;
+      return { ok: false, status: 1, stdout: "", stderr: "persistent read failure" };
+    },
+  });
+
+  assert.equal(health.ok, false);
+  assert.equal(health.reason, "claude_plugin_marketplace_list_failed");
+  assert.equal(marketplaceReads, 5);
+});
+
+test("Claude plugin health fails closed on an invalid retry policy without running commands", async () => {
+  let commandCalls = 0;
+  const health = await readClaudePluginHealth({
+    repoRoot,
+    marketplaceSource: "https://github.com/shulmansj/teami",
+    readRetryDelaysMs: ["invalid"],
+    runCommand: async () => {
+      commandCalls += 1;
+      return { ok: true, status: 0, stdout: "[]", stderr: "" };
+    },
+  });
+
+  assert.equal(health.ok, false);
+  assert.equal(health.reason, "claude_plugin_read_policy_invalid");
+  assert.equal(commandCalls, 0);
+});
+
+test("Claude plugin health does not repeat a timed-out read command", async () => {
+  let marketplaceReads = 0;
+  const health = await readClaudePluginHealth({
+    repoRoot,
+    marketplaceSource: "https://github.com/shulmansj/teami",
+    readRetryDelaysMs: [0, 0, 0, 0],
+    runCommand: async () => {
+      marketplaceReads += 1;
+      return { ok: false, status: null, stdout: "", stderr: "read timed out", timedOut: true };
+    },
+  });
+
+  assert.equal(health.ok, false);
+  assert.equal(health.reason, "claude_plugin_marketplace_list_failed");
+  assert.equal(marketplaceReads, 1);
+});
+
 test("published npm installs keep Phoenix state in the per-user Teami home", () => {
   const env = { ...process.env };
   delete env.TEAMI_HOME;
