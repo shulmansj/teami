@@ -18,6 +18,7 @@ test("production GitHub transport resolves local ambient mode for verified real 
     repoIdentity: {
       connection_mode: "real",
       repo: { owner: "acme", repo: "teami" },
+      repo_id: "R_repo_teami_1",
       default_branch: "main",
       checkout_path: "C:/Users/example/factory",
       push_auth: "ssh",
@@ -39,6 +40,7 @@ test("verified real connections default to https push auth and disabled real pus
     repoIdentity: {
       connection_mode: "real",
       repo: { owner: "acme", repo: "teami" },
+      repo_id: "R_repo_teami_1",
     },
   });
   assert.equal(selection.mode, "local_ambient");
@@ -46,13 +48,17 @@ test("verified real connections default to https push auth and disabled real pus
   assert.equal(selection.realPushEnabled, false);
 });
 
-test("local ambient transport shells the five allowlisted GitHub PR operations through gh api", async () => {
+test("local ambient transport shells the five PR operations plus immutable repository identity through gh api", async () => {
   const { spawnImpl, calls } = fakeGhSpawn((call) => {
     if (call.args[0] === "auth") return { stdout: "github.com logged in\n" };
     if (call.args.includes("state=open")) {
       return { stdout: JSON.stringify([[{ number: 1 }], [{ number: 2 }]]) };
     }
     if (call.args.includes("state=closed")) return { stdout: JSON.stringify([[]]) };
+    const apiPath = call.args.find((arg) => arg.startsWith("repos/"));
+    if (call.args.includes("GET") && apiPath === "repos/acme/teami") {
+      return { stdout: JSON.stringify({ id: 12345, node_id: "R_repo_teami_1", name: "teami" }) };
+    }
     if (call.args.includes("--method") && call.args.includes("POST")) {
       return { stdout: JSON.stringify({ number: 3, title: "Ship local gh", state: "open" }) };
     }
@@ -74,6 +80,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     repoIdentity: {
       connection_mode: "real",
       repo: { owner: "acme", repo: "teami" },
+      repo_id: "R_repo_teami_1",
       push_auth: "ssh",
     },
     spawnImpl,
@@ -82,6 +89,7 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
   const listOpen = await request(selection.transport, "list_open_pull_requests", "GET", "/repos/{owner}/{repo}/pulls");
   const listClosed = await request(selection.transport, "list_closed_pull_requests", "GET", "/repos/{owner}/{repo}/pulls");
   const getPr = await request(selection.transport, "get_pull_request", "GET", "/repos/{owner}/{repo}/pulls/{number}", { number: 2 });
+  const identity = await request(selection.transport, "get_repository_identity", "GET", "/repos/{owner}/{repo}");
   const createPr = await request(selection.transport, "create_pull_request", "POST", "/repos/{owner}/{repo}/pulls", {
     title: "Ship local gh",
     head: "proposal/af-123/agent",
@@ -97,9 +105,12 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
   assert.deepEqual(listOpen, { data: [{ number: 1 }, { number: 2 }] });
   assert.deepEqual(listClosed, { data: [] });
   assert.deepEqual(getPr, { data: { number: 2, state: "open" } });
+  assert.equal(identity.data.id, "R_repo_teami_1");
+  assert.equal(identity.data.node_id, "R_repo_teami_1");
   assert.deepEqual(createPr, { data: { number: 3, title: "Ship local gh", state: "open" } });
   assert.deepEqual(updatePr, { data: { number: 3, body: "updated body" } });
   assert.deepEqual(calls.map((call) => call.args[0]), [
+    "auth", "api",
     "auth", "api",
     "auth", "api",
     "auth", "api",
@@ -177,19 +188,31 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     "-H",
     "X-GitHub-Api-Version: 2022-11-28",
     "--method",
+    "GET",
+    "repos/acme/teami",
+  ]);
+  assert.deepEqual(apiCalls[4].args, [
+    "api",
+    "--hostname",
+    "github.com",
+    "-H",
+    "Accept: application/vnd.github+json",
+    "-H",
+    "X-GitHub-Api-Version: 2022-11-28",
+    "--method",
     "POST",
     "repos/acme/teami/pulls",
     "--input",
     "-",
   ]);
-  assert.deepEqual(JSON.parse(apiCalls[3].stdin), {
+  assert.deepEqual(JSON.parse(apiCalls[4].stdin), {
     title: "Ship local gh",
     head: "proposal/af-123/agent",
     base: "main",
     body: "created body",
     draft: true,
   });
-  assert.deepEqual(apiCalls[4].args, [
+  assert.deepEqual(apiCalls[5].args, [
     "api",
     "--hostname",
     "github.com",
@@ -203,7 +226,19 @@ test("local ambient transport shells the five allowlisted GitHub PR operations t
     "--input",
     "-",
   ]);
-  assert.deepEqual(JSON.parse(apiCalls[4].stdin), { body: "updated body" });
+  assert.deepEqual(JSON.parse(apiCalls[5].stdin), { body: "updated body" });
+});
+
+test("real promotion transport fails closed without the approved immutable repository ID", () => {
+  assert.throws(
+    () => createProductionGitHubPromotionTransport({
+      repoIdentity: {
+        connection_mode: "real",
+        repo: { owner: "acme", repo: "teami" },
+      },
+    }),
+    /github_durable_repo_identity_required/,
+  );
 });
 
 test("local ambient transport rejects malformed gh api stdout", async () => {
@@ -259,6 +294,7 @@ test("timed-out GitHub mutations expose reconciliation-required handling", async
     repoIdentity: {
       connection_mode: "real",
       repo: { owner: "acme", repo: "teami" },
+      repo_id: "R_repo_teami_1",
     },
     runSubprocess: async ({ operation }) => operation === "gh_auth_read"
       ? { ok: true, stdout: "authenticated", stderr: "", status: 0, signal: null }
@@ -294,6 +330,7 @@ function realSelection({ spawnImpl }) {
     repoIdentity: {
       connection_mode: "real",
       repo: { owner: "acme", repo: "teami" },
+      repo_id: "R_repo_teami_1",
     },
     spawnImpl,
   });

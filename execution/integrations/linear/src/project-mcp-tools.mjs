@@ -56,9 +56,11 @@ import { renderPlanningBody } from "./project-planning-body.mjs";
 import { createTrace, recordSpan } from "./trace.mjs";
 import { runRuntimeSmokeChecks } from "./runtime-smoke.mjs";
 import {
+  DEFAULT_SETUP_TEAM_NAME,
   SETUP_DISCLOSURE_HASH,
   SETUP_DISCLOSURE_VERSION,
   createSetupStateStore,
+  isSetupOwnerAlive,
   normalizeSetupRepoIntent,
   runSetupCompletionContract,
   setupEffectsDisclosure,
@@ -127,6 +129,11 @@ export function createProjectMcpToolActions({
   runSetupDoctor = doctorGraphqlLinear,
   runInitOnboardingSetupImpl = runInitOnboardingSetup,
   adminGrantUseWindowMs = ADMIN_GRANT_USE_WINDOW_MS,
+  promptLinearWorkspaceConfirmation = autoProceedReauthorizationPrompt,
+  onSetupProgress = null,
+  setupSurface = "mcp",
+  setupOwnerPid = process.pid,
+  isSetupOwnerProcessAlive = null,
 } = {}) {
   const baseConfig = config || loadConfig({ repoRoot });
   const setupStore = setupStateStore || createSetupStateStore({ home });
@@ -198,27 +205,105 @@ export function createProjectMcpToolActions({
           runPhoenixPreflight,
           runRuntimeSmoke,
           runSetupDoctor,
+          promptLinearWorkspaceConfirmation,
+          githubReplacementExplicit: setupStore.read(setupId)?.input?.github_replacement_explicit === true || Boolean(
+            optionalString(args.github_owner) && optionalString(args.github_repo),
+          ),
         }),
+        onSetupProgress,
       });
     }
-    const domainName = optionalString(args.domain);
-    if (!domainName) return initOnboardingNeedsResult();
     const currentRegistry = readDomainRegistry({ home }) || emptyDomainRegistry();
-    const completeDomain = resolveSetupCommandDomainNameHint(
+    const domainName = optionalString(args.domain) || inferredSetupDomainName(currentRegistry);
+    if (!domainName || args.confirm !== true) {
+      return initOnboardingNeedsResult({
+        domainName,
+        domainRequired: !domainName,
+      });
+    }
+    let requestedRepoIntent;
+    try {
+      requestedRepoIntent = normalizeSetupRepoIntent(args.repo_intent || { mode: "non_code" });
+    } catch (error) {
+      return {
+        ok: false,
+        status: "blocked",
+        reason: "product_repo_intent_invalid",
+        repair: error.message,
+      };
+    }
+    if (requestedRepoIntent.mode !== "non_code") {
+      return {
+        ok: false,
+        status: "blocked",
+        reason: "product_repo_access_not_supported_during_setup",
+        repair: "Run setup without a product-repository allowlist. Connecting one later is a separate explicit action.",
+      };
+    }
+    const setupArgs = {
+      ...args,
+      domain: domainName,
+      repo_intent: { mode: "non_code" },
+    };
+    const domainResolution = resolveSetupCommandDomainNameHint(
       ["--domain", domainName],
       currentRegistry,
-    ).completeResumeDomain || null;
+    );
+    const completeDomain = domainResolution.completeResumeDomain || null;
+    const incompleteDomain = domainResolution.resumeDomain || null;
+    setupArgs.github_replacement_explicit = Boolean(
+      completeDomain && optionalString(args.github_owner) && optionalString(args.github_repo),
+    );
     let existingTokenSet = null;
-    if (completeDomain) {
-      const domainContext = buildDomainContext({ domain: completeDomain, config: baseConfig, repoRoot, home });
-      existingTokenSet = await createCredentialStore({
-        config: baseConfig,
-        repoRoot,
-        domainContext,
-      }).readTokenSet();
+    if (completeDomain || incompleteDomain) {
+      const existingCredentialStore = completeDomain
+        ? createCredentialStore({
+            config: baseConfig,
+            repoRoot,
+            domainContext: buildDomainContext({ domain: completeDomain, config: baseConfig, repoRoot, home }),
+          })
+        : createBootstrapLinearCredentialStore({ config: baseConfig, repoRoot });
+      existingTokenSet = await existingCredentialStore.readTokenSet();
+      if (existingTokenSet) {
+        const setupAuthFactory = createLinearSetupAuth ||
+          ((options) => createSetupGraphqlClient(options));
+        try {
+          const existingAuth = setupAuthFactory({
+            config: baseConfig,
+            repoRoot,
+            credentialStore: existingCredentialStore,
+            allowBrowserAuth: false,
+            allowRefresh: false,
+            deferTokenPersistence: false,
+            fetchImpl,
+          });
+          await existingAuth.client.verifyAuth();
+          const expectedWorkspaceId = (completeDomain || incompleteDomain)?.linear?.workspace_id || null;
+          if (expectedWorkspaceId && typeof existingAuth.client.getOrganization === "function") {
+            const organization = await existingAuth.client.getOrganization();
+            if (organization?.id !== expectedWorkspaceId) {
+              const mismatch = new Error("Stored setup authorization belongs to a different Linear workspace.");
+              mismatch.httpStatus = 401;
+              throw mismatch;
+            }
+          }
+        } catch (error) {
+          if (!isReauthorizeError(error)) {
+            return {
+              ok: false,
+              status: "blocked",
+              reason: "linear_authorization_validation_failed",
+              detail: redactOAuthSecrets(error?.message || String(error || "Linear authorization validation failed")),
+              repair: "Check the network and Linear availability, then retry setup. Teami did not replace the existing grant.",
+            };
+          }
+          await existingCredentialStore.deleteTokenSet?.();
+          existingTokenSet = null;
+        }
+      }
     }
     const started = await beginInitOnboardingAuthorization({
-      args: { ...args, domain: domainName },
+      args: setupArgs,
       config: baseConfig,
       openBrowser,
       fetchImpl,
@@ -226,6 +311,8 @@ export function createProjectMcpToolActions({
       setupStore,
       authorizationSessions,
       existingTokenSet,
+      setupOwner: { surface: setupSurface, pid: setupOwnerPid },
+      isSetupOwnerProcessAlive,
     });
     if (started?.status === "authorization_reused") {
       return init_onboarding({ setup_id: started.setup_id });
@@ -397,7 +484,17 @@ async function beginInitOnboardingAuthorization({
   setupStore,
   authorizationSessions,
   existingTokenSet = null,
+  setupOwner,
+  isSetupOwnerProcessAlive = null,
 } = {}) {
+  if (Object.hasOwn(args || {}, "linear_team_id") || Object.hasOwn(args || {}, "linear_team_confirm")) {
+    return {
+      ok: false,
+      status: "blocked",
+      reason: "linear_team_selection_not_requested",
+      repair: "Start setup without a Linear team selection. Teami will offer the safe existing-team choices only if Linear refuses to create the dedicated team.",
+    };
+  }
   const input = normalizeInitOnboardingInput(args);
   const consent = verifySetupConsent({
     confirm: args.confirm,
@@ -426,7 +523,13 @@ async function beginInitOnboardingAuthorization({
   if (!lock.ok) return setupLockHeldResult(lock);
   try {
     const active = setupStore.findActive?.();
-    if (active?.status === "awaiting_authorization" && !authorizationSessions.has(active.setup_id)) {
+    const activeOwnerAlive = active
+      ? isSetupOwnerAlive(active, {
+          ...(isSetupOwnerProcessAlive ? { checkProcess: isSetupOwnerProcessAlive } : {}),
+        })
+      : null;
+    if (active && !authorizationSessions.has(active.setup_id) && activeOwnerAlive === false &&
+        !active.admin_revocation_required) {
       setupStore.recordPhase(active.setup_id, "linear", {
         status: "blocked",
         reason: "authorization_process_restarted",
@@ -445,12 +548,14 @@ async function beginInitOnboardingAuthorization({
       input: {
         ...input,
         repo_intent: input.repo_intent,
+        github_replacement_explicit: input.github_replacement_explicit === true,
       },
       consent: {
         confirmed: true,
         version: consent.version,
         hash: consent.hash,
       },
+      owner: setupOwner,
     });
     if (existingTokenSet) {
       authorizationSessions.set(state.setup_id, {
@@ -468,12 +573,29 @@ async function beginInitOnboardingAuthorization({
       return { ok: false, status: "authorization_reused", setup_id: state.setup_id };
     }
     const progress = [];
-    const session = await startAuthorization({
-      config,
-      fetchImpl,
-      ...(openBrowser ? { openBrowser } : {}),
-      onProgress: (line) => progress.push(String(line || "")),
-    });
+    let session;
+    try {
+      session = await startAuthorization({
+        config,
+        fetchImpl,
+        ...(openBrowser ? { openBrowser } : {}),
+        onProgress: (line) => progress.push(String(line || "")),
+      });
+    } catch (error) {
+      setupStore.recordPhase(state.setup_id, "linear", {
+        status: "blocked",
+        reason: "linear_authorization_start_failed",
+        setupStatus: "blocked",
+      });
+      return {
+        ok: false,
+        status: "blocked",
+        setup_id: state.setup_id,
+        reason: "linear_authorization_start_failed",
+        detail: redactOAuthSecrets(error?.message || String(error || "authorization listener failed")),
+        repair: "Close any process using Teami's local callback ports, then start setup again for a fresh authorization URL.",
+      };
+    }
     const tracked = {
       kind: "app",
       session,
@@ -511,6 +633,7 @@ async function resumeInitOnboardingAuthorization({
   startAdminAuthorization,
   adminGrantUseWindowMs,
   runSetup,
+  onSetupProgress,
 } = {}) {
   const state = setupStore.read(setupId);
   if (!state) {
@@ -519,6 +642,21 @@ async function resumeInitOnboardingAuthorization({
       status: "blocked",
       reason: "setup_id_not_found",
       repair: "Start setup again; Teami will create a fresh authorization URL.",
+    };
+  }
+  if (state.consent?.version !== SETUP_DISCLOSURE_VERSION || state.consent?.hash !== SETUP_DISCLOSURE_HASH) {
+    discardTrackedAuthorizationSession(authorizationSessions, setupId);
+    setupStore.recordPhase(setupId, "linear", {
+      status: "blocked",
+      reason: "setup_disclosure_changed",
+      setupStatus: "blocked",
+    });
+    return {
+      ok: false,
+      status: "blocked",
+      setup_id: setupId,
+      reason: "setup_disclosure_changed",
+      repair: "Setup's effects changed since consent was recorded. Start setup again and review the current disclosure before continuing.",
     };
   }
   let tracked = authorizationSessions.get(setupId);
@@ -592,6 +730,26 @@ async function resumeInitOnboardingAuthorization({
     return { ok: false, status: "blocked", setup_id: setupId, ...failure };
   }
 
+  let selectedLinearTeam = null;
+  if (tracked.kind === "app" && state.status === "team_selection_required") {
+    const teams = Array.isArray(tracked.availableLinearTeams) ? tracked.availableLinearTeams : [];
+    const selectedTeamId = optionalString(args.linear_team_id);
+    selectedLinearTeam = teams.find((team) => team.id === selectedTeamId) || null;
+    if (!selectedLinearTeam || args.linear_team_confirm !== true) {
+      return linearTeamSelectionRequiredResult({
+        setupId,
+        workspace: tracked.linearWorkspace,
+        teams,
+        ...(selectedTeamId && !selectedLinearTeam ? { reason: "linear_team_selection_invalid" } : {}),
+      });
+    }
+    setupStore.update(setupId, (next) => {
+      next.input.linear_team_id = selectedLinearTeam.id;
+      next.input.linear_team_confirm = true;
+      return next;
+    });
+  }
+
   if (tracked.kind === "app" && state.status === "admin_consent_required" && args.admin_confirm === true) {
     return beginAdminAuthorizationSession({
       setupId,
@@ -609,8 +767,19 @@ async function resumeInitOnboardingAuthorization({
   const lock = setupStore.acquire({ purpose: "setup" });
   if (!lock.ok) return setupLockHeldResult(lock, setupId);
   try {
-    const setupArgs = persistedSetupArgs(state.input);
+    const setupArgs = {
+      ...persistedSetupArgs(state.input),
+      ...(optionalString(args.github_owner) ? { github_owner: optionalString(args.github_owner) } : {}),
+      ...(optionalString(args.github_repo) ? { github_repo: optionalString(args.github_repo) } : {}),
+      ...(selectedLinearTeam
+        ? { linear_team_id: selectedLinearTeam.id, linear_team_confirm: true }
+        : {}),
+    };
     try {
+      onSetupProgress?.({
+        phase: "post_authorization",
+        message: "Authorization approved; finishing setup",
+      });
       const result = await runSetup(
         setupArgs,
         tracked.kind === "admin" ? tracked.appTokenSet : tracked.tokenSet,
@@ -631,6 +800,21 @@ async function resumeInitOnboardingAuthorization({
         setup_id: setupId,
       };
     } catch (error) {
+      if (error?.setupIncompleteCause === "linear_team_limit_reached" &&
+          Array.isArray(error.availableTeams) && error.availableTeams.length > 0) {
+        tracked.availableLinearTeams = error.availableTeams;
+        tracked.linearWorkspace = error.workspace || null;
+        setupStore.recordPhase(setupId, "linear", {
+          status: "input_required",
+          reason: "linear_team_limit_reached",
+          setupStatus: "team_selection_required",
+        });
+        return linearTeamSelectionRequiredResult({
+          setupId,
+          workspace: tracked.linearWorkspace,
+          teams: tracked.availableLinearTeams,
+        });
+      }
       if (error instanceof ProjectMcpToolError && error.code === "admin_consent_required") {
         setupStore.recordPhase(setupId, "linear", {
           status: "consent_required",
@@ -775,38 +959,41 @@ function canResumeAfterDurableLinearSetup(state) {
     state?.phases?.linear?.status === "healthy";
 }
 
-function initOnboardingNeedsResult() {
+function initOnboardingNeedsResult({ domainName = DEFAULT_SETUP_TEAM_NAME, domainRequired = false } = {}) {
+  const needs = [];
+  if (domainRequired) {
+    needs.push({
+      field: "domain",
+      required: true,
+      question: "Ask which existing Teami team to repair.",
+    });
+  }
+  needs.push({
+    field: "confirm",
+    required: true,
+    question: "Summarize the setup changes in plain language and ask for explicit confirmation.",
+  });
   return {
     ok: false,
     status: "consent_required",
     disclosure: setupEffectsDisclosure(),
-    needs: [
-      {
-        field: "domain",
-        required: true,
-        question: "Ask what this Linear team/domain should be called.",
-      },
-      {
-        field: "repo_intent",
-        required: true,
-        question: "Ask whether this is a non-code team or which owner/repo repositories to allowlist.",
-      },
-      {
-        field: "workspace",
-        required: false,
-        question: "Ask for the expected Linear workspace name or id when the adopter wants to disambiguate workspaces.",
-      },
-      {
-        field: "confirm",
-        required: true,
-        question: "Show the effects disclosure and ask for explicit confirmation before setup changes anything.",
-      },
-    ],
+    defaults: {
+      team: domainName || null,
+      product_repositories: "none",
+    },
+    needs,
     next_steps: [
-      "Gather the domain and an explicit non-code or repository-allowlist choice.",
+      "Tell the adopter that product repositories stay disconnected during setup.",
       `After explicit confirmation, call init_onboarding with confirm: true, disclosure_version: ${SETUP_DISCLOSURE_VERSION}, and disclosure_hash: ${SETUP_DISCLOSURE_HASH}.`,
     ],
   };
+}
+
+function inferredSetupDomainName(registry = emptyDomainRegistry()) {
+  const domains = (registry?.domains || []).filter((domain) => domain?.status !== "removed");
+  if (domains.length === 0) return DEFAULT_SETUP_TEAM_NAME;
+  if (domains.length === 1) return domains[0].adopter_provided_name || domains[0].id || DEFAULT_SETUP_TEAM_NAME;
+  return null;
 }
 
 function authorizationAwaitingResult({ setupId, session, progress = [], kind = "linear_app" } = {}) {
@@ -828,13 +1015,56 @@ function authorizationAwaitingResult({ setupId, session, progress = [], kind = "
       browser_not_opened: "Open authorization_url manually; the local callback listener is already waiting.",
       installed_app: isAdmin
         ? "If Linear does not redirect after admin approval, review and revoke Teami under Linear Settings -> Applications before restarting setup."
-        : "If Linear says Teami is already installed and does not redirect, remove Teami under Linear Settings -> Applications, then start setup again for a fresh URL.",
+        : "Linear can say \"Teami already installed\" when the workspace still has an old workspace-scoped Teami installation but this computer no longer has its matching grant. Removing it disconnects Teami for everyone in that Linear workspace, so coordinate first in a shared workspace. Then click Manage, use the ... menu beside Teami to remove it, return to the authorization tab, and refresh it while this setup session is still open.",
       expired: isAdmin
         ? "If this admin URL expires, review and revoke Teami admin access before restarting. Teami never persists the admin grant, OAuth code, or PKCE material."
         : "If this URL expires, start setup again. Teami never persists OAuth codes or PKCE material in setup state.",
       resume: "Call init_onboarding again with setup_id after the browser redirects back to Teami.",
     },
     ...(progress.length > 0 ? { progress: progress.filter(Boolean) } : {}),
+  };
+}
+
+function linearTeamSelectionRequiredResult({
+  setupId,
+  workspace = null,
+  teams = [],
+  reason = "linear_team_limit_reached",
+} = {}) {
+  const choices = teams.map((team) => ({
+    id: team.id,
+    key: team.key || null,
+    name: team.name,
+  }));
+  return {
+    ok: false,
+    status: "team_selection_required",
+    setup_id: setupId,
+    reason,
+    ...(workspace ? { workspace } : {}),
+    teams: choices,
+    effects: [
+      "Teami will add or reconcile its issue labels and workflow statuses in the team you select.",
+      "Teami will not delete existing issues or projects.",
+      "Choose a dedicated or unused team if possible.",
+    ],
+    needs: [
+      {
+        field: "linear_team_id",
+        required: true,
+        choices,
+        question: "Ask the adopter which existing Linear team Teami may configure.",
+      },
+      {
+        field: "linear_team_confirm",
+        required: true,
+        question: "Continue only after the adopter explicitly approves the selected team's listed effects.",
+      },
+    ],
+    next_steps: [
+      "Explain the effects and choices in plain language.",
+      "After explicit approval, call init_onboarding with this setup_id, linear_team_id, and linear_team_confirm: true.",
+    ],
   };
 }
 
@@ -943,6 +1173,9 @@ function persistedSetupArgs(input = {}) {
     ...(input.github_owner ? { github_owner: input.github_owner } : {}),
     ...(input.github_repo ? { github_repo: input.github_repo } : {}),
     ...(input.github_dry_run ? { github_dry_run: true } : {}),
+    ...(input.github_replacement_explicit ? { github_replacement_explicit: true } : {}),
+    ...(input.linear_team_id ? { linear_team_id: input.linear_team_id } : {}),
+    ...(input.linear_team_confirm ? { linear_team_confirm: true } : {}),
   };
 }
 
@@ -975,6 +1208,8 @@ async function runInitOnboardingSetup({
   runPhoenixPreflight = runLocalPhoenixTracePreflight,
   runRuntimeSmoke = runRuntimeSmokeChecks,
   runSetupDoctor = doctorGraphqlLinear,
+  promptLinearWorkspaceConfirmation = autoProceedReauthorizationPrompt,
+  githubReplacementExplicit = false,
 } = {}) {
   const input = normalizeInitOnboardingInput(args);
   const progress = [];
@@ -1057,7 +1292,7 @@ async function runInitOnboardingSetup({
     }),
     authorizeOneShotAdmin: authorizeAdminWithRevocationProof,
     promptAdminProvisioning,
-    promptReauthorize: autoProceedReauthorizationPrompt,
+    promptReauthorize: promptLinearWorkspaceConfirmation,
   });
 
   let linearResult = await setupLinearDomain({
@@ -1098,6 +1333,7 @@ async function runInitOnboardingSetup({
           domainContext: context,
         }),
     onPreview: log,
+    selectedExistingTeamId: input.linear_team_confirm === true ? input.linear_team_id : null,
   });
 
   const allowlistUpdate = completeResumeDomain
@@ -1136,34 +1372,32 @@ async function runInitOnboardingSetup({
   const githubFlags = githubFlagsForInitOnboarding(input);
   const githubConfig = configWithGithubFlags(config, githubFlags);
   const existingGitHub = completeResumeDomain ? readGitHubConnectionState({ repoRoot, home }) : null;
-  const githubAlreadyVerified = existingGitHub?.ok === true &&
-    existingGitHub.connection?.status === "verified" &&
-    existingGitHub.connection?.adoption_complete === true;
-  const resolvedGithubTransport = githubAlreadyVerified
-    ? { kind: "existing_verified", calls: [] }
-    : await resolveInitOnboardingGitHubTransport({
-        githubSetupTransport,
-        githubInitTransportFromFlags,
-        config: githubConfig,
-        flags: githubFlags,
-        repoRoot,
-        onProgress: log,
-      });
+  const existingConnection = existingGitHub?.ok === true ? existingGitHub.connection : null;
+  let requestedGithubOwner = input.github_owner || existingConnection?.repo?.owner || null;
+  let requestedGithubRepo = input.github_repo || existingConnection?.repo?.name || null;
+  const resolvedGithubTransport = await resolveInitOnboardingGitHubTransport({
+    githubSetupTransport,
+    githubInitTransportFromFlags,
+    config: githubConfig,
+    flags: githubFlags,
+    repoRoot,
+    onProgress: log,
+  });
+  let githubPhase = null;
   const githubPhaseInput = {
     repoRoot,
     home,
     config: githubConfig,
     transport: resolvedGithubTransport,
-    requestedOwner: input.github_owner,
-    requestedRepoName: input.github_repo,
+    requestedOwner: requestedGithubOwner,
+    requestedRepoName: requestedGithubRepo,
     requestedVisibility: null,
     onProgress: log,
     isTTY: false,
     ...(runGit ? { runGit } : {}),
+    replacementExplicit: githubReplacementExplicit === true,
   };
-  const githubPhase = githubAlreadyVerified
-    ? { ok: true, status: "verified", connection: existingGitHub.connection }
-    : await runGitHubPhase(githubPhaseInput);
+  githubPhase ||= await runGitHubPhase(githubPhaseInput);
   if (!githubPhase?.ok) {
     throw new ProjectMcpToolError(
       githubPhase?.reason || "github_setup_failed",
@@ -1256,7 +1490,14 @@ async function runInitOnboardingSetup({
     },
     health,
     ...(authorizationUrl ? { authorization_url: authorizationUrl } : {}),
-    next_steps: initOnboardingNextSteps({ githubPhase, pluginStep }),
+    next_steps: initOnboardingNextSteps({
+      githubPhase,
+      pluginStep,
+      phoenixStep,
+      runtimeStep,
+      doctorStep,
+      health,
+    }),
   };
 }
 
@@ -1299,20 +1540,48 @@ async function runInitOnboardingPhoenixStep({
       ...(preflight?.repairHint ? { repair: preflight.repairHint } : {}),
     };
   }
-  return { ok: true, status: "healthy", trace_preflight: true };
+  return {
+    ok: true,
+    status: "healthy",
+    trace_preflight: true,
+    ...(ready.appUrl ? { app_url: ready.appUrl } : {}),
+  };
 }
 
 async function runInitOnboardingRuntimeStep({ config, repoRoot, home, runRuntimeSmoke } = {}) {
   try {
     const result = await runRuntimeSmoke({ config, repoRoot, home });
+    const failures = (Array.isArray(result?.results) ? result.results : [])
+      .filter((entry) => entry?.ok !== true)
+      .map((entry) => {
+        const label = entry?.runtime || entry?.role || entry?.name || "runtime";
+        const detail = entry?.error || entry?.message || entry?.reason || "check failed";
+        return `${label}: ${redactOAuthSecrets(detail)}`;
+      });
+    const detail = failures.join("; ") ||
+      (result?.error ? redactOAuthSecrets(result.error) : "runtime smoke did not pass");
     return {
       ok: result?.ok === true,
       status: result?.ok === true ? "healthy" : "blocked",
       checked: Array.isArray(result?.results) ? result.results.length : 0,
-      ...(!result?.ok ? { reason: redactOAuthSecrets(result?.error || "runtime_smoke_failed") } : {}),
+      ...(!result?.ok
+        ? {
+          reason: "runtime_smoke_failed",
+          detail,
+          failures,
+          repair: `Run ${formatCommand("runtime-smoke")}, repair the named runtime, then re-run ${formatCommand("init")}.`,
+        }
+        : {}),
     };
   } catch (error) {
-    return { ok: false, status: "blocked", checked: 0, reason: redactOAuthSecrets(error.message) };
+    return {
+      ok: false,
+      status: "blocked",
+      checked: 0,
+      reason: "runtime_smoke_exception",
+      detail: redactOAuthSecrets(error.message),
+      repair: `Run ${formatCommand("runtime-smoke")}, repair the reported failure, then re-run ${formatCommand("init")}.`,
+    };
   }
 }
 
@@ -1340,7 +1609,14 @@ async function runInitOnboardingDoctorStep({
       claudePluginMarketplaceSource,
     }));
   } catch (error) {
-    return { ok: false, status: "blocked", reason: redactOAuthSecrets(error.message), checks: [] };
+    return {
+      ok: false,
+      status: "blocked",
+      reason: "doctor_check_exception",
+      detail: redactOAuthSecrets(error.message),
+      repair: `Run ${formatCommand("doctor")}, repair the reported check, then re-run ${formatCommand("init")}.`,
+      checks: [],
+    };
   }
   const ok = checks.length > 0 && checks.every((check) => check.state !== "fail");
   return {
@@ -1350,6 +1626,7 @@ async function runInitOnboardingDoctorStep({
     checks: checks.map((check) => ({
       name: check.name,
       state: check.state,
+      ...(check.message ? { message: check.message } : {}),
       ...(check.state !== "ok" && check.fix ? { repair: check.fix } : {}),
     })),
   };
@@ -1360,7 +1637,7 @@ function normalizeInitOnboardingInput(args = {}) {
   if (!domain) throw new ProjectMcpToolError("invalid_input", "domain is required to run setup.");
   let repoIntent;
   try {
-    repoIntent = normalizeSetupRepoIntent(args.repo_intent);
+    repoIntent = normalizeSetupRepoIntent(args.repo_intent || { mode: "non_code" });
   } catch (error) {
     throw new ProjectMcpToolError("invalid_input", error.message);
   }
@@ -1372,6 +1649,9 @@ function normalizeInitOnboardingInput(args = {}) {
     github_repo: optionalString(args.github_repo),
     github_owner: optionalString(args.github_owner),
     github_dry_run: args.github_dry_run === true,
+    github_replacement_explicit: args.github_replacement_explicit === true,
+    linear_team_id: optionalString(args.linear_team_id),
+    linear_team_confirm: args.linear_team_confirm === true,
   };
 }
 
@@ -1505,7 +1785,8 @@ async function runInitOnboardingPluginStep({
       status: "failed",
       failed: true,
       reason: "claude_plugin_exception",
-      message: redactOAuthSecrets(error.message),
+      detail: redactOAuthSecrets(error.message),
+      repair: `Repair Claude Code plugin access, then re-run ${formatCommand("init")}.`,
     };
   } finally {
     process.exitCode = previousExitCode;
@@ -1529,7 +1810,8 @@ function publicInitOnboardingPluginStep(result = {}) {
     status: "failed",
     failed: true,
     reason: result?.reason || "claude_plugin_registration_failed",
-    message: `Claude plugin registration failed; setup is otherwise complete. Repair Claude Code plugin access, then re-run ${formatCommand("init")}.`,
+    ...(result?.detail ? { detail: redactOAuthSecrets(result.detail) } : {}),
+    repair: `Repair Claude Code plugin access, then re-run ${formatCommand("init")}.`,
   };
 }
 
@@ -1581,17 +1863,40 @@ function publicInitOnboardingGitHubStep(result = {}, transport = null) {
   };
 }
 
-function initOnboardingNextSteps({ githubPhase = {}, pluginStep = {} } = {}) {
+function initOnboardingNextSteps({
+  githubPhase = {},
+  pluginStep = {},
+  phoenixStep = {},
+  runtimeStep = {},
+  doctorStep = {},
+  health = {},
+} = {}) {
   const steps = [];
+  const add = (value) => {
+    if (value && !steps.includes(value)) steps.push(value);
+  };
   const mode = githubPhase.connection?.connection_mode;
   if (mode === "dry_run") {
-    steps.push("GitHub was recorded as a dry run; re-run setup without github_dry_run before relying on promotion PRs.");
+    add("GitHub was recorded as a dry run; re-run setup without github_dry_run before relying on promotion PRs.");
   }
   if (pluginStep?.failed) {
-    steps.push(pluginStep.message || `Repair Claude Code plugin access, then re-run ${formatCommand("init")}.`);
+    add(pluginStep.repair || `Repair Claude Code plugin access, then re-run ${formatCommand("init")}.`);
   }
-  steps.push(`Start the local gateway when you are ready to run Planned projects: ${formatCommand("gateway start")}.`);
-  steps.push("Create or select a Linear project, write the planning body, then move it to Planned only after human approval.");
+  if (phoenixStep?.ok !== true) {
+    add(phoenixStep.repair || `Repair local Phoenix, then re-run ${formatCommand("init")}.`);
+  }
+  if (runtimeStep?.ok !== true) {
+    add(runtimeStep.repair || `Run ${formatCommand("runtime-smoke")}, then re-run ${formatCommand("init")}.`);
+  }
+  if (doctorStep?.ok !== true) {
+    add(doctorStep.repair || (doctorStep.checks || []).find((check) => check.repair)?.repair ||
+      `Run ${formatCommand("doctor")}, repair the named check, then re-run ${formatCommand("init")}.`);
+  }
+  if (health?.ok !== true) {
+    return steps;
+  }
+  add("Open a new Claude Code session and run /teami:plan to shape your first project.");
+  add(`When you are ready for Planned work to run, keep Teami's local listener open with ${formatCommand("gateway start")}.`);
   return steps;
 }
 

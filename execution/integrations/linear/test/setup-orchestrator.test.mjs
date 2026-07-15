@@ -26,19 +26,27 @@ test("setup disclosure is versioned, hashed, complete, and requires an exact exp
   assert.deepEqual(disclosure.effects.map((effect) => effect.id), [
     "linear_workspace",
     "linear_admin_exception",
-    "product_repo_allowlist",
+    "product_repo_access",
     "behavior_repo",
     "claude_plugin",
     "local_state",
   ]);
   const linearEffect = disclosure.effects.find((effect) => effect.id === "linear_workspace");
   assert.match(linearEffect.detail, /create or reconcile.*team.*labels.*project statuses.*project template.*workflow shape/i);
+  assert.match(linearEffect.detail, /workspace plan blocks.*stops and separately asks.*existing team you select/i);
   const adminEffect = disclosure.effects.find((effect) => effect.id === "linear_admin_exception");
   assert.match(adminEffect.retention, /never persisted/i);
   assert.match(adminEffect.retention, /if provider revocation cannot be verified.*setup stays blocked/i);
   assert.match(adminEffect.retention, /revoke Teami access in Linear Settings/i);
   assert.match(adminEffect.retention, /fresh token cannot prove the lost token is gone/i);
   assert.doesNotMatch(adminEffect.retention, /is revoked after/i);
+  const productRepoEffect = disclosure.effects.find((effect) => effect.id === "product_repo_access");
+  assert.match(productRepoEffect.detail, /no product-repository access/i);
+  assert.match(productRepoEffect.detail, /preserves connections.*approved previously/i);
+  assert.match(productRepoEffect.detail, /neither uses nor expands/i);
+  assert.match(productRepoEffect.authority, /no new product-repository permission/i);
+  const workspaceRepoEffect = disclosure.effects.find((effect) => effect.id === "behavior_repo");
+  assert.match(workspaceRepoEffect.title, /private Teami workspace repository/i);
   assert.equal(verifySetupConsent({}).status, "consent_required");
   assert.equal(verifySetupConsent({
     confirm: true,
@@ -157,6 +165,54 @@ test("active setup discovery reserves ownership while authorization is pending",
       setupStatus: "blocked",
     });
     assert.equal(store.findActive(), null);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing-team choice is a durable active setup state without OAuth material", () => {
+  const fixture = stateFixture();
+  try {
+    const store = createSetupStateStore({ home: fixture.home, now: fixture.now });
+    const started = store.start({ input: fixture.input, consent: fixture.consent });
+    store.recordPhase(started.setup_id, "linear", {
+      status: "input_required",
+      reason: "linear_team_limit_reached",
+      setupStatus: "team_selection_required",
+    });
+    assert.equal(store.findActive().setup_id, started.setup_id);
+    const selected = store.update(started.setup_id, (state) => {
+      state.input.linear_team_id = "team-existing-1";
+      state.input.linear_team_confirm = true;
+      return state;
+    });
+    assert.equal(selected.input.linear_team_id, "team-existing-1");
+    const raw = fs.readFileSync(
+      path.join(fixture.home, "setup", "sessions", `${started.setup_id}.json`),
+      "utf8",
+    );
+    assert.doesNotMatch(raw, /access_token|refresh_token|oauth_code|code_verifier|pkce/i);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("historical disclosure receipts remain readable but cannot satisfy new consent", () => {
+  const fixture = stateFixture();
+  try {
+    const store = createSetupStateStore({ home: fixture.home, now: fixture.now });
+    const started = store.start({ input: fixture.input, consent: fixture.consent });
+    const statePath = path.join(fixture.home, "setup", "sessions", `${started.setup_id}.json`);
+    const historical = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    historical.consent.version = "teami-setup-effects/v4";
+    historical.consent.hash = "a".repeat(64);
+    fs.writeFileSync(statePath, `${JSON.stringify(historical, null, 2)}\n`);
+    assert.equal(store.read(started.setup_id).consent.version, "teami-setup-effects/v4");
+    assert.equal(verifySetupConsent({
+      confirm: true,
+      disclosureVersion: historical.consent.version,
+      disclosureHash: historical.consent.hash,
+    }).reason, "setup_disclosure_changed");
   } finally {
     fixture.cleanup();
   }

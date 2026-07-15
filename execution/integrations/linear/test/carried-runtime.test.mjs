@@ -122,6 +122,32 @@ test("carried runtime rejects a completed download whose checksum does not match
   assert.equal(fs.existsSync(path.join(runtimeDir, "current")), false);
 });
 
+test("carried runtime aborts a stalled download within its configured bound", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-timeout-"));
+  const runtimeDir = path.join(tempDir, "runtime");
+  const archive = buildFixtureArchive({ "bin/python": "fixture python" });
+  const { manifestPath } = writeFixtureManifest({ tempDir, archive });
+  let receivedSignal = null;
+
+  const result = await ensureCarriedRuntime({
+    runtimeDir,
+    manifestPath,
+    platformKey: "darwin-arm64",
+    downloadTimeoutMs: 20,
+    fetchImpl: async (_url, { signal }) => {
+      receivedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "runtime_fetch_failed");
+  assert.equal(receivedSignal.aborted, true);
+  assert.match(result.repairHint, /timed out after 20ms/);
+});
+
 test("Windows carried runtime fixture preserves side-by-side VC++ runtime DLLs", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-carried-runtime-win-"));
   const runtimeDir = path.join(tempDir, "runtime");

@@ -4,7 +4,10 @@ import { runBoundedSubprocess } from "../../../git/bounded-subprocess.mjs";
 import { collectExperimentEvidence } from "../disagreement-report.mjs";
 import { resolveTeamiHome } from "../app-home.mjs";
 import { sanitizeAndClassifyContent } from "../eval-content-gate.mjs";
-import { createGitHubPromotionClient } from "../github-promotion-client.mjs";
+import {
+  createGitHubPromotionClient,
+  verifyGitHubPromotionRepositoryIdentity,
+} from "../github-promotion-client.mjs";
 import { createProductionGitHubPromotionTransport } from "../github-production-transport.mjs";
 import { resolveBehaviorRepoIdentity } from "../github-setup.mjs";
 import { ensurePhoenixReady, resolvePhoenixConfig } from "../local-phoenix-manager.mjs";
@@ -931,6 +934,7 @@ async function promoteCandidateWithOverridesUnlocked({
     createGitHubPromotionClient({
       transport: selectGitHub().transport,
       repo: githubRepo,
+      expectedRepoId: repoIdentity?.repo_id || null,
     });
   const markerPacketStatusPassed = (marker) =>
     marker?.packet?.source === "structured_packet"
@@ -1760,6 +1764,18 @@ async function promoteCandidateWithOverridesUnlocked({
   let push;
   const githubSelectionForPush = selectGitHub();
   if (githubSelectionForPush.mode === "local_ambient" && githubSelectionForPush.realPushEnabled) {
+    try {
+      await verifyGitHubPromotionRepositoryIdentity({
+        transport: githubSelectionForPush.transport,
+        repo: githubRepo,
+        expectedRepoId: repoIdentity?.repo_id,
+      });
+    } catch (error) {
+      const reason = error?.message === "github_workspace_repo_not_private"
+        ? "github_workspace_repo_not_private"
+        : "github_workspace_repo_identity_changed";
+      return blockedRetryable(reason, error.message);
+    }
     push = await pushPromotionBranchWithAmbientAuth({
       cloneDir: workspace.cloneDir,
       owner: githubSelectionForPush.owner,
@@ -1782,7 +1798,7 @@ async function promoteCandidateWithOverridesUnlocked({
       head: branch,
       base: baseBranch,
       body: prBody,
-      draft: false,
+      draft: true,
     });
     createdPr = created?.data || null;
     if (!createdPr?.number) throw new Error("github_create_pr_returned_no_number");

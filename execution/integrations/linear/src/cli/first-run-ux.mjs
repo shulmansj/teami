@@ -3,7 +3,7 @@ import { runtimeFetchDegradationNotice } from "../local-phoenix-manager.mjs";
 import { HOME_STATE } from "./home-state.mjs";
 import { formatCommand } from "./operator-output.mjs";
 
-const DEFAULT_PLANNED_PROJECT_TEXT = 'Move a Linear project to "Planned" to start your first run';
+const DEFAULT_PLANNED_PROJECT_TEXT = 'Run /teami:plan in a new Claude Code session to shape your first project';
 
 function firstRunCommands(overrides = {}) {
   return {
@@ -11,20 +11,12 @@ function firstRunCommands(overrides = {}) {
     doctor: formatCommand("doctor"),
     gatewayStart: formatCommand("gateway start"),
     gatewayStatus: formatCommand("gateway status"),
-    phoenixStart: formatCommand("phoenix:start"),
     ...overrides,
   };
 }
 
 function normalizeHomeState(state) {
   return Object.values(HOME_STATE).includes(state) ? state : HOME_STATE.IDLE;
-}
-
-function phoenixStep({ phoenixAppUrl, commands }) {
-  return {
-    text: "Local Phoenix (traces)",
-    hint: phoenixAppUrl || `run ${commands.phoenixStart}`,
-  };
 }
 
 export function firstRunPlan({
@@ -52,19 +44,12 @@ export function firstRunPlan({
 
   if (normalizedState === HOME_STATE.LISTENING) {
     return [
-      { text: plannedProjectText, hint: "the running gateway will pick it up" },
-      { text: commands.gatewayStatus, hint: "check progress without polling" },
-      { text: commands.doctor, hint: "re-check everything's healthy" },
-      phoenixStep({ phoenixAppUrl, commands }),
+      { text: plannedProjectText, hint: "Teami will guide the planning conversation" },
     ];
   }
 
   return [
-    { text: commands.gatewayStart, hint: "start polling Linear; keep this terminal open; Ctrl-C stops it" },
-    { text: plannedProjectText, hint: "the gateway starts the first decomposition run after it is on" },
-    { text: commands.gatewayStatus, hint: "check progress without polling" },
-    { text: commands.doctor, hint: "re-check everything's healthy" },
-    phoenixStep({ phoenixAppUrl, commands }),
+    { text: plannedProjectText, hint: "Teami will guide the planning conversation" },
   ];
 }
 
@@ -77,9 +62,9 @@ export function firstRunStatusLine({ state = HOME_STATE.IDLE } = {}) {
     return "Setup is recorded, but local state needs a doctor check before the first run.";
   }
   if (normalizedState === HOME_STATE.LISTENING) {
-    return "Setup is complete and the gateway is already listening.";
+    return "Setup is complete and Teami is listening.";
   }
-  return "Setup is complete. The gateway is manual, so start it when you want Teami to watch Linear.";
+  return "Setup is complete.";
 }
 
 export function shouldIncludeRuntimeFetchNotice({ gate = null, phoenixAppUrl = null } = {}) {
@@ -128,7 +113,9 @@ export function renderFirstRunUx({
 
   output.section("First run");
   output.info(firstRunStatusLine({ state: normalizedState }));
-  output.info(`Setup is resumable: if a step stops, fix it and run ${commands.init} again.`);
+  if ([HOME_STATE.UNINITIALIZED, HOME_STATE.DEGRADED].includes(normalizedState)) {
+    output.info(`Setup is resumable: if a step stops, fix it and run ${commands.init} again.`);
+  }
   output.nextSteps(firstRunPlan({
     state: normalizedState,
     phoenixAppUrl,

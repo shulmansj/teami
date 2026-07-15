@@ -26,7 +26,8 @@ export function renderConfirmation(slots = {}) {
       slotMarkdown(slots[slot.key]),
       "",
     ]),
-    "moving to Planned starts the factory now.",
+    "Local listener: `npx @shulmansj/teami gateway start` (keep it open while you want Teami to work).",
+    "Moving to Planned queues the project. If the listener is running, Teami picks it up automatically on the next poll; otherwise it waits safely until the listener starts.",
   ].join("\n"));
 }
 

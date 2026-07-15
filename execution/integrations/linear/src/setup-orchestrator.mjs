@@ -5,9 +5,10 @@ import path from "node:path";
 import { writeAtomicJson } from "../../../engine/atomic-file.mjs";
 import { acquireExclusiveFileLock } from "../../../engine/exclusive-file-lock.mjs";
 
-export const SETUP_DISCLOSURE_VERSION = "teami-setup-effects/v3";
+export const SETUP_DISCLOSURE_VERSION = "teami-setup-effects/v5";
 export const SETUP_STATE_SCHEMA_VERSION = "teami-setup-state/v1";
 export const DEFAULT_SETUP_STATE_TTL_MS = 60 * 60 * 1000;
+export const DEFAULT_SETUP_TEAM_NAME = "Teami";
 
 export const SETUP_PHASES = Object.freeze([
   Object.freeze({ id: "consent", failure: "blocked" }),
@@ -23,12 +24,12 @@ export const SETUP_PHASES = Object.freeze([
 export const SETUP_EFFECTS_DISCLOSURE = deepFreeze({
   version: SETUP_DISCLOSURE_VERSION,
   title: "What Teami setup will do",
-  summary: "Teami runs locally and uses only authority already approved on this computer.",
+  summary: "Teami runs locally, asks you to approve Linear in the browser, and uses this computer's existing GitHub and Claude Code authority.",
   effects: [
     {
       id: "linear_workspace",
       title: "Connect and configure Linear",
-      detail: "Open Linear in your browser, request workspace-wide read/write access, and create or reconcile the dedicated Teami team, required issue labels, project statuses, project template, and workflow shape. Linear offers no narrower workspace scope.",
+      detail: "Open Linear in your browser, request workspace-wide read/write access, and create or reconcile the dedicated Teami team, required issue labels, project statuses, project template, and workflow shape. If the workspace plan blocks another team, Teami stops and separately asks before adding or reconciling those labels and statuses in an existing team you select. Linear offers no narrower workspace scope.",
       authority: "Browser approval is the authorization gate.",
       retention: "The resulting Linear workspace objects remain in Linear; the normal read/write grant is stored locally for Teami operation.",
     },
@@ -40,16 +41,16 @@ export const SETUP_EFFECTS_DISCLOSURE = deepFreeze({
       retention: "The admin grant is never persisted. Teami discards it from memory after the one status operation and asks Linear to revoke that exact token. If provider revocation cannot be verified before the token is lost, setup stays blocked; the adopter must revoke Teami access in Linear Settings and reset the blocked local setup because a fresh token cannot prove the lost token is gone.",
     },
     {
-      id: "product_repo_allowlist",
-      title: "Record product repositories",
-      detail: "Record the explicitly selected owner/repo allowlist, or record that this is a non-code team.",
-      authority: "The allowlist is the boundary for future local repository work.",
-      retention: "Repository coordinates, never GitHub credentials, are stored locally.",
+      id: "product_repo_access",
+      title: "Do not add product-repository access",
+      detail: "Fresh setup records no product-repository access. Repair preserves connections the adopter approved previously, but setup neither uses nor expands them.",
+      authority: "Setup receives no new product-repository permission or GitHub credential.",
+      retention: "The no-new-access decision is stored locally with the team setup.",
     },
     {
       id: "behavior_repo",
-      title: "Connect the Teami behavior repository",
-      detail: "Create or connect the dedicated behavior repository through this computer's existing git and GitHub CLI authority.",
+      title: "Create a private Teami workspace repository",
+      detail: "Create or reconnect the private repository Teami uses for its own configuration and improvement proposals through this computer's existing git and GitHub CLI authority.",
       authority: "Teami receives no GitHub App installation or hosted token.",
       retention: "Only local connection evidence and repository identity are stored.",
     },
@@ -76,6 +77,7 @@ const SETUP_STATUSES = new Set([
   "consent_required",
   "awaiting_authorization",
   "admin_consent_required",
+  "team_selection_required",
   "running",
   "blocked",
   "degraded",
@@ -88,6 +90,7 @@ const PHASE_STATUSES = new Set([
   "blocked",
   "awaiting_authorization",
   "consent_required",
+  "input_required",
 ]);
 const FORBIDDEN_STATE_KEY = /(?:^|_)(?:access|refresh|admin)?_?token$|oauth_code|authorization_code|pkce|code_verifier|client_secret/i;
 
@@ -207,7 +210,7 @@ export function createSetupStateStore({
   const lockPath = path.join(root, "setup.lock");
   const adminMarkerPath = path.join(root, "admin-revocation-required.json");
 
-  function start({ input, consent, setupId = crypto.randomUUID() } = {}) {
+  function start({ input, consent, owner = null, setupId = crypto.randomUUID() } = {}) {
     assertSetupId(setupId);
     const verified = verifySetupConsent({
       confirm: consent?.confirmed === true,
@@ -229,6 +232,7 @@ export function createSetupStateStore({
         confirmed_at: timestamp,
       },
       input: normalizePersistedInput(input),
+      ...(owner ? { owner: normalizeSetupOwner(owner) } : {}),
       phases: {
         consent: phaseReceipt({ status: "healthy", observedAt: timestamp, reason: "explicitly_confirmed" }),
       },
@@ -370,7 +374,12 @@ export function createSetupStateStore({
 
   function findActive({ excludeSetupId = null } = {}) {
     if (!fsApi.existsSync(sessionsDir)) return null;
-    const activeStatuses = new Set(["awaiting_authorization", "admin_consent_required", "running"]);
+    const activeStatuses = new Set([
+      "awaiting_authorization",
+      "admin_consent_required",
+      "team_selection_required",
+      "running",
+    ]);
     const candidates = [];
     for (const entry of fsApi.readdirSync(sessionsDir, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
@@ -417,6 +426,28 @@ export function createSetupStateStore({
     cleanupExpired,
     findActive,
   });
+}
+
+export function isSetupOwnerAlive(state, { checkProcess = defaultSetupProcessAlive } = {}) {
+  if (!state?.owner) return null;
+  const owner = normalizeSetupOwner(state.owner);
+  return checkProcess(owner.pid) === true;
+}
+
+function defaultSetupProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function normalizeSetupOwner(owner) {
+  if (!owner || typeof owner !== "object" || Array.isArray(owner)) throw new Error("setup_owner_invalid");
+  if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error("setup_owner_pid_invalid");
+  const surface = nonEmptyString(owner.surface, "setup_owner_surface_invalid");
+  return { pid: owner.pid, surface };
 }
 
 function validateGlobalAdminMarker(marker) {
@@ -510,7 +541,11 @@ function normalizePersistedInput(input = {}) {
     repo_intent: repoIntent,
     github_owner: optionalString(input.github_owner),
     github_repo: optionalString(input.github_repo),
+    github_coordinates_explicit: input.github_coordinates_explicit === true,
+    github_replacement_explicit: input.github_replacement_explicit === true,
     github_dry_run: input.github_dry_run === true,
+    linear_team_id: optionalString(input.linear_team_id),
+    linear_team_confirm: input.linear_team_confirm === true,
   };
 }
 
@@ -523,15 +558,13 @@ function validateSetupState(state) {
       !Number.isFinite(Date.parse(state.expires_at))) {
     throw new Error("setup_state_timestamp_invalid");
   }
-  const consent = verifySetupConsent({
-    confirm: true,
-    disclosureVersion: state.consent?.version,
-    disclosureHash: state.consent?.hash,
-  });
-  if (!consent.ok || !Number.isFinite(Date.parse(state.consent?.confirmed_at))) {
+  if (typeof state.consent?.version !== "string" || state.consent.version.trim() === "" ||
+      typeof state.consent?.hash !== "string" || !/^[a-f0-9]{64}$/.test(state.consent.hash) ||
+      !Number.isFinite(Date.parse(state.consent?.confirmed_at))) {
     throw new Error("setup_state_consent_invalid");
   }
   normalizePersistedInput(state.input);
+  if (state.owner !== undefined) normalizeSetupOwner(state.owner);
   if (!state.phases || typeof state.phases !== "object" || Array.isArray(state.phases)) {
     throw new Error("setup_state_phases_invalid");
   }
@@ -598,6 +631,7 @@ function normalizePhaseStatus(status) {
 function setupStatusForPhaseOutcome(status, definition) {
   if (status === "awaiting_authorization") return "awaiting_authorization";
   if (status === "consent_required") return "admin_consent_required";
+  if (status === "input_required") return "team_selection_required";
   if (status === "blocked" || (status === "degraded" && definition.failure === "blocked")) return "blocked";
   if (status === "degraded") return "degraded";
   return "running";

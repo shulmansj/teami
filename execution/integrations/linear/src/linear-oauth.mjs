@@ -24,13 +24,10 @@ export function generatePkcePair({ randomBytes = crypto.randomBytes } = {}) {
   return { verifier, challenge, method: "S256" };
 }
 
-// prompt defaults to NONE deliberately: when the app is already authorized for the workspace,
-// Linear auto-redirects straight back with a code (documented behavior) — instant, no browser
-// interaction. Forcing prompt=consent on an already-installed actor=app app can instead land the
-// user on Linear's "already installed / Manage" page, which never redirects — a dead end the CLI
-// can only time out of. Paths that genuinely need the consent screen (the "type R to reopen and
-// use the workspace dropdown" affordance, workspace-mismatch retries, the one-shot admin grant)
-// pass prompt: "consent" explicitly.
+// prompt defaults to NONE to avoid an unnecessary repeated consent screen. Linear's actor=app
+// flow can still land on the non-redirecting "already installed / Manage" page with or without
+// prompt=consent. Callers must surface that recovery branch while the callback listener is alive.
+// Paths that genuinely need the workspace picker still pass prompt: "consent" explicitly.
 export function buildAuthorizationUrl({
   config,
   pkce,

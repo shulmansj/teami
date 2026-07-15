@@ -24,8 +24,14 @@ import { formatCommand } from "./cli/operator-output.mjs";
 // by Teami; dry-run remains available as an explicit rehearsal path.
 
 export const GITHUB_CONNECTION_SCHEMA_VERSION = "teami-github-connection/v1";
+export const TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION = "teami-workspace-repo/v1";
+export const TEAMI_WORKSPACE_REPO_MARKER_PATH = ".teami/workspace.json";
 
-export const DEFAULT_BEHAVIOR_REPO_NAME = "teami";
+// Keep Teami's private operating repository distinct from the public Teami source
+// repository and from an adopter's product repositories. Advanced callers can still
+// override this for automation or an existing installation.
+export const DEFAULT_BEHAVIOR_REPO_NAME = "teami-workspace";
+export const TEAMI_WORKSPACE_REPO_DESCRIPTION = "Private Teami workspace repository";
 export const DRY_RUN_OWNER_PLACEHOLDER = "your-github-owner";
 const SECRET_FILE_NAME_PATTERN =
   /(^\.env(?:\.|$)|(^|[_\-.])(token|secret|api[_\-.]?key|authorization|password|passwd|credential|private[_\-.]?key|oauth|client[_\-.]?secret|cookie|session[_\-.]?key)(?:$|\.(?:env|json|ya?ml|toml|ini|conf|cfg|pem|key|p12|pfx|crt|txt)$))/i;
@@ -80,6 +86,12 @@ export const GITHUB_SETUP_ENDPOINT_ALLOWLIST = Object.freeze([
     credential_path: "local_gh_auth",
   }),
   Object.freeze({
+    id: "get_workspace_marker",
+    method: "GET",
+    path: "/repos/{owner}/{repo}/contents/.teami/workspace.json",
+    credential_path: "local_gh_auth",
+  }),
+  Object.freeze({
     id: "create_repository",
     method: "POST",
     path: "/orgs/{owner}/repos | /user/repos",
@@ -126,6 +138,8 @@ export function createDryRunGitHubSetupTransport({ now = () => new Date() } = {}
         case "get_repository":
           // Canned: the requested name is available (no collision).
           return { dry_run: true, exists: false };
+        case "get_workspace_marker":
+          return { dry_run: true, exists: false };
         case "create_repository":
           return {
             dry_run: true,
@@ -139,6 +153,7 @@ export function createDryRunGitHubSetupTransport({ now = () => new Date() } = {}
               private: (params.visibility || "private") !== "public",
               default_branch: params.default_branch || "main",
               html_url: `dry-run://github/${owner}/${repo}`,
+              description: params.description || null,
             },
           };
         case "push_initial_branch":
@@ -181,7 +196,7 @@ export function createMockGitHubSetupTransport({
   const existingDetails = new Map(
     Object.entries(existingRepoDetails).map(([fullName, details]) => [fullName.toLowerCase(), details || {}]),
   );
-  const created = new Set();
+  const created = new Map();
   const maybeFail = (endpointId) => {
     const failure = failures[endpointId];
     if (!failure) return;
@@ -202,11 +217,33 @@ export function createMockGitHubSetupTransport({
       maybeFail(endpointId);
       const fullName = `${owner}/${repo}`.toLowerCase();
       switch (endpointId) {
-        case "get_repository":
+        case "get_repository": {
+          const details = existingDetails.get(fullName) || created.get(fullName) || null;
+          const defaultExistingRepo = existing.has(fullName)
+            ? {
+              id: repositoryId,
+              owner,
+              name: repo,
+              full_name: `${owner}/${repo}`,
+              visibility: "private",
+              private: true,
+              default_branch: "main",
+              empty: false,
+              html_url: `mock://github/${owner}/${repo}`,
+              description: null,
+            }
+            : null;
           return {
             exists: existing.has(fullName) || created.has(fullName),
-            repo: existingDetails.get(fullName) || null,
+            repo: details || defaultExistingRepo,
           };
+        }
+        case "get_workspace_marker": {
+          const details = existingDetails.get(fullName) || created.get(fullName) || null;
+          return details?.workspace_marker
+            ? { exists: true, marker: details.workspace_marker }
+            : { exists: false };
+        }
         case "create_repository": {
           if (creationOutcome === "org_approval_required") {
             return {
@@ -222,10 +259,7 @@ export function createMockGitHubSetupTransport({
               detail: `organization ${owner} policy blocks repository creation`,
             };
           }
-          created.add(fullName);
-          return {
-            created: true,
-            repo: {
+          const createdRepo = {
               id: repositoryId,
               owner,
               name: repo,
@@ -234,7 +268,12 @@ export function createMockGitHubSetupTransport({
               private: (params.visibility || "private") !== "public",
               default_branch: params.default_branch || "main",
               html_url: `mock://github/${owner}/${repo}`,
-            },
+              description: params.description || null,
+            };
+          created.set(fullName, createdRepo);
+          return {
+            created: true,
+            repo: createdRepo,
           };
         }
         case "push_initial_branch":
@@ -349,7 +388,7 @@ export function createLocalAmbientGitHubSetupTransport({
         case "get_repository": {
           const data = await ghJsonWithAmbientAuth({
             runCommand,
-            args: ["repo", "view", `${owner}/${repo}`, "--json", "id,nameWithOwner,visibility,url,defaultBranchRef"],
+            args: ["repo", "view", `${owner}/${repo}`, "--json", "id,nameWithOwner,visibility,url,defaultBranchRef,description"],
             missingOk: true,
           });
           if (!data) return { exists: false };
@@ -359,11 +398,33 @@ export function createLocalAmbientGitHubSetupTransport({
           }
           return { exists: true, repo: normalized };
         }
+        case "get_workspace_marker": {
+          const data = await ghJsonWithAmbientAuth({
+            runCommand,
+            args: ["api", `repos/${owner}/${repo}/contents/${TEAMI_WORKSPACE_REPO_MARKER_PATH}`],
+            missingOk: true,
+          });
+          if (!data) return { exists: false };
+          try {
+            const encoded = String(data.content || "").replace(/\s+/g, "");
+            const marker = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+            return { exists: true, marker };
+          } catch (error) {
+            return {
+              exists: true,
+              marker: null,
+              invalid: true,
+              detail: `invalid ${TEAMI_WORKSPACE_REPO_MARKER_PATH}: ${error.message}`,
+            };
+          }
+        }
         case "create_repository": {
           const visibilityFlag = (params.visibility || "private") === "public" ? "--public" : "--private";
           const result = await runCommand("gh", [
             "repo", "create", `${owner}/${repo}`,
             visibilityFlag,
+            "--description",
+            params.description || TEAMI_WORKSPACE_REPO_DESCRIPTION,
             "--disable-issues",
             "--disable-wiki",
           ], { env: promptDisabledEnv() });
@@ -372,7 +433,7 @@ export function createLocalAmbientGitHubSetupTransport({
           }
           const data = await ghJsonWithAmbientAuth({
             runCommand,
-            args: ["repo", "view", `${owner}/${repo}`, "--json", "id,nameWithOwner,visibility,url,defaultBranchRef"],
+            args: ["repo", "view", `${owner}/${repo}`, "--json", "id,nameWithOwner,visibility,url,defaultBranchRef,description"],
           });
           return { created: true, repo: normalizeGhRepo(data, owner, repo) };
         }
@@ -468,7 +529,7 @@ export function resolveBehaviorRepoIdentity({ repoRoot = null, home = resolveTea
   const read = readGitHubConnectionState({ repoRoot, home, statePath });
   if (!read.ok) return { ok: false, reason: read.reason };
   const connection = read.connection;
-  if (connection.status !== "verified" || !connection.repo?.owner || !connection.repo?.name) {
+  if (connection.status !== "verified" || !connection.repo?.owner || !connection.repo?.name || !connection.repo?.id) {
     return {
       ok: false,
       reason: "github_connection_not_verified",
@@ -480,11 +541,71 @@ export function resolveBehaviorRepoIdentity({ repoRoot = null, home = resolveTea
     source: "github_connection_state",
     connection_mode: connection.connection_mode,
     repo: { owner: connection.repo.owner, repo: connection.repo.name },
-    repo_id: connection.repo.id ?? null,
+    repo_id: connection.repo.id,
     default_branch: connection.default_branch ?? null,
     push_auth: connection.push_auth ?? connection.remotes?.origin?.push_auth ?? "https",
     real_push_enabled: connection.local_auth?.real_push_enabled === true,
   };
+}
+
+export async function verifyStoredGitHubConnectionIdentity({
+  connection,
+  transport,
+  replacementExplicit = false,
+} = {}) {
+  const pinned = connection?.connection_mode === "real" && connection.repo?.owner &&
+    connection.repo?.name && connection.repo?.id;
+  if (!pinned && connection?.status !== "verified") return { ok: true, status: "no_verified_binding" };
+  if (replacementExplicit === true) return { ok: true, status: "explicit_replacement" };
+  const owner = connection.repo?.owner;
+  const repo = connection.repo?.name;
+  const repoId = connection.repo?.id;
+  const repair = `The approved Teami workspace repository binding cannot be changed automatically. Re-run setup with both --github-owner and --github-repo to approve the exact replacement coordinates.`;
+  if (!owner || !repo || !repoId) {
+    return {
+      ok: false,
+      reason: "github_workspace_repo_identity_reapproval_required",
+      detail: "The stored Teami workspace repository has no immutable GitHub repository ID.",
+      repair,
+    };
+  }
+  if (!transport || typeof transport.request !== "function") {
+    return {
+      ok: false,
+      reason: "github_workspace_repo_identity_check_failed",
+      detail: "GitHub repository identity cannot be checked with the current transport.",
+      repair: "Repair local GitHub access, then retry setup without changing the stored binding.",
+    };
+  }
+  let live;
+  try {
+    live = await transport.request({ endpointId: "get_repository", owner, repo, params: {} });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "github_workspace_repo_identity_check_failed",
+      detail: redactGitHubSecrets(error?.message || String(error || "GitHub identity check failed")),
+      repair: "Repair local GitHub access, then retry setup without changing the stored binding.",
+    };
+  }
+  const liveId = live?.exists === true ? String(live.repo?.id || "") : "";
+  if (!liveId || liveId !== String(repoId)) {
+    return {
+      ok: false,
+      reason: "github_workspace_repo_identity_reapproval_required",
+      detail: `The repository now at ${owner}/${repo} is not the immutable repository approved during setup.`,
+      repair,
+    };
+  }
+  if (!repoIsPrivate(live.repo)) {
+    return {
+      ok: false,
+      reason: "github_behavior_repo_not_private",
+      detail: `The Teami workspace repository ${owner}/${repo} is no longer private.`,
+      repair: `Make ${owner}/${repo} private, then retry setup.`,
+    };
+  }
+  return { ok: true, status: "verified", repo: live.repo };
 }
 
 // ---------------------------------------------------------------------------
@@ -514,8 +635,12 @@ export async function resolveGitHubSetupSettings({
     return { ok: false, reason: "invalid_behavior_repo_name", detail: name };
   }
   const visibility = String(requestedVisibility || behavior.visibility || "private").toLowerCase();
-  if (!["private", "public"].includes(visibility)) {
-    return { ok: false, reason: "invalid_behavior_repo_visibility", detail: visibility };
+  if (visibility !== "private") {
+    return {
+      ok: false,
+      reason: "behavior_repo_must_be_private",
+      detail: `Teami's workspace repository must be private; received ${visibility || "blank"}`,
+    };
   }
   // An explicitly provided but blank owner (flag or config) is a mistake, not a
   // request for the gh-login default — fail closed instead of guessing an account.
@@ -578,11 +703,62 @@ export async function resolveGitHubSetupSettings({
   };
 }
 
+async function selectAvailableImplicitBehaviorRepo({
+  settings,
+  transport,
+  maxCandidates = 100,
+} = {}) {
+  if (!settings?.ok || typeof transport?.request !== "function") {
+    throw new Error("implicit_behavior_repo_selection_unavailable");
+  }
+  for (let index = 1; index <= maxCandidates; index += 1) {
+    const name = index === 1 ? settings.name : `${settings.name}-${index}`;
+    const candidate = {
+      ...settings,
+      name,
+      fullName: `${settings.owner}/${name}`,
+      url: `https://github.com/${settings.owner}/${name}`,
+    };
+    const lookup = await transport.request({
+      endpointId: "get_repository",
+      owner: candidate.owner,
+      repo: candidate.name,
+      params: {},
+    });
+    if (lookup?.exists !== true) return { settings: candidate, lookup, reused: false };
+    if (repoIsPrivate(lookup.repo) && lookup.repo?.description === TEAMI_WORKSPACE_REPO_DESCRIPTION) {
+      const markerLookup = await transport.request({
+        endpointId: "get_workspace_marker",
+        owner: candidate.owner,
+        repo: candidate.name,
+        params: {},
+      });
+      if (workspaceMarkerMatchesRepo(markerLookup?.marker, lookup.repo)) {
+        return { settings: candidate, lookup, reused: true };
+      }
+    }
+  }
+  const error = new Error(`No private Teami workspace name was available after ${maxCandidates} safe attempts.`);
+  error.code = "behavior_repo_name_collision_exhausted";
+  throw error;
+}
+
+function repoIsPrivate(repo) {
+  return repo?.private === true || String(repo?.visibility || "").toLowerCase() === "private";
+}
+
+function workspaceMarkerMatchesRepo(marker, repo) {
+  return marker?.schema_version === TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION &&
+    String(marker?.repo_id || "") === String(repo?.id || "") &&
+    String(marker?.full_name || "").toLowerCase() === String(repo?.full_name || "").toLowerCase() &&
+    Boolean(marker?.repo_id && marker?.full_name);
+}
+
 function formatGitHubOwnerPrompt({ defaultOwner, repoName, visibility }) {
   return [
-    `  Teami needs a ${visibility} GitHub repo named "${repoName}" where generated PRs will live.`,
-    `  Press Enter to create it under ${defaultOwner} (your signed-in GitHub CLI account), or type a different GitHub user/org.`,
-    `  Create repo under [${defaultOwner}]: `,
+    `  Teami will use a ${visibility} GitHub repository named "${repoName}" for its own configuration and improvement proposals.`,
+    `  Press Enter to use ${defaultOwner} (your signed-in GitHub account), or type a different GitHub user or organization.`,
+    `  GitHub account [${defaultOwner}]: `,
   ].join("\n");
 }
 
@@ -673,7 +849,7 @@ async function recordDryRunGitHubIntentWithoutLocalGit({
   void repoRoot;
   void runGit;
   const resolvedStatePath = statePath || githubConnectionStatePath(home);
-  const settings = await resolveGitHubSetupSettings({
+  let settings = await resolveGitHubSetupSettings({
     config,
     requestedOwner,
     requestedRepoName,
@@ -808,15 +984,15 @@ This repository holds your factory's owned configuration.
 Teami reads a managed mirror of this repository from your local Teami home. Changes arrive as pull requests for you to review and merge.
 `;
 
-function safeRemoveTemporarySeedDir(seedDir) {
+function safeRemoveTemporaryBehaviorDir(temporaryDir, allowedPrefixes) {
   try {
-    const resolved = path.resolve(seedDir);
+    const resolved = path.resolve(temporaryDir);
     const tempRoot = path.resolve(os.tmpdir());
     const normalizedResolved = process.platform === "win32" ? resolved.toLowerCase() : resolved;
     const normalizedTempRoot = process.platform === "win32" ? tempRoot.toLowerCase() : tempRoot;
     const insideTemp = normalizedResolved.startsWith(`${normalizedTempRoot}${path.sep}`);
-    const namedSeedDir = path.basename(resolved).startsWith("teami-behavior-seed-");
-    if (insideTemp && namedSeedDir) {
+    const namedTemporaryDir = allowedPrefixes.some((prefix) => path.basename(resolved).startsWith(prefix));
+    if (insideTemp && namedTemporaryDir) {
       fs.rmSync(resolved, { recursive: true, force: true });
     }
   } catch {
@@ -836,18 +1012,39 @@ async function gitStep({ runGit, args, cwd, env = null, reason }) {
 
 async function seedBehaviorRepoFromTemporaryClone({
   settings,
+  repoIdentity,
   runGit = defaultRunGit,
   pushAuth = "https",
   onProgress = () => {},
 } = {}) {
   const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-behavior-seed-"));
   try {
+    if (!repoIdentity?.id || !repoIdentity?.full_name) {
+      return {
+        ok: false,
+        reason: "behavior_repo_identity_unverified",
+        detail: "GitHub did not return the repository's durable identity",
+        seed_clone_dir: seedDir,
+      };
+    }
     let step = await gitStep({ runGit, args: ["init"], cwd: seedDir, reason: "seed_git_init_failed" });
     if (!step.ok) return { ...step, seed_clone_dir: seedDir };
 
     fs.writeFileSync(path.join(seedDir, "README.md"), CHECKOUTLESS_SEED_README, "utf8");
+    const markerPath = path.join(seedDir, ...TEAMI_WORKSPACE_REPO_MARKER_PATH.split("/"));
+    fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+    fs.writeFileSync(markerPath, `${JSON.stringify({
+      schema_version: TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION,
+      repo_id: repoIdentity.id,
+      full_name: repoIdentity.full_name,
+    }, null, 2)}\n`, "utf8");
 
-    step = await gitStep({ runGit, args: ["add", "README.md"], cwd: seedDir, reason: "seed_git_add_failed" });
+    step = await gitStep({
+      runGit,
+      args: ["add", "README.md", TEAMI_WORKSPACE_REPO_MARKER_PATH],
+      cwd: seedDir,
+      reason: "seed_git_add_failed",
+    });
     if (!step.ok) return { ...step, seed_clone_dir: seedDir };
 
     step = await gitStep({
@@ -914,7 +1111,38 @@ async function seedBehaviorRepoFromTemporaryClone({
       sanitizer_report: sanitizer.report,
     };
   } finally {
-    safeRemoveTemporarySeedDir(seedDir);
+    safeRemoveTemporaryBehaviorDir(seedDir, ["teami-behavior-seed-"]);
+  }
+}
+
+async function verifyBehaviorRepoWriteFromTemporaryClone({
+  settings,
+  runGit = defaultRunGit,
+  pushAuth = "https",
+} = {}) {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), "teami-behavior-write-probe-"));
+  try {
+    let step = await gitStep({
+      runGit,
+      args: ["clone", "--depth", "1", settings.url, "."],
+      cwd: probeDir,
+      env: promptDisabledEnv({}, { pushAuth }),
+      reason: "behavior_repo_write_probe_clone_failed",
+    });
+    if (!step.ok) return { ...step, probe_clone_dir: probeDir };
+
+    step = await gitStep({
+      runGit,
+      args: ["push", "--dry-run", "origin", "HEAD:refs/heads/teami/setup-write-check"],
+      cwd: probeDir,
+      env: promptDisabledEnv({}, { pushAuth }),
+      reason: "behavior_repo_write_verification_failed",
+    });
+    if (!step.ok) return { ...step, probe_clone_dir: probeDir };
+
+    return { ok: true, probe_clone_dir: probeDir, push_auth: pushAuth };
+  } finally {
+    safeRemoveTemporaryBehaviorDir(probeDir, ["teami-behavior-write-probe-"]);
   }
 }
 
@@ -937,7 +1165,9 @@ async function runRealGitHubInitPhaseWithoutLocalCheckout({
 } = {}) {
   void repoRoot;
   const resolvedStatePath = statePath || githubConnectionStatePath(home);
-  const settings = await resolveGitHubSetupSettings({
+  const previousRead = readGitHubConnectionState({ repoRoot, home, statePath: resolvedStatePath });
+  const previousConnection = previousRead.ok ? previousRead.connection : null;
+  let settings = await resolveGitHubSetupSettings({
     config,
     requestedOwner,
     requestedRepoName,
@@ -1014,10 +1244,14 @@ async function runRealGitHubInitPhaseWithoutLocalCheckout({
     const safeDetail = detail ? redactGitHubSecrets(detail) : null;
     state.status = status;
     state.failures = [{ reason, repair, ...(safeDetail ? { detail: safeDetail } : {}) }];
-    try {
-      writeGitHubConnectionState({ statePath: resolvedStatePath, connection: state });
-    } catch (writeError) {
-      onProgress(`WARNING could not record the GitHub connection state: ${redactGitHubSecrets(writeError.message)}`);
+    const preservePrevious = previousConnection?.connection_mode === "real" &&
+      previousConnection.repo?.owner && previousConnection.repo?.name && previousConnection.repo?.id;
+    if (!preservePrevious) {
+      try {
+        writeGitHubConnectionState({ statePath: resolvedStatePath, connection: state });
+      } catch (writeError) {
+        onProgress(`WARNING could not record the GitHub connection state: ${redactGitHubSecrets(writeError.message)}`);
+      }
     }
     onProgress(`FAIL GitHub setup: ${reason}${safeDetail ? ` - ${safeDetail}` : ""}`);
     onProgress(`Repair: ${repair}`);
@@ -1029,7 +1263,7 @@ async function runRealGitHubInitPhaseWithoutLocalCheckout({
       ...(safeDetail ? { detail: safeDetail } : {}),
       failures: state.failures,
       state_path: resolvedStatePath,
-      connection: state,
+      connection: preservePrevious ? previousConnection : state,
       ...extra,
     };
   };
@@ -1041,6 +1275,20 @@ async function runRealGitHubInitPhaseWithoutLocalCheckout({
   try {
     onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Checking whether ${settings.fullName} is available on GitHub...`);
     existsResponse = await callTransport("get_repository");
+    const implicitRepoName = !requestedRepoName && !configString(config?.github?.behavior_repo?.name);
+    if (implicitRepoName && existsResponse.exists === true) {
+      const selected = await selectAvailableImplicitBehaviorRepo({ settings, transport });
+      settings = selected.settings;
+      existsResponse = selected.lookup;
+      state.repo.name = settings.name;
+      state.repo.full_name = settings.fullName;
+      state.repo.url = null;
+      state.remotes.origin.url = settings.url;
+      state.remotes.origin.push_url = settings.url;
+      onProgress(selected.reused
+        ? `Found Teami's existing private workspace repository: ${settings.fullName}.`
+        : `GitHub name already in use; Teami selected ${settings.fullName} instead.`);
+    }
   } catch (error) {
     return finishFailure({
       status: "failed",
@@ -1057,6 +1305,7 @@ async function runRealGitHubInitPhaseWithoutLocalCheckout({
       creation = await callTransport("create_repository", {
         visibility: settings.visibility,
         default_branch: "main",
+        description: TEAMI_WORKSPACE_REPO_DESCRIPTION,
       });
     } catch (error) {
       return finishFailure({
@@ -1095,13 +1344,32 @@ async function runRealGitHubInitPhaseWithoutLocalCheckout({
     onProgress(`found: behavior repo ${settings.fullName} already available on GitHub`);
   }
 
+  const resolvedRepo = creation?.repo || existsResponse.repo;
+  if (!repoIsPrivate(resolvedRepo)) {
+    return finishFailure({
+      status: "failed",
+      reason: "behavior_repo_not_private",
+      detail: `${settings.fullName} is not verified private on GitHub`,
+      repair: `make ${settings.fullName} private or choose a private workspace repository, then re-run ${formatCommand("init")}`,
+    });
+  }
+
   const existingRepoEmpty = existsResponse.exists === true && existsResponse.repo?.empty === true;
   const shouldSeed = creation?.created === true || existingRepoEmpty;
   const existingDefaultBranch = existsResponse.repo?.default_branch || creation?.repo?.default_branch || "main";
 
   if (shouldSeed) {
     onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Seeding ${settings.fullName} from a temporary local clone...`);
-    const seed = await seedBehaviorRepoFromTemporaryClone({ settings, runGit, pushAuth, onProgress });
+    const seed = await seedBehaviorRepoFromTemporaryClone({
+      settings,
+      repoIdentity: {
+        id: state.repo.id,
+        full_name: state.repo.full_name,
+      },
+      runGit,
+      pushAuth,
+      onProgress,
+    });
     state.pre_push_sanitizer = seed.sanitizer_report ?? null;
     if (!seed.ok) {
       if (seed.reason === "token_or_secret_like") {
@@ -1141,25 +1409,37 @@ async function runRealGitHubInitPhaseWithoutLocalCheckout({
     };
     onProgress(`pushed: ${seed.default_branch} @ ${seed.head_sha ?? "unknown"} from temporary seed clone (verified on remote: yes)`);
   } else {
+    onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Verifying write access to ${settings.fullName}...`);
+    const writeProbe = await verifyBehaviorRepoWriteFromTemporaryClone({ settings, runGit, pushAuth });
+    if (!writeProbe.ok) {
+      return finishFailure({
+        status: "failed",
+        reason: writeProbe.reason,
+        detail: writeProbe.detail ?? null,
+        repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local git write access to ${settings.fullName}, then re-run ${formatCommand("init")}`,
+        extra: { probe_clone_dir: writeProbe.probe_clone_dir },
+      });
+    }
     state.default_branch = existingDefaultBranch;
     state.push_verification = {
-      recorded: false,
+      recorded: true,
       pushed: false,
       branch: existingDefaultBranch,
       head_sha: null,
-      verified: false,
+      verified: true,
       push_auth: pushAuth,
-      reason: "existing_non_empty_repo_no_initial_push_required",
+      mode: "dry_run",
+      reason: "existing_non_empty_repo_write_access_verified",
     };
     state.local_auth = {
       mode: "local_ambient",
       gh_auth: "verified",
-      git_write: "not_required_existing_non_empty_repo",
+      git_write: "verified",
       real_push_enabled: true,
       push_auth: pushAuth,
       checked_at: checkedAt,
     };
-    onProgress(`verified: behavior repo ${settings.fullName} is non-empty; no seed push needed`);
+    onProgress(`verified: local git auth can write to existing behavior repo ${settings.fullName} (dry-run push; no branch created)`);
   }
 
   state.pr_generation = {
@@ -1238,13 +1518,22 @@ function resolveExistingBehaviorOrigin({ remotes = [], starterRemoteUrls = [] } 
 // `origin` becomes the NEW dedicated behavior repo; any pre-existing
 // adopter-owned remote is a SETUP CONFLICT with a repair path — init never
 // adopts it (dedicated-Linear-team posture).
-export function planRemoteLayout({ remotes = [], starterRemoteUrls = [], behaviorRepoUrl } = {}) {
+export function planRemoteLayout({
+  remotes = [],
+  starterRemoteUrls = [],
+  behaviorRepoUrl,
+  approvedPreviousBehaviorRepoUrls = [],
+} = {}) {
   const starterSet = new Set(starterRemoteUrls.map(normalizeGitRemoteUrl).filter(Boolean));
+  const previousBehaviorSet = new Set(
+    approvedPreviousBehaviorRepoUrls.map(normalizeGitRemoteUrl).filter(Boolean),
+  );
   const behaviorNormalized = normalizeGitRemoteUrl(behaviorRepoUrl);
   const classified = remotes.map((remote) => {
     const normalized = normalizeGitRemoteUrl(remote.url);
     let kind;
     if (behaviorNormalized && normalized === behaviorNormalized) kind = "behavior_repo";
+    else if (previousBehaviorSet.has(normalized)) kind = "previous_behavior_repo";
     else if (starterSet.has(normalized)) kind = "starter";
     else if (remote.name === "upstream") kind = "starter_assumed_by_upstream_name";
     else kind = "adopter_owned";
@@ -1458,11 +1747,12 @@ function normalizeGhRepo(data, owner, repo) {
     owner: resolvedOwner || owner,
     name: resolvedRepo || repo,
     full_name: data?.nameWithOwner || `${owner}/${repo}`,
-    visibility: visibility === "public" ? "public" : "private",
-    private: visibility !== "public",
+    visibility,
+    private: visibility === "private",
     default_branch: data?.defaultBranchRef?.name || "main",
     empty: data?.defaultBranchRef === null || Boolean(data?.defaultBranchRef && !data.defaultBranchRef.name),
     html_url: data?.url || `https://github.com/${owner}/${repo}`,
+    description: data?.description || null,
   };
 }
 
@@ -1496,12 +1786,41 @@ export async function runGitHubInitPhase({
   isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
   promptGitHubOwner = defaultPromptGitHubOwner,
   resolveAuthenticatedGitHubLogin = defaultResolveAuthenticatedGitHubLogin,
+  replacementExplicit = false,
 } = {}) {
   const effectiveTransport = transport || createDryRunGitHubSetupTransport({ now });
   // connection_mode is derived from the transport, never caller-asserted:
   // anything that is not the real transport records dry_run.
   const connectionMode = effectiveTransport.kind === "real" ? "real" : "dry_run";
   const resolvedStatePath = statePath || githubConnectionStatePath(home);
+
+  const priorRead = readGitHubConnectionState({ repoRoot, home, statePath: resolvedStatePath });
+  const priorConnection = priorRead.ok ? priorRead.connection : null;
+  const priorBindingPinned = priorConnection?.connection_mode === "real" &&
+    priorConnection.repo?.owner && priorConnection.repo?.name && priorConnection.repo?.id;
+  if (connectionMode === "real" && (priorConnection?.status === "verified" || priorBindingPinned)) {
+    const identityGate = await verifyStoredGitHubConnectionIdentity({
+      connection: priorConnection,
+      transport: effectiveTransport,
+      replacementExplicit,
+    });
+    if (!identityGate.ok) {
+      return {
+        ok: false,
+        status: "blocked",
+        reason: identityGate.reason,
+        detail: identityGate.detail,
+        repair: identityGate.repair,
+        failures: [{ reason: identityGate.reason, repair: identityGate.repair }],
+        state_path: resolvedStatePath,
+        connection: priorConnection,
+      };
+    }
+    if (replacementExplicit !== true && priorBindingPinned) {
+      requestedOwner = priorConnection.repo.owner;
+      requestedRepoName = priorConnection.repo.name;
+    }
+  }
 
   if (connectionMode === "dry_run") {
     for (const line of DRY_RUN_GITHUB_SETUP_BANNER) onProgress(line);
@@ -1580,7 +1899,7 @@ export async function runGitHubInitPhase({
   if (connectionMode === "real" && !ownerForSettings && !configuredOwner) {
     onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Checking the signed-in GitHub account...`);
   }
-  const settings = await resolveGitHubSetupSettings({
+  let settings = await resolveGitHubSetupSettings({
     config,
     requestedOwner: ownerForSettings,
     requestedRepoName: repoForSettings,
@@ -1604,7 +1923,17 @@ export async function runGitHubInitPhase({
       state_path: resolvedStatePath,
     };
   }
-  if (originBinding && requestedOwner && requestedOwner.toLowerCase() !== originBinding.owner.toLowerCase()) {
+  const previousConnectionRead = readGitHubConnectionState({ repoRoot, home, statePath: resolvedStatePath });
+  const previousConnection = previousConnectionRead.ok ? previousConnectionRead.connection : null;
+  const approvedPreviousBehaviorRepoUrl = previousConnection?.connection_mode === "real" && previousConnection.repo?.id
+    ? previousConnection.remotes?.origin?.url || previousConnection.remotes?.origin?.push_url || null
+    : null;
+  const originIsApprovedPreviousBehaviorRepo = Boolean(
+    originBinding && approvedPreviousBehaviorRepoUrl &&
+    normalizeGitRemoteUrl(originBinding.url) === normalizeGitRemoteUrl(approvedPreviousBehaviorRepoUrl),
+  );
+  if (originBinding && !originIsApprovedPreviousBehaviorRepo && requestedOwner &&
+      requestedOwner.toLowerCase() !== originBinding.owner.toLowerCase()) {
     return {
       ok: false,
       status: "failed",
@@ -1615,7 +1944,8 @@ export async function runGitHubInitPhase({
       state_path: resolvedStatePath,
     };
   }
-  if (originBinding && requestedRepoName && requestedRepoName.toLowerCase() !== originBinding.repo.toLowerCase()) {
+  if (originBinding && !originIsApprovedPreviousBehaviorRepo && requestedRepoName &&
+      requestedRepoName.toLowerCase() !== originBinding.repo.toLowerCase()) {
     return {
       ok: false,
       status: "failed",
@@ -1627,8 +1957,6 @@ export async function runGitHubInitPhase({
     };
   }
   onProgress(`GitHub repo target: ${settings.fullName} (${settings.visibility})`);
-  const previousConnectionRead = readGitHubConnectionState({ repoRoot, home, statePath: resolvedStatePath });
-  const previousConnection = previousConnectionRead.ok ? previousConnectionRead.connection : null;
   const state = {
     schema_version: GITHUB_CONNECTION_SCHEMA_VERSION,
     connection_mode: connectionMode,
@@ -1637,7 +1965,7 @@ export async function runGitHubInitPhase({
     repo: {
       id: null,
       owner: settings.owner,
-      owner_source: originBinding ? "origin_remote" : settings.ownerSource,
+      owner_source: originBinding && !originIsApprovedPreviousBehaviorRepo ? "origin_remote" : settings.ownerSource,
       name: settings.name,
       full_name: settings.fullName,
       visibility: settings.visibility,
@@ -1675,10 +2003,14 @@ export async function runGitHubInitPhase({
     // concrete repair instead of leaving setup failures opaque.
     state.status = status;
     state.failures = [{ reason, repair, ...(safeDetail ? { detail: safeDetail } : {}) }];
-    try {
-      writeGitHubConnectionState({ statePath: resolvedStatePath, connection: state });
-    } catch (writeError) {
-      onProgress(`WARNING could not record the GitHub connection state: ${redactGitHubSecrets(writeError.message)}`);
+    const preservePrevious = previousConnection?.connection_mode === "real" &&
+      previousConnection.repo?.owner && previousConnection.repo?.name && previousConnection.repo?.id;
+    if (!preservePrevious) {
+      try {
+        writeGitHubConnectionState({ statePath: resolvedStatePath, connection: state });
+      } catch (writeError) {
+        onProgress(`WARNING could not record the GitHub connection state: ${redactGitHubSecrets(writeError.message)}`);
+      }
     }
     onProgress(`FAIL GitHub setup: ${reason}${detail ? ` — ${detail}` : ""}`);
     onProgress(`Repair: ${repair}`);
@@ -1690,17 +2022,46 @@ export async function runGitHubInitPhase({
       ...(detail ? { detail } : {}),
       failures: state.failures,
       state_path: resolvedStatePath,
-      connection: state,
+      connection: preservePrevious ? previousConnection : state,
       ...extra,
     };
   };
 
+  let preselectedRepoLookup = null;
+  const implicitRepoName = connectionMode === "real" && !requestedRepoName && !originBinding &&
+    !configString(config?.github?.behavior_repo?.name);
+  if (implicitRepoName) {
+    try {
+      const selected = await selectAvailableImplicitBehaviorRepo({ settings, transport: effectiveTransport });
+      if (selected.reused) {
+        onProgress(`Found Teami's existing private workspace repository: ${selected.settings.fullName}.`);
+      } else if (selected.settings.name !== settings.name) {
+        onProgress(`GitHub name already in use; Teami selected ${selected.settings.fullName} instead.`);
+      }
+      settings = selected.settings;
+      preselectedRepoLookup = selected.lookup;
+      state.repo.name = settings.name;
+      state.repo.full_name = settings.fullName;
+      state.repo.url = null;
+    } catch (error) {
+      return finishFailure({
+        status: "failed",
+        reason: error.code || "github_repo_lookup_failed",
+        detail: error.message,
+        repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth and GitHub availability, then re-run ${formatCommand("init")}`,
+      });
+    }
+  }
+
   // ---- a. Remote state detection ------------------------------------------
-  const behaviorRepoRemoteUrl = originBinding?.url || settings.url;
+  const behaviorRepoRemoteUrl = originBinding && !originIsApprovedPreviousBehaviorRepo
+    ? originBinding.url
+    : settings.url;
   const remotePlan = planRemoteLayout({
     remotes: remoteListing.remotes,
     starterRemoteUrls: settings.starterRemoteUrls,
     behaviorRepoUrl: behaviorRepoRemoteUrl,
+    approvedPreviousBehaviorRepoUrls: [approvedPreviousBehaviorRepoUrl].filter(Boolean),
   });
   if (!remotePlan.ok) {
     return finishFailure({
@@ -1725,8 +2086,12 @@ export async function runGitHubInitPhase({
   // ---- b. Repo reachability + optional creation through local gh auth ------
   let existsResponse;
   try {
-    onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Checking whether ${settings.fullName} is available on GitHub...`);
-    existsResponse = await callTransport("get_repository");
+    if (preselectedRepoLookup) {
+      existsResponse = preselectedRepoLookup;
+    } else {
+      onProgress(`${GITHUB_VISIBLE_PROGRESS_PREFIX} Checking whether ${settings.fullName} is available on GitHub...`);
+      existsResponse = await callTransport("get_repository");
+    }
   } catch (error) {
     return finishFailure({
       status: "failed",
@@ -1735,7 +2100,7 @@ export async function runGitHubInitPhase({
       repair: `${CONNECT_GITHUB_REPAIR_PREFIX}verify local gh auth and GitHub availability, then re-run ${formatCommand("init")}`,
     });
   }
-  if (originBinding && existsResponse.exists !== true) {
+  if (originBinding && !originIsApprovedPreviousBehaviorRepo && existsResponse.exists !== true) {
     return finishFailure({
       status: "failed",
       reason: "behavior_repo_unreachable",
@@ -1754,6 +2119,7 @@ export async function runGitHubInitPhase({
       creation = await callTransport("create_repository", {
         visibility: settings.visibility,
         default_branch: "main",
+        description: TEAMI_WORKSPACE_REPO_DESCRIPTION,
       });
     } catch (error) {
       return finishFailure({
@@ -1792,6 +2158,16 @@ export async function runGitHubInitPhase({
     state.repo.id = existsResponse.repo?.id ?? previousConnection?.repo?.id ?? state.repo.id ?? null;
     state.repo.url = settings.url;
     state.repo.visibility = existsResponse.repo?.visibility ?? state.repo.visibility;
+  }
+
+  const resolvedRepo = creation?.repo || existsResponse.repo;
+  if (!repoIsPrivate(resolvedRepo)) {
+    return finishFailure({
+      status: "failed",
+      reason: "behavior_repo_not_private",
+      detail: `${settings.fullName} is not verified private on GitHub`,
+      repair: `make ${settings.fullName} private or choose a private workspace repository, then re-run ${formatCommand("init")}`,
+    });
   }
 
   // ---- c. Local ambient auth is the steady-state GitHub connection ---------
@@ -2020,6 +2396,7 @@ export async function githubConnectionDoctorChecks({
 
   if (connection.connection_mode === "real" && remoteShape.ok) {
     const effectiveTransport = transport || createLocalAmbientGitHubSetupTransport({ repoRoot, now: () => new Date() });
+    let remoteIdentityMatches = false;
     try {
       const repoLookup = await effectiveTransport.request({
         endpointId: "get_repository",
@@ -2034,6 +2411,28 @@ export async function githubConnectionDoctorChecks({
           ? `${owner}/${repoName} reachable with local gh auth`
           : `${owner}/${repoName} was not reachable with local gh auth; run gh auth login or fix behavior repo access`,
       });
+      checks.push({
+        name: "GitHub behavior repo privacy",
+        ok: repoLookup.exists === true && repoIsPrivate(repoLookup.repo),
+        message: repoLookup.exists !== true
+          ? "privacy cannot be verified until the behavior repo is reachable"
+          : repoIsPrivate(repoLookup.repo)
+            ? `${owner}/${repoName} is private`
+            : `${owner}/${repoName} is not verified private; make it private, then re-run ${formatCommand("init")}`,
+      });
+      const recordedRepoId = String(connection.repo?.id || "");
+      const liveRepoId = String(repoLookup.repo?.id || "");
+      remoteIdentityMatches = repoLookup.exists === true && Boolean(recordedRepoId && liveRepoId) &&
+        recordedRepoId === liveRepoId;
+      checks.push({
+        name: "GitHub behavior repo identity",
+        ok: remoteIdentityMatches,
+        message: repoLookup.exists !== true
+          ? "identity cannot be verified until the behavior repo is reachable"
+          : remoteIdentityMatches
+            ? `${owner}/${repoName} matches the repository originally approved during setup`
+            : `the repository at ${owner}/${repoName} does not match the durable identity approved during setup; re-run ${formatCommand("init")}`,
+      });
     } catch (error) {
       checks.push({
         name: "GitHub behavior repo reachable",
@@ -2041,9 +2440,15 @@ export async function githubConnectionDoctorChecks({
         message: `${error.message}; run gh auth login or fix the behavior repo access`,
       });
     }
-    checks.push(isCheckoutlessConnection(connection)
-      ? evaluateCheckoutlessLocalGitWriteCheck({ connection })
-      : await evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }));
+    checks.push(remoteIdentityMatches
+      ? isCheckoutlessConnection(connection)
+        ? await evaluateCheckoutlessLocalGitWriteCheck({ connection, runGit })
+        : await evaluateLocalGitWriteCheck({ repoRoot, runGit, connection })
+      : {
+        name: "GitHub local write auth",
+        ok: false,
+        message: `skipped until the behavior repository's durable identity matches; re-run ${formatCommand("init")}`,
+      });
   } else if (connection.connection_mode === "real") {
     checks.push({
       name: "GitHub behavior repo reachable",
@@ -2115,14 +2520,29 @@ async function evaluateRemoteShapeCheck({ repoRoot, runGit, connection }) {
   return { name, ok: false, message: `remote drift: ${problems.join("; ")} (or re-run ${formatCommand("init")})` };
 }
 
-function evaluateCheckoutlessLocalGitWriteCheck({ connection }) {
-  const seeded = connection.local_auth?.git_write === "verified";
+async function evaluateCheckoutlessLocalGitWriteCheck({ connection, runGit = defaultRunGit }) {
+  const originUrl = connection.remotes?.origin?.url || connection.remotes?.origin?.push_url || null;
+  if (!originUrl) {
+    return {
+      name: "GitHub local write auth",
+      ok: false,
+      message: `checkout-less setup has no recorded origin URL; re-run ${formatCommand("init")}`,
+    };
+  }
+  const probe = await verifyBehaviorRepoWriteFromTemporaryClone({
+    settings: {
+      url: originUrl,
+      fullName: connection.repo?.full_name || `${connection.repo?.owner}/${connection.repo?.name}`,
+    },
+    runGit,
+    pushAuth: connection.push_auth || connection.remotes?.origin?.push_auth || "https",
+  });
   return {
     name: "GitHub local write auth",
-    ok: true,
-    message: seeded
-      ? `temporary seed push verified behavior repo write access via ${connection.push_auth || "https"} auth`
-      : `no adopter checkout; existing behavior repo is connected and managed mirror pushes will use ${connection.push_auth || "https"} auth`,
+    ok: probe.ok === true,
+    message: probe.ok === true
+      ? `fresh checkout-less dry-run push verified workspace-repository write access via ${connection.push_auth || "https"} auth`
+      : `${probe.detail || probe.reason || "checkout-less dry-run push failed"}; fix local GitHub write access and re-run ${formatCommand("doctor")}`,
   };
 }
 async function evaluateLocalGitWriteCheck({ repoRoot, runGit, connection }) {

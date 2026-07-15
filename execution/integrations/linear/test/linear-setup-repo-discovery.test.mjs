@@ -22,9 +22,7 @@ import {
   runSetupGitHubRepoDiscoveryStep,
 } from "../src/cli/linear-setup-command.mjs";
 
-test("setup repo discovery persists confirmed coordinates-only resources for init and domain:add", async (t) => {
-  for (const command of ["init", "domain:add"]) {
-    await t.test(command, async (t) => {
+test("explicit repo grant helper persists confirmed coordinates-only resources", async (t) => {
       const { repoRoot } = setupDomainRegistry(t);
       const output = captureOutput();
       const prompts = [];
@@ -42,7 +40,7 @@ test("setup repo discovery persists confirmed coordinates-only resources for ini
       const result = await runSetupGitHubRepoDiscoveryStep({
         repoRoot,
         domainId: "main",
-        command,
+        command: "domain:grant",
         output,
         runCommand,
         prompt: promptAnswers(["1,2"], prompts),
@@ -75,8 +73,6 @@ test("setup repo discovery persists confirmed coordinates-only resources for ini
       assert.equal(prompts.some((message) => /provider|model/i.test(message)), false);
       assert.match(output.text(), /Build\/test auto-detected for Acme\/app: npm install -> npm test/);
       assert.match(output.text(), /Build\/test auto-detected for Acme\/api: npm run setup -> npm test/);
-    });
-  }
 });
 
 test("NONE selection is a first-class non-code team outcome and clears repo resources", async (t) => {

@@ -19,6 +19,14 @@ const PUBLISHED_ADOPTER_DOCS = Object.freeze([
   "docs/adoption.md",
 ]);
 
+const PUBLIC_ONBOARDING_TRUST_DOCS = Object.freeze([
+  "README.md",
+  "docs/adoption.md",
+  "execution/integrations/linear/README.md",
+  "docs/contracts/authority-custody-defaults.md",
+  "docs/contracts/teami-product-trust-record.md",
+]);
+
 const ALL_RECONCILED_DOCS = Object.freeze([
   ...ADOPTER_DOCS,
   "docs/self-improvement.md",
@@ -49,7 +57,7 @@ test("D1 reconciles adopter docs to installed MCP plus manual gateway surfaces",
     const content = docs[relPath];
     assert.match(
       content,
-      /npx -y @shulmansj\/teami@release gateway start/,
+      /npx @shulmansj\/teami gateway start/,
       `${relPath} gives no-checkout adopters a runnable gateway command`,
     );
     assert.doesNotMatch(
@@ -59,7 +67,8 @@ test("D1 reconciles adopter docs to installed MCP plus manual gateway surfaces",
     );
   }
 
-  assert.match(docs["README.md"], /Install the Teami Claude Code plugin/);
+  assert.match(docs["README.md"], /npx @shulmansj\/teami init/);
+  assert.match(docs["README.md"], /You do not need to supply a release tag/);
   assert.match(docs["docs/adoption.md"], /The preview has three adopter-facing surfaces/);
   assert.doesNotMatch(docs["docs/self-improvement.md"], /always-on/i);
 });
@@ -85,12 +94,34 @@ test("D1 retires the local process CLI scripts, dispatch, and modules", () => {
   }
 });
 
+test("current public trust docs keep product repositories disconnected from onboarding", () => {
+  const docs = Object.fromEntries(
+    PUBLIC_ONBOARDING_TRUST_DOCS.map((relPath) => [
+      relPath,
+      readText(relPath).replace(/\s+/g, " "),
+    ]),
+  );
+  const joined = Object.values(docs).join("\n");
+  assert.doesNotMatch(
+    joined,
+    /selected product-repository allowlist|only the confirmed product repos will be allowlisted|product-repo allowlisting|setup can discover the initial allowlist|product-repository intent defaults to none|no product-repository access by default/i,
+  );
+  assert.match(docs["README.md"], /does not connect any product repository/i);
+  assert.match(docs["docs/adoption.md"], /product repositories remain disconnected during setup/i);
+  assert.match(docs["execution/integrations/linear/README.md"], /setup never discovers or records an initial product-repository allowlist/i);
+  assert.match(docs["docs/contracts/authority-custody-defaults.md"], /product repositories remain disconnected during setup/i);
+  assert.match(docs["docs/contracts/authority-custody-defaults.md"], /repair may preserve[\s\S]*previously approved[\s\S]*neither uses nor expands/i);
+  assert.match(docs["docs/contracts/teami-product-trust-record.md"], /no product-repository access/i);
+  assert.match(docs["docs/contracts/teami-product-trust-record.md"], /separate post-setup product-repository grant/i);
+  assert.match(joined, /private Teami workspace repository/i);
+});
+
 test("published plugin and runtime repair guidance never requires a bare Teami command", () => {
   const planSkill = readText("skills/plan/SKILL.md");
   const planningMutations = readText("execution/integrations/linear/src/domain-confined-planning-mutations.mjs");
   const setupCommand = readText("execution/integrations/linear/src/cli/linear-setup-command.mjs");
 
-  assert.match(planSkill, /npx -y @shulmansj\/teami@release init/);
+  assert.match(planSkill, /npx @shulmansj\/teami init/);
   assert.doesNotMatch(planSkill, /`teami init`/);
   assert.doesNotMatch(planningMutations, /Run teami doctor/);
   assert.match(planningMutations, /formatCommand\("doctor"\)/);

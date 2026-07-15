@@ -10,6 +10,8 @@ import {
   githubConnectionDoctorChecks,
   readGitHubConnectionState,
   runGitHubInitPhase,
+  TEAMI_WORKSPACE_REPO_MARKER_PATH,
+  TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION,
 } from "../src/github-setup.mjs";
 
 function tempRoot() {
@@ -57,12 +59,21 @@ function createCheckoutlessSeedRunGit({ cwd, calls, headSha = "seedabc123" }) {
       return fail("fatal: not a git repository");
     }
     if (args[0] === "init") return ok("Initialized empty Git repository\n");
-    if (args[0] === "add" && args[1] === "README.md") return ok();
+    if (args[0] === "add" && args[1] === "README.md") {
+      assert.equal(args[2], TEAMI_WORKSPACE_REPO_MARKER_PATH);
+      const marker = JSON.parse(fs.readFileSync(path.join(options.cwd, ...TEAMI_WORKSPACE_REPO_MARKER_PATH.split("/")), "utf8"));
+      assert.equal(marker.schema_version, TEAMI_WORKSPACE_REPO_MARKER_SCHEMA_VERSION);
+      assert.ok(marker.repo_id);
+      assert.ok(marker.full_name);
+      return ok();
+    }
     if (args[0] === "-c" && args.includes("commit")) return ok(`[main ${headSha}] Seed Teami behavior repo\n`);
     if (args[0] === "remote" && args[1] === "add" && args[2] === "origin") return ok();
-    if (args[0] === "ls-files" && args[1] === "-z") return ok("README.md\0");
+    if (args[0] === "ls-files" && args[1] === "-z") return ok(`README.md\0${TEAMI_WORKSPACE_REPO_MARKER_PATH}\0`);
     if (args[0] === "rev-parse" && args[1] === "HEAD") return ok(`${headSha}\n`);
     if (args[0] === "push" && args[1] === "origin" && args[2] === "HEAD:main") return ok();
+    if (args[0] === "clone" && args[1] === "--depth") return ok();
+    if (args[0] === "push" && args[1] === "--dry-run") return ok();
     if (args[0] === "ls-remote" && args[1] === "--exit-code") return ok(`${headSha}\trefs/heads/main\n`);
     return fail(`unexpected git command: ${args.join(" ")}`);
   };
@@ -194,7 +205,42 @@ test("real GitHub init from a non-repo seeds an existing empty behavior repo", a
   assert.deepEqual(transport.calls.map((call) => call.endpointId), ["get_repository"]);
   assert.ok(gitCalls.some((call) => call.args.join(" ") === "push origin HEAD:main"));
 });
-test("real GitHub init from a non-repo re-run connects an existing non-empty repo without seeding", async () => {
+
+test("real GitHub init fails closed if GitHub reports the workspace repository as public", async () => {
+  const { cwd, home, statePath } = plainWorkspace();
+  const transport = {
+    ...createMockGitHubSetupTransport({
+      existingRepos: ["fixture-owner/fixture-teami"],
+      existingRepoDetails: {
+        "fixture-owner/fixture-teami": {
+          id: "repo-public-1",
+          owner: "fixture-owner",
+          name: "fixture-teami",
+          full_name: "fixture-owner/fixture-teami",
+          visibility: "public",
+          private: false,
+          default_branch: "main",
+          empty: false,
+        },
+      },
+    }),
+    kind: "real",
+  };
+  const result = await runGitHubInitPhase({
+    repoRoot: cwd,
+    home,
+    statePath,
+    config: configWithBehaviorRepo(),
+    transport,
+    runGit: createCheckoutlessSeedRunGit({ cwd, calls: [] }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "behavior_repo_not_private");
+  assert.match(result.repair, /make .* private/);
+});
+
+test("real GitHub init from a non-repo re-run verifies write access to an existing non-empty repo", async () => {
   const { cwd, home, statePath } = plainWorkspace();
   const gitCalls = [];
   const transport = {
@@ -231,11 +277,52 @@ test("real GitHub init from a non-repo re-run connects an existing non-empty rep
   assert.equal(result.connection.repo.id, "repo-existing-1");
   assert.equal(result.connection.default_branch, "main");
   assert.equal(result.connection.local_checkout.mode, "none");
-  assert.equal(result.connection.local_auth.git_write, "not_required_existing_non_empty_repo");
-  assert.equal(result.connection.push_verification.reason, "existing_non_empty_repo_no_initial_push_required");
+  assert.equal(result.connection.local_auth.git_write, "verified");
+  assert.equal(result.connection.push_verification.verified, true);
+  assert.equal(result.connection.push_verification.mode, "dry_run");
+  assert.equal(result.connection.push_verification.reason, "existing_non_empty_repo_write_access_verified");
   assert.deepEqual(transport.calls.map((call) => call.endpointId), ["get_repository"]);
   assert.equal(gitCalls.filter((call) => call.cwd !== cwd && call.args[0] === "init").length, 0);
-  assert.equal(gitCalls.some((call) => call.args[0] === "push"), false);
+  assert.equal(gitCalls.some((call) => call.args.join(" ") === "push --dry-run origin HEAD:refs/heads/teami/setup-write-check"), true);
+});
+
+test("checkout-less setup fails closed when write access to an existing repo cannot be verified", async () => {
+  const { cwd, home, statePath } = plainWorkspace();
+  const transport = {
+    ...createMockGitHubSetupTransport({
+      existingRepos: ["fixture-owner/fixture-teami"],
+      existingRepoDetails: {
+        "fixture-owner/fixture-teami": {
+          id: "repo-read-only-1",
+          owner: "fixture-owner",
+          name: "fixture-teami",
+          full_name: "fixture-owner/fixture-teami",
+          visibility: "private",
+          default_branch: "main",
+          empty: false,
+          html_url: "https://github.com/fixture-owner/fixture-teami",
+        },
+      },
+    }),
+    kind: "real",
+  };
+  const runGit = createCheckoutlessSeedRunGit({ cwd, calls: [] });
+  const result = await runGitHubInitPhase({
+    repoRoot: cwd,
+    home,
+    statePath,
+    config: configWithBehaviorRepo(),
+    transport,
+    runGit: async (args, options) => args[0] === "push" && args[1] === "--dry-run"
+      ? fail("permission denied: read-only repository")
+      : runGit(args, options),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "behavior_repo_write_verification_failed");
+  assert.match(result.detail, /permission denied/);
+  assert.equal(result.connection.adoption_complete, false);
+  assert.equal(result.connection.status, "failed");
 });
 
 test("doctor treats checkout-less real GitHub connection state as connected", async () => {
@@ -254,14 +341,16 @@ test("doctor treats checkout-less real GitHub connection state as connected", as
     now: () => new Date("2026-06-10T05:00:00.000Z"),
   });
 
+  const doctorGitCalls = [];
   const checks = await githubConnectionDoctorChecks({
     repoRoot: cwd,
     home,
     statePath,
-    runGit() {
-      throw new Error("doctor should not inspect local git for checkout-less connection state");
-    },
-    transport: createMockGitHubSetupTransport({ existingRepos: ["fixture-owner/fixture-teami"] }),
+    runGit: createCheckoutlessSeedRunGit({ cwd, calls: doctorGitCalls }),
+    transport: createMockGitHubSetupTransport({
+      existingRepos: ["fixture-owner/fixture-teami"],
+      repositoryId: "repo-created-1",
+    }),
   });
 
   const byName = Object.fromEntries(checks.map((check) => [check.name, check]));
@@ -271,5 +360,39 @@ test("doctor treats checkout-less real GitHub connection state as connected", as
   assert.match(byName["GitHub remote shape"].message, /no local checkout/);
   assert.equal(byName["GitHub behavior repo reachable"].ok, true);
   assert.equal(byName["GitHub local write auth"].ok, true);
+  assert.ok(doctorGitCalls.some((call) => call.args[0] === "clone"));
+  assert.ok(doctorGitCalls.some((call) => call.args[0] === "push" && call.args[1] === "--dry-run"));
   assert.equal(checks.every((check) => check.ok), true);
+});
+
+test("checkout-less doctor detects write authority revoked after setup", async () => {
+  const { cwd, home, statePath } = plainWorkspace();
+  const setupTransport = {
+    ...createMockGitHubSetupTransport({ repositoryId: "repo-created-1" }),
+    kind: "real",
+  };
+  await runGitHubInitPhase({
+    repoRoot: cwd,
+    home,
+    statePath,
+    config: configWithBehaviorRepo(),
+    runGit: createCheckoutlessSeedRunGit({ cwd, calls: [] }),
+    transport: setupTransport,
+  });
+  const healthyGit = createCheckoutlessSeedRunGit({ cwd, calls: [] });
+  const checks = await githubConnectionDoctorChecks({
+    repoRoot: cwd,
+    home,
+    statePath,
+    runGit: async (args, options) => args[0] === "push" && args[1] === "--dry-run"
+      ? fail("permission denied: repository is now read-only")
+      : healthyGit(args, options),
+    transport: createMockGitHubSetupTransport({
+      existingRepos: ["fixture-owner/fixture-teami"],
+      repositoryId: "repo-created-1",
+    }),
+  });
+  const write = checks.find((check) => check.name === "GitHub local write auth");
+  assert.equal(write.ok, false);
+  assert.match(write.message, /permission denied|write access/i);
 });
