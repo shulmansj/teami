@@ -52,7 +52,7 @@ renderConfirmation(slots)
 
 1. Resolve the domain.
    - Call `resolve_domain` if the session has not already established the Linear domain.
-   - If the tool reports that reauthorization is needed, tell the human to run `npx -y @shulmansj/teami@release init` and approve in the browser. Do not ask for credentials.
+   - If the tool reports that reauthorization is needed, tell the human to run `npx @shulmansj/teami init` and approve in the browser. Do not ask for credentials.
 
 2. Establish or create the project.
    - If the human provides a project id, use it.
@@ -108,7 +108,7 @@ Then surface exactly two kinds of thing, and nothing else:
 
 2. `You're ready`
    - Show this only when the pressure-test surfaces no remaining human-only decisions.
-   - Say the project body is ready to write and that moving to Planned starts the factory now.
+   - Say the project body is ready to write. Before asking for the go, tell the adopter to keep Teami's local listener open in another terminal with `npx @shulmansj/teami gateway start` if it is not already running. Do not claim you can verify the listener. Explain that moving the project to Planned queues it: Teami picks it up automatically on the next poll when the listener is running, or it waits safely until the listener starts.
    - Ask for an unambiguous go before committing.
 
 The factory is the backstop, not the gate: if inadequate content slips through, the decomposer escalates back to the human. Your job is to make that rare, not to be perfect — so bias toward surfacing a genuine product decision over waving the plan through, but do not invent decisions to look thorough.
@@ -123,7 +123,7 @@ Treat commit as irreversible enough to require explicit language.
 - Call `project_write_body({ project_id, slots })`.
 - If the write succeeds, call `project_move_status({ project_id, confirm: true, planning_telemetry: { elicitation_rounds, human_only_decisions_surfaced, pressure_test_verdict: "ready", advisor_used } })`. Fill `planning_telemetry` from the session — how many reflect-back rounds you ran, how many human-only decisions you surfaced, whether the human used your advice. It is optional and best-effort: if you are unsure of a count, omit that field, and never block or delay the commit on it.
 - After the move succeeds, show `renderConfirmation(slots)` as the receipt.
-- If either tool fails with a sanitized `reauthorize` signal, tell the human to run `npx -y @shulmansj/teami@release init` and approve in the browser, then retry later.
+- If either tool fails with a sanitized `reauthorize` signal, tell the human to run `npx @shulmansj/teami init` and approve in the browser, then retry later.
 
 ## Tone
 

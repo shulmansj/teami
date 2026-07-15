@@ -156,6 +156,7 @@ export async function setupLinearDomain({
   onPreview = () => {},
   behaviorRepoId,
   ensureNeedsPrincipalProjectStatus = null,
+  selectedExistingTeamId = null,
 } = {}) {
   if (!client) throw new Error("Linear client is required for domain setup.");
   if (!config) throw new Error("Linear config is required for domain setup.");
@@ -179,6 +180,7 @@ export async function setupLinearDomain({
   const workspaceId = organization.id;
   const workspaceName = organization.name;
   let latestRegistry = currentRegistry;
+  let teamProvisionedByTeami = matchedResumeDomain?.linear?.provisioned_by_teami ?? true;
   let latestSetupDomain = matchedResumeDomain || makeSetupIncompleteDomain({
     domainId,
     domainName: adopterProvidedName,
@@ -199,6 +201,7 @@ export async function setupLinearDomain({
       workspaceName,
       team: setupTeam,
       webhook,
+      provisionedByTeami: teamProvisionedByTeami,
     });
     const nextRegistry = upsertDomainRecord(latestRegistry, domain);
     await writeRegistry(nextRegistry, domain);
@@ -222,6 +225,7 @@ export async function setupLinearDomain({
       setupIncompleteCause: cause,
       workspaceId,
       workspaceName,
+      provisionedByTeami: teamProvisionedByTeami,
       ...state,
     });
     let result = { registry: upsertDomainRecord(latestRegistry, fallbackDomain), domain: fallbackDomain };
@@ -269,7 +273,15 @@ export async function setupLinearDomain({
     domainId,
     resumeDomain: matchedResumeDomain,
     cache,
+    registry: currentRegistry,
+    workspaceId,
+    selectedExistingTeamId,
   });
+  teamProvisionedByTeami = teamPlan.mode === "adopt_explicit"
+    ? false
+    : teamPlan.mode === "create"
+      ? true
+      : matchedResumeDomain?.linear?.provisioned_by_teami ?? true;
   if (completeResume && !teamPlan.team) {
     throw new Error(
       `complete_domain_team_missing: domain ${domainId} records Linear team ${matchedResumeDomain.linear?.team_id || "unknown"}, but that team was not found in workspace ${workspaceLabel(organization)}.`,
@@ -277,7 +289,7 @@ export async function setupLinearDomain({
   }
 
   onPreview(
-    teamPlan.mode === "adopt"
+    ["adopt", "adopt_explicit"].includes(teamPlan.mode)
       ? setupPreviewLine({
           action: "use",
           teamName: teamPlan.team.name,
@@ -299,7 +311,17 @@ export async function setupLinearDomain({
     }
   } catch (error) {
     const setupIncompleteCause = classifyTeamCreateError(error);
-    await failWithSetupIncomplete(setupIncompleteCause, error);
+    try {
+      await failWithSetupIncomplete(setupIncompleteCause, error);
+    } catch (setupError) {
+      if (setupIncompleteCause === "linear_team_limit_reached") {
+        setupError.availableTeams = safeExistingTeamChoices(
+          unboundExistingTeams(teamPlan.existingTeams, currentRegistry, { workspaceId, domainId }),
+        );
+        setupError.workspace = { id: workspaceId, name: workspaceName };
+      }
+      throw setupError;
+    }
   }
 
   if (!team?.id || !team?.key || !team?.name) {
@@ -313,7 +335,14 @@ export async function setupLinearDomain({
     } catch (error) {
       throw setupIncompleteError({
         cause: "registry_write_failed",
-        domain: makeSetupIncompleteDomain({ domainId, domainName: adopterProvidedName, workspaceId, workspaceName, team }),
+        domain: makeSetupIncompleteDomain({
+          domainId,
+          domainName: adopterProvidedName,
+          workspaceId,
+          workspaceName,
+          team,
+          provisionedByTeami: teamProvisionedByTeami,
+        }),
         registry: latestRegistry,
         originalError: error,
       });
@@ -325,6 +354,7 @@ export async function setupLinearDomain({
     config: configForDomain,
     cache: { ...(cache || {}), teamId: team.id },
     ensureNeedsPrincipalProjectStatus,
+    allowLegacyHumanReviewMigration: teamProvisionedByTeami !== false,
     writeCache: (nextCache) => {
       initializedCache = nextCache;
     },
@@ -358,6 +388,7 @@ export async function setupLinearDomain({
           workspaceName,
           team,
           webhook: webhookRegistration.webhook,
+          provisionedByTeami: teamProvisionedByTeami,
         }),
         registry: latestRegistry,
         originalError: error,
@@ -416,6 +447,7 @@ export async function setupLinearDomain({
     teamName: team.name,
     teamNameLastSeenAt: new Date().toISOString(),
     webhookId: webhookRegistration.webhook?.id || matchedResumeDomain?.linear?.webhook_id || null,
+    provisionedByAgenticFactory: teamProvisionedByTeami,
     resources: matchedResumeDomain?.resources || [],
     policyProfile: matchedResumeDomain?.policy_profile || "default",
     policyOverlayRef: matchedResumeDomain?.policy_overlay_ref || null,
@@ -479,6 +511,7 @@ export async function setupLinearDomain({
         workspaceName,
         team,
         webhook: webhookRegistration.webhook,
+        provisionedByTeami: teamProvisionedByTeami,
       }),
       registry: latestRegistry,
       originalError: error,
@@ -512,6 +545,7 @@ function makeSetupIncompleteDomain({
   workspaceName = null,
   team = null,
   webhook = null,
+  provisionedByTeami = true,
 } = {}) {
   return makeDomainRecord({
     domainId,
@@ -525,6 +559,7 @@ function makeSetupIncompleteDomain({
     teamName: team?.name || team?.teamName || null,
     teamNameLastSeenAt: team?.name || team?.teamName ? new Date().toISOString() : null,
     webhookId: webhook?.id || webhook?.webhookId || null,
+    provisionedByAgenticFactory: provisionedByTeami,
   });
 }
 
@@ -534,13 +569,53 @@ async function resolveSetupTeamPlan({
   domainId,
   resumeDomain = null,
   cache = null,
+  registry = emptyDomainRegistry(),
+  workspaceId = null,
+  selectedExistingTeamId = null,
 } = {}) {
   const existingTeams = await client.listTeams?.() || [];
   const recordedTeam = findRecordedSetupTeam(existingTeams, { domainId, resumeDomain, cache });
+  const selectedTeamId = typeof selectedExistingTeamId === "string"
+    ? selectedExistingTeamId.trim()
+    : "";
+  if (recordedTeam && selectedTeamId && recordedTeam.id !== selectedTeamId) {
+    throw linearTeamSelectionError(
+      "linear_team_selection_conflicts_with_recorded_team",
+      "The selected Linear team differs from the team already recorded for this Teami domain.",
+      existingTeams,
+    );
+  }
   if (recordedTeam) {
     return {
       mode: "adopt",
       team: recordedTeam,
+      existingTeams,
+    };
+  }
+
+  if (selectedTeamId) {
+    const selectedMatches = existingTeams.filter((team) =>
+      team?.id === selectedTeamId && team?.archived !== true && !team?.archivedAt);
+    if (selectedMatches.length !== 1) {
+      throw linearTeamSelectionError(
+        "linear_team_selection_invalid",
+        "The selected Linear team is no longer available in the authorized workspace.",
+        existingTeams,
+      );
+    }
+    const alreadyBound = (registry?.domains || []).find((domain) =>
+      domain?.id !== domainId && domain?.status !== "removed" &&
+      domain?.linear?.workspace_id === workspaceId && domain?.linear?.team_id === selectedTeamId);
+    if (alreadyBound) {
+      throw linearTeamSelectionError(
+        "linear_team_already_bound",
+        `The selected Linear team is already connected to Teami domain ${alreadyBound.id}.`,
+        existingTeams,
+      );
+    }
+    return {
+      mode: "adopt_explicit",
+      team: selectedMatches[0],
       existingTeams,
     };
   }
@@ -550,6 +625,35 @@ async function resolveSetupTeamPlan({
     input: teamCreateInputForSetup({ requestedName, existingTeams }),
     existingTeams,
   };
+}
+
+function safeExistingTeamChoices(teams = []) {
+  return teams
+    .filter((team) => team?.archived !== true && !team?.archivedAt)
+    .filter((team) => typeof team?.id === "string" && team.id.trim() &&
+      typeof team?.name === "string" && team.name.trim())
+    .map((team) => ({
+      id: team.id,
+      key: typeof team.key === "string" && team.key.trim() ? team.key.trim() : null,
+      name: team.name.trim(),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+function unboundExistingTeams(teams, registry, { workspaceId, domainId } = {}) {
+  const boundTeamIds = new Set((registry?.domains || [])
+    .filter((domain) => domain?.id !== domainId && domain?.status !== "removed" &&
+      domain?.linear?.workspace_id === workspaceId)
+    .map((domain) => domain?.linear?.team_id)
+    .filter(Boolean));
+  return (teams || []).filter((team) => !boundTeamIds.has(team?.id));
+}
+
+function linearTeamSelectionError(code, message, teams) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  error.availableTeams = safeExistingTeamChoices(teams);
+  return error;
 }
 
 function findRecordedSetupTeam(teams, { domainId, resumeDomain = null, cache = null } = {}) {
@@ -722,7 +826,7 @@ export function repairPathForSetupIncompleteCause(cause) {
     return "Ask a Linear workspace admin to allow team creation for your account, then rerun npm run init.";
   }
   if (cause === "linear_team_limit_reached") {
-    return "Free or Basic Linear workspaces may be at their team limit; remove an unused team or upgrade, then rerun npm run init.";
+    return "Choose an existing team when setup offers the safe selection step, or remove an unused team or upgrade the Linear plan before retrying.";
   }
   if (cause === "linear_webhook_registration_failed") {
     return "Rerun npm run init after confirming Linear webhook admin authorization; npm run reset removes local setup state if needed.";
@@ -751,6 +855,7 @@ export async function initLinear({
   cache = null,
   writeCache,
   ensureNeedsPrincipalProjectStatus = null,
+  allowLegacyHumanReviewMigration = true,
 } = {}) {
   const summary = { created: [], found: [], updated: [], failed: [], notes: [], doctorChecks: [] };
   const appIdentity = await resolveSetupAppIdentity(client);
@@ -806,6 +911,7 @@ export async function initLinear({
       states: workflowStates,
       summary,
       cache,
+      allowLegacyHumanReviewMigration,
     });
     issueStatuses[role] = status.id;
   }
@@ -908,7 +1014,16 @@ function issueStatusMetadata(role) {
 
 async function findOrCreateWorkflowState(
   client,
-  { role, statusConfig, statusConfigs, teamId, states, summary, cache },
+  {
+    role,
+    statusConfig,
+    statusConfigs,
+    teamId,
+    states,
+    summary,
+    cache,
+    allowLegacyHumanReviewMigration = true,
+  },
 ) {
   const { name, type } = statusConfig;
   const cachedId = cache?.issueStatuses?.[role];
@@ -923,7 +1038,7 @@ async function findOrCreateWorkflowState(
     return reconcileWorkflowState(client, role, cachedMatches[0], statusConfig, states, summary);
   }
 
-  if (role === "human_review") {
+  if (role === "human_review" && allowLegacyHumanReviewMigration) {
     const configuredMatches = states.filter((state) => state.name === name);
     const legacyMatches = states.filter((state) => state.name === LEGACY_HUMAN_REVIEW_WORKFLOW_STATE_NAME);
     if (configuredMatches.length > 0 && legacyMatches.length > 0) {

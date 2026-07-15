@@ -20,7 +20,7 @@ const COMMANDS = Object.freeze({
   gatewayStatus: "teami gateway status",
   phoenixStart: "teami phoenix:start",
 });
-const PLANNED_STEP = 'Move a Linear project to "Planned" to start your first run';
+const PLANNED_STEP = "Run /teami:plan in a new Claude Code session to shape your first project";
 
 class MemoryStream extends Writable {
   constructor() {
@@ -41,13 +41,9 @@ test("D0c first-run plan is ordered and resumable across home-state probe states
     plannedProjectText: PLANNED_STEP,
   });
   assert.deepEqual(idle.map((step) => step.text), [
-    "teami gateway start",
     PLANNED_STEP,
-    "teami gateway status",
-    "teami doctor",
-    "Local Phoenix (traces)",
   ]);
-  assert.match(idle[0].hint, /start polling Linear/);
+  assert.match(idle[0].hint, /planning conversation/);
 
   const uninitialized = firstRunPlan({ state: HOME_STATE.UNINITIALIZED, commands: COMMANDS });
   assert.equal(uninitialized[0].text, "teami init");
@@ -120,6 +116,7 @@ test("D0c first-run rendering uses the CLI ASCII fallback", () => {
     includeOfflineBranch: false,
   });
 
-  assert.match(stream.output, /Setup is resumable: if a step stops/);
-  assert.match(stream.output, /\n  -> teami gateway start\s+start polling Linear/);
+  assert.match(stream.output, /Setup is complete\./);
+  assert.match(stream.output, /\n  -> Run \/teami:plan in a new Claude Code session/);
+  assert.doesNotMatch(stream.output, /gateway start/);
 });

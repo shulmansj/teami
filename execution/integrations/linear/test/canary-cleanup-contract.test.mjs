@@ -268,9 +268,12 @@ test("exact GitHub absence accepts only an explicit not-found response", () => {
   );
 });
 
-test("recursive canary cleanup is confined to an exact prefixed child of the OS temp root", () => {
+test("recursive canary cleanup is confined to an exact prefixed child of the OS temp root", (t) => {
+  const syntheticTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-canary-test-temp-root-"));
+  t.after(() => fs.rmSync(syntheticTempRoot, { recursive: true, force: true }));
+  const outsideSyntheticTempRoot = path.join(os.tmpdir(), "teami-linear-canary-danger");
   assert.throws(
-    () => assertDisposableCanaryHome(path.resolve("teami-linear-canary-danger")),
+    () => assertDisposableCanaryHome(outsideSyntheticTempRoot, { tempRoot: syntheticTempRoot }),
     /must_be_under_os_temp/,
   );
 });

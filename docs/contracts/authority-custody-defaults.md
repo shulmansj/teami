@@ -14,8 +14,9 @@ where resulting data may live. It refines the
 | --- | --- | --- | --- | --- |
 | Linear ordinary operation | Adopter's browser-approved OAuth grant | Read the selected workspace and perform policy-bound writes in the resolved Teami domain | OS credential storage on the adopter machine | Revoke the Linear app grant and re-run setup when wanted |
 | Linear status repair | Separate adopter/admin browser approval | Create the single missing `Principal Escalation` project status | In memory only; never persisted as runtime authority | Teami discards the grant after the attempt and best-effort revokes it |
-| Product-repo allowlist | Adopter's explicit setup confirmation | Record selected `owner/repo` and default-branch identities | Local domain registry | `teami domain revoke` or setup repair |
-| Behavior repository | Adopter's ambient local git/`gh` session | Create or connect the configured behavior repo and prepare reviewable proposal branches/PRs | Git credential custody remains outside Teami | Revoke/repair local git or `gh` access |
+| Product repositories during setup | No product-repository authority requested | Fresh setup records no product-repository access. Repair may preserve connections the adopter approved previously, but setup neither uses nor expands them. | Local domain registry | Connect or disconnect a product repository later through a separate explicit domain action |
+| Product-repository grant after setup | Adopter's separate explicit domain action | Record the selected `owner/repo` and default-branch identity; this does not activate write-capable execution | Local domain registry | Remove it through the separate domain-revoke action |
+| Private Teami workspace repository | Adopter's ambient local git/`gh` session | Create or reconnect the private repository Teami uses for configuration and reviewable improvement proposals | Git credential custody remains outside Teami | Revoke or repair local git/`gh` access |
 | Claude plugin | Adopter's explicit setup confirmation | Register/update the Teami marketplace and install the Teami plugin in user scope | Claude's local plugin configuration | Claude plugin uninstall/marketplace removal |
 | Gateway and runner | Adopter starts the foreground command | Poll Linear, record/claim local wakes, and apply gated domain-confined Linear effects | Local Teami state | Stop the command |
 | Phoenix | Adopter's local Teami process | Store local trace/eval evidence and health receipts | Local Phoenix and Teami state | Stop/delete only through an explicit local cleanup path |
@@ -34,8 +35,10 @@ The disclosure must say:
 
 - workspace-wide Linear read/write covers the entire selected workspace;
 - the admin exception is possible, one-purpose, one-time, and non-retained;
-- only the confirmed product repos will be allowlisted;
-- behavior-repo effects use the adopter's existing local GitHub authority;
+- product repositories remain disconnected during setup; repair may preserve
+  previously approved connections, but setup neither uses nor expands them;
+- the private Teami workspace repository uses the adopter's existing local
+  GitHub authority and is not product-repository access;
 - Claude plugin configuration will change; and
 - local Teami, runtime, and Phoenix state will be created or updated.
 
@@ -96,12 +99,12 @@ Git effects, domain confinement, a staged secret/content scanner, and no push
 after a safety failure. A scanner alone is defense in depth, not proof of
 isolation.
 
-## Behavior-Repo Proposal Authority
+## Teami Workspace-Repository Proposal Authority
 
-Behavior-change proposals use only the configured behavior repository and the
+Process-change proposals use only the configured private Teami workspace repository and the
 adopter's ambient local git/`gh` authority. Pushes are confined to
 `refs/heads/teami/promotion/*`; default branches, protected branches, tags,
-workflow refs, arbitrary refs, and any repo other than the configured behavior
+workflow refs, arbitrary refs, and any repo other than the configured Teami workspace
 repo are rejected. Staged content must pass the protected-path and packet
 guards before push, and a failed safety gate means no push.
 

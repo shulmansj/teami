@@ -1,5 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { Buffer } from "node:buffer";
+import fs from "node:fs";
+import path from "node:path";
 
 import { readLinearCache, writeLinearCache } from "../cache.mjs";
 import { resolveTeamiHome } from "../app-home.mjs";
@@ -52,9 +54,11 @@ export {
 } from "../linear-oauth.mjs";
 import { runRuntimeSmokeChecks } from "../runtime-smoke.mjs";
 import {
+  DEFAULT_SETUP_TEAM_NAME,
   SETUP_DISCLOSURE_HASH,
   SETUP_DISCLOSURE_VERSION,
   createSetupStateStore,
+  isSetupOwnerAlive,
   runSetupCompletionContract,
   setupEffectsDisclosure,
   verifySetupConsent,
@@ -84,6 +88,10 @@ import {
 } from "../../../git/git-repo-materializer.mjs";
 
 const GITHUB_REPO_DISCOVERY_LIMIT = 50;
+const PACKAGED_CLAUDE_PLUGIN_MANIFEST_PATH = path.resolve(
+  import.meta.dirname,
+  "../../../../../.claude-plugin/plugin.json",
+);
 const PROJECT_NEEDS_PRINCIPAL_STATUS_NAME = "Principal Escalation";
 const PROJECT_NEEDS_PRINCIPAL_STATUS_TYPE = "planned";
 const PROJECT_NEEDS_PRINCIPAL_STATUS_COLOR = "#F2994A";
@@ -99,13 +107,13 @@ const ADMIN_REVOCATION_REPAIR = "open Linear Settings -> Applications and revoke
 const LINEAR_SETUP_COMMAND_OPTIONS = Object.freeze({
   "domain:add": {
     intro: "Teami will add a domain to the same factory and learning loop, then ask Linear for read/write browser authorization for that domain's workspace. If Principal Escalation is missing, setup asks once for admin approval to create that one project status.",
-    prompt: "Domain name to add to this factory and learning loop: ",
+    prompt: "Linear team name: ",
     readyLabel: "Domain",
     runGithubPhase: false,
   },
   init: {
     intro: "Teami will ask Linear for read/write browser authorization to verify setup and post project updates. If Principal Escalation is missing, setup asks once for admin approval to create that one project status. No API key is required.",
-    prompt: "First domain name: ",
+    prompt: "Linear team name: ",
     readyLabel: "First domain",
     runGithubPhase: true,
   },
@@ -143,9 +151,10 @@ export async function runLinearSetupCommand({ context, command, args }) {
     process.exitCode = 1;
     return { ok: false, status: "blocked", reason: "admin_revocation_required" };
   }
-  if (command === "init") {
+  if (["init", "domain:add"].includes(command)) {
     return runCliSharedOnboarding({
       context: { ...(context || {}), output, home, setupStateStore: setupStore },
+      command,
       args,
       output,
       consent,
@@ -207,10 +216,10 @@ export async function runLinearSetupCommand({ context, command, args }) {
   }
 }
 
-async function runCliSharedOnboarding({ context, args, output, consent } = {}) {
+async function runCliSharedOnboarding({ context, command = "init", args, output, consent } = {}) {
   const { config, repoRoot, home, setupStateStore } = context;
   const active = setupStateStore.findActive?.();
-  if (active) {
+  if (active && isSetupOwnerAlive(active) !== false) {
     output.error({
       what: "A conversational setup is waiting for authorization",
       why: "Teami keeps one setup owner at a time so CLI and conversational setup cannot interleave effects.",
@@ -222,51 +231,43 @@ async function runCliSharedOnboarding({ context, args, output, consent } = {}) {
   const { flags } = parseCliFlags(args || []);
   const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
   const resolution = resolveSetupCommandDomainNameHint(args || [], registry);
-  const implicitResumeDomain = resolution.completeResumeDomain || resolution.resumeDomain ||
-    resolveGitHubPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) ||
-    resolveClaudePluginPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) || null;
+  const initOnlyResumeDomain = command === "init"
+    ? resolveGitHubPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) ||
+      resolveClaudePluginPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) || null
+    : null;
+  const implicitResumeDomain = resolution.completeResumeDomain || resolution.resumeDomain || initOnlyResumeDomain;
   const domainName = resolution.domainNameHint ||
     (implicitResumeDomain ? domainNameForResumeDomain(implicitResumeDomain) : null) ||
-    await resolveInitDomainName(args || [], { command: "init" });
+    await resolveInitDomainName(args || [], {
+      command,
+      registry,
+      isTTY: "isTTY" in context
+        ? Boolean(context.isTTY)
+        : Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      prompt: context.promptDomainName || promptLine,
+    });
   const resumeDomain = implicitResumeDomain;
   const priorDomain = registry.domains.find((domain) =>
     String(domain?.adopter_provided_name || domain?.id || "").trim().toLowerCase() ===
       String(domainName).trim().toLowerCase());
   const workspaceHint = flags.workspace || resumeDomain?.linear?.workspace_id ||
     priorDomain?.linear?.workspace_id || null;
-  const existingRepos = (resumeDomain?.resources || [])
-    .filter((resource) => resource?.kind === "git_repo")
-    .map((resource) => repoLabel(resource.binding));
-  let repoIntent;
-  if (resumeDomain) {
-    repoIntent = existingRepos.length > 0
-      ? { mode: "allowlist", repos: existingRepos }
-      : { mode: "non_code" };
-  } else {
-    const selection = await discoverAndConfirmDomainGitHubRepos({
-      output,
-      runCommand: context.githubDiscoveryRunCommand || context.runCommand || defaultRunCommand,
-      prompt: context.githubRepoAllowlistPrompt || promptLine,
-      isTTY: "isTTY" in context ? Boolean(context.isTTY) : Boolean(process.stdin.isTTY && process.stdout.isTTY),
-    });
-    if (!selection.confirmed) {
-      process.exitCode = 1;
-      return { ok: false, status: "blocked", reason: selection.reason || "repo_intent_not_confirmed" };
-    }
-    repoIntent = selection.selectedRepos.length > 0
-      ? { mode: "allowlist", repos: selection.selectedRepos.map(repoLabel) }
-      : { mode: "non_code" };
-  }
+  // Onboarding never adds product-repository access. The shared setup service preserves
+  // resources already recorded on a complete-domain repair without accepting a new allowlist.
+  const repoIntent = { mode: "non_code" };
 
   const {
-    createProjectMcpToolActions,
+    createProjectMcpToolActions: defaultCreateProjectMcpToolActions,
     ProjectMcpToolError,
   } = await import("../project-mcp-tools.mjs");
+  const createProjectMcpToolActions = context.createProjectMcpToolActions ||
+    defaultCreateProjectMcpToolActions;
   const actionOptions = {
     repoRoot,
     config,
     home,
     setupStateStore,
+    setupSurface: "cli",
     ...(context.createLinearSetupAuth ? { createLinearSetupAuth: context.createLinearSetupAuth } : {}),
     ...(context.startLinearBrowserAuthorization
       ? { startLinearBrowserAuthorization: context.startLinearBrowserAuthorization }
@@ -342,24 +343,18 @@ async function runCliSharedOnboarding({ context, args, output, consent } = {}) {
     if (context.runSmoke) actionOptions.runRuntimeSmoke = context.runSmoke;
     if (context.runDoctor) actionOptions.runSetupDoctor = context.runDoctor;
   }
-  const actions = createProjectMcpToolActions(actionOptions);
-  const callOnboarding = async (input) => {
-    const timeoutMs = context.sharedSetupCallTimeoutMs || 5 * 60 * 1000;
-    let timer;
-    return Promise.race([
-      actions.init_onboarding(input),
-      new Promise((resolve) => {
-        timer = setTimeout(() => resolve({
-          ok: false,
-          status: "blocked",
-          setup_id: input.setup_id || null,
-          reason: "shared_setup_call_timeout",
-          repair: "Retry setup; the current phase exceeded its bounded local wait.",
-        }), timeoutMs);
-        timer.unref?.();
-      }),
-    ]).finally(() => clearTimeout(timer));
+  let waitProgress = null;
+  let finishProgress = null;
+  actionOptions.onSetupProgress = ({ message } = {}) => {
+    waitProgress?.stop?.();
+    waitProgress = null;
+    finishProgress ||= output.progress(message || "Authorization approved; finishing setup");
   };
+  const actions = createProjectMcpToolActions(actionOptions);
+  // Each provider/subprocess operation owns a bounded timeout. Do not race the
+  // shared setup action with an uncancellable timer: that could tell the adopter
+  // setup stopped while the same action continued making approved changes.
+  const callOnboarding = (input) => actions.init_onboarding(input);
   let result = await callOnboarding({
     domain: domainName,
     ...(workspaceHint ? { workspace: workspaceHint } : {}),
@@ -372,15 +367,30 @@ async function runCliSharedOnboarding({ context, args, output, consent } = {}) {
     disclosure_hash: consent.hash,
   });
   const shownUrls = new Set();
+  const shownRecoveries = new Set();
+  const authorizationWaitStartedAt = Date.now();
+  const installedAppRecoveryDelayMs = context.installedAppRecoveryDelayMs ?? 15_000;
   const pollDeadline = Date.now() + (context.authorizationPollTimeoutMs || 15 * 60 * 1000);
-  while (["awaiting_authorization", "admin_consent_required"].includes(result?.status)) {
+  while (["awaiting_authorization", "admin_consent_required", "team_selection_required"].includes(result?.status)) {
     if (Date.now() >= pollDeadline) {
+      const timedOutSetupId = result?.setup_id || null;
+      if (timedOutSetupId) {
+        try {
+          setupStateStore.recordPhase(timedOutSetupId, "linear", {
+            status: "blocked",
+            reason: "cli_authorization_poll_timeout",
+            setupStatus: "blocked",
+          });
+        } catch {
+          // The blocked result below remains truthful even if local persistence failed.
+        }
+      }
       result = {
         ok: false,
         status: "blocked",
-        setup_id: result?.setup_id,
+        setup_id: timedOutSetupId,
         reason: `cli_authorization_poll_timeout:${result?.authorization?.kind || result?.status || "unknown"}`,
-        repair: "Open the displayed authorization URL or restart setup for a fresh callback session.",
+        repair: `Re-run ${formatCommand(command === "domain:add" ? "domain add" : "init")} for a fresh authorization session.`,
       };
       break;
     }
@@ -388,41 +398,203 @@ async function runCliSharedOnboarding({ context, args, output, consent } = {}) {
       shownUrls.add(result.authorization_url);
       output.info(`Linear authorization: ${result.authorization_url}`);
     }
+    const installedAppRecovery = result?.recovery?.installed_app;
+    if (installedAppRecovery && Date.now() - authorizationWaitStartedAt >= installedAppRecoveryDelayMs &&
+        !shownRecoveries.has(installedAppRecovery)) {
+      shownRecoveries.add(installedAppRecovery);
+      output.warn(installedAppRecovery);
+    }
+    if (result.status === "team_selection_required") {
+      waitProgress?.stop?.();
+      waitProgress = null;
+      finishProgress?.stop?.();
+      finishProgress = null;
+      const team = await promptCliLinearTeamSelection({
+        result,
+        output,
+        isTTY: "isTTY" in context
+          ? Boolean(context.isTTY)
+          : Boolean(process.stdin.isTTY && process.stdout.isTTY),
+        prompt: context.promptLinearTeamSelection || promptLine,
+      });
+      if (!team) break;
+      result = await callOnboarding({
+        setup_id: result.setup_id,
+        linear_team_id: team.id,
+        linear_team_confirm: true,
+      });
+      continue;
+    }
     if (result.status === "admin_consent_required") {
+      waitProgress?.stop?.();
+      waitProgress = null;
+      finishProgress?.stop?.();
+      finishProgress = null;
       const answer = await (context.promptAdminProvisioning || promptLine)(
         "Type YES to approve the one-time Linear admin grant now: ",
       );
       if (String(answer || "").trim() !== "YES") {
+        setupStateStore.recordPhase(result.setup_id, "linear", {
+          status: "blocked",
+          reason: "one_shot_admin_consent_declined",
+          setupStatus: "blocked",
+        });
         process.exitCode = 1;
         return { ...result, ok: false, status: "blocked", reason: "one_shot_admin_consent_declined" };
       }
       result = await callOnboarding({ setup_id: result.setup_id, admin_confirm: true });
       continue;
     }
+    waitProgress ||= output.progress("Waiting for browser approval; setup will continue automatically");
     await new Promise((resolve) => setTimeout(resolve, 100));
     result = await callOnboarding({ setup_id: result.setup_id });
   }
+  waitProgress?.stop?.();
+  finishProgress?.stop?.();
   for (const line of result?.progress || []) output.detail(line);
+  renderCliSetupResult({ result, output });
   if (result?.ok) {
-    output.success("Setup verified.");
+    output.done("Teami is ready.");
+    output.nextSteps([
+      { text: "Open a new Claude Code session", hint: "then run /teami:plan" },
+    ]);
     process.exitCode = 0;
   } else {
+    const diagnosis = cliSetupFailureDiagnosis(result);
     output.error({
       what: "Setup remains incomplete",
-      why: result?.error?.message || result?.reason || result?.status || "setup_failed",
-      fix: result?.error?.repair || result?.repair || `repair the reported phase, then rerun ${formatCommand("init")}; setup is resumable.`,
+      why: diagnosis.why,
+      fix: diagnosis.fix,
     });
     process.exitCode = 1;
   }
   return result;
 }
 
+async function promptCliLinearTeamSelection({ result, output, isTTY, prompt } = {}) {
+  const teams = Array.isArray(result?.teams) ? result.teams : [];
+  output.warn("Linear can't create another team on this workspace plan.");
+  output.info("Teami can use one existing team instead. It will add or reconcile Teami labels and workflow statuses in that team; it will not delete existing issues or projects.");
+  output.info("Choose a dedicated or unused team if possible. Selecting a number approves these changes for that team.");
+  teams.forEach((team, index) => output.info(`${index + 1}. ${team.name}${team.key ? ` (${team.key})` : ""}`));
+  output.info("0. Stop setup");
+  if (!isTTY || teams.length === 0) {
+    output.info(`Run ${formatCommand("init")} in an interactive terminal to return to this choice.`);
+    return null;
+  }
+  for (;;) {
+    const answer = String(await prompt(`Choose a team for Teami (0-${teams.length}): `) || "").trim();
+    if (answer === "0" || answer === "") {
+      output.info(`Setup is still resumable. Run ${formatCommand("init")} to return to this choice.`);
+      return null;
+    }
+    if (/^\d+$/.test(answer)) {
+      const index = Number(answer) - 1;
+      if (index >= 0 && index < teams.length) return teams[index];
+    }
+    output.warn(`Enter a number from 0 to ${teams.length}.`);
+  }
+}
+
+export function renderCliSetupResult({ result, output } = {}) {
+  const steps = result?.steps;
+  if (!steps || typeof steps !== "object") return;
+
+  if (steps.linear?.ok) {
+    const workspace = steps.linear.workspace?.name || steps.linear.workspace?.id;
+    output.success(`Linear connected${workspace ? `: ${workspace}` : ""}`);
+  }
+
+  if (steps.product_repos?.ok) {
+    const repos = Array.isArray(steps.product_repos.repos) ? steps.product_repos.repos : [];
+    output.success(repos.length === 0
+      ? "Product repositories: none"
+      : `Product repositories retained: ${repos.map((repo) => `${repo.owner}/${repo.repo}`).join(", ")}`);
+  }
+
+  if (steps.github?.ok) {
+    const repo = steps.github.repo?.full_name;
+    output.success(`Private GitHub workspace ready${repo ? `: ${repo}` : ""}`);
+  }
+  if (steps.plugin?.ok) output.success("Claude Code integration installed");
+  else if (steps.plugin) {
+    output.warn(`Claude Code integration: ${steps.plugin.detail || steps.plugin.reason || "not ready"}`);
+    if (steps.plugin.repair) output.info(steps.plugin.repair);
+  }
+  if (steps.phoenix?.ok) {
+    output.success("Local traces ready");
+    if (steps.phoenix.app_url) output.detail(`Local trace viewer: ${steps.phoenix.app_url}`);
+  }
+  else if (steps.phoenix) output.warn(`Local traces: ${steps.phoenix.repair || steps.phoenix.reason || "not ready"}`);
+  if (steps.runtime?.ok) output.success("Agent runtimes ready");
+  else if (steps.runtime) {
+    output.warn(`Agent runtimes: ${steps.runtime.detail || steps.runtime.reason || "not ready"}`);
+    if (steps.runtime.repair) output.info(steps.runtime.repair);
+  }
+  if (steps.doctor) {
+    const doctorWarnings = (steps.doctor.checks || []).filter((check) => check.state !== "ok");
+    for (const check of doctorWarnings) {
+      output.warn(`${check.name}: ${check.message || check.repair || check.state || "failed"}`);
+      if (check.repair && check.repair !== check.message) output.info(check.repair);
+    }
+    if (!steps.doctor.ok && doctorWarnings.length === 0) {
+      output.warn(`Final health: ${steps.doctor.detail || steps.doctor.reason || "not ready"}`);
+      if (steps.doctor.repair) output.info(steps.doctor.repair);
+    }
+    if (steps.doctor.ok && result?.ok) {
+      output.success(doctorWarnings.length > 0
+        ? "Final health check passed with warnings"
+        : "Final health check passed");
+    } else if (steps.doctor.ok) {
+      output.detail("Other health checks passed; setup still has an incomplete step above.");
+    }
+  }
+}
+
+export function cliSetupFailureDiagnosis(result = {}) {
+  const steps = result.steps || {};
+  const failedDoctorChecks = (steps.doctor?.checks || []).filter((check) => check.state === "fail");
+  const phaseFailure = [
+    ["GitHub", steps.github],
+    ["Claude Code integration", steps.plugin],
+    ["Local traces", steps.phoenix],
+    ["Agent runtimes", steps.runtime],
+    ["Final health", steps.doctor],
+  ].find(([, step]) => step && step.ok !== true);
+  const fallbackFix = `Fix the named step above, then rerun ${formatCommand("init")}; completed steps are preserved.`;
+  if (failedDoctorChecks.length > 0) {
+    return {
+      why: `Health checks failed: ${failedDoctorChecks.map((check) =>
+        `${check.name}${check.message ? ` (${check.message})` : ""}`).join(", ")}`,
+      fix: failedDoctorChecks.find((check) => check.repair)?.repair || fallbackFix,
+    };
+  }
+  if (phaseFailure) {
+    const [name, step] = phaseFailure;
+    return {
+      why: `${name}: ${step.detail || step.message || step.reason || step.status || "not ready"}`,
+      fix: step.repair || fallbackFix,
+    };
+  }
+  return {
+    why: result?.error?.message || result?.reason || result?.status || "setup_failed",
+    fix: result?.error?.repair || result?.repair || fallbackFix,
+  };
+}
+
 export async function confirmCliSetupEffects({ context = {}, output = createCliOutput() } = {}) {
   const disclosure = setupEffectsDisclosure();
-  output.section("Setup effects and access");
+  (output.heading || output.section).call(output, "Welcome to Teami");
+  output.info("Teami runs on this computer. Before setup starts, here is what it will change:");
+  output.info("- Connect your Linear workspace with read/write access and create the Teami planning workflow.");
+  output.info("- If your plan cannot add the dedicated Teami team, stop and ask before configuring an existing team you select.");
+  output.info("- If one required Linear status is missing, ask separately for one-time admin approval; Teami never stores that access and blocks if revocation cannot be verified.");
+  output.info("- Create or connect a private GitHub repository for Teami's own configuration and improvement proposals, using your signed-in GitHub account.");
+  output.info("- Install the Claude Code integration and keep setup and trace data on this computer.");
+  output.info("- Add no product-repository access. A repair preserves connections you approved previously, but setup will not use or expand them.");
   output.detail(`Disclosure ${disclosure.version} (${disclosure.hash})`);
   for (const effect of disclosure.effects) {
-    output.info(effect.title);
+    output.detail(effect.title);
     output.detail(`Change: ${effect.detail}`);
     output.detail(`Approval: ${effect.authority}`);
     output.detail(`Kept after setup: ${effect.retention}`);
@@ -437,9 +609,9 @@ export async function confirmCliSetupEffects({ context = {}, output = createCliO
       : Boolean(process.stdin.isTTY && process.stdout.isTTY);
     if (isTTY) {
       const answer = await (context.promptSetupEffects || promptLine)(
-        `Type YES to accept disclosure ${SETUP_DISCLOSURE_VERSION} (${SETUP_DISCLOSURE_HASH}): `,
+        "Continue? [y/N]: ",
       );
-      confirmed = String(answer || "").trim() === "YES";
+      confirmed = ["y", "yes"].includes(String(answer || "").trim().toLowerCase());
     }
   }
 
@@ -452,7 +624,7 @@ export async function confirmCliSetupEffects({ context = {}, output = createCliO
     output.error({
       what: "Setup effects were not confirmed",
       why: "Teami changes Linear, GitHub, Claude plugin, and local runtime state only after explicit disclosure-bound consent.",
-      fix: "run setup from an interactive terminal and type YES after reviewing the effects.",
+      fix: "run setup from an interactive terminal and answer yes after reviewing the changes.",
     });
   }
   return consent;
@@ -1162,6 +1334,7 @@ async function runGitHubInitStep({
     requestedOwner: initFlags["github-owner"] || null,
     requestedRepoName: initFlags["github-repo"] || null,
     requestedVisibility: initFlags["github-visibility"] || null,
+    replacementExplicit: Boolean(initFlags["github-owner"] && initFlags["github-repo"]),
     onProgress: githubProgress.log,
   };
   const githubPhase = runGitHubPhase
@@ -1219,8 +1392,29 @@ export async function runClaudePluginRegistrationStep({
   marketplaceName = CLAUDE_PLUGIN_MARKETPLACE,
   marketplaceSource = repoRoot,
   scope = CLAUDE_PLUGIN_SCOPE,
+  pluginManifestPath = PACKAGED_CLAUDE_PLUGIN_MANIFEST_PATH,
 } = {}) {
   output.step(stepNumber, totalSteps, "Install Claude plugin");
+  let expectedVersion;
+  try {
+    expectedVersion = JSON.parse(
+      fs.readFileSync(pluginManifestPath, "utf8"),
+    ).version;
+  } catch (error) {
+    return failClaudePluginRegistration({
+      output,
+      reason: "claude_plugin_expected_version_unavailable",
+      detail: error.message,
+    });
+  }
+  if (typeof expectedVersion !== "string" || !expectedVersion.trim() || expectedVersion.includes("__")) {
+    return failClaudePluginRegistration({
+      output,
+      reason: "claude_plugin_expected_version_invalid",
+      detail: "packaged Claude plugin manifest must contain a concrete version",
+    });
+  }
+  expectedVersion = expectedVersion.trim();
   const current = await readClaudePluginHealth({
     repoRoot,
     runCommand,
@@ -1229,12 +1423,14 @@ export async function runClaudePluginRegistrationStep({
     marketplaceSource,
     scope,
   });
-  if (current.ok) {
+  if (current.ok && current.version === expectedVersion) {
     output.success(`Claude plugin already installed: ${pluginName}`);
     output.info(`Claude command available: /${pluginName}:plan`);
     return { ok: true, status: "already_installed", pluginName };
   }
-  if (!["claude_plugin_missing", "claude_plugin_marketplace_missing"].includes(current.reason)) {
+  const needsUpdate = (current.ok && current.version !== expectedVersion) ||
+    current.reason === "claude_plugin_launch_contract_mismatch";
+  if (!needsUpdate && !["claude_plugin_missing", "claude_plugin_marketplace_missing"].includes(current.reason)) {
     return failClaudePluginRegistration({ output, reason: current.reason, detail: current.detail });
   }
 
@@ -1254,12 +1450,12 @@ export async function runClaudePluginRegistrationStep({
   const installResult = await runClaudePluginCommand({
     runCommand,
     repoRoot,
-    args: ["plugin", "install", installRef, "--scope", scope],
+    args: ["plugin", needsUpdate ? "update" : "install", installRef, "--scope", scope],
   });
   if (!installResult.ok) {
     return failClaudePluginRegistration({
       output,
-      reason: "claude_plugin_install_failed",
+      reason: needsUpdate ? "claude_plugin_update_failed" : "claude_plugin_install_failed",
       result: installResult,
     });
   }
@@ -1275,12 +1471,20 @@ export async function runClaudePluginRegistrationStep({
   if (!readBack.ok) {
     return failClaudePluginRegistration({ output, reason: readBack.reason, detail: readBack.detail });
   }
+  if (readBack.version !== expectedVersion) {
+    return failClaudePluginRegistration({
+      output,
+      reason: "claude_plugin_version_mismatch",
+      detail: `Claude reported ${readBack.version || "no version"}; expected ${expectedVersion}`,
+    });
+  }
 
-  output.success(`Claude plugin installed: ${pluginName}`);
+  output.success(`Claude plugin ${needsUpdate ? "updated" : "installed"}: ${pluginName}`);
   output.info(`Claude command available: /${pluginName}:plan`);
   return {
     ok: true,
-    status: "installed",
+    status: needsUpdate ? "updated" : "installed",
+    version: expectedVersion,
     pluginName,
     marketplaceName,
     marketplace: marketplace.status,
@@ -1474,7 +1678,7 @@ async function finishSetupOutput({
     return gate;
   }
   const firstRunProbe = config ? homeStateProbe({ repoRoot, home, config }) : null;
-  output.done(commandOptions.runGithubPhase ? "Setup complete." : `${commandOptions.readyLabel} connected.`);
+  output.done(commandOptions.runGithubPhase ? "Teami is ready." : `${commandOptions.readyLabel} connected.`);
   renderFirstRunUx({
     output,
     probe: firstRunProbe,
@@ -1487,7 +1691,7 @@ async function finishSetupOutput({
       gatewayStatus: factoryLauncherCommand("gateway status"),
       phoenixStart: formatCommand("phoenix:start"),
     },
-    plannedProjectText: 'Move a Linear project to "Planned" to start your first run',
+    plannedProjectText: "Run /teami:plan in a new Claude Code session to shape your first project",
   });
   if (!output.verbose) {
     output.raw(`\n  ${output.style.dim("(Run with --verbose for full detail.)")}\n`);
@@ -1537,10 +1741,10 @@ async function authorizeLinearSetupWorkspace({
   const completeResume = isCompleteResumeSelection(selection);
   let trustLinePrinted = false;
   let forceBrowserAuthorization = false;
-  // Browser authorization deliberately does NOT force Linear's consent screen by default: an
-  // already-installed app auto-redirects back instantly (no dead-end "already installed" page).
-  // Only when the user explicitly wants the workspace dropdown — typing R, or recovering from a
-  // wrong-workspace grant — does the retry force prompt=consent so the picker actually appears.
+  // Browser authorization does not force Linear's consent screen by default. The explicit
+  // workspace-picker paths below still request prompt=consent, but actor=app installations can
+  // show Linear's non-redirecting "already installed" page either way. The shared onboarding
+  // result carries the recovery branch so CLI and MCP render that live platform behavior honestly.
   let forceConsentAuthorization = false;
 
   for (let attempt = 1; attempt <= maxAuthorizationAttempts; attempt += 1) {
@@ -1817,8 +2021,7 @@ async function verifyWorkspaceGrantForSelection({
       });
       if (String(answer || "").trim().toLocaleLowerCase() === "r") {
         await setupAuth.tokenProvider?.clear?.();
-        // The user asked for the workspace dropdown: the reopen must force Linear's consent
-        // screen, or an already-installed app would silently auto-redirect right back.
+        // The user asked for the workspace dropdown, so request the consent screen on reopen.
         return { retry: true, forceConsent: true };
       }
     }
@@ -2126,15 +2329,23 @@ function createGitHubSetupProgress(output) {
   return { log, state };
 }
 
-async function resolveInitDomainName(args = [], { command = "init" } = {}) {
+async function resolveInitDomainName(args = [], {
+  command = "init",
+  registry = emptyDomainRegistry(),
+  isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  prompt = promptLine,
+} = {}) {
   const explicit = explicitInitDomainName(args);
   if (explicit) return explicit;
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    const prompt = (LINEAR_SETUP_COMMAND_OPTIONS[command] || LINEAR_SETUP_COMMAND_OPTIONS.init).prompt;
-    const answer = await promptLine(prompt);
-    if (answer.trim()) return answer.trim();
+  const domains = (registry?.domains || []).filter((domain) => domain?.status !== "removed");
+  if (command === "init" && domains.length === 0) return DEFAULT_SETUP_TEAM_NAME;
+  if (command === "init" && domains.length === 1) return domainNameForResumeDomain(domains[0]);
+  if (isTTY) {
+    const promptText = (LINEAR_SETUP_COMMAND_OPTIONS[command] || LINEAR_SETUP_COMMAND_OPTIONS.init).prompt;
+    const answer = await prompt(promptText);
+    if (String(answer || "").trim()) return String(answer).trim();
   }
-  throw new Error("An explicit domain name is required. Rerun with --domain \"Your Domain Name\".");
+  throw new Error("A Linear team name is required in non-interactive setup. Rerun with --domain \"Your Team Name\".");
 }
 
 function explicitInitDomainName(args = []) {

@@ -4,10 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { loadLinearConfig } from "../src/config.mjs";
 import {
   confirmCliSetupEffects,
+  cliSetupFailureDiagnosis,
   factoryLauncherCommand,
   finishSetupOutput,
+  renderCliSetupResult,
   runLinearSetupCommand,
   runFinalGate,
 } from "../src/cli/linear-setup-command.mjs";
@@ -19,6 +22,7 @@ import {
 } from "../src/setup-orchestrator.mjs";
 
 const sourcePath = path.resolve(import.meta.dirname, "../src/cli/linear-setup-command.mjs");
+const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
 test("runFinalGate passes when runtime smoke and doctor are green", async () => {
   const output = createRecordingOutput();
@@ -131,11 +135,11 @@ test("finishSetupOutput prints closeout on green gate and resumable warning on r
     });
 
     assert.equal(process.exitCode, 0);
-    assertCall(greenOutput, "done", "Setup complete.");
+    assertCall(greenOutput, "done", "Teami is ready.");
     assert.ok(
       greenOutput.calls.some((call) =>
         call.method === "nextSteps" &&
-        call.args[0].some((item) => item?.text === factoryLauncherCommand("gateway start"))),
+        call.args[0].some((item) => item?.text.includes("/teami:plan"))),
     );
 
     const redOutput = createRecordingOutput();
@@ -148,7 +152,7 @@ test("finishSetupOutput prints closeout on green gate and resumable warning on r
 
     assert.equal(process.exitCode, 1);
     assertCall(redOutput, "warn", `Setup is resumable — fix the checks above and re-run ${factoryLauncherCommand("init")}.`);
-    assert.equal(redOutput.calls.some((call) => call.method === "done" && call.args[0] === "Setup complete."), false);
+    assert.equal(redOutput.calls.some((call) => call.method === "done" && call.args[0] === "Teami is ready."), false);
   } finally {
     process.exitCode = previousExitCode;
   }
@@ -178,7 +182,7 @@ test("runFinalGate is idempotent with injected fakes", async () => {
   assert.deepEqual(withoutObservationTimes(second), withoutObservationTimes(first));
 });
 
-test("CLI setup uses the same disclosure and requires an explicit exact confirmation", async () => {
+test("CLI setup uses the same disclosure and requires a simple explicit confirmation", async () => {
   const rejectedOutput = createRecordingOutput();
   const rejected = await confirmCliSetupEffects({
     context: { isTTY: false },
@@ -186,7 +190,7 @@ test("CLI setup uses the same disclosure and requires an explicit exact confirma
   });
   assert.equal(rejected.ok, false);
   assert.equal(rejected.status, "consent_required");
-  assertCall(rejectedOutput, "section", "Setup effects and access");
+  assertCall(rejectedOutput, "section", "Welcome to Teami");
 
   let presented = null;
   const acceptedOutput = createRecordingOutput();
@@ -209,6 +213,20 @@ test("CLI setup uses the same disclosure and requires an explicit exact confirma
     assert.match(rendered, new RegExp(escapeRegExp(effect.authority)));
     assert.match(rendered, new RegExp(escapeRegExp(effect.retention)));
   }
+
+  let prompt = null;
+  const acceptedByPrompt = await confirmCliSetupEffects({
+    context: {
+      isTTY: true,
+      promptSetupEffects: async (value) => {
+        prompt = value;
+        return "yes";
+      },
+    },
+    output: createRecordingOutput(),
+  });
+  assert.equal(acceptedByPrompt.ok, true);
+  assert.equal(prompt, "Continue? [y/N]: ");
 });
 
 test("CLI setup refuses to interleave with a pending conversational setup", async () => {
@@ -252,12 +270,168 @@ test("CLI setup refuses to interleave with a pending conversational setup", asyn
   }
 });
 
-test("CLI init is a renderer over the same resumable onboarding action as MCP", () => {
+test("CLI init surfaces installed-app recovery while Linear authorization is still pending", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-cli-installed-app-recovery-"));
+  const previousExitCode = process.exitCode;
+  try {
+    const output = createRecordingOutput();
+    const result = await runLinearSetupCommand({
+      command: "init",
+      args: [],
+      context: {
+        config: loadLinearConfig({ repoRoot }),
+        repoRoot,
+        home,
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        promptDomainName: async () => "",
+        authorizationPollTimeoutMs: 50,
+        installedAppRecoveryDelayMs: 0,
+        startLinearBrowserAuthorization: async () => ({
+          authorizationUrl: "https://linear.test/oauth/authorize?pending=true",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          browser: { opened: true, reason: null },
+          waitForToken: () => new Promise(() => {}),
+          close: async () => true,
+        }),
+      },
+    });
+
+    assert.equal(result.status, "blocked");
+    const visibleWarning = output.calls
+      .filter((call) => call.method === "warn")
+      .map((call) => String(call.args[0]))
+      .join("\n");
+    assert.match(visibleWarning, /Teami already installed/i);
+    assert.match(visibleWarning, /old workspace-scoped Teami installation/i);
+    assert.match(visibleWarning, /no longer has its matching grant/i);
+    assert.match(visibleWarning, /click Manage/i);
+    assert.match(visibleWarning, /refresh it/i);
+    assert.match(visibleWarning, /session is still open/i);
+    assert.match(visibleWarning, /disconnects Teami for everyone/i);
+    assert.match(visibleWarning, /coordinate first/i);
+    const store = createSetupStateStore({ home });
+    assert.equal(store.findActive(), null, "a timed-out CLI session must not strand the next init attempt");
+    const timedOut = store.read(result.setup_id);
+    assert.equal(timedOut.status, "blocked");
+    assert.equal(timedOut.phases.linear.reason, "cli_authorization_poll_timeout");
+  } finally {
+    process.exitCode = previousExitCode;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI init and domain add are renderers over the same resumable onboarding action as MCP", () => {
   const source = fs.readFileSync(sourcePath, "utf8");
-  assert.match(source, /if \(command === "init"\) \{\s*return runCliSharedOnboarding\(/);
+  assert.match(source, /if \(\["init", "domain:add"\]\.includes\(command\)\) \{\s*return runCliSharedOnboarding\(/);
+  assert.match(source, /runCliSharedOnboarding\(\{\s*context:[\s\S]*?command,\s*args,/);
   assert.match(source, /createProjectMcpToolActions/);
   assert.match(source, /actions\.init_onboarding\(input\)/);
+  assert.match(source, /const repoIntent = \{ mode: "non_code" \}/);
   assert.match(source, /setupStateStore/);
+  assert.doesNotMatch(source, /shared_setup_call_timeout|sharedSetupCallTimeoutMs/);
+  assert.doesNotMatch(source, /actionOptions\.promptLinearWorkspaceConfirmation/);
+});
+
+test("CLI setup renders the safe Claude plugin cause and exact resumable repair", () => {
+  const output = createRecordingOutput();
+  const result = {
+    ok: false,
+    steps: {
+      plugin: {
+        ok: false,
+        reason: "claude_plugin_install_failed",
+        detail: "marketplace denied",
+        repair: "Repair Claude Code plugin access, then re-run teami init.",
+      },
+    },
+  };
+  renderCliSetupResult({ result, output });
+  const visible = output.calls.flatMap((call) => call.args).join("\n");
+  assert.match(visible, /Claude Code integration: marketplace denied/);
+  assert.match(visible, /Repair Claude Code plugin access, then re-run teami init/);
+  assert.deepEqual(cliSetupFailureDiagnosis(result), {
+    why: "Claude Code integration: marketplace denied",
+    fix: "Repair Claude Code plugin access, then re-run teami init.",
+  });
+});
+
+test("CLI setup renders the failed runtime role and runtime-smoke repair", () => {
+  const output = createRecordingOutput();
+  const result = {
+    ok: false,
+    steps: {
+      runtime: {
+        ok: false,
+        reason: "runtime_smoke_failed",
+        detail: "codex: configured model unavailable",
+        repair: "Run teami runtime-smoke, repair codex, then re-run teami init.",
+      },
+    },
+  };
+  renderCliSetupResult({ result, output });
+  const visible = output.calls.flatMap((call) => call.args).join("\n");
+  assert.match(visible, /Agent runtimes: codex: configured model unavailable/);
+  assert.match(visible, /teami runtime-smoke/);
+  assert.match(cliSetupFailureDiagnosis(result).why, /configured model unavailable/);
+});
+
+test("CLI setup preserves doctor messages and explains a thrown doctor check", () => {
+  const failedOutput = createRecordingOutput();
+  const failedResult = {
+    ok: false,
+    steps: {
+      doctor: {
+        ok: false,
+        reason: "doctor_failed",
+        checks: [{ name: "GitHub write access", state: "fail", message: "permission was revoked" }],
+      },
+    },
+  };
+  renderCliSetupResult({ result: failedResult, output: failedOutput });
+  assert.match(failedOutput.calls.flatMap((call) => call.args).join("\n"), /permission was revoked/);
+  assert.match(cliSetupFailureDiagnosis(failedResult).why, /permission was revoked/);
+
+  const thrownOutput = createRecordingOutput();
+  const thrownResult = {
+    ok: false,
+    steps: {
+      doctor: {
+        ok: false,
+        reason: "doctor_check_exception",
+        detail: "doctor transport stopped",
+        repair: "Run teami doctor, then re-run teami init.",
+        checks: [],
+      },
+    },
+  };
+  renderCliSetupResult({ result: thrownResult, output: thrownOutput });
+  assert.match(thrownOutput.calls.flatMap((call) => call.args).join("\n"), /doctor transport stopped/);
+  assert.deepEqual(cliSetupFailureDiagnosis(thrownResult), {
+    why: "Final health: doctor transport stopped",
+    fix: "Run teami doctor, then re-run teami init.",
+  });
+});
+
+test("CLI setup names doctor warnings before reporting health passed with warnings", () => {
+  const output = createRecordingOutput();
+  renderCliSetupResult({
+    result: {
+      ok: true,
+      steps: {
+        doctor: {
+          ok: true,
+          checks: [{ name: "Local Phoenix", state: "warn", message: "trace viewer is stopped" }],
+        },
+      },
+    },
+    output,
+  });
+  assertCall(output, "warn", "Local Phoenix: trace viewer is stopped");
+  assertCall(output, "success", "Final health check passed with warnings");
+  assert.equal(output.calls.some((call) =>
+    call.method === "success" && call.args[0] === "Final health check passed"), false);
 });
 
 test("factoryLauncherCommand returns the platform launcher form and appends the subcommand", () => {

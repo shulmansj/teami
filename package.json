@@ -27,6 +27,7 @@
   },
   "files": [
     "LICENSE",
+    ".claude-plugin/plugin.json",
     "execution/engine/**/*.mjs",
     "execution/evals/**",
     "execution/integrations/git/**/*.mjs",

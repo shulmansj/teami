@@ -88,7 +88,7 @@ function writePublicDevConfigFixture() {
   const config = JSON.parse(readFileSync(packagedConfigPath, "utf8"));
   config.linear.team.key = "AF";
   config.github = {
-    behavior_repo: { owner: null, name: "teami", visibility: "private" },
+    behavior_repo: { owner: null, name: null, visibility: "private" },
     starter_remote_urls: ["https://github.com/shulmansj/teami"],
   };
   for (const workflow of Object.values(config.workflows)) {

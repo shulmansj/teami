@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import zlib from "node:zlib";
 
 export const CARRIED_RUNTIME_CURRENT_DIRNAME = "current";
+const DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
 export async function ensureCarriedRuntime({
   runtimeDir,
@@ -13,6 +14,7 @@ export async function ensureCarriedRuntime({
   platformKey = `${process.platform}-${process.arch}`,
   fetchImpl = globalThis.fetch,
   onProgress = () => {},
+  downloadTimeoutMs = DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS,
 } = {}) {
   try {
     if (typeof runtimeDir !== "string" || runtimeDir.trim() === "") {
@@ -48,6 +50,7 @@ export async function ensureCarriedRuntime({
       assetName,
       fetchImpl,
       onProgress,
+      timeoutMs: downloadTimeoutMs,
     });
 
     const actualSize = fs.statSync(partPath).size;
@@ -126,7 +129,7 @@ function isRuntimeCurrent({ runtimeDir, manifestEntry }) {
   }
 }
 
-async function downloadRuntimeAsset({ manifestEntry, partPath, assetName, fetchImpl, onProgress }) {
+async function downloadRuntimeAsset({ manifestEntry, partPath, assetName, fetchImpl, onProgress, timeoutMs }) {
   let resumeFrom = fs.existsSync(partPath) ? fs.statSync(partPath).size : 0;
   if (resumeFrom >= manifestEntry.size_bytes) {
     if (resumeFrom === manifestEntry.size_bytes && (await sha256File(partPath)) === manifestEntry.sha256) return;
@@ -136,16 +139,26 @@ async function downloadRuntimeAsset({ manifestEntry, partPath, assetName, fetchI
 
   const headers = resumeFrom > 0 ? { Range: `bytes=${resumeFrom}-` } : {};
   onProgress(resumeFrom > 0 ? `Resuming carried runtime download at byte ${resumeFrom}...` : "Downloading carried runtime...");
-  const response = await fetchImpl(manifestEntry.asset_url, { headers });
-  if (!response || !response.ok) {
-    throw new Error(`runtime download failed:${response?.status || "no_response"}`);
-  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("runtime download timeout must be positive");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(manifestEntry.asset_url, { headers, signal: controller.signal });
+    if (!response || !response.ok) {
+      throw new Error(`runtime download failed:${response?.status || "no_response"}`);
+    }
 
-  const append = resumeFrom > 0 && response.status === 206;
-  if (resumeFrom > 0 && response.status !== 206) {
-    resumeFrom = 0;
+    const append = resumeFrom > 0 && response.status === 206;
+    if (resumeFrom > 0 && response.status !== 206) {
+      resumeFrom = 0;
+    }
+    await writeResponseBody(response, partPath, { append, initialBytes: resumeFrom });
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`runtime download timed out after ${timeoutMs}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  await writeResponseBody(response, partPath, { append, initialBytes: resumeFrom });
   const size = fs.statSync(partPath).size;
   if (size < manifestEntry.size_bytes) {
     throw new Error(`runtime download incomplete:${assetName}`);

@@ -24,6 +24,9 @@ export function createProductionGitHubPromotionTransport({
   runSubprocess = runBoundedSubprocess,
 } = {}) {
   if (repoIdentity?.connection_mode === "real") {
+    if (!repoIdentity?.repo?.owner || !repoIdentity?.repo?.repo || !repoIdentity?.repo_id) {
+      throw new Error("github_durable_repo_identity_required");
+    }
     const pushAuth = repoIdentity.push_auth === "ssh" ? "ssh" : "https";
     return {
       transport: createLocalAmbientGitHubTransport({
@@ -130,6 +133,14 @@ function ghApiArgsForRequest({ endpointId, owner, repo, params = {} }) {
       `${pullsPath}/${encodePathSegment(params.number)}`,
     ];
   }
+  if (endpointId === "get_repository_identity") {
+    return [
+      ...common,
+      "--method",
+      "GET",
+      `repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}`,
+    ];
+  }
   if (endpointId === "create_pull_request") {
     return [
       ...common,
@@ -181,6 +192,12 @@ function parseGitHubApiResponse({ endpointId, stdout }) {
       throw new Error(`github_api_request_failed:${endpointId}:unexpected_response_shape`);
     }
     return payload.flat();
+  }
+  if (endpointId === "get_repository_identity") {
+    if (!payload || Array.isArray(payload) || typeof payload !== "object" || !payload.node_id) {
+      throw new Error(`github_api_request_failed:${endpointId}:unexpected_response_shape`);
+    }
+    return { ...payload, id: payload.node_id };
   }
   if (!payload || Array.isArray(payload) || typeof payload !== "object") {
     throw new Error(`github_api_request_failed:${endpointId}:unexpected_response_shape`);

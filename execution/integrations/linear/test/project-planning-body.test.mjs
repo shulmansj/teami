@@ -90,5 +90,8 @@ test("renderConfirmation derives from the same slots and ends with the commit cu
   assert.match(confirmation, /both show this changed acceptance evidence/);
   assert.doesNotMatch(body, /Every planning slot is visible/);
   assert.doesNotMatch(confirmation, /Every planning slot is visible/);
-  assert.ok(confirmation.trimEnd().endsWith("moving to Planned starts the factory now."));
+  assert.ok(confirmation.trimEnd().endsWith(
+    "Moving to Planned queues the project. If the listener is running, Teami picks it up automatically on the next poll; otherwise it waits safely until the listener starts.",
+  ));
+  assert.match(confirmation, /npx @shulmansj\/teami gateway start/);
 });

@@ -1734,7 +1734,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
 
   const createPrCall = githubTransport.calls.find((call) => call.endpointId === "create_pull_request");
   assert.ok(createPrCall, "dry-run GitHub transport should record the drafted sr-eng PR creation intent");
-  assert.equal(createPrCall.params.draft, false);
+  assert.equal(createPrCall.params.draft, true);
   assert.equal(createPrCall.params.body, proposal.proposal_document);
   assert.ok(createPrCall.params.body.includes(`Machine-drafted candidate (${DRAFTED_BY})`));
   assert.ok(createPrCall.params.body.includes(PROMOTION_MARKER_SENTINEL_BEGIN));

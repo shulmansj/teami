@@ -10,7 +10,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 import { loadLinearConfig } from "../src/config.mjs";
 import { readDomainRegistry } from "../src/domain-registry.mjs";
-import { createMockGitHubSetupTransport } from "../src/github-setup.mjs";
+import {
+  createMockGitHubSetupTransport,
+  githubConnectionStatePath,
+} from "../src/github-setup.mjs";
 import { createTeamiProjectMcpServer } from "../src/project-mcp-server.mjs";
 import {
   TEAMI_PROJECT_MCP_TOOL_NAMES,
@@ -23,6 +26,10 @@ import {
 } from "../src/setup-orchestrator.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
+const PACKAGED_PLUGIN_VERSION = JSON.parse(fs.readFileSync(
+  path.join(repoRoot, ".claude-plugin", "plugin.json"),
+  "utf8",
+)).version;
 
 test("init_onboarding bare MCP call returns setup needs without minting an auth URL", async (t) => {
   const home = tempHome(t, "teami-mcp-init-needs-");
@@ -58,8 +65,13 @@ test("init_onboarding bare MCP call returns setup needs without minting an auth 
     const structured = result.structuredContent;
     assert.equal(structured.ok, false);
     assert.equal(structured.status, "consent_required");
-    assert.deepEqual(structured.needs.map((need) => need.field), ["domain", "repo_intent", "workspace", "confirm"]);
+    assert.deepEqual(structured.needs.map((need) => need.field), ["confirm"]);
     assert.equal(structured.needs[0].required, true);
+    assert.deepEqual(structured.defaults, {
+      team: "Teami",
+      product_repositories: "none",
+    });
+    assert.match(structured.next_steps.join("\n"), /product repositories stay disconnected/i);
     assert.equal(structured.disclosure.version, SETUP_DISCLOSURE_VERSION);
     assert.equal(structured.disclosure.hash, SETUP_DISCLOSURE_HASH);
     assert.equal(Object.hasOwn(structured, "authorization_url"), false);
@@ -81,6 +93,149 @@ test("init_onboarding mutates nothing before exact disclosure-bound consent", as
   assert.equal(fs.existsSync(path.join(harness.home, "setup")), false);
   assert.equal(harness.githubTransport.calls.length, 0);
   assert.deepEqual(harness.fakeClaude.calls, []);
+});
+
+test("init_onboarding rejects product-repository access before browser authorization", async (t) => {
+  const harness = createProgrammaticHarness(t);
+  const result = await startOnboarding(harness, {
+    domain: "Support Ops",
+    repo_intent: { mode: "allowlist", repos: ["Acme/app"] },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "blocked");
+  assert.equal(result.reason, "product_repo_access_not_supported_during_setup");
+  assert.match(result.repair, /separate explicit action/i);
+  assert.equal(harness.authorize.calls.length, 0);
+  assert.equal(readDomainRegistry({ home: harness.home }), null);
+  assert.equal(harness.githubTransport.calls.length, 0);
+});
+
+test("fresh onboarding rejects an existing-team choice until Teami offers the live safe choices", async (t) => {
+  const harness = createProgrammaticHarness(t, {
+    existingTeams: [{ id: "team-existing", key: "EX", name: "Existing Team" }],
+  });
+  const result = await startOnboarding(harness, {
+    domain: "Teami",
+    repo_intent: { mode: "non_code" },
+    linear_team_id: "team-existing",
+    linear_team_confirm: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "blocked");
+  assert.equal(result.reason, "linear_team_selection_not_requested");
+  assert.equal(harness.authorize.calls.length, 0);
+  assert.equal(readDomainRegistry({ home: harness.home }), null);
+  assert.equal(harness.client.projectLabels.length, 0);
+});
+
+test("team-limit recovery stays on the same setup and configures an existing team only after explicit choice", async (t) => {
+  const harness = createProgrammaticHarness(t, {
+    existingTeams: [
+      { id: "team-agent-platform", key: "AP", name: "Agent Platform" },
+      { id: "team-research", key: "RES", name: "Research" },
+    ],
+    teamCreateError: {
+      errors: [{
+        message: "You have reached the limit of teams allowed in your current plan.",
+        path: ["teamCreate"],
+      }],
+    },
+  });
+  const awaiting = await startOnboarding(harness, {
+    domain: "Teami",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-team-limit",
+  });
+  assert.equal(awaiting.status, "awaiting_authorization");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const choice = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(choice.status, "team_selection_required");
+  assert.equal(choice.setup_id, awaiting.setup_id);
+  assert.deepEqual(choice.teams, [
+    { id: "team-agent-platform", key: "AP", name: "Agent Platform" },
+    { id: "team-research", key: "RES", name: "Research" },
+  ]);
+  assert.match(choice.effects.join("\n"), /labels and workflow statuses/i);
+  assert.equal(harness.githubTransport.calls.length, 0);
+  assert.equal(harness.fakeClaude.calls.length, 0);
+
+  const polled = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(polled.status, "team_selection_required");
+  assert.deepEqual(polled.teams, choice.teams);
+  const invalid = await harness.actions.init_onboarding({
+    setup_id: awaiting.setup_id,
+    linear_team_id: "team-not-offered",
+    linear_team_confirm: true,
+  });
+  assert.equal(invalid.status, "team_selection_required");
+  assert.equal(invalid.reason, "linear_team_selection_invalid");
+  assert.equal(harness.client.projectLabels.length, 0);
+
+  const result = await harness.actions.init_onboarding({
+    setup_id: awaiting.setup_id,
+    linear_team_id: "team-agent-platform",
+    linear_team_confirm: true,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(harness.authorize.calls.length, 1, "the saved ordinary Linear grant must be reused");
+  const domain = readDomainRegistry({ home: harness.home }).domains.find((candidate) => candidate.id === "teami");
+  assert.equal(domain.linear.team_id, "team-agent-platform");
+  assert.equal(domain.linear.provisioned_by_teami, false);
+  const stateText = fs.readFileSync(
+    path.join(harness.home, "setup", "sessions", `${awaiting.setup_id}.json`),
+    "utf8",
+  );
+  assert.doesNotMatch(stateText, /access-test|refresh-test|oauth_code|pkce|code_verifier/i);
+});
+
+test("team-limit recovery rehydrates the saved Linear grant after a process restart", async (t) => {
+  const teamCreateError = {
+    errors: [{
+      message: "You have reached the limit of teams allowed in your current plan.",
+      path: ["teamCreate"],
+    }],
+  };
+  const harness = createProgrammaticHarness(t, {
+    existingTeams: [{ id: "team-existing", key: "EX", name: "Existing Team" }],
+    teamCreateError,
+  });
+  const awaiting = await startOnboarding(harness, { domain: "Teami", repo_intent: { mode: "non_code" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const choice = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(choice.status, "team_selection_required");
+
+  let browserStarts = 0;
+  const restartedActions = createProjectMcpToolActions({
+    repoRoot: harness.home,
+    home: harness.home,
+    config: testConfig(),
+    createLinearSetupAuth: createAuthorizingSetupAuthFactory(harness.client),
+    startLinearBrowserAuthorization: async () => {
+      browserStarts += 1;
+      throw new Error("saved setup authorization should be reused before opening a browser");
+    },
+    githubSetupTransport: harness.githubTransport,
+    runGit: createInMemoryRunGit(),
+    claudePluginRunCommand: harness.fakeClaude.runCommand,
+    ensurePhoenix: async () => ({ ok: true, appUrl: "http://127.0.0.1:6006" }),
+    runPhoenixPreflight: async () => ({ ok: true, traceId: "trace-test" }),
+    runRuntimeSmoke: async () => ({ ok: true, results: [{ ok: true }] }),
+    runSetupDoctor: async () => [{ name: "fixture health", ok: true }],
+    isSetupOwnerProcessAlive: () => false,
+  });
+  const restarted = await startOnboarding({ actions: restartedActions }, {
+    domain: "Teami",
+    repo_intent: { mode: "non_code" },
+  });
+
+  assert.equal(restarted.status, "team_selection_required", JSON.stringify(restarted));
+  assert.notEqual(restarted.setup_id, awaiting.setup_id);
+  assert.equal(browserStarts, 0);
+  assert.deepEqual(restarted.teams, [{ id: "team-existing", key: "EX", name: "Existing Team" }]);
 });
 
 test("interrupted admin authorization cannot be cleared by revoking a fresh token", async (t) => {
@@ -149,6 +304,38 @@ test("a pending conversational setup reserves setup ownership until it is resume
   assert.equal(second.reason, "setup_session_active");
   assert.equal(second.setup_id, first.setup_id);
   assert.match(second.repair, /Resume the active setup/i);
+});
+
+test("callback-listener start failure is typed and does not strand the next setup", async (t) => {
+  const authorize = createSuccessfulAuthorize();
+  const healthyStarter = createFakeAuthorizationSessionStarter(authorize);
+  let starts = 0;
+  const harness = createProgrammaticHarness(t, {
+    startLinearBrowserAuthorization: async (options) => {
+      starts += 1;
+      if (starts === 1) throw new Error("Every local callback port is already in use");
+      return healthyStarter(options);
+    },
+  });
+
+  const failed = await startOnboarding(harness, {
+    domain: "Listener Recovery",
+    repo_intent: { mode: "non_code" },
+  });
+  assert.equal(failed.status, "blocked");
+  assert.equal(failed.reason, "linear_authorization_start_failed");
+  assert.match(failed.repair, /callback ports/i);
+  const store = createSetupStateStore({ home: harness.home });
+  assert.equal(store.findActive(), null);
+  assert.equal(store.read(failed.setup_id).phases.linear.status, "blocked");
+
+  const retry = await startOnboarding(harness, {
+    domain: "Listener Recovery",
+    repo_intent: { mode: "non_code" },
+  });
+  assert.equal(retry.status, "awaiting_authorization");
+  assert.notEqual(retry.setup_id, failed.setup_id);
+  assert.equal(starts, 2);
 });
 
 test("init_onboarding returns the live URL over stdio while the OAuth callback is still pending", async (t) => {
@@ -334,6 +521,7 @@ test("a fresh start after process restart retires the orphaned callback and issu
     home: harness.home,
     config: testConfig(),
     startLinearBrowserAuthorization: createFakeAuthorizationSessionStarter(harness.authorize),
+    isSetupOwnerProcessAlive: () => false,
   });
   const fresh = await restartedActions.init_onboarding({
     domain: "Fresh Setup",
@@ -592,14 +780,15 @@ test("unused in-memory admin grant is automatically revoked within a bounded win
 });
 
 test("init_onboarding returns awaiting authorization before completing full setup on resume", async (t) => {
+  const setupProgress = [];
   const harness = createProgrammaticHarness(t, {
-    githubDiscoveryRepos: [ghRepo("Acme/app", "trunk")],
+    onSetupProgress: (event) => setupProgress.push(event),
   });
 
   const { awaiting, result } = await startAndResume(harness, {
     domain: "Support Ops",
     workspace: "Example Workspace",
-    repo_intent: { mode: "allowlist", repos: ["Acme/app"] },
+    repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-behavior",
   });
@@ -609,12 +798,16 @@ test("init_onboarding returns awaiting authorization before completing full setu
   assert.equal(awaiting.authorization_url, harness.authorize.url);
   assert.equal(result.ok, true);
   assert.equal(result.status, "complete");
+  assert.deepEqual(setupProgress, [{
+    phase: "post_authorization",
+    message: "Authorization approved; finishing setup",
+  }]);
   assert.deepEqual(result.steps.linear, {
     ok: true,
     domain: { id: "support-ops", status: "active" },
     workspace: { id: "workspace-1", name: "Example Workspace" },
     team: { id: "team-1", key: "SO", name: "Support Ops" },
-    repos: [{ owner: "Acme", repo: "app", default_branch: "trunk" }],
+    repos: [],
   });
   assert.equal(result.steps.github.ok, true);
   assert.equal(result.steps.github.mode, "real");
@@ -630,18 +823,7 @@ test("init_onboarding returns awaiting authorization before completing full setu
   const registry = readDomainRegistry({ home: harness.home });
   const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
   assert.equal(domain.status, "active");
-  assert.deepEqual(domain.resources, [
-    {
-      id: "git_repo:acme/app",
-      kind: "git_repo",
-      role: "primary",
-      binding: {
-        owner: "Acme",
-        repo: "app",
-        default_branch: "trunk",
-      },
-    },
-  ]);
+  assert.deepEqual(domain.resources, []);
 
   const cache = JSON.parse(
     fs.readFileSync(path.resolve(harness.home, domain.linear.cache_path), "utf8"),
@@ -721,6 +903,28 @@ test("init_onboarding treats an already-installed Claude plugin as a successful 
       ["plugin", "list", "--json"],
     ],
   );
+});
+
+test("revoked complete-domain authorization starts a fresh resumable browser session", async (t) => {
+  const credentialControl = { revoked: false };
+  const authorize = createSuccessfulAuthorize("https://linear.test/oauth/authorize?fresh=1");
+  const harness = createProgrammaticHarness(t, { authorize, credentialControl });
+  const { result: first } = await startAndResume(harness, {
+    domain: "Revoked Grant",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-revoked-grant",
+  });
+  assert.equal(first.status, "complete", JSON.stringify(first));
+
+  credentialControl.revoked = true;
+  const retry = await startOnboarding(harness, {
+    domain: "Revoked Grant",
+    repo_intent: { mode: "non_code" },
+  });
+  assert.equal(retry.status, "awaiting_authorization", JSON.stringify(retry));
+  assert.equal(retry.authorization_url, authorize.url);
+  assert.match(retry.recovery.resume, /setup_id/i);
 });
 
 test("init_onboarding auth failure is typed and persists no credential or domain mutation", async (t) => {
@@ -803,7 +1007,7 @@ test("init_onboarding resumes a repaired post-Linear phase without retaining the
 
   harness.fakeClaude.setInstallFails(false);
   const resumed = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
-  assert.equal(resumed.status, "complete");
+  assert.equal(resumed.status, "complete", JSON.stringify(resumed));
   assert.equal(resumed.ok, true);
   assert.equal(harness.authorize.calls.length, 1, "repair resume must use the promoted ordinary credential, not reopen OAuth");
 });
@@ -834,9 +1038,197 @@ test("init_onboarding preserves durable Linear progress across a recoverable Git
   assert.equal(stateAfterFailure.phases.github.status, "blocked");
 
   const resumed = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
-  assert.equal(resumed.status, "complete");
+  assert.equal(resumed.status, "complete", JSON.stringify(resumed));
   assert.equal(resumed.ok, true);
   assert.equal(harness.authorize.calls.length, 1, "GitHub repair resume must not reopen Linear OAuth");
+});
+
+test("implicit repair blocks a changed GitHub identity until exact replacement coordinates are approved", async (t) => {
+  const baseTransport = createMockGitHubSetupTransport();
+  let sameNameWasReplaced = false;
+  const githubTransport = {
+    kind: "real",
+    calls: baseTransport.calls,
+    request: async (request) => {
+      if (sameNameWasReplaced && request.endpointId === "get_repository" &&
+          request.owner === "Acme" && request.repo === "teami-identity") {
+        return {
+          exists: true,
+          repo: {
+            id: "replacement-repo-99",
+            owner: "Acme",
+            name: "teami-identity",
+            full_name: "Acme/teami-identity",
+            visibility: "private",
+            private: true,
+            default_branch: "main",
+            empty: false,
+          },
+        };
+      }
+      return baseTransport.request(request);
+    },
+  };
+  const harness = createProgrammaticHarness(t, {
+    githubSetupTransport: githubTransport,
+    pluginFails: true,
+    runGit: createCheckoutlessRunGit(),
+  });
+  const { awaiting, result: blocked } = await startAndResume(harness, {
+    domain: "GitHub Identity",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-identity",
+  });
+  assert.equal(blocked.status, "blocked");
+
+  sameNameWasReplaced = true;
+  harness.fakeClaude.setInstallFails(false);
+  const resumed = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(resumed.status, "blocked", JSON.stringify(resumed));
+  assert.equal(resumed.reason, "github_workspace_repo_identity_reapproval_required");
+  assert.match(resumed.error.repair, /both --github-owner and --github-repo/i);
+  const unchanged = JSON.parse(fs.readFileSync(githubConnectionStatePath(harness.home), "utf8"));
+  assert.equal(unchanged.repo.full_name, "Acme/teami-identity");
+
+  const approved = await harness.actions.init_onboarding({
+    setup_id: awaiting.setup_id,
+    github_owner: "Acme",
+    github_repo: "teami-identity-2",
+  });
+  assert.equal(approved.status, "complete", JSON.stringify(approved));
+  assert.equal(approved.steps.github.repo.full_name, "Acme/teami-identity-2");
+  assert.ok(githubTransport.calls.some((call) =>
+    call.endpointId === "create_repository" && call.repo === "teami-identity-2"));
+});
+
+test("an adopter can explicitly replace a missing GitHub workspace repository with different coordinates", async (t) => {
+  const baseTransport = createMockGitHubSetupTransport();
+  const githubTransport = { ...baseTransport, kind: "real" };
+  const harness = createProgrammaticHarness(t, {
+    githubSetupTransport: githubTransport,
+    pluginFails: true,
+  });
+  const { result: blocked } = await startAndResume(harness, {
+    domain: "GitHub Replacement",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-old",
+  });
+  assert.equal(blocked.status, "blocked");
+
+  harness.fakeClaude.setInstallFails(false);
+  const resumed = await startOnboarding(harness, {
+    domain: "GitHub Replacement",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-new",
+  });
+  assert.equal(resumed.status, "complete", JSON.stringify(resumed));
+  assert.equal(resumed.steps.github.repo.full_name, "Acme/teami-new");
+  assert.ok(githubTransport.calls.some((call) =>
+    call.endpointId === "create_repository" && call.repo === "teami-new"));
+});
+
+test("a legacy GitHub record without an immutable repository ID requires explicit replacement approval", async (t) => {
+  const githubTransport = { ...createMockGitHubSetupTransport(), kind: "real" };
+  const harness = createProgrammaticHarness(t, {
+    githubSetupTransport: githubTransport,
+    pluginFails: true,
+    runGit: createCheckoutlessRunGit(),
+  });
+  const { awaiting, result: blocked } = await startAndResume(harness, {
+    domain: "Legacy GitHub Identity",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-legacy",
+  });
+  assert.equal(blocked.status, "blocked");
+  const statePath = githubConnectionStatePath(harness.home);
+  const connection = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  delete connection.repo.id;
+  fs.writeFileSync(statePath, `${JSON.stringify(connection, null, 2)}\n`, "utf8");
+
+  harness.fakeClaude.setInstallFails(false);
+  const resumed = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(resumed.status, "blocked", JSON.stringify(resumed));
+  assert.equal(resumed.reason, "github_workspace_repo_identity_reapproval_required");
+  const stillLegacy = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(stillLegacy.repo.full_name, "Acme/teami-legacy");
+  assert.equal(stillLegacy.repo.id, undefined);
+
+  const approved = await harness.actions.init_onboarding({
+    setup_id: awaiting.setup_id,
+    github_owner: "Acme",
+    github_repo: "teami-legacy-replacement",
+  });
+  assert.equal(approved.status, "complete", JSON.stringify(approved));
+  assert.equal(approved.steps.github.repo.full_name, "Acme/teami-legacy-replacement");
+});
+
+test("checkout-based repair rechecks current GitHub write authority and recovers after auth is restored", async (t) => {
+  const baseTransport = createMockGitHubSetupTransport();
+  let writeDenied = false;
+  const githubTransport = {
+    kind: "real",
+    calls: baseTransport.calls,
+    request: async (request) => {
+      if (writeDenied && request.endpointId === "push_initial_branch") {
+        throw new Error("write permission denied by GitHub");
+      }
+      return baseTransport.request(request);
+    },
+  };
+  const harness = createProgrammaticHarness(t, {
+    githubSetupTransport: githubTransport,
+    pluginFails: true,
+  });
+  const { awaiting, result: pluginBlocked } = await startAndResume(harness, {
+    domain: "Checkout Write Recheck",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-checkout-write",
+  });
+  assert.equal(pluginBlocked.status, "blocked");
+
+  harness.fakeClaude.setInstallFails(false);
+  writeDenied = true;
+  const denied = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(denied.status, "blocked");
+  assert.equal(denied.reason, "initial_branch_push_failed");
+  assert.match(denied.error.repair, /GitHub|push access/i);
+
+  writeDenied = false;
+  const repaired = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(repaired.status, "complete", JSON.stringify(repaired));
+});
+
+test("checkoutless repair performs a fresh dry-run push and recovers after auth is restored", async (t) => {
+  const writeControl = { denied: false };
+  const githubTransport = { ...createMockGitHubSetupTransport(), kind: "real" };
+  const harness = createProgrammaticHarness(t, {
+    githubSetupTransport: githubTransport,
+    pluginFails: true,
+    runGit: createCheckoutlessRunGit({ writeControl }),
+  });
+  const { awaiting, result: pluginBlocked } = await startAndResume(harness, {
+    domain: "Checkoutless Write Recheck",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-checkoutless-write",
+  });
+  assert.equal(pluginBlocked.status, "blocked");
+
+  harness.fakeClaude.setInstallFails(false);
+  writeControl.denied = true;
+  const denied = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(denied.status, "blocked");
+  assert.equal(denied.reason, "behavior_repo_write_verification_failed");
+  assert.match(denied.error.repair, /GitHub|write access/i);
+
+  writeControl.denied = false;
+  const repaired = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(repaired.status, "complete", JSON.stringify(repaired));
 });
 
 test("init_onboarding honors github_dry_run with the shared GitHub dry-run transport", async (t) => {
@@ -887,6 +1279,12 @@ for (const fixture of [
     assert.equal(result.ok, false);
     assert.equal(result.status, fixture.expected);
     assert.notEqual(result.steps[fixture.phase].ok, true);
+    assert.doesNotMatch(result.next_steps.join("\n"), /Open a new Claude Code session|gateway start/i);
+    if (fixture.phase === "runtime") {
+      assert.match(result.steps.runtime.detail, /runtime fixture failed/i);
+      assert.match(result.steps.runtime.repair, /runtime-smoke/i);
+      assert.match(result.next_steps.join("\n"), /runtime-smoke/i);
+    }
   });
 }
 
@@ -904,9 +1302,15 @@ function createProgrammaticHarness(
     statuses = undefined,
     authorizeOneShotAdmin = undefined,
     startOneShotAdminAuthorization = undefined,
+    startLinearBrowserAuthorization = undefined,
     adminGrantUseWindowMs = undefined,
     githubDiscoveryRepos = [],
     githubSetupTransport = { ...createMockGitHubSetupTransport(), kind: "real" },
+    runGit = createInMemoryRunGit(),
+    onSetupProgress = null,
+    credentialControl = null,
+    existingTeams = [],
+    teamCreateError = null,
   } = {},
 ) {
   const home = tempHome(t, "teami-mcp-init-full-");
@@ -915,6 +1319,8 @@ function createProgrammaticHarness(
     workspaceName: "Example Workspace",
     statuses,
   });
+  client.teams = existingTeams.map((team) => ({ ...team }));
+  client.teamCreateError = teamCreateError;
   const fakeClaude = createFakeClaudeRunCommand({
     alreadyInstalled: pluginAlreadyInstalled,
     installFails: pluginFails,
@@ -924,15 +1330,16 @@ function createProgrammaticHarness(
     repoRoot: home,
     home,
     config: testConfig(),
-    createLinearSetupAuth: createAuthorizingSetupAuthFactory(client),
-    startLinearBrowserAuthorization: createFakeAuthorizationSessionStarter(authorize, authorizationBrowser),
+    createLinearSetupAuth: createAuthorizingSetupAuthFactory(client, credentialControl),
+    startLinearBrowserAuthorization: startLinearBrowserAuthorization ||
+      createFakeAuthorizationSessionStarter(authorize, authorizationBrowser),
     startOneShotAdminAuthorization: startOneShotAdminAuthorization ||
       createFakeAdminAuthorizationSessionStarter(authorizeOneShotAdmin, adminAuthorizationBrowser),
     ...(adminGrantUseWindowMs === undefined ? {} : { adminGrantUseWindowMs }),
     ...(authorizeOneShotAdmin ? { authorizeOneShotAdmin } : {}),
     githubDiscoveryRunCommand: fakeGithubDiscoveryRunCommand({ repos: githubDiscoveryRepos }),
     ...(githubSetupTransport === null ? {} : { githubSetupTransport }),
-    runGit: createInMemoryRunGit(),
+    runGit,
     claudePluginRunCommand: fakeClaude.runCommand,
     ensurePhoenix: async () => phoenixOk
       ? ({ ok: true, appUrl: "http://127.0.0.1:6006" })
@@ -942,6 +1349,7 @@ function createProgrammaticHarness(
       ? ({ ok: true, results: [{ ok: true }] })
       : ({ ok: false, results: [], error: "runtime fixture failed" }),
     runSetupDoctor: async () => [{ name: "fixture health", ok: doctorOk }],
+    ...(onSetupProgress ? { onSetupProgress } : {}),
   });
   return {
     home,
@@ -1008,7 +1416,7 @@ function createFakeAdminAuthorizationSessionStarter(
   };
 }
 
-function createAuthorizingSetupAuthFactory(client) {
+function createAuthorizingSetupAuthFactory(client, credentialControl = null) {
   return ({
     credentialStore,
     allowBrowserAuth,
@@ -1021,6 +1429,22 @@ function createAuthorizingSetupAuthFactory(client) {
     fetchImpl,
     openBrowser,
   } = {}) => {
+    if (allowBrowserAuth === false && credentialControl?.revoked === true) {
+      const error = new Error("Linear GraphQL request failed with HTTP 401");
+      error.httpStatus = 401;
+      return {
+        client: {
+          async verifyAuth() {
+            throw error;
+          },
+        },
+        credentialStore,
+        tokenProvider: {
+          lastTokenSource: "stored",
+          clear: async () => credentialStore.deleteTokenSet?.(),
+        },
+      };
+    }
     let pendingTokenSet = null;
     const tokenProvider = {
       lastTokenSource: null,
@@ -1137,11 +1561,11 @@ function createFakeClaudeRunCommand({
         return ok(installed ? JSON.stringify([{
           id: "teami@teami",
           name: "teami",
-          version: "0.3.20",
+          version: PACKAGED_PLUGIN_VERSION,
           scope: "user",
           enabled: true,
           mcpServers: {
-            teami: { command: "npx", args: ["-y", "@shulmansj/teami@0.3.20", "mcp"] },
+            teami: { command: "npx", args: ["-y", `@shulmansj/teami@${PACKAGED_PLUGIN_VERSION}`, "mcp"] },
           },
         }]) : "[]");
       }
@@ -1181,11 +1605,6 @@ function fakeGithubDiscoveryRunCommand({ repos = [] } = {}) {
     }
     return { ok: true, status: 0, stdout: "", stderr: "" };
   };
-}
-
-function ghRepo(fullName, defaultBranch = "main") {
-  const [owner, repo] = fullName.split("/");
-  return { owner, repo, default_branch: defaultBranch };
 }
 
 function testConfig() {
@@ -1258,6 +1677,24 @@ function createInMemoryRunGit({ remotes = {} } = {}) {
   };
 }
 
+function createCheckoutlessRunGit({ writeControl = { denied: false } } = {}) {
+  const ok = (stdout = "") => ({ ok: true, status: 0, stdout, stderr: "" });
+  const fail = (stderr) => ({ ok: false, status: 128, stdout: "", stderr });
+  return (args) => {
+    if (args[0] === "remote" && args[1] === "-v") {
+      return fail("fatal: not a git repository");
+    }
+    if (args[0] === "rev-parse") return ok("abc123\n");
+    if (args[0] === "ls-files" && args[1] === "-z") return ok("");
+    if (args[0] === "push" && args.includes("--dry-run") && writeControl.denied) {
+      return fail("write permission denied by GitHub");
+    }
+    if (["init", "add", "commit", "clone", "push", "ls-remote"].includes(args[0]) || args.includes("commit")) return ok();
+    if (args[0] === "remote" && args[1] === "add") return ok();
+    return fail(`unexpected git command: ${args.join(" ")}`);
+  };
+}
+
 function defaultWorkflowStates() {
   return [
     { id: "state-backlog", name: "Backlog", type: "backlog", position: 10 },
@@ -1297,6 +1734,7 @@ class MemoryLinearClient {
     workspaceName = "Example Workspace",
     viewerId = "app-viewer-1",
     viewerName = "Teami App",
+    teamCreateError = null,
   } = {}) {
     this.teams = [];
     this.projectLabels = [];
@@ -1319,6 +1757,7 @@ class MemoryLinearClient {
     this.workspaceName = workspaceName;
     this.viewerId = viewerId;
     this.viewerName = viewerName;
+    this.teamCreateError = teamCreateError;
   }
 
   async verifyAuth() {
@@ -1334,6 +1773,7 @@ class MemoryLinearClient {
   }
 
   async createTeam(input) {
+    if (this.teamCreateError) throw this.teamCreateError;
     const team = {
       id: `team-${this.teams.length + 1}`,
       ...input,

@@ -51,6 +51,6 @@ test("Claude plugin bundles the existing plan skill as /teami:plan", () => {
   assert.equal(manifest.name, "teami");
   assert.match(skill, /^name:\s*plan$/m);
   assert.match(skill, /^description:\s*Guide a Teami adopter through a \/plan session/m);
-  assert.match(skill, /npx -y @shulmansj\/teami@release init/);
+  assert.match(skill, /npx @shulmansj\/teami init/);
   assert.doesNotMatch(skill, /`teami init`/);
 });

@@ -20,12 +20,13 @@ const PROPOSAL_HEAD = "teami/promotion/x/abc123abc123";
 // module must have NO merge or mark-ready codepath AT ALL.
 // ---------------------------------------------------------------------------
 
-test("endpoint allowlist contains exactly the five PR endpoints and no merge-shaped endpoint", () => {
+test("endpoint allowlist contains the five PR endpoints plus repository identity read and no merge-shaped endpoint", () => {
   assert.deepEqual(
     GITHUB_PROMOTION_ENDPOINT_ALLOWLIST.map((endpoint) => endpoint.id).sort(),
     [
       "create_pull_request",
       "get_pull_request",
+      "get_repository_identity",
       "list_closed_pull_requests",
       "list_open_pull_requests",
       "update_pull_request_body",
@@ -38,6 +39,45 @@ test("endpoint allowlist contains exactly the five PR endpoints and no merge-sha
     // no PUT exists anywhere in the allowlist.
     assert.notEqual(endpoint.method, "PUT");
   }
+});
+
+test("write calls revalidate the immutable repository ID before mutation", async () => {
+  const transport = createMockGitHubTransport({ repositoryId: "repo-live" });
+  const client = createGitHubPromotionClient({
+    transport,
+    repo: REPO,
+    expectedRepoId: "repo-approved",
+  });
+  await assert.rejects(
+    client.createPullRequest({ title: "t", head: PROPOSAL_HEAD, base: "main", body: "b" }),
+    /github_workspace_repo_identity_changed/,
+  );
+  assert.deepEqual(transport.calls.map((call) => call.endpointId), ["get_repository_identity"]);
+});
+
+test("write calls refuse a public repository even when its immutable ID still matches", async () => {
+  const transport = createMockGitHubTransport({
+    repositoryId: "repo-approved",
+    repositoryPrivate: false,
+  });
+  const client = createGitHubPromotionClient({
+    transport,
+    repo: REPO,
+    expectedRepoId: "repo-approved",
+  });
+
+  await assert.rejects(
+    client.createPullRequest({ title: "t", head: PROPOSAL_HEAD, base: "main", body: "b" }),
+    /github_workspace_repo_not_private/,
+  );
+  await assert.rejects(
+    client.updatePullRequestBody({ number: 7, body: "b" }),
+    /github_workspace_repo_not_private/,
+  );
+  assert.deepEqual(
+    transport.calls.map((call) => call.endpointId),
+    ["get_repository_identity", "get_repository_identity"],
+  );
 });
 
 test("the client object exposes no merge-shaped method and the module exports none either", () => {
