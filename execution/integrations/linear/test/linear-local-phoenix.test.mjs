@@ -324,7 +324,10 @@ test("managed Phoenix fetches the carried runtime without system Python, venv, p
   assert.equal(commands[0].command.includes("phoenix-venv"), false);
   assert.notEqual(commands[0].command, "python");
   assert.notEqual(commands[0].command, "python3");
-  assert.deepEqual(commands[0].args, ["-c", "import phoenix"]);
+  assert.deepEqual(commands[0].args, [
+    "-c",
+    "import importlib.metadata as m; import phoenix; assert m.version('arize-phoenix') == '14.13.0'",
+  ]);
   assert.equal(commands[0].args.some((arg) => /venv|pip/i.test(arg)), false);
   assert.equal(commands[0].options.env.PATH, "fixture-path");
   assert.equal(commands[0].options.env.Path, "fixture-path-win");
@@ -333,7 +336,15 @@ test("managed Phoenix fetches the carried runtime without system Python, venv, p
   assert.equal(spawns[0].command.startsWith(path.join(expectedHomePaths.runtimeDir, "current")), true);
   assert.equal(spawns[0].command.includes("phoenix-venv"), false);
   assert.notEqual(spawns[0].command, "phoenix");
-  assert.deepEqual(spawns[0].args, ["serve", "--host", "127.0.0.1", "--port", "6006"]);
+  assert.deepEqual(spawns[0].args, [
+    "-m",
+    "phoenix.server.main",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "6006",
+  ]);
   assert.equal(spawns[0].args.some((arg) => /venv|pip/i.test(arg)), false);
   assert.equal(spawns[0].options.cwd, expectedHomePaths.phoenixDataDir);
   assert.equal(spawns[0].options.windowsHide, true);

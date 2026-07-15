@@ -28,24 +28,24 @@ test("runtime manifest matches Contract 3 and resolves by platform-arch key", ()
 
   const expected = {
     "darwin-arm64": {
-      asset: "cpython-3.12.13+20260623-aarch64-apple-darwin-install_only.tar.gz",
-      size_bytes: 25159977,
-      sha256: "3724aa4dafb5f7b6c2cf98e89914e4248dc6bd2fe40407df4a2d73de99615f16",
+      asset: "teami-phoenix-runtime-cpython-3.12.13+20260623-darwin-arm64.tar.gz",
+      size_bytes: 224776165,
+      sha256: "92a400cfae52b7409be368bcbe81281ac9d410dbc43440a898182639e02f503c",
     },
     "darwin-x64": {
-      asset: "cpython-3.12.13+20260623-x86_64-apple-darwin-install_only.tar.gz",
-      size_bytes: 24829196,
-      sha256: "7c57fdd1fa675190093700eb0d8e7117e1f9eae7c30a46dea5f8d5266bcfc791",
+      asset: "teami-phoenix-runtime-cpython-3.12.13+20260623-darwin-x64.tar.gz",
+      size_bytes: 238648023,
+      sha256: "751d3d92982f79dd8471158b24bf8cbc8d99be009f774e4a315d597a2016ee2f",
     },
     "win32-x64": {
-      asset: "cpython-3.12.13+20260623-x86_64-pc-windows-msvc-install_only.tar.gz",
-      size_bytes: 46013305,
-      sha256: "c6af85bb83d5158c9ff71f50dfad467853d1cd236f932b144e87e26e2ea2a83e",
+      asset: "teami-phoenix-runtime-cpython-3.12.13+20260623-win32-x64.tar.gz",
+      size_bytes: 245367107,
+      sha256: "8f2d0d193a412a86fdc3fe052fdea7e971621e6f996752a698d6e43e0a1c0853",
     },
   };
 
   for (const [platformKey, entry] of Object.entries(manifest.platforms)) {
-    assert.equal(entry.source_commit, "20260623");
+    assert.equal(entry.source_commit, "01e476d78f3c0472c95a91cbb947be890bcd6570");
     assert.equal(entry.size_bytes, expected[platformKey].size_bytes);
     assert.equal(entry.sha256, expected[platformKey].sha256);
     assert.equal(entry.asset_url.includes("/releases/expanded_assets/"), false);

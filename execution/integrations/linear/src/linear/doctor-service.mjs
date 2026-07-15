@@ -343,6 +343,13 @@ export async function doctorMergePathGitHubCheck({
 } = {}) {
   if (!repoIdentity) {
     const missingReason = repoIdentityError || "no git_repo resource is bound to this domain";
+    if (repoIdentityError === "review_git_repo_resource_missing") {
+      return doctorCheck({
+        name: MERGE_PATH_GITHUB_CHECK_NAME,
+        state: "ok",
+        message: "No product repository is connected, so code merge checks are not applicable.",
+      });
+    }
     return doctorCheck({
       name: MERGE_PATH_GITHUB_CHECK_NAME,
       state: "warn",

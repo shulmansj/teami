@@ -1,6 +1,7 @@
 import path from "node:path";
 
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS = Object.freeze([250, 750]);
 
 export async function readClaudePluginHealth({
   repoRoot = process.cwd(),
@@ -19,7 +20,7 @@ export async function readClaudePluginHealth({
   });
   if (!marketplace.ok) return marketplace;
 
-  const listed = await runClaudePluginCommand({
+  const listed = await runClaudePluginReadCommand({
     runCommand,
     repoRoot,
     args: ["plugin", "list", "--json"],
@@ -89,7 +90,7 @@ export async function ensureTrustedClaudeMarketplace({
 }
 
 async function readTrustedMarketplace({ repoRoot, runCommand, marketplaceName, marketplaceSource } = {}) {
-  const listed = await runClaudePluginCommand({
+  const listed = await runClaudePluginReadCommand({
     runCommand,
     repoRoot,
     args: ["plugin", "marketplace", "list", "--json"],
@@ -208,6 +209,16 @@ async function runClaudePluginCommand({ runCommand, repoRoot, args } = {}) {
   } catch (error) {
     return { ok: false, status: 1, stdout: "", stderr: error.message };
   }
+}
+
+async function runClaudePluginReadCommand(options = {}) {
+  let result = await runClaudePluginCommand(options);
+  for (const delayMs of CLAUDE_PLUGIN_READ_RETRY_DELAYS_MS) {
+    if (result.ok) return result;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    result = await runClaudePluginCommand(options);
+  }
+  return result;
 }
 
 function failure(reason, detail = "") {
