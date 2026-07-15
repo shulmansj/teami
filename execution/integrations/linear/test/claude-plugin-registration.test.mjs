@@ -50,6 +50,7 @@ test("Claude plugin registration installs once and is a no-op on re-run", async 
   assert.equal(first.status, "installed");
   assert.equal(second.ok, true);
   assert.equal(second.status, "already_installed");
+  assert.equal(second.version, PACKAGED_PLUGIN_VERSION);
   const commands = fakeClaude.calls.map((call) => call.args.join(" "));
   assert.ok(commands.includes(`plugin marketplace add ${repoRoot} --scope user`));
   assert.equal(commands.filter((command) => command === "plugin install teami@teami --scope user").length, 1);
