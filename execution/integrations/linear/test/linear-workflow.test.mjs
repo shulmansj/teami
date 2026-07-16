@@ -111,6 +111,7 @@ import {
 } from "../../../engine/trace-contract.mjs";
 import { finishWakeFromRunnerResult, runDecompositionOrchestrator } from "../src/trigger-runner.mjs";
 import { acquireGatewayLock } from "../src/gateway-loop.mjs";
+import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
@@ -1309,11 +1310,25 @@ test("resolveLinearShape tolerates unprovisioned optional work_type labels witho
 });
 
 test("Teami project MCP tools create Backlog project, write body, and require confirm before Planned", async () => {
+  registerGitRepoResourceKind();
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   const initialized = await initLinear({ client, config });
   const cache = mcpTeamCache(initialized.cache);
-  const registry = mcpTeamRegistry({ config, client });
+  const registry = mcpTeamRegistry({
+    config,
+    client,
+    resources: [{
+      id: "git_repo:shulmansj/alexandria",
+      kind: "git_repo",
+      role: "primary",
+      binding: {
+        owner: "shulmansj",
+        repo: "alexandria",
+        default_branch: "main",
+      },
+    }],
+  });
   const updateInputs = [];
   const originalUpdateProject = client.updateProject.bind(client);
   client.updateProject = async (projectId, input) => {
@@ -1326,6 +1341,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     registry,
     readCache: () => cache,
     linearClient: client,
+    packageVersion: "9.8.7-test.1",
   });
   try {
     const listed = await mcp.client.listTools();
@@ -1333,13 +1349,40 @@ test("Teami project MCP tools create Backlog project, write body, and require co
       listed.tools.map((tool) => tool.name).sort(),
       [...TEAMI_PROJECT_MCP_TOOL_NAMES].sort(),
     );
+    const checkTool = listed.tools.find((tool) => tool.name === "check_team_context");
+    assert.equal(checkTool.title, "Check Team and approved planning context");
+    assert.match(checkTool.description, /^Read-only\./);
+    assert.deepEqual(checkTool.annotations, {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
 
     const resolved = await mcp.client.callTool({
-      name: "resolve_team",
+      name: "check_team_context",
       arguments: { team: "support-ops" },
     });
+    assert.equal(resolved.structuredContent.read_only, true);
     assert.equal(resolved.structuredContent.team.team_ref, "support-ops");
+    assert.equal(resolved.structuredContent.team.workspace_name, client.workspaceName);
     assert.equal(resolved.structuredContent.team.team_id, "team-1");
+    assert.deepEqual(resolved.structuredContent.approved_repositories, [{
+      resource_id: "git_repo:shulmansj/alexandria",
+      owner: "shulmansj",
+      repo: "alexandria",
+      default_branch: "main",
+    }]);
+    assert.equal(
+      resolved.structuredContent.summary,
+      `Team "${config.linear.team.name}" in workspace "${client.workspaceName}"; approved repositories: shulmansj/alexandria.`,
+    );
+    assert.deepEqual(resolved.structuredContent.listener, {
+      build: "9.8.7-test.1",
+      start_command: "npx -y @shulmansj/teami@9.8.7-test.1 gateway start",
+      status_command: "npx -y @shulmansj/teami@9.8.7-test.1 gateway status",
+      lifecycle: "foreground",
+    });
 
     const created = await mcp.client.callTool({
       name: "project_create",
@@ -1457,6 +1500,51 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     assert.equal(moved.structuredContent.status.id, "status-planned");
     assert.equal(client.projects[0].status.id, "status-planned");
     assert.equal(updateInputs.some((event) => event.input.statusId === "status-planned"), true);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("Team context check asks the human to choose when multiple active Teams could apply", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  const registry = mcpTeamRegistry({ config, client });
+  registry.teams.push(makeTeamRecord({
+    teamRef: "alexandria",
+    status: "active",
+    workspaceId: "workspace-2",
+    workspaceName: "Knowledge Products",
+    teamId: "team-2",
+    teamKey: "ALX",
+    teamName: "Alexandria",
+    webhookId: "webhook-team-2",
+  }));
+  const mcp = await connectedProjectMcpClient({
+    config,
+    registry,
+    readCache: () => mcpTeamCache(initialized.cache),
+    linearClient: client,
+  });
+  try {
+    const checked = await mcp.client.callTool({
+      name: "check_team_context",
+      arguments: {},
+    });
+
+    assert.equal(checked.isError, true);
+    assert.equal(checked.structuredContent.error.code, "team_required");
+    assert.match(checked.structuredContent.error.message, /ask the human to choose/i);
+    assert.deepEqual(
+      checked.structuredContent.error.candidates.map((candidate) => ({
+        team: candidate.teamName,
+        workspace: candidate.workspaceName,
+      })),
+      [
+        { team: config.linear.team.name, workspace: client.workspaceName },
+        { team: "Alexandria", workspace: "Knowledge Products" },
+      ],
+    );
   } finally {
     await mcp.close();
   }
@@ -8146,7 +8234,7 @@ class InProcessMcpTransport {
   }
 }
 
-function mcpTeamRegistry({ config, client }) {
+function mcpTeamRegistry({ config, client, resources = [] }) {
   return {
     schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
     teams: [
@@ -8159,6 +8247,7 @@ function mcpTeamRegistry({ config, client }) {
         teamKey: config.linear.team.key,
         teamName: config.linear.team.name,
         webhookId: "webhook-team-1",
+        resources,
       }),
     ],
   };

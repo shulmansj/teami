@@ -129,6 +129,23 @@ test("published plugin and runtime repair guidance never requires a bare Teami c
   assert.match(setupCommand, /rerun \$\{formatCommand\("init"\)\}/);
 });
 
+test("planning explains the read-only Team check and confirms its context", () => {
+  const planSkill = readText("skills/plan/SKILL.md");
+  const agentGuide = readText("AGENTS.md");
+  const claudeGuide = readText("CLAUDE.md");
+
+  assert.match(planSkill, /This only reads your local Teami setup; it won't create or change anything\./);
+  assert.match(planSkill, /choose Allow once for this session or Always allow to skip this specific read-only prompt in future\./);
+  assert.match(planSkill, /`check_team_context`/);
+  assert.doesNotMatch(planSkill, /`resolve_team`/);
+  assert.match(planSkill, /Never guess silently\./);
+  assert.match(planSkill, /I'm planning in Team \[team name\] in \[workspace name\], using approved repositories/);
+  assert.match(planSkill, /not proof that every repository's contents are already loaded/);
+  assert.match(agentGuide, /`check_team_context` to confirm the target workspace\/Team and its approved\s+repositories/);
+  assert.match(claudeGuide, /`init_onboarding`, `check_team_context`/);
+  assert.doesNotMatch(`${agentGuide}\n${claudeGuide}`, /`resolve_team`/);
+});
+
 function readText(relPath) {
   return fs.readFileSync(path.join(repoRoot, relPath), "utf8");
 }

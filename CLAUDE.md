@@ -21,7 +21,7 @@ The essentials, so you act correctly even before reading the rest:
 - You converse, then run Teami's deterministic surfaces. You hold no credential
   and perform no privileged action yourself. Browser OAuth is the human approval
   gate.
-- Daily project operations use MCP tools: `init_onboarding`, `resolve_team`,
+- Daily project operations use MCP tools: `init_onboarding`, `check_team_context`,
   `project_create`, `project_write_body`, and `project_move_status`.
 - The thin CLI remains for setup and local operation: `teami init`,
   `teami doctor`, and `teami gateway start` (with `teami gateway status` as a

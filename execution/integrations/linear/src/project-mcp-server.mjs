@@ -96,15 +96,21 @@ export function registerTeamiProjectTools(server, actions, z) {
     initOnboardingToolCallback(server, actions.init_onboarding),
   );
   server.registerTool(
-    "resolve_team",
+    "check_team_context",
     {
-      title: "Resolve Teami Team context",
-      description: "Resolve the requested or unambiguous active Teami Team and return its Linear identity and approved context without exposing credentials.",
+      title: "Check Team and approved planning context",
+      description: "Read-only. Identify which Teami Team applies and return its Linear workspace, Team, and approved repositories. Does not create, edit, or grant access.",
       inputSchema: {
         team: teamField.describe("Optional local Team reference (team_ref) when multiple active Teams exist."),
       },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    toolCallback(actions.resolve_team),
+    toolCallback(actions.check_team_context),
   );
 
   server.registerTool(

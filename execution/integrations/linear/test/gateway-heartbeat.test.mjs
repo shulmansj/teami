@@ -83,3 +83,28 @@ test("the gateway loop heartbeat emits durable, animation-free lines when non-TT
   assert.match(out, /Events:\s+7 total; 1 recent retained; 6 older dropped/, "live loop counts disclose bounded retention");
   assert.doesNotMatch(out, /10000ms/, "the machine-speak interval is gone");
 });
+
+test("an unrelated gateway startup failure does not tell the adopter to re-run setup", async () => {
+  const repoRoot = activeRepo();
+  const { output, text } = capture();
+  const savedExit = process.exitCode;
+
+  try {
+    await runGatewayCommand({
+      context: { config: { poll: { interval_ms: 10_000 } }, repoRoot, output },
+      command: "gateway",
+      args: [],
+      loop: async () => {
+        throw new Error("simulated_listener_transport_failure");
+      },
+    });
+  } finally {
+    process.exitCode = savedExit;
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  }
+
+  const out = text();
+  assert.match(out, /simulated_listener_transport_failure/);
+  assert.match(out, /gateway status/);
+  assert.doesNotMatch(out, /teami(?:\.cmd)? init|run .* init/i);
+});
