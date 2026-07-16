@@ -25,26 +25,26 @@ test("normalizeCommandInvocation maps noun-verb commands", () => {
   assertNormalization("gateway", [], { command: "gateway", args: [] });
   assertNormalization("gateway", ["--verbose"], { command: "gateway", args: ["--verbose"] });
   assertNormalization("gateway", ["frobnicate"], { command: "gateway", args: ["frobnicate"] });
-  assertNormalization("domain", ["add"], { command: "domain:add", args: [] });
-  assertNormalization("domain", ["--verbose", "add"], { command: "domain", args: ["--verbose", "add"] });
-  assertNormalization("domain", ["add", "--verbose"], { command: "domain:add", args: ["--verbose"] });
-  assertNormalization("domain", ["add", "--domain", "X"], { command: "domain:add", args: ["--domain", "X"] });
-  assertNormalization("domain", ["show", "main"], { command: "domain:show", args: ["main"] });
-  assertNormalization("domain", ["grant", "main", "--repo", "acme/app"], {
-    command: "domain:grant",
+  assertNormalization("team", ["add"], { command: "team:add", args: [] });
+  assertNormalization("team", ["--verbose", "add"], { command: "team", args: ["--verbose", "add"] });
+  assertNormalization("team", ["add", "--verbose"], { command: "team:add", args: ["--verbose"] });
+  assertNormalization("team", ["add", "--team", "X"], { command: "team:add", args: ["--team", "X"] });
+  assertNormalization("team", ["show", "main"], { command: "team:show", args: ["main"] });
+  assertNormalization("team", ["grant", "main", "--repo", "acme/app"], {
+    command: "team:grant",
     args: ["main", "--repo", "acme/app"],
   });
-  assertNormalization("domain", ["revoke", "main", "--repo", "acme/app"], {
-    command: "domain:revoke",
+  assertNormalization("team", ["revoke", "main", "--repo", "acme/app"], {
+    command: "team:revoke",
     args: ["main", "--repo", "acme/app"],
   });
   const retiredRepoPathVerb = ["bind", "repo"].join("-");
-  assertNormalization("domain", [retiredRepoPathVerb, "--domain", "X", "--path", "Y"], {
-    command: "domain",
-    args: [retiredRepoPathVerb, "--domain", "X", "--path", "Y"],
+  assertNormalization("team", [retiredRepoPathVerb, "--team", "X", "--path", "Y"], {
+    command: "team",
+    args: [retiredRepoPathVerb, "--team", "X", "--path", "Y"],
   });
-  assert.equal(COMMAND_INDEX.has(`domain:${retiredRepoPathVerb}`), false);
-  assertNormalization("domain", ["frobnicate"], { command: "domain", args: ["frobnicate"] });
+  assert.equal(COMMAND_INDEX.has(`team:${retiredRepoPathVerb}`), false);
+  assertNormalization("team", ["frobnicate"], { command: "team", args: ["frobnicate"] });
   assertNormalization("execution", ["run", "--issue", "ISS-1"], {
     command: "execution",
     args: ["run", "--issue", "ISS-1"],
@@ -69,7 +69,7 @@ test("normalizeCommandInvocation maps noun-verb commands", () => {
   assertNormalization("phoenix", ["frobnicate"], { command: "phoenix", args: ["frobnicate"] });
   assertNormalization("phoenix", ["start"], { command: "phoenix", args: ["start"] });
   assertNormalization("doctor", [], { command: "doctor", args: [] });
-  assertNormalization("domain:add", ["--domain", "X"], { command: "domain:add", args: ["--domain", "X"] });
+  assertNormalization("team:add", ["--team", "X"], { command: "team:add", args: ["--team", "X"] });
 });
 
 test("CLI noun-verb commands dispatch to shipped command paths", async (t) => {
@@ -77,25 +77,25 @@ test("CLI noun-verb commands dispatch to shipped command paths", async (t) => {
     {
       name: "gateway start",
       tokens: ["gateway", "start"],
-      expected: /Gateway could not start[\s\S]*no_active_domains/,
+      expected: /Gateway could not start[\s\S]*no_active_teams/,
       unexpected: /Unknown gateway subcommand/,
     },
     {
       name: "gateway status",
       tokens: ["gateway", "status"],
-      // Adopter `gateway status` is now read-only: no poll, so no "could not be read"/no_active_domains.
+      // Adopter `gateway status` is now read-only: no poll, so no "could not be read"/no_active_teams.
       expected: /gateway status[\s\S]*Not set up yet/,
-      unexpected: /Gateway status could not be read|no_active_domains/,
+      unexpected: /Gateway status could not be read|no_active_teams/,
     },
     {
-      name: "domain add",
-      tokens: ["domain", "add", "--workspace"],
+      name: "team add",
+      tokens: ["team", "add", "--workspace"],
       expected: /Usage: --workspace requires a workspace name or id/,
     },
     {
-      name: "domain show",
-      tokens: ["domain", "show", "main"],
-      expected: /domain show[\s\S]*Domain show failed[\s\S]*domain_registry_missing/,
+      name: "team show",
+      tokens: ["team", "show", "main"],
+      expected: /team show[\s\S]*Team show failed[\s\S]*team_registry_missing/,
     },
     {
       name: "unshipped execution run",
@@ -105,7 +105,7 @@ test("CLI noun-verb commands dispatch to shipped command paths", async (t) => {
     {
       name: "review run",
       tokens: ["review", "run", "--issue", "ISS-1"],
-      expected: /review run[\s\S]*Review run could not start[\s\S]*no_active_domains/,
+      expected: /review run[\s\S]*Review run could not start[\s\S]*no_active_teams/,
     },
     {
       name: "phoenix open",

@@ -52,7 +52,7 @@ export async function runTeamiProjectMcpStdioServer(options = {}) {
 }
 
 export function registerTeamiProjectTools(server, actions, z) {
-  const domainField = z.string().min(1).optional();
+  const teamField = z.string().min(1).optional();
   const projectIdField = z.string().min(1);
   const planningSlotValueField = z.union([z.string(), z.array(z.string())]);
   const planningSlotsField = z.object(
@@ -75,7 +75,7 @@ export function registerTeamiProjectTools(server, actions, z) {
       description: "Run full Teami setup; onboarding leaves every product repository disconnected.",
       inputSchema: {
         setup_id: z.string().uuid().optional().describe("Resume or poll an in-process setup authorization session."),
-        domain: z.string().min(1).optional().describe("Advanced override. Fresh setup uses the single default Teami team."),
+        team: z.string().min(1).optional().describe("Advanced override. Fresh setup uses the single default Teami team."),
         workspace: z.string().min(1).optional().describe("Expected Linear workspace name or id."),
         repo_intent: z.object({ mode: z.literal("non_code") }).optional()
           .describe("Compatibility field. Omit it; onboarding leaves every product repository disconnected."),
@@ -96,24 +96,24 @@ export function registerTeamiProjectTools(server, actions, z) {
     initOnboardingToolCallback(server, actions.init_onboarding),
   );
   server.registerTool(
-    "resolve_domain",
+    "resolve_team",
     {
-      title: "Resolve Teami domain",
-      description: "Resolve the active local Teami domain without exposing credentials.",
+      title: "Resolve Teami Team context",
+      description: "Resolve the requested or unambiguous active Teami Team and return its Linear identity and approved context without exposing credentials.",
       inputSchema: {
-        domain: domainField.describe("Optional domain id when multiple active domains exist."),
+        team: teamField.describe("Optional local Team reference (team_ref) when multiple active Teams exist."),
       },
     },
-    toolCallback(actions.resolve_domain),
+    toolCallback(actions.resolve_team),
   );
 
   server.registerTool(
     "project_create",
     {
       title: "Create Linear planning project",
-      description: "Create a bare Linear project in Backlog for the resolved Teami domain team.",
+      description: "Create a bare Linear project in Backlog for the resolved Teami Team.",
       inputSchema: {
-        domain: domainField.describe("Optional domain id when multiple active domains exist."),
+        team: teamField.describe("Optional local Team reference (team_ref) when multiple active Teams exist."),
         name: z.string().min(1).describe("Project name."),
         description: z.string().min(1).optional().describe("One-line project summary."),
       },
@@ -127,7 +127,7 @@ export function registerTeamiProjectTools(server, actions, z) {
       title: "Write Linear project body",
       description: "Write the planning body to a Linear project content field.",
       inputSchema: {
-        domain: domainField.describe("Optional domain id when multiple active domains exist."),
+        team: teamField.describe("Optional local Team reference (team_ref) when multiple active Teams exist."),
         project_id: projectIdField.describe("Linear project id."),
         content: z.string().min(1).optional().describe("Legacy complete markdown body to store as project content."),
         slots: planningSlotsField
@@ -144,7 +144,7 @@ export function registerTeamiProjectTools(server, actions, z) {
       title: "Move Linear project to Planned",
       description: "Move a project to the configured Planned status. Requires confirm: true.",
       inputSchema: {
-        domain: domainField.describe("Optional domain id when multiple active domains exist."),
+        team: teamField.describe("Optional local Team reference (team_ref) when multiple active Teams exist."),
         project_id: projectIdField.describe("Linear project id."),
         confirm: z.literal(true).describe("Must be true only after explicit human approval."),
         planning_telemetry: planningTelemetryField

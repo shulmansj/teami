@@ -62,7 +62,7 @@ function commitArtifact(runId, overrides = {}) {
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
     kind: "commit",
     run_id: runId,
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     terminal_output: {
@@ -119,7 +119,7 @@ function setUpPromotableRun({ repoRoot, runId, artifact = commitArtifact(runId) 
   recordTraceStatus({
     repoRoot,
     runId,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "proj-1",
@@ -132,7 +132,7 @@ function setUpPromotableRun({ repoRoot, runId, artifact = commitArtifact(runId) 
   captureProjectSnapshot({
     repoRoot,
     runId,
-    domainId: artifact.domain_id,
+    teamRef: artifact.team_ref,
     project: sampleProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T00:00:01.000Z",
@@ -284,7 +284,7 @@ test("D-capture resolves HUMAN annotations at save time and does not rewrite the
   assert.equal(second.state, "duplicate_changed_content");
   assert.notEqual(second.new_content_hash, first.example_content_hash);
   const receipt = JSON.parse(fs.readFileSync(
-    promotionReceiptPath({ repoRoot, runId, domainId: "support-ops" }),
+    promotionReceiptPath({ repoRoot, runId, teamRef: "support-ops" }),
     "utf8",
   ));
   assert.equal(receipt.datasets[0].promotions.length, 1);
@@ -316,5 +316,5 @@ test("D-capture refuses non-HUMAN annotations as tuning labels", async () => {
   assert.equal(result.state, "cannot_promote");
   assert.equal(result.reason, "human_fixture_label_requires_human_annotation");
   assert.equal(calls.some((call) => call.url.includes("/v1/datasets/upload")), false);
-  assert.equal(fs.existsSync(promotionReceiptPath({ repoRoot, runId, domainId: "support-ops" })), false);
+  assert.equal(fs.existsSync(promotionReceiptPath({ repoRoot, runId, teamRef: "support-ops" })), false);
 });

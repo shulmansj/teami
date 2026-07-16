@@ -28,8 +28,8 @@ test("never retokenizes the middle: an interleaved global-flag token passes thro
 });
 
 test("returns args unchanged when there are no global output flags", () => {
-  const result = extractCliOutputFlags(["--domain", "d1"]);
-  assert.deepEqual(result.args, ["--domain", "d1"]);
+  const result = extractCliOutputFlags(["--team", "d1"]);
+  assert.deepEqual(result.args, ["--team", "d1"]);
   assert.equal(result.verbose, false);
   assert.equal(result.noColor, false);
   assert.equal(result.ascii, false);

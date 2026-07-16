@@ -388,7 +388,7 @@ const BASELINE_ALLOWLIST = [
   "execution/integrations/linear/test/linear-workflow.test.mjs ::: PHASE_PACKET_SCHEMA_VERSION ::: schema_version: PHASE_PACKET_SCHEMA_VERSION,",
   "execution/integrations/linear/test/linear-workflow.test.mjs ::: phase_packets ::: phase_packets: [pmContinue(\"run-checkpoint-only\")],",
   "execution/integrations/linear/test/linear-workflow.test.mjs ::: phase_packets ::: phase_packets: [pmContinue(\"run-atomic\")],",
-  "execution/integrations/linear/test/linear-workflow.test.mjs ::: phase_packets ::: phase_packets: [pmContinue(\"run-domain-artifact\")],",
+  "execution/integrations/linear/test/linear-workflow.test.mjs ::: phase_packets ::: phase_packets: [pmContinue(\"run-team-artifact\")],",
   "execution/integrations/linear/test/linear-workflow.test.mjs ::: phase-packet ::: path.join(repoRoot, \"execution/integrations/linear/schemas/phase-packet.schema.json\"),",
   "execution/integrations/linear/test/phoenix-experiment.test.mjs ::: accepted_packets ::: accepted_packets: [{}, {}, {}, {}],",
   "execution/integrations/linear/test/phoenix-experiment.test.mjs ::: phase_packets ::: phase_packets: [],",

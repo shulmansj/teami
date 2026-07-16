@@ -893,7 +893,7 @@ export async function runDecompositionEvalTask({
   variantId = null,
   emitChecks = false,
   judge = false,
-  domainContext = null,
+  teamContext = null,
   evalRunId = null,
   evalRunStoreDir = null,
   liveRunStoreDir = null,
@@ -994,10 +994,10 @@ export async function runDecompositionEvalTask({
         wake: pseudoWake,
         sourceEvent: null,
         runId: resolvedEvalRunId,
-        workspaceId: domainContext?.linear?.workspaceId || null,
+        workspaceId: teamContext?.linear?.workspaceId || null,
         runnerId: "local_eval_cli",
         runnerVersion: "eval",
-        domainContext,
+        teamContext,
       }),
     ).catch((error) => ({ ok: false, traceId: null, status: "trace_unavailable", reason: error.message }));
 
@@ -1023,7 +1023,7 @@ export async function runDecompositionEvalTask({
         home,
         runStoreDir: evalArtifactDir,
         traceId: session?.traceId || null,
-        domainContext,
+        teamContext,
       });
     } catch (error) {
       result = {

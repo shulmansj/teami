@@ -14,13 +14,13 @@ import {
 import { resolveRoleRuntimeAssignments } from "../../runtime-adapters.mjs";
 import {
   knownTraceAttributes,
-  resolveDomainTrace,
+  resolveTeamTrace,
 } from "../../linear/matching-utils.mjs";
 import { resolveLinearShape } from "../../linear/shape-resolver.mjs";
 import { evaluateEligibilityFromContext } from "./eligibility.mjs";
 import {
   maybeApplyPersistedArtifact,
-  validateReplayArtifactDomain,
+  validateReplayArtifactTeam,
   validateReplayArtifactProject,
 } from "./artifact-apply.mjs";
 import { canApplyTerminal } from "../../../../../engine/terminal-gate.mjs";
@@ -48,22 +48,22 @@ export async function runDecomposition({
   runtimeEvidence = {},
   retryCommit = false,
   traceContext = {},
-  domainContext = null,
+  teamContext = null,
   evalMode = false,
   onBeforeLinearMutation = null,
   qualityJudge = false,
   acceptedRefs = null,
   loadJudgeContractFn = null,
 } = {}) {
-  const domainTrace = resolveDomainTrace({ domainContext, traceContext, cache, repoRoot });
+  const teamTrace = resolveTeamTrace({ teamContext, traceContext, cache, repoRoot });
   const trace = createTrace(decompositionDefinition.trace_descriptor.trace_name, knownTraceAttributes({
     "workflow.name": "project_decomposition",
     "workflow.version": DECOMPOSITION_FUNCTION_VERSION,
-    "teami.domain_id": domainTrace.domain_id,
-    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
+    "teami.team_ref": teamTrace.team_ref,
+    "teami.behavior_repo_id": teamTrace.behavior_repo_id,
     behavior_config_commit: config?.behavior_config_commit || null,
-    "linear.workspace_id": domainTrace.workspace_id,
-    "linear.team_id": domainTrace.team_id,
+    "linear.workspace_id": teamTrace.workspace_id,
+    "linear.team_id": teamTrace.team_id,
     "linear.project_id": projectId,
     linear_project_id: projectId,
     run_id: runId || runResult?.terminal_output?.run_id || null,
@@ -71,10 +71,10 @@ export async function runDecomposition({
     wake_id: traceContext.wake_id || null,
     trace_id: traceContext.trace_id || null,
     attempt: traceContext.attempt || null,
-    workspace_id: domainTrace.workspace_id,
-    domain_id: domainTrace.domain_id,
-    team_id: domainTrace.team_id,
-    behavior_repo_id: domainTrace.behavior_repo_id,
+    workspace_id: teamTrace.workspace_id,
+    team_ref: teamTrace.team_ref,
+    team_id: teamTrace.team_id,
+    behavior_repo_id: teamTrace.behavior_repo_id,
     source_provider: traceContext.source_provider || "linear",
     source_object_id: traceContext.source_object_id || projectId,
     trigger_type: traceContext.trigger_type || null,
@@ -89,11 +89,11 @@ export async function runDecomposition({
       runId,
       repoRoot,
       home,
-      domainId: domainContext?.domainId || domainTrace.domain_id || null,
+      teamRef: teamContext?.teamRef || teamTrace.team_ref || null,
       runStoreDir,
     });
     if (!persisted) throw new Error(`No persisted run artifact found for ${runId}.`);
-    validateReplayArtifactDomain({ artifact: persisted, domainContext, replayed: true });
+    validateReplayArtifactTeam({ artifact: persisted, teamContext, replayed: true });
     if (!["commit", "pause"].includes(persisted.kind)) {
       throw new Error(`Persisted ${persisted.kind} artifact has no terminal Linear mutation artifact to replay.`);
     }
@@ -108,7 +108,7 @@ export async function runDecomposition({
         runId,
         repoRoot,
         home,
-        domainId: domainContext?.domainId || domainTrace.domain_id || null,
+        teamRef: teamContext?.teamRef || teamTrace.team_ref || null,
         runStoreDir,
       }),
     };
@@ -146,7 +146,7 @@ export async function runDecomposition({
       repoRoot,
       runStoreDir,
       replayed: true,
-      domainContext,
+      teamContext,
       evalMode,
       onBeforeLinearMutation,
       runId: persisted.run_id,
@@ -174,7 +174,7 @@ export async function runDecomposition({
     evalMode,
     repoRoot,
     home,
-    domainId: domainContext?.domainId || domainTrace.domain_id || null,
+    teamRef: teamContext?.teamRef || teamTrace.team_ref || null,
     runStoreDir,
     trace,
   });
@@ -191,7 +191,7 @@ export async function runDecomposition({
   let effectiveRunResult = runResult;
   let artifact = terminalArtifact({
     runId: runId || runResult.terminal_output.run_id,
-    domainTrace,
+    teamTrace,
     projectId,
     runResult: effectiveRunResult,
     runtimeAssignments,
@@ -230,7 +230,7 @@ export async function runDecomposition({
     runId: artifact.run_id,
     repoRoot,
     home,
-    domainId: artifact.domain_id,
+    teamRef: artifact.team_ref,
     runStoreDir,
     payloadValidator: decompositionCommitPayload,
     functionVersion: DECOMPOSITION_FUNCTION_VERSION,
@@ -580,7 +580,7 @@ export async function replayPersistedDecompositionRun({
   repoRoot = process.cwd(),
   runStoreDir = null,
   traceContext = {},
-  domainContext = null,
+  teamContext = null,
 } = {}) {
   return runDecomposition({
     client,
@@ -592,7 +592,7 @@ export async function replayPersistedDecompositionRun({
     runStoreDir,
     retryCommit: true,
     traceContext,
-    domainContext,
+    teamContext,
   });
 }
 

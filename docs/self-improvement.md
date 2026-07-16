@@ -198,8 +198,8 @@ observer is explicitly scoped.
 
 Promotion readiness is anchored in a dedicated Teami behavior repo.
 Behavior-changing proposals should route through owner-reviewed PRs in that
-repo. Product repos are granted separately with `teami domain grant` as local
-`git_repo` resources for domain-scoped work; that grant set is not behavior-repo
+repo. Product repos are granted separately with `teami team grant` as local
+`git_repo` resources for team-scoped work; that grant set is not behavior-repo
 proposal authority and does not give proposal workflows product-repo access. If
 the starter checkout already has an upstream/template remote, setup may preserve
 that remote only as template state.

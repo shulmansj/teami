@@ -100,42 +100,42 @@ test("resolveTeamiHome honors per-platform default precedence with platform-spec
   );
 });
 
-test("teamiHomePaths composes root and per-domain layout and rejects invalid domain ids", () => {
+test("teamiHomePaths composes root and per-team layout and rejects invalid team ids", () => {
   const home = "/home/example/.local/state/teami";
 
   assert.deepEqual(teamiHomePaths({ home }), {
     home,
-    registryPath: path.posix.join(home, "domains.json"),
+    registryPath: path.posix.join(home, "teams.json"),
     gatewayLockPath: path.posix.join(home, "gateway.lock"),
     githubConnectionPath: path.posix.join(home, "github-connection.json"),
     behaviorMirrorDir: path.posix.join(home, "behavior-mirror"),
     runtimeDir: path.posix.join(home, "runtime"),
     phoenixDataDir: path.posix.join(home, "phoenix-data"),
-    domainDir: null,
-    domainCachePath: null,
+    teamDir: null,
+    teamCachePath: null,
   });
 
-  assert.deepEqual(teamiHomePaths({ home, domainId: "support-ops" }), {
+  assert.deepEqual(teamiHomePaths({ home, teamRef: "support-ops" }), {
     home,
-    registryPath: path.posix.join(home, "domains.json"),
+    registryPath: path.posix.join(home, "teams.json"),
     gatewayLockPath: path.posix.join(home, "gateway.lock"),
     githubConnectionPath: path.posix.join(home, "github-connection.json"),
     behaviorMirrorDir: path.posix.join(home, "behavior-mirror"),
     runtimeDir: path.posix.join(home, "runtime"),
     phoenixDataDir: path.posix.join(home, "phoenix-data"),
-    domainDir: path.posix.join(home, "domains", "support-ops"),
-    domainCachePath: path.posix.join(home, "domains", "support-ops", "linear.json"),
+    teamDir: path.posix.join(home, "teams", "support-ops"),
+    teamCachePath: path.posix.join(home, "teams", "support-ops", "linear.json"),
   });
 
   const winHome = path.win32.join("C:\\Users\\Ada\\AppData\\Local", "teami");
   assert.equal(
-    teamiHomePaths({ home: winHome, domainId: "support-ops" }).domainCachePath,
-    path.win32.join(winHome, "domains", "support-ops", "linear.json"),
+    teamiHomePaths({ home: winHome, teamRef: "support-ops" }).teamCachePath,
+    path.win32.join(winHome, "teams", "support-ops", "linear.json"),
   );
 
   assert.throws(
-    () => teamiHomePaths({ home, domainId: "../support-ops" }),
-    /invalid_domain_id:\.\.\/support-ops/,
+    () => teamiHomePaths({ home, teamRef: "../support-ops" }),
+    /invalid_team_ref:\.\.\/support-ops/,
   );
 });
 
@@ -166,7 +166,7 @@ test("home and packaged-default resolution are independent of process.cwd()", ()
     });
     return {
       home,
-      paths: teamiHomePaths({ home, domainId: "support-ops" }),
+      paths: teamiHomePaths({ home, teamRef: "support-ops" }),
       packagedDefault: resolvePackagedDefault("execution/integrations/linear/config.package-default.json"),
     };
   }

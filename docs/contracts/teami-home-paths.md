@@ -17,6 +17,10 @@ The home precedence is:
 3. Windows: `%LOCALAPPDATA%\teami`, then `%APPDATA%\teami`, then `~\.teami`.
 4. Linux and other POSIX platforms: `$XDG_STATE_HOME/teami`, then `~/.local/state/teami`, then `~/.teami`.
 
-Cross-domain state lives at the home root: `domains.json`, `gateway.lock`, `github-connection.json`,
-`behavior-mirror/`, `runtime/`, and `phoenix-data/`. Only per-domain state nests under
-`domains/<domainId>/`, and `domainId` must match the registry's `DOMAIN_ID_PATTERN`.
+Cross-team state lives at the home root: `teams.json`, `gateway.lock`, `github-connection.json`,
+`behavior-mirror/`, `runtime/`, and `phoenix-data/`. Only per-team state nests under
+`teams/<teamRef>/`, and `teamRef` must match the registry's `TEAM_REF_PATTERN`.
+
+The Teami home must be on a local filesystem that provides ordinary atomic file-create and rename
+semantics. Removable, network-mounted, or synchronization-backed homes are not supported for
+crash-durability claims.

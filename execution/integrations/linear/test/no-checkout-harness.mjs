@@ -8,16 +8,16 @@ import { teamiHomePaths } from "../src/app-home.mjs";
 import { writeLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  readDomainRegistry,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import {
   gatewayLockPath,
   readGatewayLockLiveness,
   runGatewayLoop,
-  selectGatewayDomains,
+  selectGatewayTeams,
 } from "../src/gateway-loop.mjs";
 import {
   createLinearCredentialStore,
@@ -25,8 +25,8 @@ import {
 } from "../src/linear-credential-store.mjs";
 import { createTeamiProjectMcpServer } from "../src/project-mcp-server.mjs";
 
-export const NO_CHECKOUT_DOMAIN = Object.freeze({
-  domainId: "support-ops",
+export const NO_CHECKOUT_TEAM = Object.freeze({
+  teamRef: "support-ops",
   workspaceId: "workspace-1",
   workspaceName: "Fixture Workspace",
   teamId: "team-1",
@@ -75,7 +75,7 @@ export function createNoCheckoutFixture({ prefix = "teami-no-checkout-" } = {}) 
     cwdTokenRead,
     cliPath: CLI_PATH,
     graphqlShimPath: GRAPHQL_SHIM_PATH,
-    domain: NO_CHECKOUT_DOMAIN,
+    team: NO_CHECKOUT_TEAM,
     cleanup() {
       fs.rmSync(root, { recursive: true, force: true });
     },
@@ -135,8 +135,8 @@ export async function runNoCheckoutGatewayStart(
       fixture.cliPath,
       "gateway",
       "start",
-      "--domain",
-      fixture.domain.domainId,
+      "--team",
+      fixture.team.teamRef,
       "--max-iterations",
       "1",
     ], {
@@ -169,8 +169,8 @@ export async function runCredentialRoundTripFromNoCheckoutCwds(fixture) {
   const accessToken = ["fixture", "access", "token"].join("-");
   const refreshToken = ["fixture", "refresh", "token"].join("-");
   const common = {
-    domainId: fixture.domain.domainId,
-    workspaceId: fixture.domain.workspaceId,
+    teamRef: fixture.team.teamRef,
+    workspaceId: fixture.team.workspaceId,
     configUrl: pathToFileURL(path.join(SOURCE_REPO_ROOT, "execution", "integrations", "linear", "src", "config.mjs")).href,
     credentialUrl: pathToFileURL(path.join(SOURCE_REPO_ROOT, "execution", "integrations", "linear", "src", "linear-credential-store.mjs")).href,
   };
@@ -230,34 +230,34 @@ export function gatewayLockIsUnderHome(home) {
 function writeNoCheckoutConfig(configPath) {
   const config = JSON.parse(fs.readFileSync(EXAMPLE_CONFIG_PATH, "utf8"));
   config.linear.oauth.credential_storage = "file";
-  config.linear.team.key = NO_CHECKOUT_DOMAIN.teamKey;
-  config.linear.team.name = NO_CHECKOUT_DOMAIN.teamName;
+  config.linear.team.key = NO_CHECKOUT_TEAM.teamKey;
+  config.linear.team.name = NO_CHECKOUT_TEAM.teamName;
   config.poll.interval_ms = 2_000;
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
 function writeNoCheckoutRegistry(home) {
-  const registry = emptyDomainRegistry();
-  registry.domains.push(
-    makeDomainRecord({
-      domainId: NO_CHECKOUT_DOMAIN.domainId,
+  const registry = emptyTeamRegistry();
+  registry.teams.push(
+    makeTeamRecord({
+      teamRef: NO_CHECKOUT_TEAM.teamRef,
       status: "active",
-      workspaceId: NO_CHECKOUT_DOMAIN.workspaceId,
-      workspaceName: NO_CHECKOUT_DOMAIN.workspaceName,
-      teamId: NO_CHECKOUT_DOMAIN.teamId,
-      teamKey: NO_CHECKOUT_DOMAIN.teamKey,
-      teamName: NO_CHECKOUT_DOMAIN.teamName,
+      workspaceId: NO_CHECKOUT_TEAM.workspaceId,
+      workspaceName: NO_CHECKOUT_TEAM.workspaceName,
+      teamId: NO_CHECKOUT_TEAM.teamId,
+      teamKey: NO_CHECKOUT_TEAM.teamKey,
+      teamName: NO_CHECKOUT_TEAM.teamName,
       teamNameLastSeenAt: "2026-07-08T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ home }, registry);
+  writeTeamRegistry({ home }, registry);
 }
 
 function writeNoCheckoutCache(home) {
-  writeLinearCache(teamiHomePaths({ home, domainId: NO_CHECKOUT_DOMAIN.domainId }).domainCachePath, {
-    domainId: NO_CHECKOUT_DOMAIN.domainId,
-    workspaceId: NO_CHECKOUT_DOMAIN.workspaceId,
-    teamId: NO_CHECKOUT_DOMAIN.teamId,
+  writeLinearCache(teamiHomePaths({ home, teamRef: NO_CHECKOUT_TEAM.teamRef }).teamCachePath, {
+    teamRef: NO_CHECKOUT_TEAM.teamRef,
+    workspaceId: NO_CHECKOUT_TEAM.workspaceId,
+    teamId: NO_CHECKOUT_TEAM.teamId,
     app_identity_id: "app-viewer-1",
     projectStatuses: {
       backlog: "status-backlog",
@@ -295,8 +295,8 @@ function writeNoCheckoutCredential(home) {
   const credentialPath = path.join(
     teamiHomePaths({ home }).home,
     "credentials",
-    "domains",
-    NO_CHECKOUT_DOMAIN.domainId,
+    "teams",
+    NO_CHECKOUT_TEAM.teamRef,
     "linear-oauth-token.json",
   );
   fs.mkdirSync(path.dirname(credentialPath), { recursive: true });
@@ -388,8 +388,8 @@ async function connectNoCheckoutMcpServerInProcess(fixture, { cwd, spawnError })
 async function runNoCheckoutGatewayStartInProcess(fixture, { cwd, spawnError }) {
   return withNoCheckoutProcessEnv(fixture, { cwd }, async () => {
     const config = loadLinearConfig({ repoRoot: cwd });
-    const registry = readDomainRegistry({ home: fixture.home }) || emptyDomainRegistry();
-    const domains = selectGatewayDomains({ registry, domainId: fixture.domain.domainId });
+    const registry = readTeamRegistry({ home: fixture.home }) || emptyTeamRegistry();
+    const teams = selectGatewayTeams({ registry, teamRef: fixture.team.teamRef });
     let releaseFirstPoll;
     let firstPollStarted;
     const firstPollGate = new Promise((resolve) => {
@@ -420,7 +420,7 @@ async function runNoCheckoutGatewayStartInProcess(fixture, { cwd, spawnError }) 
       home: fixture.home,
       config,
       registry,
-      domains,
+      teams,
       maxIterations: 1,
       createLinearClient: async () => client,
       sleep: async () => {},
@@ -450,8 +450,8 @@ async function runCredentialRoundTripInProcess(fixture, { accessToken, refreshTo
     const writeConfig = loadLinearConfig({ repoRoot: fixture.cwdTokenWrite });
     const writeStore = createLinearCredentialStore({
       config: writeConfig,
-      domainId: fixture.domain.domainId,
-      workspaceId: fixture.domain.workspaceId,
+      teamRef: fixture.team.teamRef,
+      workspaceId: fixture.team.workspaceId,
     });
     await writeStore.writeTokenSet({ accessToken, refreshToken });
     const written = {
@@ -464,8 +464,8 @@ async function runCredentialRoundTripInProcess(fixture, { accessToken, refreshTo
       const readConfig = loadLinearConfig({ repoRoot: fixture.cwdTokenRead });
       const readStore = createLinearCredentialStore({
         config: readConfig,
-        domainId: fixture.domain.domainId,
-        workspaceId: fixture.domain.workspaceId,
+        teamRef: fixture.team.teamRef,
+        workspaceId: fixture.team.workspaceId,
       });
       return {
         mode: "in-process-spawn-fallback",
@@ -611,23 +611,23 @@ function spawnBlockedError(error) {
   return error;
 }
 
-function credentialWriterScript({ configUrl, credentialUrl, domainId, workspaceId, accessToken, refreshToken }) {
+function credentialWriterScript({ configUrl, credentialUrl, teamRef, workspaceId, accessToken, refreshToken }) {
   return `
 const { loadLinearConfig } = await import(${JSON.stringify(configUrl)});
 const { createLinearCredentialStore } = await import(${JSON.stringify(credentialUrl)});
 const config = loadLinearConfig({ repoRoot: process.cwd() });
-const store = createLinearCredentialStore({ config, domainId: ${JSON.stringify(domainId)}, workspaceId: ${JSON.stringify(workspaceId)} });
+const store = createLinearCredentialStore({ config, teamRef: ${JSON.stringify(teamRef)}, workspaceId: ${JSON.stringify(workspaceId)} });
 await store.writeTokenSet({ accessToken: ${JSON.stringify(accessToken)}, refreshToken: ${JSON.stringify(refreshToken)} });
 console.log(JSON.stringify({ ok: true, cwd: process.cwd(), target: store.target }));
 `;
 }
 
-function credentialReaderScript({ configUrl, credentialUrl, domainId, workspaceId }) {
+function credentialReaderScript({ configUrl, credentialUrl, teamRef, workspaceId }) {
   return `
 const { loadLinearConfig } = await import(${JSON.stringify(configUrl)});
 const { createLinearCredentialStore } = await import(${JSON.stringify(credentialUrl)});
 const config = loadLinearConfig({ repoRoot: process.cwd() });
-const store = createLinearCredentialStore({ config, domainId: ${JSON.stringify(domainId)}, workspaceId: ${JSON.stringify(workspaceId)} });
+const store = createLinearCredentialStore({ config, teamRef: ${JSON.stringify(teamRef)}, workspaceId: ${JSON.stringify(workspaceId)} });
 const tokenSet = await store.readTokenSet();
 console.log(JSON.stringify({ ok: true, cwd: process.cwd(), target: store.target, tokenSet }));
 `;

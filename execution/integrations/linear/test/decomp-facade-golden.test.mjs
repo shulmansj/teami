@@ -45,7 +45,7 @@ const PROJECT = readJson(path.join(TEST_DIR, "fixtures", "orchestrator-e2e", "we
 
 const RUN_ID = "run_decomp_facade_commit";
 const WAKE_ID = "wake-decomp-facade";
-const DOMAIN_ID = "support-ops";
+const TEAM_REF = "support-ops";
 const WORKSPACE_ID = "workspace-1";
 const TEAM_ID = "team-1";
 const COMPLETED_AT = "2026-06-26T12:00:00.000Z";
@@ -55,19 +55,19 @@ const SR_ENG_TARGET = "prompt/decomposition/sr_eng_grounding_pass";
 const PM_TARGET = "prompt/decomposition/pm_product_sufficiency_pass";
 const SUBAGENT_TURN_SCHEMA_VERSION = "linear-decomposition-orchestrator-subagent-turn/v2";
 const ENVIRONMENT = Object.freeze({ agent_write_credentials_present: false });
-const DOMAIN_TRACE = Object.freeze({
-  domain_id: DOMAIN_ID,
+const TEAM_TRACE = Object.freeze({
+  team_ref: TEAM_REF,
   workspace_id: WORKSPACE_ID,
   team_id: TEAM_ID,
   behavior_repo_id: "local:test",
 });
-const DOMAIN_CONTEXT = Object.freeze({
-  domainId: DOMAIN_ID,
+const TEAM_CONTEXT = Object.freeze({
+  teamRef: TEAM_REF,
   linear: Object.freeze({
     workspaceId: WORKSPACE_ID,
     teamId: TEAM_ID,
   }),
-  trace: DOMAIN_TRACE,
+  trace: TEAM_TRACE,
 });
 
 const SCHEMA_GOLDENS = Object.freeze([
@@ -118,7 +118,7 @@ test("DECOMP-FACADE golden keeps decomposition persisted artifacts and live appl
   const artifact = terminalArtifact({
     runId: RUN_ID,
     projectId: PROJECT.id,
-    domainTrace: DOMAIN_TRACE,
+    teamTrace: TEAM_TRACE,
     runResult: output,
     runtimeAssignments: resolveRoleRuntimeAssignments(config, "decomposition"),
     runtimeEvidence,
@@ -152,7 +152,7 @@ test("DECOMP-FACADE golden keeps decomposition persisted artifacts and live appl
   assert.equal(persistedArtifact.project_update_markdown, output.terminal_output.project_update_markdown);
 
   writeMutationIntent({
-    domainId: DOMAIN_ID,
+    teamRef: TEAM_REF,
     projectId: PROJECT.id,
     runId: RUN_ID,
     artifactKind: "commit",
@@ -165,7 +165,7 @@ test("DECOMP-FACADE golden keeps decomposition persisted artifacts and live appl
     readText(path.join(runStoreDir, "unconfirmed-linear-mutation-intents", `${RUN_ID}.json`)),
   );
   assertFixtureBytes("replay-pending.json", jsonBytes(readReplayPending({
-    domainId: DOMAIN_ID,
+    teamRef: TEAM_REF,
     projectId: PROJECT.id,
     runStoreDir,
   })));
@@ -185,7 +185,7 @@ test("DECOMP-FACADE golden keeps decomposition persisted artifacts and live appl
     repoRoot: REPO_ROOT,
     runStoreDir,
     replayed: true,
-    domainContext: DOMAIN_CONTEXT,
+    teamContext: TEAM_CONTEXT,
     onBeforeLinearMutation: async ({ artifactKind, runId }) => {
       preMutationCalls.push({ artifactKind, runId });
     },

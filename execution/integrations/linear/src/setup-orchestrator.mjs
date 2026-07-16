@@ -533,10 +533,10 @@ export async function runSetupCompletionContract({
 
 function normalizePersistedInput(input = {}) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("setup_input_required");
-  const domain = nonEmptyString(input.domain, "setup_domain_required");
+  const team = nonEmptyString(input.team, "setup_team_required");
   const repoIntent = normalizeSetupRepoIntent(input.repo_intent);
   return {
-    domain,
+    team,
     workspace: optionalString(input.workspace),
     repo_intent: repoIntent,
     github_owner: optionalString(input.github_owner),

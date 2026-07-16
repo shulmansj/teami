@@ -17,9 +17,9 @@ const SUPERSEDED_HEADER = Object.freeze([
 ]);
 
 const EXPECTED_SUPERSEDED_DOCS = Object.freeze([
-  "docs/contracts/domain-context.md",
+  "docs/contracts/team-context.md",
   "docs/contracts/phase-0-doc-alignment.md",
-  "docs/contracts/wake-domain-identity.md",
+  "docs/contracts/wake-team-identity.md",
 ]);
 
 const CURRENT_OWNER_DOCS = Object.freeze([

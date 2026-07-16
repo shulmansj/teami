@@ -25,7 +25,7 @@ test("valid command descriptors pass validation", () => {
     handler: noopHandler,
     tier: "operator",
     summary: "run the runtime smoke test",
-    usageTail: "[--domain <id>]",
+    usageTail: "[--team <id>]",
     aliases: [],
   };
   assert.equal(validateCommandDescriptor(operatorDescriptor), operatorDescriptor);

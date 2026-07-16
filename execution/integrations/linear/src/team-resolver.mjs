@@ -3,70 +3,70 @@ import path from "node:path";
 
 import { credentialTargetForConfig } from "./linear-credential-store.mjs";
 import {
-  domainCachePath,
-  readDomainRegistry,
-  validateDomainRegistry,
-} from "./domain-registry.mjs";
+  teamCachePath,
+  readTeamRegistry,
+  validateTeamRegistry,
+} from "./team-registry.mjs";
 import { resolveTeamiHome } from "./app-home.mjs";
 
-export function resolveDomainContext({
+export function resolveTeamContext({
   registry,
-  domainId,
+  teamRef,
   config,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot),
 } = {}) {
   const loaded = loadRegistry(registry, home);
-  const domain = loaded.domains.find((candidate) => candidate.id === domainId);
-  if (!domain) {
+  const team = loaded.teams.find((candidate) => candidate.id === teamRef);
+  if (!team) {
     return {
       ok: false,
-      reason: "domain_not_found",
-      candidates: domainCandidates(loaded.domains),
+      reason: "team_not_found",
+      candidates: teamCandidates(loaded.teams),
     };
   }
-  if (domain.status !== "active") {
+  if (team.status !== "active") {
     return {
       ok: false,
-      reason: "domain_not_active",
-      candidates: domainCandidates([domain]),
+      reason: "team_not_active",
+      candidates: teamCandidates([team]),
     };
   }
-  return { ok: true, context: buildDomainContext({ domain, config, repoRoot, home, behaviorRepoId }) };
+  return { ok: true, context: buildTeamContext({ team, config, repoRoot, home, behaviorRepoId }) };
 }
 
-export function resolveForegroundDomainContext({
+export function resolveForegroundTeamContext({
   registry,
-  domainId = null,
+  teamRef = null,
   config,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot),
 } = {}) {
   const loaded = loadRegistry(registry, home);
-  if (domainId) {
-    return resolveDomainContext({ registry: loaded, domainId, config, repoRoot, home, behaviorRepoId });
+  if (teamRef) {
+    return resolveTeamContext({ registry: loaded, teamRef, config, repoRoot, home, behaviorRepoId });
   }
 
-  const activeDomains = loaded.domains.filter((domain) => domain.status === "active");
-  if (activeDomains.length === 1) {
+  const activeTeams = loaded.teams.filter((team) => team.status === "active");
+  if (activeTeams.length === 1) {
     return {
       ok: true,
-      context: buildDomainContext({ domain: activeDomains[0], config, repoRoot, home, behaviorRepoId }),
+      context: buildTeamContext({ team: activeTeams[0], config, repoRoot, home, behaviorRepoId }),
     };
   }
   return {
     ok: false,
-    reason: activeDomains.length === 0 ? "no_active_domains" : "domain_required",
-    message: activeDomains.length === 0
-      ? "No active domains are configured."
-      : "Multiple active domains are configured; pass --domain <domain_id>.",
-    candidates: domainCandidates(activeDomains),
+    reason: activeTeams.length === 0 ? "no_active_teams" : "team_required",
+    message: activeTeams.length === 0
+      ? "No active teams are configured."
+      : "Multiple active teams are configured; pass --team <team_ref>.",
+    candidates: teamCandidates(activeTeams),
   };
 }
 
-export function resolveWakeDomainContext({
+export function resolveWakeTeamContext({
   registry,
   selector = {},
   config,
@@ -80,36 +80,36 @@ export function resolveWakeDomainContext({
     return { ok: false, reason: "missing_workspace_id", candidates: [] };
   }
 
-  const workspaceDomains = loaded.domains.filter(
-    (domain) => domain.linear.workspace_id === workspaceId,
+  const workspaceTeams = loaded.teams.filter(
+    (team) => team.linear.workspace_id === workspaceId,
   );
-  const activeWorkspaceDomains = workspaceDomains.filter((domain) => domain.status === "active");
-  if (activeWorkspaceDomains.length === 0) {
+  const activeWorkspaceTeams = workspaceTeams.filter((team) => team.status === "active");
+  if (activeWorkspaceTeams.length === 0) {
     return {
       ok: false,
-      reason: "no_active_domain_for_workspace",
-      candidates: domainCandidates(workspaceDomains),
+      reason: "no_active_team_for_workspace",
+      candidates: teamCandidates(workspaceTeams),
     };
   }
 
   const projectTeamIds = values(selector.projectTeamIds);
-  const projectTeamMatches = activeWorkspaceDomains.filter(
-    (domain) => projectTeamIds.includes(domain.linear.team_id),
+  const projectTeamMatches = activeWorkspaceTeams.filter(
+    (team) => projectTeamIds.includes(team.linear.team_id),
   );
   if (projectTeamMatches.length > 1) {
     return {
       ok: false,
-      reason: "cross_domain_team_conflict",
-      candidates: domainCandidates(projectTeamMatches),
+      reason: "cross_team_conflict",
+      candidates: teamCandidates(projectTeamMatches),
     };
   }
 
   const webhookIds = values(selector.webhookId);
   if (webhookIds.length > 0) {
-    const matches = activeWorkspaceDomains.filter((domain) => webhookIds.includes(domain.linear.webhook_id));
+    const matches = activeWorkspaceTeams.filter((team) => webhookIds.includes(team.linear.webhook_id));
     return oneOrFailure({
       matches,
-      allCandidates: activeWorkspaceDomains,
+      allCandidates: activeWorkspaceTeams,
       reasonZero: "webhook_id_mismatch",
       reasonMany: "ambiguous_webhook_id",
       config,
@@ -121,10 +121,10 @@ export function resolveWakeDomainContext({
 
   const teamIds = values(selector.teamId);
   if (teamIds.length > 0) {
-    const matches = activeWorkspaceDomains.filter((domain) => teamIds.includes(domain.linear.team_id));
+    const matches = activeWorkspaceTeams.filter((team) => teamIds.includes(team.linear.team_id));
     return oneOrFailure({
       matches,
-      allCandidates: activeWorkspaceDomains,
+      allCandidates: activeWorkspaceTeams,
       reasonZero: "team_id_mismatch",
       reasonMany: "ambiguous_team_id",
       config,
@@ -138,8 +138,8 @@ export function resolveWakeDomainContext({
     return oneOrFailure({
       matches: projectTeamMatches,
       allCandidates: projectTeamMatches,
-      reasonZero: "no_domain_project_team_intersection",
-      reasonMany: "ambiguous_domain_project_team_intersection",
+      reasonZero: "no_team_project_team_intersection",
+      reasonMany: "ambiguous_team_project_team_intersection",
       config,
       repoRoot,
       home,
@@ -147,62 +147,63 @@ export function resolveWakeDomainContext({
     });
   }
 
-  if (workspaceDomains.length === 1 && workspaceDomains[0].status === "active") {
+  if (workspaceTeams.length === 1 && workspaceTeams[0].status === "active") {
     return {
       ok: true,
-      context: buildDomainContext({ domain: workspaceDomains[0], config, repoRoot, home, behaviorRepoId }),
+      context: buildTeamContext({ team: workspaceTeams[0], config, repoRoot, home, behaviorRepoId }),
     };
   }
   return {
     ok: false,
     reason: "insufficient_wake_identity",
-    candidates: domainCandidates(workspaceDomains),
+    candidates: teamCandidates(workspaceTeams),
   };
 }
 
-export function buildDomainContext({
-  domain,
+export function buildTeamContext({
+  team,
   config,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   behaviorRepoId = behaviorRepoIdForRepoRoot(repoRoot),
 } = {}) {
   const context = {
-    domainId: domain.id,
-    status: domain.status,
-    resources: structuredClone(domain.resources || []),
-    allowedRepoPacket: allowedRepoPacketFromDomainResources(domain.resources || []),
+    teamRef: team.id,
+    status: team.status,
+    resources: structuredClone(team.resources || []),
+    allowedRepoPacket: allowedRepoPacketFromTeamResources(team.resources || []),
     linear: {
-      workspaceId: domain.linear.workspace_id,
-      teamId: domain.linear.team_id,
-      teamKey: domain.linear.team_key,
-      teamName: domain.linear.team_name,
-      webhookId: domain.linear.webhook_id,
-      cachePath: domainCachePath({
+      workspaceId: team.linear.workspace_id,
+      workspaceName: team.linear.workspace_name,
+      teamId: team.linear.team_id,
+      teamKey: team.linear.team_key,
+      teamName: team.linear.team_name,
+      webhookId: team.linear.webhook_id,
+      cachePath: teamCachePath({
         home,
-        domainId: domain.id,
-        cachePath: domain.linear.cache_path,
+        teamRef: team.id,
+        cachePath: team.linear.cache_path,
       }),
     },
     credentialTargets: {
       linearOAuth: config
         ? credentialTargetForConfig(config, repoRoot, {
-            domainId: domain.id,
-            workspaceId: domain.linear.workspace_id,
+            teamRef: team.id,
+            workspaceId: team.linear.workspace_id,
           })
         : null,
     },
     trace: {
-      domain_id: domain.id,
-      workspace_id: domain.linear.workspace_id,
-      team_id: domain.linear.team_id,
+      team_ref: team.id,
+      workspace_id: team.linear.workspace_id,
+      team_id: team.linear.team_id,
       behavior_repo_id: behaviorRepoId,
     },
   };
   return deepFreeze(context);
 }
 
-export function allowedRepoPacketFromDomainResources(resources = []) {
+export function allowedRepoPacketFromTeamResources(resources = []) {
   return (Array.isArray(resources) ? resources : [])
     .filter((resource) => resource?.kind === "git_repo" && resource.binding)
     .map((resource) => {
@@ -227,8 +228,8 @@ export function behaviorRepoIdForRepoRoot(repoRoot = process.cwd()) {
 }
 
 function loadRegistry(registry, home) {
-  const loaded = registry || readDomainRegistry({ home });
-  validateDomainRegistry(loaded);
+  const loaded = registry || readTeamRegistry({ home });
+  validateTeamRegistry(loaded);
   return loaded;
 }
 
@@ -243,12 +244,12 @@ function oneOrFailure({
   behaviorRepoId,
 }) {
   if (matches.length === 1) {
-    return { ok: true, context: buildDomainContext({ domain: matches[0], config, repoRoot, home, behaviorRepoId }) };
+    return { ok: true, context: buildTeamContext({ team: matches[0], config, repoRoot, home, behaviorRepoId }) };
   }
   return {
     ok: false,
     reason: matches.length === 0 ? reasonZero : reasonMany,
-    candidates: domainCandidates(matches.length === 0 ? allCandidates : matches),
+    candidates: teamCandidates(matches.length === 0 ? allCandidates : matches),
   };
 }
 
@@ -262,11 +263,15 @@ function values(...inputs) {
   ];
 }
 
-function domainCandidates(domains) {
-  return domains.map((domain) => ({
-    domainId: domain.id,
-    status: domain.status,
-    teamId: domain.linear.team_id,
+function teamCandidates(teams) {
+  return teams.map((team) => ({
+    teamRef: team.id,
+    status: team.status,
+    workspaceId: team.linear.workspace_id,
+    workspaceName: team.linear.workspace_name,
+    teamId: team.linear.team_id,
+    teamKey: team.linear.team_key,
+    teamName: team.linear.team_name,
   }));
 }
 

@@ -5,8 +5,8 @@ import { pathToFileURL } from "node:url";
 
 import { readLinearCache, writeLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
-import { readDomainRegistry } from "../src/domain-registry.mjs";
-import { buildDomainContext } from "../src/domain-resolver.mjs";
+import { readTeamRegistry } from "../src/team-registry.mjs";
+import { buildTeamContext } from "../src/team-resolver.mjs";
 import {
   createLinearCredentialStore,
   parseTokenSecret,
@@ -23,7 +23,7 @@ registerGitRepoResourceKind();
 
 const MODULE_DIR = import.meta.dirname;
 const REPO_ROOT = path.resolve(MODULE_DIR, "..", "..", "..", "..");
-const DEFAULT_SANDBOX_DOMAIN_ID = "test-1";
+const DEFAULT_SANDBOX_TEAM_REF = "test-1";
 const SANDBOX_WORKSPACE_NAME = "agentic factory sandbox";
 const STATUS_UAT_TOKEN_SET_ENV = "TEAMI_STATUS_UAT_TOKEN_SET";
 const STATUS_UAT_UPDATED_TOKEN_SET_PATH_ENV = "TEAMI_STATUS_UAT_UPDATED_TOKEN_SET_PATH";
@@ -48,7 +48,7 @@ export function parseStatusModelUatArgs(argv = process.argv.slice(2), env = proc
       env.TEAMI_UAT_REPO_ROOT ||
       REPO_ROOT,
     ),
-    domainId: env.TEAMI_STATUS_UAT_DOMAIN_ID || null,
+    teamRef: env.TEAMI_STATUS_UAT_TEAM_REF || null,
     help: false,
   };
 
@@ -58,8 +58,8 @@ export function parseStatusModelUatArgs(argv = process.argv.slice(2), env = proc
       options.help = true;
     } else if (arg === "--repo-root") {
       options.repoRoot = path.resolve(requireNext(argv, ++index, arg));
-    } else if (arg === "--domain" || arg === "--domain-id") {
-      options.domainId = requireNext(argv, ++index, arg);
+    } else if (arg === "--team" || arg === "--team-id") {
+      options.teamRef = requireNext(argv, ++index, arg);
     } else {
       throw new StatusModelUatUserError(`unknown status-model UAT flag: ${arg}`, "usage");
     }
@@ -70,15 +70,15 @@ export function parseStatusModelUatArgs(argv = process.argv.slice(2), env = proc
 
 export function buildStatusModelUatUsage() {
   return [
-    "Usage: node execution/integrations/linear/uat/status-model-e2e-uat.mjs [--repo-root <repo>] [--domain test-1]",
+    "Usage: node execution/integrations/linear/uat/status-model-e2e-uat.mjs [--repo-root <repo>] [--team test-1]",
     "",
     "Live target:",
-    "- Uses the Teami sandbox Linear domain (default: test-1 / agentic factory sandbox).",
+    "- Uses the Teami sandbox Linear team (default: test-1 / agentic factory sandbox).",
     "- This is destructive-but-disposable: it provisions canonical statuses/labels and creates one zz-status-uat issue, then cleans that issue up.",
     "- It does not use GitHub and does not run agent execution.",
     "",
     "Environment:",
-    "- TEAMI_STATUS_UAT_DOMAIN_ID selects the sandbox domain.",
+    "- TEAMI_STATUS_UAT_TEAM_REF selects the sandbox team.",
     "- TEAMI_STATUS_UAT_TOKEN_SET can env-bridge a Linear OAuth token set for CI-style handoff.",
     "- TEAMI_STATUS_UAT_UPDATED_TOKEN_SET_PATH writes back a refreshed env-bridged token set.",
   ].join("\n");
@@ -91,14 +91,14 @@ export async function runStatusModelE2eUat(options = parseStatusModelUatArgs()) 
     ranAt: new Date().toISOString(),
     script: "status-model-e2e-uat",
     repoRoot: context.repoRoot,
-    domain: {
-      id: context.domain.id,
-      workspaceId: context.domainContext.linear.workspaceId,
-      workspaceName: context.domain.linear.workspace_name || null,
+    team: {
+      id: context.team.id,
+      workspaceId: context.teamContext.linear.workspaceId,
+      workspaceName: context.teamContext.linear.workspaceName || null,
       teamId: context.team.id,
       teamKey: context.team.key,
       teamName: context.team.name,
-      cachePath: context.domainContext.linear.cachePath,
+      cachePath: context.teamContext.linear.cachePath,
     },
     oauth: {
       credentialStoreKind: context.credentialStore.kind,
@@ -155,19 +155,19 @@ export async function runStatusModelE2eUat(options = parseStatusModelUatArgs()) 
 async function prepareLiveStatusModelContext(options) {
   const repoRoot = path.resolve(options.repoRoot || REPO_ROOT);
   const config = loadLinearConfig({ repoRoot });
-  const registry = readDomainRegistry({ repoRoot });
-  const domain = selectStatusUatDomain({
+  const registry = readTeamRegistry({ repoRoot });
+  const teamRecord = selectStatusUatTeam({
     registry,
-    domainId: options.domainId || null,
+    teamRef: options.teamRef || null,
   });
-  const domainContext = buildDomainContext({ domain, config, repoRoot });
-  const team = {
-    id: domainContext.linear.teamId,
-    key: domainContext.linear.teamKey,
-    name: domainContext.linear.teamName,
+  const teamContext = buildTeamContext({ team: teamRecord, config, repoRoot });
+  const linearTeam = {
+    id: teamContext.linear.teamId,
+    key: teamContext.linear.teamKey,
+    name: teamContext.linear.teamName,
   };
-  const configForDomain = configWithLinearTeam(config, team);
-  const configuredStore = createLinearCredentialStore({ config, repoRoot, domainContext });
+  const configForTeam = configWithLinearTeam(config, linearTeam);
+  const configuredStore = createLinearCredentialStore({ config, repoRoot, teamContext });
   const envBridge = resolveEnvBridge(process.env);
   const credentialStore = envBridge
     ? createEnvCredentialStore({
@@ -189,10 +189,10 @@ async function prepareLiveStatusModelContext(options) {
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
-    team,
-    configForDomain,
+    teamRecord,
+    teamContext,
+    team: linearTeam,
+    configForTeam,
     configuredStore,
     credentialStore,
     usesEnvBridge: Boolean(envBridge),
@@ -205,11 +205,11 @@ async function prepareLiveStatusModelContext(options) {
 }
 
 async function provisionStatusModel(context) {
-  const existingCache = readLinearCache(context.domainContext.linear.cachePath);
+  const existingCache = readLinearCache(context.teamContext.linear.cachePath);
   let provisioned = null;
   const initResult = await initLinear({
     client: context.client,
-    config: context.configForDomain,
+    config: context.configForTeam,
     cache: { ...(existingCache || {}), teamId: context.team.id },
     writeCache: (cache) => {
       provisioned = cache;
@@ -223,17 +223,17 @@ async function provisionStatusModel(context) {
   const cacheToWrite = {
     ...(existingCache || {}),
     ...provisioned,
-    domainId: existingCache?.domainId || context.domain.id,
-    workspaceId: existingCache?.workspaceId || context.domainContext.linear.workspaceId,
+    teamRef: existingCache?.teamRef || context.team.id,
+    workspaceId: existingCache?.workspaceId || context.teamContext.linear.workspaceId,
     ...(existingCache?.localRunner ? { localRunner: existingCache.localRunner } : {}),
   };
-  writeLinearCache(context.domainContext.linear.cachePath, cacheToWrite);
+  writeLinearCache(context.teamContext.linear.cachePath, cacheToWrite);
 
   return {
     ok: initResult.ok,
     summary: initResult.summary,
     cache: cacheToWrite,
-    cachePath: context.domainContext.linear.cachePath,
+    cachePath: context.teamContext.linear.cachePath,
   };
 }
 
@@ -245,7 +245,7 @@ async function verifyProvisionedCache(context) {
   assertCondition(!Object.hasOwn(cache.projectStatuses || {}, "blocked"), "Project status cache must not include blocked.");
 
   const issueLabelNames = [
-    context.configForDomain.linear.issue.labels.discovery,
+    context.configForTeam.linear.issue.labels.discovery,
   ];
   const projectLabelNames = [];
   const issueLabels = assertNameIdMap(cache.issueLabels, issueLabelNames, "issueLabels");
@@ -262,7 +262,7 @@ async function verifyProvisionedCache(context) {
 async function verifyDoctor(context) {
   const doctor = await doctorLinear({
     client: context.client,
-    config: context.configForDomain,
+    config: context.configForTeam,
     cache: context.cache,
   });
   const nonGreen = doctor.checks.filter((check) => !check.ok);
@@ -270,7 +270,7 @@ async function verifyDoctor(context) {
     throw new Error(`Doctor status-model checks failed: ${nonGreen.map((check) => `${check.name}: ${check.message}`).join("; ")}`);
   }
 
-  for (const required of requiredDoctorCheckNames(context.configForDomain)) {
+  for (const required of requiredDoctorCheckNames(context.configForTeam)) {
     const check = doctor.checks.find((candidate) => candidate.name === required);
     assertCondition(check?.ok === true, `Required doctor check did not pass: ${required}`);
   }
@@ -365,41 +365,41 @@ async function resolveCanceledWorkflowState(context) {
   );
 }
 
-function selectStatusUatDomain({ registry, domainId = null } = {}) {
-  const domains = Array.isArray(registry?.domains) ? registry.domains : [];
-  const activeWithTeam = domains.filter((domain) => domain.status === "active" && domain.linear?.team_id);
+function selectStatusUatTeam({ registry, teamRef = null } = {}) {
+  const teams = Array.isArray(registry?.teams) ? registry.teams : [];
+  const activeWithTeam = teams.filter((team) => team.status === "active" && team.linear?.team_id);
   if (activeWithTeam.length === 0) {
-    throw new StatusModelUatUserError("No active Linear domain with a team is configured; run init against the sandbox first.", "no_linear_domain");
+    throw new StatusModelUatUserError("No active Linear team with a team is configured; run init against the sandbox first.", "no_linear_team");
   }
-  const selected = domainId
-    ? activeWithTeam.find((domain) => domain.id === domainId)
+  const selected = teamRef
+    ? activeWithTeam.find((team) => team.id === teamRef)
     : activeWithTeam[0];
   if (!selected) {
-    throw new StatusModelUatUserError(`Status-model UAT domain is not active or not found: ${domainId}`, "domain");
+    throw new StatusModelUatUserError(`Status-model UAT team is not active or not found: ${teamRef}`, "team");
   }
-  assertSandboxDomain(selected);
+  assertSandboxTeam(selected);
   return selected;
 }
 
-function assertSandboxDomain(domain) {
+function assertSandboxTeam(team) {
   const labels = [
-    domain.id,
-    domain.adopter_provided_name,
-    domain.linear?.workspace_name,
-    domain.linear?.team_name,
+    team.id,
+    team.adopter_provided_name,
+    team.linear?.workspace_name,
+    team.linear?.team_name,
   ].filter(Boolean);
   if (labels.some((label) => /af-smoke/i.test(label))) {
     throw new StatusModelUatUserError(
-      `Refusing to run status-model UAT against non-sandbox-looking domain ${domain.id}; this harness targets ${DEFAULT_SANDBOX_DOMAIN_ID}.`,
-      "wrong_domain",
+      `Refusing to run status-model UAT against non-sandbox-looking team ${team.id}; this harness targets ${DEFAULT_SANDBOX_TEAM_REF}.`,
+      "wrong_team",
     );
   }
 
-  const workspaceName = String(domain.linear?.workspace_name || "").trim().toLowerCase();
-  if (domain.id !== DEFAULT_SANDBOX_DOMAIN_ID && workspaceName !== SANDBOX_WORKSPACE_NAME) {
+  const workspaceName = String(team.linear?.workspace_name || "").trim().toLowerCase();
+  if (team.id !== DEFAULT_SANDBOX_TEAM_REF && workspaceName !== SANDBOX_WORKSPACE_NAME) {
     throw new StatusModelUatUserError(
-      `Refusing to run status-model UAT against ${domain.id}; expected domain ${DEFAULT_SANDBOX_DOMAIN_ID} or workspace '${SANDBOX_WORKSPACE_NAME}'.`,
-      "wrong_domain",
+      `Refusing to run status-model UAT against ${team.id}; expected team ${DEFAULT_SANDBOX_TEAM_REF} or workspace '${SANDBOX_WORKSPACE_NAME}'.`,
+      "wrong_team",
     );
   }
 }
@@ -438,7 +438,7 @@ function createEnvCredentialStore({ tokenSecret, target, tokenUpdatePath = null 
 async function readRequiredLinearTokenSet(credentialStore) {
   const tokenSet = await credentialStore.readTokenSet();
   if (!tokenSet?.accessToken && !tokenSet?.refreshToken) {
-    throw new StatusModelUatUserError("Linear OAuth authorization is missing for the selected sandbox domain; run init first.", "no_linear_credential");
+    throw new StatusModelUatUserError("Linear OAuth authorization is missing for the selected sandbox team; run init first.", "no_linear_credential");
   }
   return tokenSet;
 }
@@ -468,7 +468,7 @@ async function recordStep(report, name, fn) {
 
 function assertIssueState(issue, context, role) {
   const expectedId = context.cache?.issueStatuses?.[role];
-  const expectedType = context.configForDomain.linear.issue.statuses[role]?.type;
+  const expectedType = context.configForTeam.linear.issue.statuses[role]?.type;
   assertCondition(isNonEmptyString(expectedId), `Cached issue status ${role} is missing.`);
   assertCondition(issue?.state?.id === expectedId, `Issue ${issue?.id || "unknown"} state id ${issue?.state?.id || "missing"} did not equal ${role}=${expectedId}.`);
   assertCondition(issue?.state?.type === expectedType, `Issue ${issue?.id || "unknown"} state type ${issue?.state?.type || "missing"} did not equal ${expectedType}.`);

@@ -73,12 +73,12 @@ const RUN_ID = "run-step17-bad-4";
 const SOURCE_TRACE_ID = "17171717171717171717171717171717";
 const EVAL_TRACE_ID = "27171717171717171717171717171717";
 const TRACE_IDENTITY = Object.freeze({
-  domainId: "support-ops",
+  teamRef: "support-ops",
   workspaceId: "workspace-1",
   teamId: "team-1",
 });
 const ARTIFACT_IDENTITY = Object.freeze({
-  domain_id: TRACE_IDENTITY.domainId,
+  team_ref: TRACE_IDENTITY.teamRef,
   workspace_id: TRACE_IDENTITY.workspaceId,
   team_id: TRACE_IDENTITY.teamId,
 });
@@ -997,7 +997,7 @@ test("Step 17 offline fixture proves a judge experiment runs but its promotion i
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
-    domainId: TRACE_IDENTITY.domainId,
+    teamRef: TRACE_IDENTITY.teamRef,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",
@@ -1202,7 +1202,7 @@ test("Step 17 offline fixture rejects zero-override baseline runs as promotion c
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
-    domainId: TRACE_IDENTITY.domainId,
+    teamRef: TRACE_IDENTITY.teamRef,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",
@@ -1277,7 +1277,7 @@ test("Step 17 offline fixture routes runtime-role evidence to an accepted-defaul
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
-    domainId: TRACE_IDENTITY.domainId,
+    teamRef: TRACE_IDENTITY.teamRef,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",
@@ -1528,7 +1528,7 @@ test("Step 18 offline fixture runs self-drafting opportunity to scanner-routed H
   captureProjectSnapshot({
     repoRoot: root,
     runId: RUN_ID,
-    domainId: TRACE_IDENTITY.domainId,
+    teamRef: TRACE_IDENTITY.teamRef,
     project: sourceProject(),
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T04:00:01.000Z",

@@ -49,9 +49,9 @@ const SUBAGENT_TURN_SCHEMA_VERSION = "linear-decomposition-orchestrator-subagent
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function evalDomainContext() {
+function evalTeamContext() {
   return Object.freeze({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     status: "active",
     linear: Object.freeze({
       workspaceId: "workspace-1",
@@ -62,7 +62,7 @@ function evalDomainContext() {
       cachePath: "unused",
     }),
     trace: Object.freeze({
-      domain_id: "support-ops",
+      team_ref: "support-ops",
       workspace_id: "workspace-1",
       team_id: "eval-team-1",
       behavior_repo_id: "local:test-eval",
@@ -400,7 +400,7 @@ test("eval:decomposition runs the orchestrator loop over a memory example and re
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     evalRunId,
     runtimeExecutor: fakeSubagentExecutor(),
@@ -505,7 +505,7 @@ test("pause-path eval run returns the pause artifact with authored prose and no 
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     evalRunId,
     runtimeExecutor: fakeSubagentExecutor(),
@@ -538,7 +538,7 @@ test("eval-mode cannot call Linear mutation methods (recording fake sees zero ca
       linearClient: client,
       config,
       cache,
-      domainContext: evalDomainContext(),
+      teamContext: evalTeamContext(),
       projectId: "project-eval-1",
       runtimeExecutor: fakeSubagentExecutor(),
       orchestratorTurnExecutor: orchestrator("eval-no-mutation"),
@@ -553,7 +553,7 @@ test("eval-mode cannot call Linear mutation methods (recording fake sees zero ca
   }
 });
 
-test("eval-mode requires a resolved foreground DomainContext instead of cache-derived identity", async () => {
+test("eval-mode requires a resolved foreground TeamContext instead of cache-derived identity", async () => {
   const root = tempRoot();
   copyAcceptedPromptAssets(root);
   const { client, cache } = mutationRecordingClient(validExample().input.project);
@@ -564,12 +564,12 @@ test("eval-mode requires a resolved foreground DomainContext instead of cache-de
       cache,
       projectId: "project-eval-1",
       runtimeExecutor: fakeSubagentExecutor(),
-      orchestratorTurnExecutor: fakeOrchestrator("eval-domain-required"),
-      runId: "eval-domain-required",
+      orchestratorTurnExecutor: fakeOrchestrator("eval-team-required"),
+      runId: "eval-team-required",
       repoRoot: root,
       runStoreDir: path.join(root, "runs"),
     }),
-    /domain_context_required/,
+    /team_context_required/,
   );
 });
 
@@ -640,7 +640,7 @@ test("eval-mode never claims gateway wakes: no lease surface exists on the eval 
   await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     evalRunId: "eval-wakefree-1",
     runtimeExecutor: fakeSubagentExecutor(),
@@ -663,7 +663,7 @@ test("eval task works fully offline: degraded trace, report-only checks with hon
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     evalRunId,
     runtimeExecutor: fakeSubagentExecutor(),
@@ -704,7 +704,7 @@ test("--example fails closed on schema mismatch and writes nothing", async () =>
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     runtimeExecutor: fakeSubagentExecutor(),
     orchestratorTurnExecutor: fakeOrchestrator("eval-unused"),
@@ -779,7 +779,7 @@ test("--run fails closed on a missing captured snapshot and loads a present one"
   const missing = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     runId: "run_without_snapshot",
     liveRunStoreDir,
     runtimeExecutor: fakeSubagentExecutor(),
@@ -810,7 +810,7 @@ test("--run fails closed on a missing captured snapshot and loads a present one"
   const loaded = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     runId: "run_with_snapshot",
     liveRunStoreDir,
     evalRunId,
@@ -854,7 +854,7 @@ test("--variant resolves runtime/model overrides, labels outputs, and fails clos
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     evalRunId,
     variantId: "candidate_pm",
@@ -904,7 +904,7 @@ test("--variant resolves runtime/model overrides, labels outputs, and fails clos
   const unknown = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     variantId: "does_not_exist",
     variantsPath,
@@ -1069,7 +1069,7 @@ test("eval prompt override delivers the candidate body to the targeted library s
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     evalRunId,
     variantId: "candidate_prompt_override",
@@ -1107,7 +1107,7 @@ test("--emit-checks and --judge chain over the in-memory outputs without re-read
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     examplePath,
     evalRunId,
     emitChecks: true,
@@ -1177,7 +1177,7 @@ test("eval-run record is written atomically with a deterministic inputs hash", a
     runDecompositionEvalTask({
       repoRoot: root,
       config,
-      domainContext: evalDomainContext(),
+      teamContext: evalTeamContext(),
       examplePath,
       evalRunId,
       runtimeExecutor: fakeSubagentExecutor(),
@@ -1242,7 +1242,7 @@ test("--dataset fetches the example via the verified REST GET path and degrades 
   const result = await runDecompositionEvalTask({
     repoRoot: root,
     config,
-    domainContext: evalDomainContext(),
+    teamContext: evalTeamContext(),
     datasetName: "eval-ds",
     datasetExampleId: "EX1",
     evalRunId,
@@ -1328,8 +1328,8 @@ test("eval:decomposition is wired as a first-class CLI task", () => {
     "utf8",
   );
   assert.ok(dispatchSource.includes("runDecompositionEvalTask"));
-  assert.ok(dispatchSource.includes("resolveForegroundDomainCache"));
-  assert.ok(dispatchSource.includes("domainContext: foreground.context"));
+  assert.ok(dispatchSource.includes("resolveForegroundTeamCache"));
+  assert.ok(dispatchSource.includes("teamContext: foreground.context"));
   // The repo-owned variants config exists with the no-override accepted
   // baseline as the default.
   const variants = JSON.parse(

@@ -233,10 +233,10 @@ function judgeReceiptReadPath({ home, runId, runStoreDir = null }) {
   const homeRoot = teamiHomePaths({ home }).home;
   const direct = path.join(homeRoot, "runs", `${runId}.judge.json`);
   if (fs.existsSync(direct)) return direct;
-  const domainsDir = path.join(homeRoot, "domains");
-  if (!fs.existsSync(domainsDir)) return direct;
-  for (const domainId of fs.readdirSync(domainsDir)) {
-    const candidate = path.join(domainsDir, domainId, "runs", `${runId}.judge.json`);
+  const teamsDir = path.join(homeRoot, "teams");
+  if (fs.existsSync(path.join(homeRoot, "teams.json.migration.lock")) || !fs.existsSync(teamsDir)) return direct;
+  for (const teamRef of fs.readdirSync(teamsDir)) {
+    const candidate = path.join(teamsDir, teamRef, "runs", `${runId}.judge.json`);
     if (fs.existsSync(candidate)) return candidate;
   }
   return direct;
@@ -576,7 +576,7 @@ export async function collectDisagreementReport({
         ok: false,
         status: "not_run",
         reason: receipt.reason,
-        detail: `${receipt.detail}; re-run the source workflow to write a current domain-identity trace receipt.`,
+        detail: `${receipt.detail}; re-run the source workflow to write a current team-identity trace receipt.`,
         run_id: runId,
         repairable: true,
         trace_receipt_path: receipt.path,

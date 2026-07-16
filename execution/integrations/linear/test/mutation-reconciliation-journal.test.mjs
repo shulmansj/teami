@@ -19,7 +19,7 @@ function tempHome() {
 function appendFixture(home, overrides = {}) {
   return appendMutationReconciliation({
     home,
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectType: "project",
     objectId: "project-1",
     runId: overrides.runId || "run-1",
@@ -51,7 +51,7 @@ test("reconciliation journal is ordered, hash-chained, and queryable by durable 
     assert.equal(second.prior_record_hash, first.record_hash);
     assert.equal(findMutationReconciliation({
       records,
-      domainId: "domain-1",
+      teamRef: "team-1",
       objectType: "project",
       objectId: "project-1",
       runId: "run-2",

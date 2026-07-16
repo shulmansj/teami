@@ -255,7 +255,7 @@ test("GitHub merge-path doctor check fails closed when PR API is unreachable", a
   assert.match(check.message, /Merge permission is proven at the first real merge/);
 });
 
-test("GitHub merge-path doctor check is healthy and not applicable for domains without a code repo", async () => {
+test("GitHub merge-path doctor check is healthy and not applicable for teams without a code repo", async () => {
   const check = await doctorMergePathGitHubCheck({
     repoIdentityError: "review_git_repo_resource_missing",
   });

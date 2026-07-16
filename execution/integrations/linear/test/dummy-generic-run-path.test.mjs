@@ -64,7 +64,7 @@ test("dummy no-identity deliverable flows materialize, cwd loop, resource ctx, a
     const manifest = writeDummyAcceptedPromptFixture({ repoRoot, definition });
 
     materialized = await materializeRunContext({
-      domainContext: {
+      teamContext: {
         resources: [dummyResource({ workingDir, publishedPath })],
       },
       runId: DUMMY_RUN_ID,
@@ -484,7 +484,7 @@ function dummyCommitArtifact({
     workflow_version: DUMMY_FUNCTION_VERSION,
     kind: "commit",
     run_id: DUMMY_RUN_ID,
-    domain_id: "dummy-domain",
+    team_ref: "dummy-team",
     workspace_id: "workspace-1",
     team_id: "team-1",
     terminal_output: terminalOutput,

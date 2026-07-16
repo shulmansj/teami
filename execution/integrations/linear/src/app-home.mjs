@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..", "..", "..", "..");
-const DOMAIN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const TEAM_REF_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function resolveTeamiHome({
   env = process.env,
@@ -41,27 +41,27 @@ export function resolveTeamiHome({
   return absoluteJoin(path.posix, home, ".teami");
 }
 
-export function teamiHomePaths({ home = resolveTeamiHome(), domainId = null } = {}) {
+export function teamiHomePaths({ home = resolveTeamiHome(), teamRef = null } = {}) {
   const pathApi = pathApiForHome(home);
   const paths = {
     home,
-    registryPath: pathApi.join(home, "domains.json"),
+    registryPath: pathApi.join(home, "teams.json"),
     gatewayLockPath: pathApi.join(home, "gateway.lock"),
     githubConnectionPath: pathApi.join(home, "github-connection.json"),
     behaviorMirrorDir: pathApi.join(home, "behavior-mirror"),
     runtimeDir: pathApi.join(home, "runtime"),
     phoenixDataDir: pathApi.join(home, "phoenix-data"),
-    domainDir: null,
-    domainCachePath: null,
+    teamDir: null,
+    teamCachePath: null,
   };
 
-  if (domainId === null) return paths;
-  if (typeof domainId !== "string" || !DOMAIN_ID_PATTERN.test(domainId)) {
-    throw new Error(`invalid_domain_id:${String(domainId)}`);
+  if (teamRef === null) return paths;
+  if (typeof teamRef !== "string" || !TEAM_REF_PATTERN.test(teamRef)) {
+    throw new Error(`invalid_team_ref:${String(teamRef)}`);
   }
 
-  paths.domainDir = pathApi.join(home, "domains", domainId);
-  paths.domainCachePath = pathApi.join(paths.domainDir, "linear.json");
+  paths.teamDir = pathApi.join(home, "teams", teamRef);
+  paths.teamCachePath = pathApi.join(paths.teamDir, "linear.json");
   return paths;
 }
 

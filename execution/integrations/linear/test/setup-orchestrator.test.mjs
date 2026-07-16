@@ -353,7 +353,7 @@ function stateFixture() {
     home,
     now: () => Date.parse("2026-07-11T13:00:00.000Z"),
     input: {
-      domain: "Support Ops",
+      team: "Support Ops",
       workspace: "Example Workspace",
       repo_intent: { mode: "non_code" },
       github_owner: "Acme",

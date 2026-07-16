@@ -25,13 +25,13 @@ test("init smoke wait shows durable, animation-free progress (non-TTY)", async (
     config: {},
     repoRoot: process.cwd(),
     cachePath: "linear-cache.json",
-    domainId: "domain-one",
+    teamRef: "team-one",
     output,
     runSmoke: async () => {
       await sleep(30); // simulate a slow smoke
       return { ok: true, results: [] };
     },
-    runDoctor: async () => [{ name: "domain registry", ok: true }],
+    runDoctor: async () => [{ name: "team registry", ok: true }],
   });
 
   const out = text();
@@ -49,10 +49,10 @@ test("init smoke heartbeat is cleared on both the success and the throw path", a
       config: {},
       repoRoot: process.cwd(),
       cachePath: "linear-cache.json",
-      domainId: "domain-one",
+      teamRef: "team-one",
       output: ttyOutput(),
       runSmoke: async () => ({ ok: true, results: [] }),
-      runDoctor: async () => [{ name: "domain registry", ok: true }],
+      runDoctor: async () => [{ name: "team registry", ok: true }],
     });
     assert.equal(process.listenerCount("exit"), baseline, "heartbeat cleared on the success path");
 
@@ -60,12 +60,12 @@ test("init smoke heartbeat is cleared on both the success and the throw path", a
       config: {},
       repoRoot: process.cwd(),
       cachePath: "linear-cache.json",
-      domainId: "domain-one",
+      teamRef: "team-one",
       output: ttyOutput(),
       runSmoke: async () => {
         throw new Error("smoke blew up");
       },
-      runDoctor: async () => [{ name: "domain registry", ok: true }],
+      runDoctor: async () => [{ name: "team registry", ok: true }],
     });
     assert.equal(process.listenerCount("exit"), baseline, "heartbeat cleared on the throw path");
     assert.equal(result.smokeOk, false, "a thrown smoke is handled, setup still completes");

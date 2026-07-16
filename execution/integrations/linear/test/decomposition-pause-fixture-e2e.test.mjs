@@ -18,12 +18,12 @@ import {
   authorizeLinearSetupWorkspace,
 } from "../cli.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
-import { emptyDomainRegistry } from "../src/domain-registry.mjs";
+import { emptyTeamRegistry } from "../src/team-registry.mjs";
 import { extractDecompositionKey } from "../src/issue-body.mjs";
 import {
   initLinear,
   runDecomposition,
-  setupLinearDomain,
+  setupLinearTeam,
 } from "../src/linear-service.mjs";
 import { buildOrchestratorPrompt } from "../src/orchestrator-turn.mjs";
 import { buildLinearProjectBody } from "../src/project-body.mjs";
@@ -58,8 +58,8 @@ test("fixture setup provisions Principal Escalation with one-shot admin and pres
     config,
     repoRoot,
     credentialStore,
-    registry: emptyDomainRegistry(),
-    domainNameHint: "Support Ops",
+    registry: emptyTeamRegistry(),
+    teamNameHint: "Support Ops",
     isTTY: true,
     createSetupAuth: () =>
       fakeSetupAuth(appClient, {
@@ -99,12 +99,12 @@ test("fixture setup provisions Principal Escalation with one-shot admin and pres
   assert.ok(logs.some((line) => /admin approval only to create Principal Escalation/i.test(line)));
 
   let writtenCache = null;
-  await setupLinearDomain({
+  await setupLinearTeam({
     client: authorization.setupAuth.client,
     config,
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     repoRoot,
-    domainName: "Support Ops",
+    teamName: "Support Ops",
     cache: {
       projectStatuses: {
         needs_principal: authorization.needsPrincipalProjectStatus.id,
@@ -302,7 +302,7 @@ async function initializedRuntimeClient(config) {
     writeCache: (cache) => {
       client.cache = {
         ...cache,
-        domainId: "support-ops",
+        teamRef: "support-ops",
         workspaceId: "workspace-1",
         teamId: "team-1",
       };

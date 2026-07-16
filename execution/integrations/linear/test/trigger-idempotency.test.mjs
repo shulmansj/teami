@@ -69,7 +69,7 @@ test("mutation intent write/list/read is durable, run-id keyed, and clear remove
     runArtifact({
       runId: "run-commit",
       kind: "commit",
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
     }),
   );
@@ -82,7 +82,7 @@ test("mutation intent write/list/read is durable, run-id keyed, and clear remove
   };
   try {
     const intent = writeMutationIntent({
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
       runId: "run-commit",
       artifactKind: "commit",
@@ -96,29 +96,29 @@ test("mutation intent write/list/read is durable, run-id keyed, and clear remove
   }
   assert.ok(fsyncCalls >= 1, "mutation intent write must fsync the temp file");
 
-  assert.deepEqual(listReplayPending({ domainId: "support-ops", runStoreDir }), [{
-    domainId: "support-ops",
+  assert.deepEqual(listReplayPending({ teamRef: "support-ops", runStoreDir }), [{
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-commit",
     artifactKind: "commit",
   }]);
-  assert.deepEqual(readReplayPending({ domainId: "support-ops", projectId: "project-1", runStoreDir }), {
-    domainId: "support-ops",
+  assert.deepEqual(readReplayPending({ teamRef: "support-ops", projectId: "project-1", runStoreDir }), {
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-commit",
     artifactKind: "commit",
   });
-  assert.equal(readReplayPending({ domainId: "support-ops", projectId: "project-other", runStoreDir }), null);
+  assert.equal(readReplayPending({ teamRef: "support-ops", projectId: "project-other", runStoreDir }), null);
 
   assert.deepEqual(clearMutationIntent({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-commit",
     runStoreDir,
   }), { cleared: true });
-  assert.deepEqual(listReplayPending({ domainId: "support-ops", runStoreDir }), []);
+  assert.deepEqual(listReplayPending({ teamRef: "support-ops", runStoreDir }), []);
   assert.deepEqual(clearMutationIntent({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-commit",
     runStoreDir,
@@ -132,12 +132,12 @@ test("replay pending scan excludes resume mutation intents", () => {
     runArtifact({
       runId: "run-resume",
       kind: "resume",
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
     }),
   );
   writeMutationIntent({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-resume",
     artifactKind: "resume",
@@ -146,8 +146,8 @@ test("replay pending scan excludes resume mutation intents", () => {
     runStoreDir,
   });
 
-  assert.deepEqual(listReplayPending({ domainId: "support-ops", runStoreDir }), []);
-  assert.equal(readReplayPending({ domainId: "support-ops", projectId: "project-1", runStoreDir }), null);
+  assert.deepEqual(listReplayPending({ teamRef: "support-ops", runStoreDir }), []);
+  assert.equal(readReplayPending({ teamRef: "support-ops", projectId: "project-1", runStoreDir }), null);
 });
 
 for (const boundary of [
@@ -161,7 +161,7 @@ for (const boundary of [
   test(`mutation intent recovery is deterministic at ${boundary}`, () => {
     const runStoreDir = tempRunStore();
     assert.throws(() => writeMutationIntent({
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
       runId: "run-intent-boundary",
       artifactKind: "commit",
@@ -178,7 +178,7 @@ for (const boundary of [
       "after_committed_validation",
     ].includes(boundary);
     assert.equal(Boolean(readMutationIntent({
-      domainId: "support-ops",
+      teamRef: "support-ops",
       runId: "run-intent-boundary",
       runStoreDir,
     })), committed);
@@ -195,7 +195,7 @@ test("suppression write/read returns only the matching project fingerprint", () 
   assert.notEqual(changedFingerprint, fingerprint);
 
   const note = writeSuppression({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     fingerprint,
     runId: null,
@@ -207,7 +207,7 @@ test("suppression write/read returns only the matching project fingerprint", () 
 
   assert.deepEqual(note, {
     project_id: "project-1",
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     run_id: null,
     terminal_status: "rejected",
     reason: "missing_required_template",
@@ -240,14 +240,14 @@ function projectFixture() {
   };
 }
 
-function runArtifact({ runId, kind, domainId, projectId }) {
+function runArtifact({ runId, kind, teamRef, projectId }) {
   const base = {
     schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
     engine_version: ENGINE_VERSION,
     function_version: "0.0.1",
     workflow_version: "0.0.1",
     run_id: runId,
-    domain_id: domainId,
+    team_ref: teamRef,
     workspace_id: "workspace-1",
     team_id: "team-1",
     kind,

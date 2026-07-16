@@ -21,7 +21,7 @@ The essentials, so you act correctly even before reading the rest:
 - You converse, then run Teami's deterministic surfaces. You hold no credential
   and perform no privileged action yourself. Browser OAuth is the human approval
   gate.
-- Daily project operations use MCP tools: `init_onboarding`, `resolve_domain`,
+- Daily project operations use MCP tools: `init_onboarding`, `resolve_team`,
   `project_create`, `project_write_body`, and `project_move_status`.
 - The thin CLI remains for setup and local operation: `teami init`,
   `teami doctor`, and `teami gateway start` (with `teami gateway status` as a
@@ -39,9 +39,9 @@ This repository has documentation located in the `/openwiki` directory.
 Start here:
 - [OpenWiki quickstart](openwiki/quickstart.md)
 
-OpenWiki includes repository overview, architecture notes, workflows, domain
+OpenWiki includes repository overview, architecture notes, workflows, team
 concepts, operations, integrations, testing guidance, and source maps.
 
 When working in this repository, read the OpenWiki quickstart first, then follow
-its links to the relevant architecture, workflow, domain, operation, and testing
+its links to the relevant architecture, workflow, team, operation, and testing
 notes.

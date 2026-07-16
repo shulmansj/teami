@@ -77,7 +77,7 @@ launcher form** — always via `formatCommand()` (`./teami <sub>` on posix,
 
 **Every `status` verb is side-effect-free** (a hard invariant). The adopter "is it working
 right now?" surfaces — the `teami` home screen and `teami gateway status` — inspect
-state only (config, domain registry, gateway-lock liveness, latest local run). They never
+state only (config, team registry, gateway-lock liveness, latest local run). They never
 poll Linear, drain replay, start a decomposition, or write. Active one-pass behavior lives
 behind a distinct operator path (`trigger-status`), never behind `status`.
 

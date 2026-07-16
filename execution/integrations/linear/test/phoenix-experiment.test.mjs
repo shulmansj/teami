@@ -9,11 +9,11 @@ import { COMMAND_INDEX } from "../src/cli/dispatch.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import { runDecompositionEvalTask } from "../src/decomposition-eval-cli.mjs";
 import {
-  DOMAIN_REGISTRY_SCHEMA_VERSION,
-  makeDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
-import { resolveForegroundDomainContext } from "../src/domain-resolver.mjs";
+  TEAM_REGISTRY_SCHEMA_VERSION,
+  makeTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
+import { resolveForegroundTeamContext } from "../src/team-resolver.mjs";
 import { PROCESS_VERSION } from "../../../engine/engine-contract-constants.mjs";
 import { DECOMPOSITION_FUNCTION_VERSION } from "../src/phase-contract.mjs";
 import {
@@ -67,12 +67,12 @@ function tempRoot() {
   return root;
 }
 
-function resolvedEvalDomainContext(root) {
+function resolvedEvalTeamContext(root) {
   const registry = {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [
-      makeDomainRecord({
-        domainId: "support-ops",
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         workspaceId: "workspace-1",
         teamId: "eval-team-1",
@@ -82,10 +82,10 @@ function resolvedEvalDomainContext(root) {
       }),
     ],
   };
-  writeDomainRegistry({ home: root }, registry);
-  const resolved = resolveForegroundDomainContext({
+  writeTeamRegistry({ home: root }, registry);
+  const resolved = resolveForegroundTeamContext({
     registry,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     config,
     repoRoot: root,
     home: root,
@@ -1306,7 +1306,7 @@ test("explicit example-id selection filters and fails closed on unknown ids; pre
 
 test("end-to-end with the real eval task: dataset example runs the real phase loop and the outputs land as experiment rows", async () => {
   const root = tempRoot();
-  const domainContext = resolvedEvalDomainContext(root);
+  const teamContext = resolvedEvalTeamContext(root);
   const records = [exampleRecord({ id: "EX1" })];
   const fetchImpl = fetchRouter(baseRoutes({ records }));
 
@@ -1396,7 +1396,7 @@ test("end-to-end with the real eval task: dataset example runs the real phase lo
   };
   const traceSink = {
     async startRun(input) {
-      assert.equal(input.domainContext.domainId, "support-ops");
+      assert.equal(input.teamContext.teamRef, "support-ops");
       return { ok: true, traceId: "e".repeat(32), status: "trace_unknown", run: { run_id: input.runId } };
     },
     async finishRun() {
@@ -1422,7 +1422,7 @@ test("end-to-end with the real eval task: dataset example runs the real phase lo
       ...args,
       repoRoot,
       evalRunStoreDir: path.join(root, "eval-runs"),
-      domainContext,
+      teamContext,
       orchestratorTurnExecutor,
     }),
     emitChecksFn: async ({ artifact, traceId }) => ({

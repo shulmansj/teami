@@ -411,10 +411,10 @@ test("ledger coverage: the JUDGE accepted ref is appended to the artifact when q
     existing_issues: [],
   };
   const { client, cache } = createSnapshotEvalLinearClient({ config, project });
-  const domainContext = Object.freeze({
-    domainId: "support-ops",
+  const teamContext = Object.freeze({
+    teamRef: "support-ops",
     linear: Object.freeze({ workspaceId: "ws-1", teamId: "team-1" }),
-    trace: Object.freeze({ domain_id: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
+    trace: Object.freeze({ team_ref: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
   });
 
   // Run the orchestrator loop (recorder path) — its accepted_refs are FROZEN
@@ -454,7 +454,7 @@ test("ledger coverage: the JUDGE accepted ref is appended to the artifact when q
     runId,
     acceptedRefs: orchestratorRun.acceptedRefs,
     evalMode: true,
-    domainContext,
+    teamContext,
     qualityJudge: async () => null,
   });
   // eval-mode is read-only: the run reaches a terminal artifact without a live
@@ -495,10 +495,10 @@ test("ledger coverage: when the judge RAN but its contract ref cannot be resolve
     existing_issues: [],
   };
   const { client, cache } = createSnapshotEvalLinearClient({ config, project });
-  const domainContext = Object.freeze({
-    domainId: "support-ops",
+  const teamContext = Object.freeze({
+    teamRef: "support-ops",
     linear: Object.freeze({ workspaceId: "ws-1", teamId: "team-1" }),
-    trace: Object.freeze({ domain_id: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
+    trace: Object.freeze({ team_ref: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
   });
 
   const orchestratorRun = await runLoop({
@@ -531,7 +531,7 @@ test("ledger coverage: when the judge RAN but its contract ref cannot be resolve
     runId,
     acceptedRefs: orchestratorRun.acceptedRefs,
     evalMode: true,
-    domainContext,
+    teamContext,
     qualityJudge: async () => null,
     loadJudgeContractFn: () => {
       throw new Error("simulated judge contract resolution failure");
@@ -584,10 +584,10 @@ test("ledger coverage: the captured judge ref provably matches what the judge IT
     existing_issues: [],
   };
   const { client, cache } = createSnapshotEvalLinearClient({ config, project });
-  const domainContext = Object.freeze({
-    domainId: "support-ops",
+  const teamContext = Object.freeze({
+    teamRef: "support-ops",
     linear: Object.freeze({ workspaceId: "ws-1", teamId: "team-1" }),
-    trace: Object.freeze({ domain_id: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
+    trace: Object.freeze({ team_ref: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
   });
 
   // The judge's OWN contract load (the version it consumes at judge time). This
@@ -628,7 +628,7 @@ test("ledger coverage: the captured judge ref provably matches what the judge IT
     runId,
     acceptedRefs: orchestratorRun.acceptedRefs,
     evalMode: true,
-    domainContext,
+    teamContext,
     qualityJudge: async () => null,
   });
   assert.equal(result.status, "evaluated");

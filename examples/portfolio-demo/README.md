@@ -36,7 +36,7 @@ The demo shows:
 | [architecture.md](architecture.md) | Demo architecture and trust-boundary explanation. | `hand-curated from current output` |
 | [evidence/trace-summary.md](evidence/trace-summary.md) | Synthetic trace summary for the demo decomposition flow. | `hand-curated from current output` |
 | [evidence/eval-summary.md](evidence/eval-summary.md) | Synthetic eval summary behind the local proposal. | `hand-curated from current output` |
-| [evidence/resource-binding-proof.md](evidence/resource-binding-proof.md) | Public-safe proof packet for landed local domain `git_repo` binding behavior. | `hand-curated from current implementation` |
+| [evidence/resource-binding-proof.md](evidence/resource-binding-proof.md) | Public-safe proof packet for landed local team `git_repo` binding behavior. | `hand-curated from current implementation` |
 
 ## Current Boundaries
 

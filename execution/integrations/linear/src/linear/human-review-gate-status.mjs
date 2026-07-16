@@ -3,10 +3,10 @@ import { resolveTeamiHome } from "../app-home.mjs";
 import { createLinearCredentialStore } from "../linear-credential-store.mjs";
 import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
 import {
-  emptyDomainRegistry,
-  readDomainRegistry,
-} from "../domain-registry.mjs";
-import { buildDomainContext } from "../domain-resolver.mjs";
+  emptyTeamRegistry,
+  readTeamRegistry,
+} from "../team-registry.mjs";
+import { buildTeamContext } from "../team-resolver.mjs";
 import {
   createLocalTriggerStore,
   localTriggerStorePath,
@@ -29,44 +29,44 @@ export async function collectHumanReviewGateStatusReport({
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   config,
-  registry = readDomainRegistry({ home }) || emptyDomainRegistry(),
+  registry = readTeamRegistry({ home }) || emptyTeamRegistry(),
   store = createLocalTriggerStore({ repoRoot, home }),
   createLinearClient = createReadOnlyLinearClient,
   createPrAdapter = ({ repoIdentity }) => createDefaultExecutionPullRequestAdapter({ repoIdentity }),
   now = () => new Date(),
 } = {}) {
-  const activeDomains = (registry?.domains || []).filter((domain) => domain.status === "active");
+  const activeTeams = (registry?.teams || []).filter((team) => team.status === "active");
   const warnings = [];
   const records = safeParkRecords(store, warnings);
   const runRecords = safeRunRecords(home, warnings);
   const itemsByIssue = new Map();
 
-  for (const domain of activeDomains) {
-    const domainContext = buildDomainContext({ domain, config, repoRoot, home });
-    const cache = readLinearCache(domainContext.linear.cachePath);
+  for (const team of activeTeams) {
+    const teamContext = buildTeamContext({ team, config, repoRoot, home });
+    const cache = readLinearCache(teamContext.linear.cachePath);
     if (!cache) {
       warnings.push({
-        domain_id: domain.id,
-        reason: "linear cache missing; human-review gate status skipped for this domain",
+        team_ref: team.id,
+        reason: "linear cache missing; human-review gate status skipped for this team",
       });
       continue;
     }
 
     let client;
     try {
-      client = await createLinearClient({ config, repoRoot, domain, domainContext });
+      client = await createLinearClient({ config, repoRoot, team, teamContext });
     } catch (error) {
       warnings.push({
-        domain_id: domain.id,
+        team_ref: team.id,
         reason: `Linear read unavailable: ${safeErrorMessage(error)}`,
       });
       continue;
     }
 
-    await collectDomainIssues({
+    await collectTeamIssues({
       config,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       cache,
       client,
       records,
@@ -81,7 +81,7 @@ export async function collectHumanReviewGateStatusReport({
       issueId: record.issue_id,
       parkRecord: record,
       issueMissing: true,
-      readError: "Linear issue was not found in active domains",
+      readError: "Linear issue was not found in active teams",
     }));
   }
 
@@ -104,7 +104,7 @@ export async function collectHumanReviewGateStatusReport({
     }),
     warnings,
     sources: {
-      active_domain_count: activeDomains.length,
+      active_team_count: activeTeams.length,
       park_record_count: records.length,
       run_record_count: runRecords.length,
     },
@@ -132,7 +132,7 @@ export function deriveGateQueue(items = [], { now = () => new Date() } = {}) {
       const decision = gateDecisionForItem(item);
       return {
         kind: "queue",
-        domain_id: item.domain_id,
+        team_ref: item.team_ref,
         issue_id: item.issue_id,
         identifier: item.identifier,
         title: item.title,
@@ -319,10 +319,10 @@ function hasLiveParkRecordForOutcome(items, outcome = {}) {
   );
 }
 
-async function collectDomainIssues({
+async function collectTeamIssues({
   config = null,
-  domain,
-  domainContext,
+  team,
+  teamContext,
   cache,
   client,
   records,
@@ -336,18 +336,18 @@ async function collectDomainIssues({
   if (gateLabelId && typeof client.listIssues === "function") {
     candidates.push(...await readIssueList({
       client,
-      domainId: domain.id,
+      teamRef: team.id,
       warnings,
-      query: { teamId: domain.linear.team_id, labelId: gateLabelId },
+      query: { teamId: team.linear.team_id, labelId: gateLabelId },
       source: "human_review_label",
     }));
   }
   if (humanReviewStateId && typeof client.listIssues === "function") {
     candidates.push(...await readIssueList({
       client,
-      domainId: domain.id,
+      teamRef: team.id,
       warnings,
-      query: { teamId: domain.linear.team_id, stateId: humanReviewStateId },
+      query: { teamId: team.linear.team_id, stateId: humanReviewStateId },
       source: "human_review_status",
     }));
   }
@@ -364,8 +364,8 @@ async function collectDomainIssues({
     const existing = itemsByIssue.get(issue.id);
     if (existing && existing.park_record) continue;
     const item = baseGateStatusItem({
-      domainId: domain.id,
-      domainContext,
+      teamRef: team.id,
+      teamContext,
       cache,
       issue,
       issueId: issue.id,
@@ -392,7 +392,7 @@ async function hydrateGateStatusItem({
 
   let adapter;
   try {
-    const repoIdentity = resourcesToRepoIdentity(next.domain_context, {
+    const repoIdentity = resourcesToRepoIdentity(next.team_context, {
       resourceId: next.issue?.resource_target?.id,
     });
     adapter = await createPrAdapter({ repoIdentity, item: next });
@@ -435,8 +435,8 @@ async function hydrateGateStatusItem({
 }
 
 function baseGateStatusItem({
-  domainId = null,
-  domainContext = null,
+  teamRef = null,
+  teamContext = null,
   cache = null,
   issue = null,
   issueId,
@@ -447,8 +447,8 @@ function baseGateStatusItem({
   readError = null,
 } = {}) {
   return {
-    domain_id: domainId,
-    domain_context: domainContext,
+    team_ref: teamRef,
+    team_context: teamContext,
     cache,
     client,
     issue,
@@ -472,12 +472,12 @@ function baseGateStatusItem({
   };
 }
 
-async function readIssueList({ client, domainId, warnings, query, source }) {
+async function readIssueList({ client, teamRef, warnings, query, source }) {
   try {
     return await client.listIssues(query);
   } catch (error) {
     warnings.push({
-      domain_id: domainId,
+      team_ref: teamRef,
       reason: `${source} issue read failed: ${safeErrorMessage(error)}`,
     });
     return [];
@@ -555,21 +555,24 @@ function latestMergeRun(store, { issueId, prNumber, headSha } = {}) {
 async function createReadOnlyLinearClient({
   config,
   repoRoot = process.cwd(),
-  domainContext,
+  home = resolveTeamiHome(),
+  teamContext,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
 } = {}) {
   const credentialStore = createLinearCredentialStore({
     config,
     repoRoot,
-    domainContext,
+    home,
+    teamContext,
+    promoteLegacyOnRead: false,
   });
   return createSetupGraphqlClient({
     config,
     repoRoot,
     credentialStore,
-    domainContext,
+    teamContext,
     allowBrowserAuth: false,
-    allowRefresh: true,
+    allowRefresh: false,
   }).client;
 }
 
@@ -580,7 +583,7 @@ function normalizeGateStatusItem(item = {}) {
   const prState = item.pr_state || item.prState || "open";
   return {
     ...item,
-    domain_id: stringOrNull(item.domain_id || item.domainId),
+    team_ref: stringOrNull(item.team_ref || item.teamRef),
     issue_id: stringOrNull(item.issue_id || item.issueId),
     identifier: stringOrNull(item.identifier),
     title: stringOrNull(item.title),
@@ -629,7 +632,7 @@ function gateDecisionForItem(item = {}) {
 
 function reconciliationBase(item, reason) {
   return {
-    domain_id: item.domain_id,
+    team_ref: item.team_ref,
     issue_id: item.issue_id,
     identifier: item.identifier,
     title: item.title,

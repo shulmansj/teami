@@ -26,10 +26,10 @@ import {
   runDecompositionExperiment,
 } from "../src/phoenix-experiment.mjs";
 import {
-  DOMAIN_REGISTRY_SCHEMA_VERSION,
-  makeDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  TEAM_REGISTRY_SCHEMA_VERSION,
+  makeTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import { DEFAULT_ANNOTATION_NAME } from "../src/eval-annotation-contract.mjs";
 
@@ -113,7 +113,7 @@ async function captureJudgeAnnotationBody() {
 async function captureDrafterDraftBytes() {
   const repoRoot = tempRoot("drafter");
   copyDecompositionEvalAssets(repoRoot);
-  writeTestDomainRegistry(repoRoot);
+  writeTestTeamRegistry(repoRoot);
 
   const draftContent = [
     "# Accepted Sr Eng Grounding Prompt",
@@ -205,7 +205,7 @@ function seedJudgeRun(repoRoot, runId) {
   captureProjectSnapshot({
     repoRoot,
     runId,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     project: {
       id: "project-post-migration-golden",
       name: "Post Migration Golden Project",
@@ -225,7 +225,7 @@ function seedJudgeRun(repoRoot, runId) {
     phoenixAppUrl: "http://127.0.0.1:6006",
     status: "trace_exported",
     observedAt: FIXED_NOW.toISOString(),
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
   });
@@ -237,7 +237,7 @@ function commitArtifact(runId) {
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
     kind: "commit",
     run_id: runId,
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     terminal_output: {
@@ -567,14 +567,14 @@ function copyDecompositionEvalAssets(repoRoot) {
   fs.cpSync(source, target, { recursive: true });
 }
 
-function writeTestDomainRegistry(repoRoot) {
-  writeDomainRegistry(
+function writeTestTeamRegistry(repoRoot) {
+  writeTeamRegistry(
     { repoRoot },
     {
-      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-      domains: [
-        makeDomainRecord({
-          domainId: "support-ops",
+      schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+      teams: [
+        makeTeamRecord({
+          teamRef: "support-ops",
           status: "active",
           workspaceId: "workspace-1",
           workspaceName: "Support Ops",

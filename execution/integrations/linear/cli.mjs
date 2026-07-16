@@ -26,27 +26,27 @@ async function main() {
 export {
   authorizeLinearSetupWorkspace,
   ensureNeedsPrincipalProjectStatus,
-  explicitInitDomainName,
+  explicitInitTeamName,
   promptLinearWorkspacePicker,
-  resolveInitDomainName,
-  resolveGitHubPhaseResumeDomain,
+  resolveInitTeamName,
+  resolveGitHubPhaseResumeTeam,
   resolveLinearWorkspaceSelection,
-  resolveSetupCommandDomainNameHint,
+  resolveSetupCommandTeamNameHint,
 } from "./src/cli/linear-setup-command.mjs";
 export {
   createBootstrapLinearCredentialStore,
   legacyCredentialStores,
-  promoteSetupCredentialToDomain,
+  promoteSetupCredentialToTeam,
   removeLocalLinearSetup,
-  removeOneDomainSetup,
+  removeOneTeamSetup,
 } from "./src/cli/local-setup-cleanup.mjs";
 export {
-  acquireDomainRunnerLock,
+  acquireTeamRunnerLock,
   formatTriggerWakeStatusLine,
   inspectTriggerStatus,
   requeueTriggerWake,
   runOneTriggerWake,
-  selectRunnerDomains,
+  selectRunnerTeams,
 } from "./src/cli/runner-command.mjs";
 
 // True when this module is the process entrypoint. The Windows npm bin runs `node cli.mjs`

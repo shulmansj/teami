@@ -62,23 +62,23 @@ async function assertAllMcpToolsWorkFromNoCheckoutCwd(fixture) {
     assert.equal(onboarding.structuredContent.ok, false);
     assert.deepEqual(onboarding.structuredContent.needs.map((need) => need.field), ["confirm"]);
     assert.deepEqual(onboarding.structuredContent.defaults, {
-      team: fixture.domain.domainId,
+      team: fixture.team.teamRef,
       product_repositories: "none",
     });
     assert.equal(Object.hasOwn(onboarding.structuredContent, "authorization_url"), false);
 
     const resolved = await mcp.client.callTool({
-      name: "resolve_domain",
-      arguments: { domain: fixture.domain.domainId },
+      name: "resolve_team",
+      arguments: { team: fixture.team.teamRef },
     });
     assert.equal(resolved.isError, undefined, JSON.stringify(resolved.structuredContent));
-    assert.equal(resolved.structuredContent.domain.domain_id, fixture.domain.domainId);
+    assert.equal(resolved.structuredContent.team.team_ref, fixture.team.teamRef);
     assert.equal(resolved.structuredContent.cache.present, true);
 
     const created = await mcp.client.callTool({
       name: "project_create",
       arguments: {
-        domain: fixture.domain.domainId,
+        team: fixture.team.teamRef,
         name: "No-checkout planning project",
         description: "Created by a repo-less regression harness.",
       },
@@ -91,7 +91,7 @@ async function assertAllMcpToolsWorkFromNoCheckoutCwd(fixture) {
     const written = await mcp.client.callTool({
       name: "project_write_body",
       arguments: {
-        domain: fixture.domain.domainId,
+        team: fixture.team.teamRef,
         project_id: projectId,
         content: body,
       },
@@ -102,7 +102,7 @@ async function assertAllMcpToolsWorkFromNoCheckoutCwd(fixture) {
     const moved = await mcp.client.callTool({
       name: "project_move_status",
       arguments: {
-        domain: fixture.domain.domainId,
+        team: fixture.team.teamRef,
         project_id: projectId,
         confirm: true,
       },

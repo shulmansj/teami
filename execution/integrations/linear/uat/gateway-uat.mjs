@@ -7,8 +7,8 @@ import { SUBAGENT_TURN_CONTRACT_SCHEMA_VERSION } from "../../../engine/orchestra
 import { defaultRunStoreDir } from "../../../engine/run-store.mjs";
 import { readLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
-import { readDomainRegistry } from "../src/domain-registry.mjs";
-import { buildDomainContext } from "../src/domain-resolver.mjs";
+import { readTeamRegistry } from "../src/team-registry.mjs";
+import { buildTeamContext } from "../src/team-resolver.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import {
   acquireGatewayLock,
@@ -31,8 +31,8 @@ const MODULE_DIR = import.meta.dirname;
 const REPO_ROOT = path.resolve(MODULE_DIR, "..", "..", "..", "..");
 const HARNESS_PATH = path.join(MODULE_DIR, "gateway-uat.mjs");
 
-export const NO_LINEAR_DOMAIN_MESSAGE =
-  "no Linear domain configured — run npm run init against a disposable test team";
+export const NO_LINEAR_TEAM_MESSAGE =
+  "no Linear team configured — run npm run init against a disposable test team";
 export const DEFAULT_UAT_PREFIX = "AF-UAT";
 export const DEFAULT_CONSECUTIVE_COMMITS = 2;
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -76,7 +76,7 @@ class UatUserError extends Error {
 export function parseGatewayUatArgs(argv = process.argv.slice(2), env = process.env) {
   const options = {
     repoRoot: path.resolve(env.TEAMI_UAT_REPO_ROOT || REPO_ROOT),
-    domainId: env.TEAMI_UAT_DOMAIN || null,
+    teamRef: env.TEAMI_UAT_TEAM || null,
     prefix: env.TEAMI_UAT_PREFIX || DEFAULT_UAT_PREFIX,
     consecutive: parsePositiveInteger(env.TEAMI_UAT_CONSECUTIVE, DEFAULT_CONSECUTIVE_COMMITS),
     pollIntervalMs: parsePositiveInteger(env.TEAMI_UAT_POLL_INTERVAL_MS, null),
@@ -92,8 +92,8 @@ export function parseGatewayUatArgs(argv = process.argv.slice(2), env = process.
     const arg = argv[index];
     if (arg === "--help" || arg === "-h") {
       options.help = true;
-    } else if (arg === "--domain") {
-      options.domainId = requireNext(argv, ++index, arg);
+    } else if (arg === "--team") {
+      options.teamRef = requireNext(argv, ++index, arg);
     } else if (arg === "--prefix") {
       options.prefix = requireNext(argv, ++index, arg);
     } else if (arg === "--consecutive") {
@@ -126,18 +126,18 @@ export function parseGatewayUatArgs(argv = process.argv.slice(2), env = process.
   return options;
 }
 
-export function selectUatDomain({ registry, domainId = null } = {}) {
-  const domains = Array.isArray(registry?.domains) ? registry.domains : [];
-  const active = domains.filter((domain) => domain.status === "active");
-  if (active.length === 0) throw new UatUserError(NO_LINEAR_DOMAIN_MESSAGE, "no_linear_domain");
-  if (domainId) {
-    const selected = active.find((domain) => domain.id === domainId);
-    if (!selected) throw new UatUserError(`domain not active or not found for gateway UAT: ${domainId}`, "domain");
+export function selectUatTeam({ registry, teamRef = null } = {}) {
+  const teams = Array.isArray(registry?.teams) ? registry.teams : [];
+  const active = teams.filter((team) => team.status === "active");
+  if (active.length === 0) throw new UatUserError(NO_LINEAR_TEAM_MESSAGE, "no_linear_team");
+  if (teamRef) {
+    const selected = active.find((team) => team.id === teamRef);
+    if (!selected) throw new UatUserError(`team not active or not found for gateway UAT: ${teamRef}`, "team");
     return selected;
   }
   if (active.length > 1) {
-    const ids = active.map((domain) => domain.id).join(", ");
-    throw new UatUserError(`multiple Linear domains configured (${ids}) - pass --domain <domain_id> for the disposable test team`, "domain");
+    const ids = active.map((team) => team.id).join(", ");
+    throw new UatUserError(`multiple Linear teams configured (${ids}) - pass --team <team_ref> for the disposable test team`, "team");
   }
   return active[0];
 }
@@ -162,10 +162,10 @@ export function classifyReplayRecovery({ statuses = [], projectId, expectedRunId
 
 export function buildGatewayUatUsage() {
   return [
-    "Usage: npm run uat:gateway -- [--domain <id>] [--prefix AF-UAT] [--consecutive 2]",
+    "Usage: npm run uat:gateway -- [--team <id>] [--prefix AF-UAT] [--consecutive 2]",
     "",
     "Environment equivalents:",
-    "- TEAMI_UAT_DOMAIN selects the disposable Linear domain/team.",
+    "- TEAMI_UAT_TEAM selects the disposable Linear team/team.",
     "- TEAMI_UAT_PREFIX controls test-created Linear project name prefixes.",
     "- TEAMI_UAT_POLL_INTERVAL_MS overrides poll.interval_ms for the harness run.",
     "- TEAMI_UAT_KEEP_ARTIFACTS=1 keeps test artifacts where the scenarios leave them.",
@@ -177,7 +177,7 @@ export async function runGatewayUat(options = parseGatewayUatArgs()) {
   const createdProjects = [];
   const report = {
     ok: false,
-    domainId: context.domain.id,
+    teamRef: context.team.id,
     prefix: context.prefix,
     scenarios: [],
     createdProjects,
@@ -210,22 +210,22 @@ export async function runGatewayUat(options = parseGatewayUatArgs()) {
 async function prepareLiveUatContext(options) {
   const repoRoot = path.resolve(options.repoRoot || REPO_ROOT);
   const config = loadLinearConfig({ repoRoot });
-  // The domain registry can bind git_repo resources (since #90); register that resource kind
-  // before reading the registry, or readDomainRegistry throws unknown_resource_kind:git_repo.
+  // The team registry can bind git_repo resources (since #90); register that resource kind
+  // before reading the registry, or readTeamRegistry throws unknown_resource_kind:git_repo.
   // (This UAT lives outside `npm test`, so the rot was invisible — same class as live-e2e #160.)
   registerGitRepoResourceKind();
-  const registry = readDomainRegistry({ repoRoot });
-  const domain = selectUatDomain({ registry, domainId: options.domainId });
-  const domainContext = buildDomainContext({ domain, config, repoRoot });
-  const credentialStore = createLinearCredentialStore({ config, repoRoot, domainContext });
+  const registry = readTeamRegistry({ repoRoot });
+  const team = selectUatTeam({ registry, teamRef: options.teamRef });
+  const teamContext = buildTeamContext({ team, config, repoRoot });
+  const credentialStore = createLinearCredentialStore({ config, repoRoot, teamContext });
   let tokenSet = null;
   try {
     tokenSet = await credentialStore.readTokenSet();
   } catch {
-    throw new UatUserError(NO_LINEAR_DOMAIN_MESSAGE, "no_linear_credential");
+    throw new UatUserError(NO_LINEAR_TEAM_MESSAGE, "no_linear_credential");
   }
   if (!tokenSet?.refreshToken && !tokenSet?.accessToken) {
-    throw new UatUserError(NO_LINEAR_DOMAIN_MESSAGE, "no_linear_credential");
+    throw new UatUserError(NO_LINEAR_TEAM_MESSAGE, "no_linear_credential");
   }
 
   const client = createLinearSetupGraphqlClient({
@@ -236,7 +236,7 @@ async function prepareLiveUatContext(options) {
     allowRefresh: true,
   }).client;
   await client.verifyAuth();
-  const cache = readLinearCache(domainContext.linear.cachePath);
+  const cache = readLinearCache(teamContext.linear.cachePath);
   const shape = await resolveLinearShape({ client, config, cache });
   const pollIntervalMs = options.pollIntervalMs || config.poll?.interval_ms || 10_000;
   const liveConfig = structuredClone(config);
@@ -248,8 +248,8 @@ async function prepareLiveUatContext(options) {
     repoRoot,
     config: liveConfig,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     cache,
     client,
     shape,
@@ -302,7 +302,7 @@ async function runCommitPickupScenario(context, { index, createdProjects }) {
     repoRoot: context.repoRoot,
     config: context.config,
     registry: context.registry,
-    domains: [context.domain],
+    teams: [context.team],
     // Scope the poll to THIS scenario's project. The UAT shares a live sandbox team that
     // accumulates stale Planned projects from interrupted prior runs; an unscoped poll would
     // process them all serially (real Linear mutations) ahead of this project, blow the tight
@@ -455,7 +455,7 @@ async function runCrashScenario(context, { crashMode, createdProjects }) {
 
   const crash = await spawnCrashChild(context, { crashMode, projectId: project.id });
   const pendingBefore = readReplayPending({
-    domainId: context.domain.id,
+    teamRef: context.team.id,
     projectId: project.id,
     repoRoot: context.repoRoot,
   });
@@ -473,7 +473,7 @@ async function runCrashScenario(context, { crashMode, createdProjects }) {
     repoRoot: context.repoRoot,
     config: context.config,
     registry: context.registry,
-    domains: [context.domain],
+    teams: [context.team],
     // Scope to the crashed project: the replay pass must reconcile exactly this project's pending
     // mutation, undisturbed by stale sandbox projects that would also be polled unscoped.
     pollScope: { projectIds: [project.id] },
@@ -485,7 +485,7 @@ async function runCrashScenario(context, { crashMode, createdProjects }) {
   });
   assertCondition(replayResult.ok, `gateway replay pass failed: ${replayResult.reason || replayResult.status}`);
   const pendingAfter = readReplayPending({
-    domainId: context.domain.id,
+    teamRef: context.team.id,
     projectId: project.id,
     repoRoot: context.repoRoot,
   });
@@ -571,7 +571,7 @@ async function runSingleGatewayPass(context, { outcome, projectId = null }) {
     repoRoot: context.repoRoot,
     config: context.config,
     registry: context.registry,
-    domains: [context.domain],
+    teams: [context.team],
     // Scope to the scenario's project so leftover sandbox state can never be processed here.
     ...(projectId ? { pollScope: { projectIds: [projectId] } } : {}),
     runTimeoutMs: context.timeoutMs,
@@ -589,8 +589,8 @@ async function spawnCrashChild(context, { crashMode, projectId }) {
     crashMode,
     "--project-id",
     projectId,
-    "--domain",
-    context.domain.id,
+    "--team",
+    context.team.id,
     "--repo-root",
     context.repoRoot,
     "--timeout-ms",
@@ -664,7 +664,7 @@ async function runChildCrashGateway(options) {
     repoRoot: context.repoRoot,
     config: context.config,
     registry: context.registry,
-    domains: [context.domain],
+    teams: [context.team],
     // Scope to the child's crash project so this single poll iteration reaches its crash point
     // without processing unrelated stale sandbox projects first.
     pollScope: { projectIds: [options.childProjectId] },
@@ -1079,7 +1079,7 @@ function testProjectContent({ name, summary }) {
     desired_outcome: "Prove the local gateway poll and replay paths against disposable live Linear artifacts.",
     acceptance: "The UAT harness observes status events and terminal Linear state.",
     scope: "Gateway UAT only; use disposable test-prefixed Linear projects.",
-    constraints: "Use the bound local domain, local credentials, and the real gateway entrypoints.",
+    constraints: "Use the bound local team, local credentials, and the real gateway entrypoints.",
     sources: "Generated by the gateway UAT harness.",
     human_decisions: "None for this disposable verification run.",
   });
@@ -1267,9 +1267,9 @@ export async function main({
     const message = error instanceof UatUserError ? error.message : `GATEWAY UAT FAIL: ${error?.message || String(error)}`;
     stderr(message);
     if (!(error instanceof UatUserError)) {
-      stderr(options.domainId
-        ? `Run store: ${defaultRunStoreDir({ domainId: options.domainId })}`
-        : "Run store: unavailable until a domain is selected");
+      stderr(options.teamRef
+        ? `Run store: ${defaultRunStoreDir({ teamRef: options.teamRef })}`
+        : "Run store: unavailable until a team is selected");
     }
     exit(error instanceof UatUserError && error.code === "usage" ? 2 : 1);
     return { ok: false, stage: "run", error };

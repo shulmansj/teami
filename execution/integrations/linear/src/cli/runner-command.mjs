@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { emptyDomainRegistry, readDomainRegistry } from "../domain-registry.mjs";
+import { emptyTeamRegistry, readTeamRegistry } from "../team-registry.mjs";
 import { readLocalEvalInputs } from "../eval-status.mjs";
 import {
   runGatewayLoop,
   runGatewayOnce,
-  selectGatewayDomains,
+  selectGatewayTeams,
 } from "../gateway-loop.mjs";
 import { collectHumanReviewGateStatusReport } from "../linear/human-review-gate-status.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
@@ -27,7 +27,7 @@ import {
   printVerboseHint,
 } from "./operator-output.mjs";
 
-const DEFAULT_DOMAIN_RUNNER_LOCK_STALE_MS = 30 * 60 * 1000;
+const DEFAULT_TEAM_RUNNER_LOCK_STALE_MS = 30 * 60 * 1000;
 const GATEWAY_SUCCESS_STATUSES = new Set(["completed", "stopped"]);
 const ATTENTION_STATES = new Set(["rate_limited", "wedged", "degraded", "resume_attention"]);
 const ACTIVE_STATES = new Set(["replaying", "working", "resume_working"]);
@@ -46,7 +46,7 @@ export async function runGatewayCommand(input) {
   }
   if (subcommand && !subcommand.startsWith("--")) {
     output.error({
-      what: `Usage: ${formatCommand("gateway [status] [--domain <id>]")}`,
+      what: `Usage: ${formatCommand("gateway [status] [--team <id>]")}`,
       why: `Unknown gateway subcommand: ${subcommand}`,
     });
     process.exitCode = 2;
@@ -93,7 +93,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
       repoRoot,
       home,
       config,
-      domainId: flags.domain || null,
+      teamRef: flags.team || null,
     });
     const intervalMs = config.poll?.interval_ms || 10_000;
     output.info(`Watching Linear for Planned projects. Polling every ${humanizeInterval(intervalMs)}; stop with Ctrl-C.`);
@@ -105,7 +105,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
       home,
       config,
       registry: selection.registry,
-      domains: selection.domains,
+      teams: selection.teams,
       signal: controller.signal,
       maxIterations,
       onStatus: (event) => {
@@ -119,7 +119,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
     output.error({
       what: "Gateway could not start",
       why: redactOAuthSecrets(error.message),
-      fix: `run ${formatCommand("init")} or pass --domain for an active domain, then retry.`,
+      fix: `run ${formatCommand("init")} or pass --team for an active team, then retry.`,
     });
     process.exitCode = 1;
     return;
@@ -155,20 +155,20 @@ async function runGatewayStatusCommand({ context, args }) {
       repoRoot,
       home,
       config,
-      domainId: flags.domain || null,
+      teamRef: flags.team || null,
     });
     result = await runGatewayOnce({
       repoRoot,
       home,
       config,
       registry: selection.registry,
-      domains: selection.domains,
+      teams: selection.teams,
     });
   } catch (error) {
     output.error({
       what: "Gateway status could not be read",
       why: redactOAuthSecrets(error.message),
-      fix: `run ${formatCommand("init")} or pass --domain for a configured active domain, then retry.`,
+      fix: `run ${formatCommand("init")} or pass --team for a configured active team, then retry.`,
     });
     process.exitCode = 1;
     return;
@@ -189,7 +189,7 @@ async function runGatewayStatusReadOnly({ context }) {
   const probe = homeStateProbe({ repoRoot, home, config });
 
   if (probe.state === "uninitialized") {
-    output.warn("Not set up yet — this checkout has no active factory domain.");
+    output.warn("Not set up yet — this checkout has no active factory team.");
     output.nextSteps([{ text: formatCommand("init"), hint: "set up your factory" }]);
     process.exitCode = 0;
     return;
@@ -207,7 +207,7 @@ async function runGatewayStatusReadOnly({ context }) {
     : output.style.dim(output.symbols.stopped);
   output.raw(`\n  ${mark} ${running ? "Running" : "Stopped"}\n`);
   output.keyValues(compactPairs([
-    ["Domain", probe.evidence.activeDomainId],
+    ["Team", probe.evidence.activeTeamRef],
     ["Poll", `every ${humanizeInterval(config.poll?.interval_ms ?? 10_000)}`],
     ["Dashboard", normalizeLocalPhoenixAppUrl(process.env.TEAMI_PHOENIX_URL)],
   ]));
@@ -222,13 +222,13 @@ async function runGatewayStatusReadOnly({ context }) {
   process.exitCode = 0;
 }
 
-function resolveGatewaySelection({ repoRoot, home = resolveTeamiHome(), config, domainId = null } = {}) {
-  const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
-  const domains = selectGatewayDomains({ registry, domainId });
-  if (domains.length === 0) {
-    throw new Error(`no_active_domains: no active domains are configured. Run ${formatCommand("init")}.`);
+function resolveGatewaySelection({ repoRoot, home = resolveTeamiHome(), config, teamRef = null } = {}) {
+  const registry = readTeamRegistry({ home }) || emptyTeamRegistry();
+  const teams = selectGatewayTeams({ registry, teamRef });
+  if (teams.length === 0) {
+    throw new Error(`no_active_teams: no active teams are configured. Run ${formatCommand("init")}.`);
   }
-  return { registry, domains, config };
+  return { registry, teams, config };
 }
 
 function renderGatewayCompletion(result, output) {
@@ -313,14 +313,14 @@ function renderPlannedProjectSummary(result, output) {
     return;
   }
   for (const row of rows) {
-    const headline = `${row.projectId || row.domainId}: ${humanizeToken(row.action || row.status || "observed")}`;
+    const headline = `${row.projectId || row.teamRef}: ${humanizeToken(row.action || row.status || "observed")}`;
     if (["replay_degraded", "replay_dead_letter", "rate_limited"].includes(row.action || row.status)) {
       output.warn(headline);
     } else {
       output.success(headline);
     }
     output.keyValues(compactPairs([
-      ["Domain", row.domainId],
+      ["Team", row.teamRef],
       ["Project", row.projectId],
       ["Action", row.action],
       ["Status", row.status],
@@ -332,27 +332,27 @@ function renderPlannedProjectSummary(result, output) {
 }
 
 function plannedProjectRows(result) {
-  const domains = result.poll?.domains || [];
+  const teams = result.poll?.teams || [];
   const rows = [];
-  for (const domain of domains) {
-    if (domain.status && domain.status !== "ok") {
+  for (const team of teams) {
+    if (team.status && team.status !== "ok") {
       rows.push({
-        domainId: domain.domainId,
-        status: domain.status,
-        reason: domain.reason || null,
+        teamRef: team.teamRef,
+        status: team.status,
+        reason: team.reason || null,
       });
     }
-    for (const entry of domain.processed || []) {
-      rows.push(plannedProjectRow(domain, entry));
+    for (const entry of team.processed || []) {
+      rows.push(plannedProjectRow(team, entry));
     }
   }
   for (const entry of result.startup?.replay || []) {
-    rows.push(plannedProjectRow({ domainId: entry.pending?.domainId }, entry));
+    rows.push(plannedProjectRow({ teamRef: entry.pending?.teamRef }, entry));
   }
   return rows;
 }
 
-function plannedProjectRow(domain, entry = {}) {
+function plannedProjectRow(team, entry = {}) {
   const pending = entry.pending || entry.replay?.pending || {};
   const runId =
     pending.runId ||
@@ -361,7 +361,7 @@ function plannedProjectRow(domain, entry = {}) {
     entry.result?.artifact?.run_id ||
     null;
   return {
-    domainId: domain.domainId || pending.domainId || null,
+    teamRef: team.teamRef || pending.teamRef || null,
     projectId: entry.projectId || pending.projectId || null,
     action: entry.action || null,
     status: entry.result?.status || entry.replay?.status || entry.status || null,
@@ -429,7 +429,7 @@ async function renderHumanReviewGateStatus({ repoRoot, home = resolveTeamiHome()
     for (const row of report.queue) {
       output.info(`${gateIssueLabel(row)}: ${row.reason}`);
       output.keyValues(compactPairs([
-        ["Domain", row.domain_id],
+        ["Team", row.team_ref],
         ["PR", row.pr_number ? `#${row.pr_number}` : null],
         ["Parked", row.parked_at],
         ["Age", humanizeGateAge(row.age_ms)],
@@ -446,7 +446,7 @@ async function renderHumanReviewGateStatus({ repoRoot, home = resolveTeamiHome()
       else if (row.severity === "info") output.info(line);
       else output.warn(line);
       output.keyValues(compactPairs([
-        ["Domain", row.domain_id],
+        ["Team", row.team_ref],
         ["Status", row.issue_status_role],
         ["PR", row.pr_number ? `#${row.pr_number}` : null],
         ["PR state", row.pr_state],
@@ -564,14 +564,14 @@ function runtimeSmokeFailureSummary(result) {
 async function inspectTriggerStatus({
   config,
   repoRoot,
-  domainId = null,
+  teamRef = null,
 }) {
-  const selection = resolveGatewaySelection({ repoRoot, config, domainId });
+  const selection = resolveGatewaySelection({ repoRoot, config, teamRef });
   return runGatewayOnce({
     repoRoot,
     config,
     registry: selection.registry,
-    domains: selection.domains,
+    teams: selection.teams,
   });
 }
 
@@ -590,71 +590,71 @@ function formatTriggerWakeStatusLine({ wake } = {}) {
   });
 }
 
-function selectRunnerDomains({ registry, domainId = null } = {}) {
-  return selectGatewayDomains({ registry, domainId });
+function selectRunnerTeams({ registry, teamRef = null } = {}) {
+  return selectGatewayTeams({ registry, teamRef });
 }
 
 async function runOneTriggerWake({
   config,
   repoRoot,
-  domainId = null,
+  teamRef = null,
 } = {}) {
-  const selection = resolveGatewaySelection({ repoRoot, config, domainId });
+  const selection = resolveGatewaySelection({ repoRoot, config, teamRef });
   const result = await runGatewayOnce({
     repoRoot,
     config,
     registry: selection.registry,
-    domains: selection.domains,
+    teams: selection.teams,
   });
   return {
     status: result.ok ? "completed" : result.status,
     reason: result.reason || null,
     messages: [],
     gateway: result,
-    domainId: selection.domains[0]?.id || null,
+    teamRef: selection.teams[0]?.id || null,
   };
 }
 
-function acquireDomainRunnerLock({
+function acquireTeamRunnerLock({
   repoRoot,
-  domainId,
-  staleMs = DEFAULT_DOMAIN_RUNNER_LOCK_STALE_MS,
+  teamRef,
+  staleMs = DEFAULT_TEAM_RUNNER_LOCK_STALE_MS,
   now = () => new Date(),
   log = () => {},
   isProcessAlive = defaultIsProcessAlive,
   installHandlers = true,
 } = {}) {
-  const lockPath = path.join(repoRoot, ".teami", "domains", domainId, ".lock");
+  const lockPath = path.join(repoRoot, ".teami", "teams", teamRef, ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const createdAt = toDate(now()).toISOString();
   const token = randomUUID();
 
-  const created = tryCreateDomainRunnerLock({ lockPath, token, createdAt });
+  const created = tryCreateTeamRunnerLock({ lockPath, token, createdAt });
   if (created.ok) {
-    return domainRunnerLockHandle({ lockPath, token, installHandlers });
+    return teamRunnerLockHandle({ lockPath, token, installHandlers });
   }
   if (created.error?.code !== "EEXIST") throw created.error;
 
-  const existing = readDomainRunnerLock(lockPath);
-  const staleReason = domainRunnerLockBreakReason({ lock: existing, staleMs, now: toDate(now()), isProcessAlive });
+  const existing = readTeamRunnerLock(lockPath);
+  const staleReason = teamRunnerLockBreakReason({ lock: existing, staleMs, now: toDate(now()), isProcessAlive });
   if (staleReason) {
-    log(`warning: breaking stale runner lock for domain ${domainId} (${staleReason})`);
-    if (removeDomainRunnerLockIfTokenMatches({ lockPath, token: existing?.token })) {
-      const retry = tryCreateDomainRunnerLock({ lockPath, token, createdAt });
-      if (retry.ok) return domainRunnerLockHandle({ lockPath, token, installHandlers });
+    log(`warning: breaking stale runner lock for team ${teamRef} (${staleReason})`);
+    if (removeTeamRunnerLockIfTokenMatches({ lockPath, token: existing?.token })) {
+      const retry = tryCreateTeamRunnerLock({ lockPath, token, createdAt });
+      if (retry.ok) return teamRunnerLockHandle({ lockPath, token, installHandlers });
       if (retry.error?.code !== "EEXIST") throw retry.error;
     }
   }
 
   return {
     ok: false,
-    reason: "already_running_for_domain",
+    reason: "already_running_for_team",
     lockPath,
-    message: `already running for domain ${domainId}`,
+    message: `already running for team ${teamRef}`,
   };
 }
 
-function tryCreateDomainRunnerLock({ lockPath, token, createdAt }) {
+function tryCreateTeamRunnerLock({ lockPath, token, createdAt }) {
   let fd = null;
   try {
     fd = fs.openSync(lockPath, "wx");
@@ -672,14 +672,14 @@ function tryCreateDomainRunnerLock({ lockPath, token, createdAt }) {
   }
 }
 
-function domainRunnerLockHandle({ lockPath, token, installHandlers }) {
+function teamRunnerLockHandle({ lockPath, token, installHandlers }) {
   const handlers = [];
   let released = false;
 
   const release = ({ removeHandlers = true } = {}) => {
     if (released) return;
     released = true;
-    removeDomainRunnerLockIfTokenMatches({ lockPath, token });
+    removeTeamRunnerLockIfTokenMatches({ lockPath, token });
     if (removeHandlers) {
       for (const [event, handler] of handlers) process.off(event, handler);
     }
@@ -709,7 +709,7 @@ function domainRunnerLockHandle({ lockPath, token, installHandlers }) {
   };
 }
 
-function readDomainRunnerLock(lockPath) {
+function readTeamRunnerLock(lockPath) {
   try {
     return JSON.parse(fs.readFileSync(lockPath, "utf8"));
   } catch {
@@ -717,7 +717,7 @@ function readDomainRunnerLock(lockPath) {
   }
 }
 
-function domainRunnerLockBreakReason({ lock, staleMs, now, isProcessAlive }) {
+function teamRunnerLockBreakReason({ lock, staleMs, now, isProcessAlive }) {
   if (!lock || typeof lock !== "object") return "invalid_lock_file";
   const pid = Number(lock.pid);
   if (!Number.isInteger(pid) || pid <= 0) return "invalid_pid";
@@ -728,8 +728,8 @@ function domainRunnerLockBreakReason({ lock, staleMs, now, isProcessAlive }) {
   return null;
 }
 
-function removeDomainRunnerLockIfTokenMatches({ lockPath, token }) {
-  const current = readDomainRunnerLock(lockPath);
+function removeTeamRunnerLockIfTokenMatches({ lockPath, token }) {
+  const current = readTeamRunnerLock(lockPath);
   if (token && current?.token !== token) return false;
   if (!token && current?.token) return false;
   try {
@@ -756,10 +756,10 @@ function toDate(value) {
 }
 
 export {
-  acquireDomainRunnerLock,
+  acquireTeamRunnerLock,
   formatTriggerWakeStatusLine,
   inspectTriggerStatus,
   requeueTriggerWake,
   runOneTriggerWake,
-  selectRunnerDomains,
+  selectRunnerTeams,
 };

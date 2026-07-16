@@ -29,7 +29,7 @@ import {
 const TRACE_RUN = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01";
 const TRACE_SRC = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02";
 const TRACE_IDENTITY = Object.freeze({
-  domainId: "support-ops",
+  teamRef: "support-ops",
   workspaceId: "workspace-1",
   teamId: "team-1",
 });
@@ -314,7 +314,7 @@ test("run mode surfaces judge_invalid and judge_missing receipt attempts as work
       status: "trace_exported",
       observedAt: "2026-06-10T01:00:00.000Z",
     });
-    const runsDir = path.join(repoRoot, "domains", "support-ops", "runs");
+    const runsDir = path.join(repoRoot, "teams", "support-ops", "runs");
     fs.mkdirSync(runsDir, { recursive: true });
     fs.writeFileSync(path.join(runsDir, "run-judge.judge.json"), JSON.stringify({
       schema_version: 1,

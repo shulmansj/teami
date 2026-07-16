@@ -34,7 +34,7 @@ test("exclusive lock admits one owner and exposes no ownership token", () => {
   }
 });
 
-test("exclusive lock reclaims a dead owner but not a live owner", () => {
+test("exclusive lock atomically quarantines a dead legacy owner before publishing a new owner", () => {
   const { root, lockPath } = fixture();
   try {
     fs.writeFileSync(lockPath, `${JSON.stringify({
@@ -54,14 +54,17 @@ test("exclusive lock reclaims a dead owner but not a live owner", () => {
     assert.equal(held.ok, false);
     assert.equal(held.reason, "lock_held");
 
-    const reclaimed = acquireExclusiveFileLock({
+    const recovered = acquireExclusiveFileLock({
       lockPath,
       purpose: "setup",
       now: () => Date.parse("2026-07-11T12:00:01.000Z"),
       isProcessAlive: () => false,
     });
-    assert.equal(reclaimed.ok, true);
-    assert.equal(reclaimed.release(), true);
+    assert.equal(recovered.ok, true);
+    const tombstones = fs.readdirSync(root).filter((name) => name.startsWith("setup.lock.stale-"));
+    assert.equal(tombstones.length, 1);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, tombstones[0]), "utf8")).token, "old-owner");
+    assert.equal(recovered.release(), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -90,6 +93,79 @@ test("exclusive lock does not reclaim an over-age owner while its pid is live", 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("exclusive lock recovers a dead v2 owner after a process crash", () => {
+  const { root, lockPath } = fixture();
+  try {
+    const crashed = acquireExclusiveFileLock({
+      lockPath,
+      purpose: "setup",
+      pid: 7777,
+      isProcessAlive: () => true,
+    });
+    assert.equal(crashed.ok, true);
+
+    const recovered = acquireExclusiveFileLock({
+      lockPath,
+      purpose: "setup",
+      pid: 8888,
+      isProcessAlive: (pid) => pid !== 7777,
+    });
+    assert.equal(recovered.ok, true);
+    assert.equal(crashed.release(), false);
+    assert.equal(recovered.release(), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const collisionCode of ["ENOTEMPTY", "EACCES"]) {
+  test(`a delayed stale reclaimer cannot move a fresh owner (${collisionCode})`, () => {
+    const { root, lockPath } = fixture();
+    let freshOwner = null;
+    try {
+      const crashed = acquireExclusiveFileLock({
+        lockPath,
+        purpose: "setup",
+        pid: 7777,
+        isProcessAlive: () => true,
+      });
+      assert.equal(crashed.ok, true);
+
+      const fsApi = Object.create(fs);
+      fsApi.renameSync = (source, destination) => {
+        if (source === lockPath && destination.includes(".stale-")) {
+          freshOwner = acquireExclusiveFileLock({
+            lockPath,
+            purpose: "setup",
+            pid: 8888,
+            isProcessAlive: (candidatePid) => candidatePid !== 7777,
+          });
+          assert.equal(freshOwner.ok, true);
+          const collision = new Error("simulated delayed stale reclaimer collision");
+          collision.code = collisionCode;
+          throw collision;
+        }
+        return fs.renameSync(source, destination);
+      };
+
+      const delayed = acquireExclusiveFileLock({
+        lockPath,
+        purpose: "setup",
+        pid: 9999,
+        isProcessAlive: (candidatePid) => candidatePid !== 7777,
+        fsApi,
+      });
+      assert.equal(delayed.ok, false);
+      assert.equal(delayed.reason, "lock_contended");
+      assert.equal(freshOwner.release(), true);
+      assert.equal(crashed.release(), false);
+    } finally {
+      freshOwner?.release();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("exclusive lock fails closed when owner liveness is indeterminate", () => {
   const { root, lockPath } = fixture();
@@ -120,7 +196,8 @@ test("exclusive lock publishes only a complete fsynced owner record", (t) => {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockPath = path.join(root, "setup.lock");
   const fsApi = Object.create(fs);
-  fsApi.linkSync = () => {
+  fsApi.renameSync = (source, destination) => {
+    if (destination !== lockPath) return fs.renameSync(source, destination);
     const error = new Error("simulated crash before atomic publish");
     error.code = "EIO";
     throw error;
@@ -132,7 +209,7 @@ test("exclusive lock publishes only a complete fsynced owner record", (t) => {
   );
   assert.equal(fs.existsSync(lockPath), false);
   assert.deepEqual(
-    fs.readdirSync(root).filter((name) => name.endsWith(".tmp")),
+    fs.readdirSync(root).filter((name) => name.includes(".tmp")),
     [],
   );
   assert.equal(acquireExclusiveFileLock({ lockPath, purpose: "setup" }).ok, true);

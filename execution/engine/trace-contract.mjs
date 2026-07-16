@@ -20,9 +20,9 @@ export const LOCAL_TRACE_STATUSES = Object.freeze([
   "trace_unknown",
 ]);
 export const TRACE_RECEIPT_SCHEMA_VERSION = 2;
-export const CANONICAL_DOMAIN_TRACE_ATTRIBUTES = Object.freeze([
+export const CANONICAL_TEAM_TRACE_ATTRIBUTES = Object.freeze([
   "teami.behavior_repo_id",
-  "teami.domain_id",
+  "teami.team_ref",
   "linear.workspace_id",
   "linear.team_id",
   "linear.project_id",
@@ -171,12 +171,12 @@ export function boundedRunReceiptProjection({
   if (!LOCAL_TRACE_STATUSES.includes(traceStatus)) {
     throw new Error(`Invalid local trace status: ${traceStatus}`);
   }
-  const domainId =
-    run?.domain_id ||
-    trace?.attributes?.["teami.domain_id"] ||
-    trace?.attributes?.domain_id ||
+  const teamRef =
+    run?.team_ref ||
+    trace?.attributes?.["teami.team_ref"] ||
+    trace?.attributes?.team_ref ||
     null;
-  if (!domainId) throw new Error("domain_id is required for local trace receipts.");
+  if (!teamRef) throw new Error("team_ref is required for local trace receipts.");
   const resource = receiptResourceProjection({ run, trace });
   const requiresLinearIdentity = requiresLinearReceiptIdentity(resource?.kind);
   const workspaceId =
@@ -206,7 +206,7 @@ export function boundedRunReceiptProjection({
   const receipt = {
     schema_version: TRACE_RECEIPT_SCHEMA_VERSION,
     run_id: run?.run_id || trace?.attributes?.run_id || null,
-    domain_id: domainId,
+    team_ref: teamRef,
     workspace_id: workspaceId,
     team_id: teamId,
     workflow_type: run?.workflow_type || trace?.attributes?.["workflow.name"] || null,

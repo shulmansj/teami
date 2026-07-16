@@ -31,7 +31,7 @@ is red, translate it (see Repair below); don't dump the raw output.
 
 1. Setup and repair: `init_onboarding` through MCP after the agent gathers the
    adopter's consent, or `teami init` / `teami doctor` through the thin CLI.
-2. Planning work: MCP tools `resolve_domain`, `project_create`,
+2. Planning work: MCP tools `resolve_team`, `project_create`,
    `project_write_body`, and `project_move_status`.
 3. Running work: `teami gateway start` to listen for Planned projects, and
    `teami gateway status` for a read-only snapshot.
@@ -59,11 +59,11 @@ This repository has documentation located in the `/openwiki` directory.
 Start here:
 - [OpenWiki quickstart](openwiki/quickstart.md)
 
-OpenWiki includes repository overview, architecture notes, workflows, domain
+OpenWiki includes repository overview, architecture notes, workflows, team
 concepts, operations, integrations, testing guidance, and source maps.
 
 When working in this repository, read the OpenWiki quickstart first, then follow
-its links to the relevant architecture, workflow, domain, operation, and testing
+its links to the relevant architecture, workflow, team, operation, and testing
 notes.
 
 ---
@@ -131,7 +131,7 @@ You can't and won't do that step for them.
 
 Use the MCP tools in order:
 
-1. `resolve_domain` to confirm the target workspace/team.
+1. `resolve_team` to confirm the target workspace/team.
 2. `project_create` when they need a new Linear project.
 3. `project_write_body` to write the canonical planning body from slots.
 4. `project_move_status` only after the adopter gives a clear go.

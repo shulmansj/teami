@@ -57,7 +57,7 @@ test("git_repo commit effect commits, pushes, persists observed intent, and open
   assert.equal(remoteHead(fixture.remote, branchNameForIssue("AF-1")).length >= 40, true);
 
   const pending = readGitReplayPending({
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectId: "issue-1",
     runStoreDir,
   });
@@ -90,7 +90,7 @@ test("git_repo commit effect returns failed_closed for an empty staged diff and 
   assert.equal(result.outcome, "failed_closed");
   assert.equal(result.pending_effect_id, GIT_REPO_COMMIT_EFFECT_ID);
   assert.equal(result.reason, "git_repo_empty_diff");
-  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+  assert.equal(readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir }), null);
 });
 
 test("staged credential content blocks commit, intent, push, and pull request", async () => {
@@ -114,7 +114,7 @@ test("staged credential content blocks commit, intent, push, and pull request", 
   assert.equal(result.reason, "git_repo_staged_content_guard_failed");
   assert.equal(prAdapter.created.length, 0);
   assert.equal(remoteHead(fixture.remote, branchNameForIssue("AF-1")), "");
-  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+  assert.equal(readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir }), null);
   assert.equal(git(["rev-parse", "HEAD"], worker).stdout.trim(), fixture.baseSha);
 });
 
@@ -140,7 +140,7 @@ test("git_repo commit effect returns failed_closed when the staged diff exceeds 
 
   assert.equal(result.outcome, "failed_closed");
   assert.equal(result.reason, "git_repo_diff_over_budget_changed_files");
-  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+  assert.equal(readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir }), null);
 });
 
 test("git_repo replay after push and before PR open derives remote head from an absent worktree and creates exactly one PR", async () => {
@@ -172,7 +172,7 @@ test("git_repo replay after push and before PR open derives remote head from an 
   assert.equal(first.outcome, "pending");
   assert.equal(first.pending_effect_id, GIT_REPO_COMMIT_EFFECT_ID);
   assert.equal(prAdapter.created.length, 0);
-  const preReplay = readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir });
+  const preReplay = readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir });
   assert.equal(preReplay.git.branch, branchNameForIssue("AF-1"));
   assert.equal(Object.hasOwn(preReplay.git, "head_sha"), false);
   assert.equal(remoteHead(fixture.remote, preReplay.git.branch).length >= 40, true);
@@ -192,7 +192,7 @@ test("git_repo replay after push and before PR open derives remote head from an 
 
   assert.equal(replay.outcome, "ok");
   assert.equal(prAdapter.created.length, 1);
-  const observed = readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir });
+  const observed = readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir });
   assert.equal(observed.git.head_sha, remoteHead(fixture.remote, observed.git.branch));
   assert.equal(observed.git.tree_sha.length >= 40, true);
 
@@ -229,7 +229,7 @@ test("git_repo replay resolves gitRepoResourceId-keyed remote override when the 
         ok: true,
         wake: {
           id: "wake-1",
-          domain_id: "domain-1",
+          team_ref: "team-1",
           object_type: "issue",
           object_id: "issue-1",
           workflow_type: "execution",
@@ -261,7 +261,7 @@ test("git_repo replay resolves gitRepoResourceId-keyed remote override when the 
       executionReadiness: () => ({ ok: true }),
       runId,
       runStoreDir: tempRunStore(),
-      domainContext: { domainId: "domain-1" },
+      teamContext: { teamRef: "team-1" },
       issueId: "issue-1",
       issue: {
         id: "issue-1",
@@ -271,7 +271,7 @@ test("git_repo replay resolves gitRepoResourceId-keyed remote override when the 
       artifact: {
         kind: "commit",
         run_id: runId,
-        domain_id: "domain-1",
+        team_ref: "team-1",
         linear_issue_id: "issue-1",
         payload: payload(),
       },
@@ -308,7 +308,7 @@ test("git_repo replay resolves gitRepoResourceId-keyed remote override when the 
       store,
       wake: {
         id: "wake-1",
-        domain_id: "domain-1",
+        team_ref: "team-1",
         object_type: "issue",
         object_id: "issue-1",
         workflow_type: "execution",
@@ -370,13 +370,13 @@ test("git_repo remote commands against GitHub carry in-memory Basic auth and kee
       executionReadiness: () => ({ ok: true }),
       runId,
       runStoreDir: tempRunStore(),
-      domainContext: { domainId: "domain-1" },
+      teamContext: { teamRef: "team-1" },
       issueId: "issue-1",
       issue: { id: "issue-1", identifier: "AF-1", title: "Implement AF-1" },
       artifact: {
         kind: "commit",
         run_id: runId,
-        domain_id: "domain-1",
+        team_ref: "team-1",
         linear_issue_id: "issue-1",
         payload: payload(),
       },
@@ -403,7 +403,7 @@ test("git_repo remote commands against GitHub carry in-memory Basic auth and kee
       store,
       wake: {
         id: "wake-1",
-        domain_id: "domain-1",
+        team_ref: "team-1",
         object_type: "issue",
         object_id: "issue-1",
         workflow_type: "execution",
@@ -455,7 +455,7 @@ test("git_repo pre-push branch ownership failure leaves no replay marker", async
 
   assert.equal(result.outcome, "failed_closed");
   assert.equal(result.reason, "git_repo_remote_branch_not_owned");
-  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+  assert.equal(readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir }), null);
 });
 
 test("git_repo pre-push ownership accepts a remote head that descends from the recorded head", async () => {
@@ -517,7 +517,7 @@ test("git_repo pre-push ownership accepts a remote head that descends from the r
   assert.equal(result.outcome, "ok");
   const workerHead = git(["rev-parse", "HEAD"], worker).stdout.trim();
   assert.equal(remoteHead(fixture.remote, branch), workerHead, "the resumed commit must land on top of the human addition");
-  const pending = readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir });
+  const pending = readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir });
   assert.equal(pending.runId, runId);
   assert.equal(pending.git.head_sha, workerHead, "the observed intent must rebaseline to the landed head");
 });
@@ -579,7 +579,7 @@ test("git_repo pre-push ownership still fails closed when the recorded head was 
 
   assert.equal(result.outcome, "failed_closed");
   assert.equal(result.reason, "git_repo_remote_branch_not_owned");
-  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+  assert.equal(readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir }), null);
 });
 
 test("git_repo same-run replay awaits ancestry and rejects a rewritten observed branch", async () => {
@@ -643,7 +643,7 @@ test("git_repo replay with no remote branch and no worktree fails closed and cle
   const worker = path.join(fixture.root, "deleted-worker");
   const runStoreDir = tempRunStore();
   writeMutationIntent({
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectType: "issue",
     objectId: "issue-1",
     runId,
@@ -675,7 +675,7 @@ test("git_repo replay with no remote branch and no worktree fails closed and cle
 
   assert.equal(result.outcome, "failed_closed");
   assert.equal(result.reason, "git_repo_replay_remote_branch_missing_worktree_absent");
-  assert.equal(readGitReplayPending({ domainId: "domain-1", objectId: "issue-1", runStoreDir }), null);
+  assert.equal(readGitReplayPending({ teamRef: "team-1", objectId: "issue-1", runStoreDir }), null);
 });
 
 function createGitFixture(name) {
@@ -775,7 +775,7 @@ function effectContext({
     runId,
     repoRoot: fixture.root,
     runStoreDir,
-    domainContext: { domainId: "domain-1" },
+    teamContext: { teamRef: "team-1" },
     issueId: "issue-1",
     issue: {
       id: "issue-1",
@@ -785,7 +785,7 @@ function effectContext({
     artifact: {
       kind: "commit",
       run_id: runId,
-      domain_id: "domain-1",
+      team_ref: "team-1",
       linear_issue_id: "issue-1",
       payload: payload(),
     },
@@ -821,7 +821,7 @@ function effectContext({
     store,
     wake: {
       id: "wake-1",
-      domain_id: "domain-1",
+      team_ref: "team-1",
       object_type: "issue",
       object_id: "issue-1",
       workflow_type: "execution",
@@ -851,7 +851,7 @@ function createIntentStore({ runStoreDir }) {
       tick += 1;
       this.writes.push(structuredClone(input));
       writeMutationIntent({
-        domainId: "domain-1",
+        teamRef: "team-1",
         objectType: "issue",
         objectId: "issue-1",
         runId: input.runId,
@@ -867,7 +867,7 @@ function createIntentStore({ runStoreDir }) {
         ok: true,
         wake: {
           id: "wake-1",
-          domain_id: "domain-1",
+          team_ref: "team-1",
           object_type: "issue",
           object_id: "issue-1",
           workflow_type: "execution",

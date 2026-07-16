@@ -12,21 +12,21 @@ import {
   registerGitRepoResourceKind,
 } from "../../git/git-repo-materializer.mjs";
 import {
-  grantDomainGitRepoResource,
-  readDomainGrantSet,
-  revokeDomainGitRepoResource,
-  runDomainCommand,
-} from "../src/cli/domain-command.mjs";
+  grantTeamGitRepoResource,
+  readTeamGrantSet,
+  revokeTeamGitRepoResource,
+  runTeamCommand,
+} from "../src/cli/team-command.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  readDomainRegistry,
-  upsertDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  upsertTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 
-test("domain grant/show/revoke are non-interactive and idempotent", async (t) => {
-  const { repoRoot } = setupDomainRegistry(t);
+test("team grant/show/revoke are non-interactive and idempotent", async (t) => {
+  const { repoRoot } = setupTeamRegistry(t);
   const output = captureOutput();
   const { runCommand, calls } = fakeGhRunner({
     repos: {
@@ -35,23 +35,23 @@ test("domain grant/show/revoke are non-interactive and idempotent", async (t) =>
   });
   withCleanExitCode(t);
 
-  await runDomainCommand({
+  await runTeamCommand({
     context: { repoRoot, output, runCommand },
-    command: "domain:grant",
+    command: "team:grant",
     args: ["main", "--repo", "Acme/app"],
   });
-  await runDomainCommand({
+  await runTeamCommand({
     context: { repoRoot, output, runCommand },
-    command: "domain:grant",
+    command: "team:grant",
     args: ["main", "--repo", "Acme/app"],
   });
-  await runDomainCommand({
+  await runTeamCommand({
     context: { repoRoot, output, runCommand },
-    command: "domain:show",
+    command: "team:show",
     args: ["main"],
   });
 
-  const resources = readDomainRegistry({ repoRoot }).domains[0].resources;
+  const resources = readTeamRegistry({ repoRoot }).teams[0].resources;
   assert.equal(process.exitCode, 0);
   assert.equal(resources.length, 1);
   assert.deepEqual(resources[0], {
@@ -71,76 +71,123 @@ test("domain grant/show/revoke are non-interactive and idempotent", async (t) =>
   assert.match(output.text(), /Resource[\s\S]*git_repo:acme\/app/);
   assert.match(output.text(), /Default branch[\s\S]*trunk/);
 
-  await runDomainCommand({
+  await runTeamCommand({
     context: { repoRoot, output, runCommand },
-    command: "domain:revoke",
+    command: "team:revoke",
     args: ["main", "--repo", "Acme/app"],
   });
-  await runDomainCommand({
+  await runTeamCommand({
     context: { repoRoot, output, runCommand },
-    command: "domain:revoke",
+    command: "team:revoke",
     args: ["main", "--repo", "Acme/app"],
   });
 
   assert.equal(process.exitCode, 0);
-  assert.deepEqual(readDomainRegistry({ repoRoot }).domains[0].resources, []);
+  assert.deepEqual(readTeamRegistry({ repoRoot }).teams[0].resources, []);
   assert.match(output.text(), /Repo revoked: Acme\/app/);
   assert.match(output.text(), /Repo was not granted: Acme\/app/);
 });
 
-test("domain grant writes coordinates only and preserves other resources", async (t) => {
+test("team grant writes coordinates only and preserves other resources", async (t) => {
   const existingOther = gitRepoResource({
     owner: "Acme",
     repo: "api",
     default_branch: "main",
   });
-  const { repoRoot } = setupDomainRegistry(t, { resources: [existingOther] });
+  const { repoRoot } = setupTeamRegistry(t, { resources: [existingOther] });
   const { runCommand } = fakeGhRunner({
     repos: {
       "Acme/app": ghRepo("Acme/app", "trunk"),
     },
   });
 
-  const result = await grantDomainGitRepoResource({
+  const result = await grantTeamGitRepoResource({
     repoRoot,
-    domainId: "main",
+    teamRef: "main",
     repoSlug: "Acme/app",
     runCommand,
   });
 
   assert.equal(result.action, "added");
   assert.deepEqual(
-    readDomainRegistry({ repoRoot }).domains[0].resources.map((resource) => resource.binding),
+    readTeamRegistry({ repoRoot }).teams[0].resources.map((resource) => resource.binding),
     [
       { owner: "Acme", repo: "api", default_branch: "main" },
       { owner: "Acme", repo: "app", default_branch: "trunk" },
     ],
   );
-  for (const resource of readDomainRegistry({ repoRoot }).domains[0].resources) {
+  for (const resource of readTeamRegistry({ repoRoot }).teams[0].resources) {
     assert.equal(resource.id, gitRepoResourceId(resource.binding));
     assert.equal(Object.hasOwn(resource.binding, "local_checkout_path"), false);
   }
 });
 
-test("domain grant canonicalizes a legacy local path resource without duplicating", async (t) => {
+test("team grant preserves a concurrent registry update made during GitHub lookup", async (t) => {
+  const { repoRoot } = setupTeamRegistry(t);
+  const concurrent = gitRepoResource({
+    owner: "Acme",
+    repo: "api",
+    default_branch: "main",
+  });
+  const fake = fakeGhRunner({
+    repos: {
+      "Acme/app": ghRepo("Acme/app", "trunk"),
+    },
+  });
+  let concurrentWriteMade = false;
+  const runCommand = (command, args) => {
+    if (!concurrentWriteMade && command === "gh" && args[0] === "repo" && args[1] === "view") {
+      concurrentWriteMade = true;
+      const current = readTeamRegistry({ repoRoot });
+      const team = current.teams[0];
+      writeTeamRegistry(
+        { home: repoRoot },
+        upsertTeamRecord(current, {
+          ...team,
+          resources: [...team.resources, concurrent],
+        }),
+      );
+    }
+    return fake.runCommand(command, args);
+  };
+
+  const result = await grantTeamGitRepoResource({
+    repoRoot,
+    teamRef: "main",
+    repoSlug: "Acme/app",
+    runCommand,
+  });
+
+  assert.equal(result.action, "added");
+  assert.equal(concurrentWriteMade, true);
+  assert.deepEqual(
+    readTeamRegistry({ repoRoot }).teams[0].resources.map((resource) => resource.binding),
+    [
+      { owner: "Acme", repo: "api", default_branch: "main" },
+      { owner: "Acme", repo: "app", default_branch: "trunk" },
+    ],
+  );
+});
+
+test("team grant canonicalizes a legacy local path resource without duplicating", async (t) => {
   const legacy = gitRepoResource({
     owner: "Acme",
     repo: "app",
     default_branch: "main",
     local_checkout_path: "placeholder-legacy-checkout",
   });
-  const { repoRoot } = setupDomainRegistry(t, { resources: [legacy] });
+  const { repoRoot } = setupTeamRegistry(t, { resources: [legacy] });
 
-  const result = await grantDomainGitRepoResource({
+  const result = await grantTeamGitRepoResource({
     repoRoot,
-    domainId: "main",
+    teamRef: "main",
     repoSlug: "Acme/app",
     runCommand: () => {
       throw new Error("existing grants should not need gh");
     },
   });
 
-  const resources = readDomainRegistry({ repoRoot }).domains[0].resources;
+  const resources = readTeamRegistry({ repoRoot }).teams[0].resources;
   assert.equal(result.action, "canonicalized");
   assert.equal(resources.length, 1);
   assert.deepEqual(resources[0], {
@@ -155,51 +202,75 @@ test("domain grant canonicalizes a legacy local path resource without duplicatin
   });
 });
 
-test("domain revoke absent is a clean no-op", (t) => {
+test("team revoke absent is a clean no-op", (t) => {
   const existing = gitRepoResource({
     owner: "Acme",
     repo: "api",
     default_branch: "main",
   });
-  const { repoRoot } = setupDomainRegistry(t, { resources: [existing] });
+  const { repoRoot } = setupTeamRegistry(t, { resources: [existing] });
 
-  const result = revokeDomainGitRepoResource({
+  const result = revokeTeamGitRepoResource({
     repoRoot,
-    domainId: "main",
+    teamRef: "main",
     repoSlug: "Acme/app",
   });
 
   assert.equal(result.action, "unchanged");
   assert.equal(result.changed, false);
-  assert.deepEqual(readDomainRegistry({ repoRoot }).domains[0].resources, [existing]);
+  assert.deepEqual(readTeamRegistry({ repoRoot }).teams[0].resources, [existing]);
 });
 
-test("domain show reads the grant set without writing", (t) => {
+test("team show reads the grant set without writing", (t) => {
   const existing = gitRepoResource({
     owner: "Acme",
     repo: "app",
     default_branch: "main",
   });
-  const { repoRoot } = setupDomainRegistry(t, { resources: [existing] });
-  const before = readDomainRegistry({ repoRoot });
+  const { repoRoot } = setupTeamRegistry(t, { resources: [existing] });
+  const before = readTeamRegistry({ repoRoot });
 
-  const result = readDomainGrantSet({ repoRoot, domainId: "main" });
+  const result = readTeamGrantSet({ repoRoot, teamRef: "main" });
 
   assert.deepEqual(result.resources, [existing]);
-  assert.deepEqual(readDomainRegistry({ repoRoot }), before);
+  assert.deepEqual(readTeamRegistry({ repoRoot }), before);
 });
 
-function setupDomainRegistry(t, { domainId = "main", resources = [] } = {}) {
+test("removed Teams reject resource grants and revocations before mutation", async (t) => {
+  const { repoRoot } = setupTeamRegistry(t, { status: "removed" });
+  let githubCalls = 0;
+
+  await assert.rejects(
+    () => grantTeamGitRepoResource({
+      repoRoot,
+      teamRef: "main",
+      repoSlug: "Acme/app",
+      runCommand: () => {
+        githubCalls += 1;
+        return ok(JSON.stringify(ghRepo("Acme/app", "main")));
+      },
+    }),
+    /team_removed:main/,
+  );
+  assert.throws(
+    () => revokeTeamGitRepoResource({ repoRoot, teamRef: "main", repoSlug: "Acme/app" }),
+    /team_removed:main/,
+  );
+  assert.equal(githubCalls, 0);
+  assert.equal(readTeamRegistry({ repoRoot }).teams[0].status, "removed");
+});
+
+function setupTeamRegistry(t, { teamRef = "main", resources = [], status = "active" } = {}) {
   resetResourceRegistry();
   registerGitRepoResourceKind();
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-command-"));
-  // Engine state (domain registry) now lives under the per-user home; isolate to this temp dir.
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-team-command-"));
+  // Engine state (team registry) now lives under the per-user home; isolate to this temp dir.
   process.env.TEAMI_HOME = repoRoot;
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId,
-      status: "active",
+  const registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef,
+      status,
       workspaceId: "workspace-1",
       workspaceName: "Example Workspace",
       teamId: "team-1",
@@ -208,7 +279,7 @@ function setupDomainRegistry(t, { domainId = "main", resources = [] } = {}) {
       resources,
     }),
   );
-  writeDomainRegistry({ repoRoot }, registry);
+  writeTeamRegistry({ repoRoot }, registry);
   t.after(() => {
     resetResourceRegistry();
     fs.rmSync(repoRoot, { recursive: true, force: true });

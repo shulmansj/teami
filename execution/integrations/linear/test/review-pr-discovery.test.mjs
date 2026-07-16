@@ -39,7 +39,7 @@ test("resourcesToRepoIdentity reads the git_repo binding array and ignores taint
   assert.deepEqual(identity, REPO);
 });
 
-test("resourcesToRepoIdentity resolves the selected git_repo id and refuses ambiguous multi-repo domains", () => {
+test("resourcesToRepoIdentity resolves the selected git_repo id and refuses ambiguous multi-repo teams", () => {
   const repoA = {
     owner: "acme",
     repo: "repo-a",
@@ -50,16 +50,16 @@ test("resourcesToRepoIdentity resolves the selected git_repo id and refuses ambi
     repo: "repo-b",
     default_branch: "trunk",
   };
-  const domainContext = {
+  const teamContext = {
     resources: [
       { id: "repo-a", kind: "git_repo", role: "primary", binding: repoA },
       { id: "repo-b", kind: "git_repo", role: "primary", binding: repoB },
     ],
   };
 
-  assert.deepEqual(resourcesToRepoIdentity(domainContext, { resourceId: "repo-b" }), repoB);
+  assert.deepEqual(resourcesToRepoIdentity(teamContext, { resourceId: "repo-b" }), repoB);
   assert.throws(
-    () => resourcesToRepoIdentity(domainContext),
+    () => resourcesToRepoIdentity(teamContext),
     /review_git_repo_resource_id_required/,
   );
 });

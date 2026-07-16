@@ -386,7 +386,7 @@ export async function emitDeterministicCheckResults({
       storage: "report_only",
       failed_closed: Boolean(requirePhoenixNative),
       reason: invalidTraceReceipt.reason,
-      detail: `${invalidTraceReceipt.detail}; re-run the source workflow to write a current domain-identity trace receipt.`,
+      detail: `${invalidTraceReceipt.detail}; re-run the source workflow to write a current team-identity trace receipt.`,
       repairable: true,
       capability_preflight: null,
       trace_receipt_path: invalidTraceReceipt.path,

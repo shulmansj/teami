@@ -92,14 +92,14 @@ export function promotionReceiptPath({
   runId,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir = null,
 } = {}) {
   void repoRoot;
   if (!runId || typeof runId !== "string" || !SAFE_RUN_ID_PATTERN.test(runId)) {
     throw new Error(`Invalid run_id for local promotion receipt store: ${runId}`);
   }
-  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.promotion.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, teamRef }), `${runId}.promotion.json`);
 }
 
 // Tolerant-shape promotion receipt (the worklist already reads
@@ -109,10 +109,10 @@ export function readPromotionReceipt({
   runId,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir = null,
 } = {}) {
-  const filePath = promotionReceiptReadPath({ runId, repoRoot, home, domainId, runStoreDir });
+  const filePath = promotionReceiptReadPath({ runId, repoRoot, home, teamRef, runStoreDir });
   if (!fs.existsSync(filePath)) return { ok: true, exists: false, path: filePath, receipt: null };
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -125,14 +125,14 @@ export function readPromotionReceipt({
 }
 
 function promotionReceiptReadPath(options = {}) {
-  if (options.runStoreDir || options.domainId) return promotionReceiptPath(options);
+  if (options.runStoreDir || options.teamRef) return promotionReceiptPath(options);
   const home = teamiHomePaths({ home: options.home || resolveTeamiHome() }).home;
   const direct = path.join(home, "runs", `${options.runId}.promotion.json`);
   if (fs.existsSync(direct)) return direct;
-  const domainsDir = path.join(home, "domains");
-  if (!fs.existsSync(domainsDir)) return direct;
-  for (const domainId of fs.readdirSync(domainsDir)) {
-    const candidate = promotionReceiptPath({ ...options, home, domainId });
+  const teamsDir = path.join(home, "teams");
+  if (fs.existsSync(path.join(home, "teams.json.migration.lock")) || !fs.existsSync(teamsDir)) return direct;
+  for (const teamRef of fs.readdirSync(teamsDir)) {
+    const candidate = promotionReceiptPath({ ...options, home, teamRef });
     if (fs.existsSync(candidate)) return candidate;
   }
   return direct;
@@ -668,7 +668,7 @@ export async function promoteRichDecompositionExample({
       state: "cannot_promote",
       reason: receipt.reason,
       run_id: runId,
-      detail: `${receipt.detail}; re-run the source workflow to write a current domain-identity trace receipt.`,
+      detail: `${receipt.detail}; re-run the source workflow to write a current team-identity trace receipt.`,
       repairable: true,
       trace_receipt_path: receipt.path,
     };
@@ -699,11 +699,11 @@ export async function promoteRichDecompositionExample({
       detail: `No local run artifact found for run ${runId} under .teami/runs/.`,
     };
   }
-  const domainId = artifact.domain_id || null;
+  const teamRef = artifact.team_ref || null;
 
   // 3. Captured project snapshot. Fail closed when absent: rich promotion has
   // NO live-Linear fallback by design (CONSTRAINTS #28).
-  const snapshotResult = loadCapturedProjectSnapshot(runId, { repoRoot, home, domainId, runStoreDir });
+  const snapshotResult = loadCapturedProjectSnapshot(runId, { repoRoot, home, teamRef, runStoreDir });
   if (!snapshotResult.ok) {
     return {
       ok: false,
@@ -754,7 +754,7 @@ export async function promoteRichDecompositionExample({
   if (!build.ok) return { run_id: runId, ...build };
 
   // 6. Client-side idempotency via the local promotion receipt.
-  const existing = readPromotionReceipt({ runId, repoRoot, home, domainId, runStoreDir });
+  const existing = readPromotionReceipt({ runId, repoRoot, home, teamRef, runStoreDir });
   if (!existing.ok) {
     return { ok: false, state: "cannot_promote", reason: existing.reason, run_id: runId, path: existing.path };
   }
@@ -869,7 +869,7 @@ export async function promoteRichDecompositionExample({
     runId,
     repoRoot,
     home,
-    domainId,
+    teamRef,
     runStoreDir,
     existingReceipt: existing.receipt,
     datasetName,
@@ -901,13 +901,13 @@ function writePromotionReceipt({
   runId,
   repoRoot,
   home,
-  domainId,
+  teamRef,
   runStoreDir,
   existingReceipt,
   datasetName,
   promotionEvent,
 }) {
-  const filePath = promotionReceiptPath({ runId, repoRoot, home, domainId, runStoreDir });
+  const filePath = promotionReceiptPath({ runId, repoRoot, home, teamRef, runStoreDir });
   const datasets = Array.isArray(existingReceipt?.datasets)
     ? existingReceipt.datasets.map((entry) => ({ ...entry }))
     : [];

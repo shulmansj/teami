@@ -7,39 +7,38 @@ import test from "node:test";
 import { writeLinearCache } from "../src/cache.mjs";
 import { cachePathForConfig, loadLinearConfig, validateLinearConfig } from "../src/config.mjs";
 import {
-  decorateWakeViewsForDomains,
-} from "../src/domain-command-context.mjs";
+  decorateWakeViewsForTeams,
+} from "../src/team-command-context.mjs";
 import { extractDecompositionKey } from "../src/issue-body.mjs";
 import {
-  ARTIFACT_DOMAIN_MISMATCH_REASON,
+  ARTIFACT_TEAM_MISMATCH_REASON,
   ARTIFACT_PROJECT_MISMATCH_REASON,
   createOrReuseExecutionIssues,
-  doctorDomainRegistry,
-  doctorDomainRegistryFromDisk,
+  doctorTeamRegistry,
+  doctorTeamRegistryFromDisk,
   doctorLinear,
   evaluateDecompositionEligibility,
   initLinear,
   replayPersistedDecompositionRun,
   resolveLinearShape,
   runDecomposition,
-  setupLinearDomain,
+  setupLinearTeam,
   verifyDeclaredWorkspace,
 } from "../src/linear-service.mjs";
-import {
-  runLinearSetupCommand,
-} from "../src/cli/linear-setup-command.mjs";
+import { runLinearSetupCommand } from "../src/cli/linear-setup-command.mjs";
 import { formatCommand } from "../src/cli/operator-output.mjs";
 import { LINEAR_OAUTH_WAIT_ESCAPED_CODE } from "../src/linear-oauth.mjs";
 import {
-  DOMAIN_REGISTRY_SCHEMA_VERSION,
-  domainRegistryPath,
-  emptyDomainRegistry,
-  makeDomainRecord,
-  readDomainRegistry,
-  upsertDomainRecord,
-  validateDomainRegistry,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  TEAM_REGISTRY_SCHEMA_VERSION,
+  teamRegistryPath,
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  updateTeamRegistry,
+  upsertTeamRecord,
+  validateTeamRegistry,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import {
   createLinearCredentialStore,
   legacyCredentialTargetForConfig,
@@ -51,16 +50,17 @@ import {
   sanitizeProjectMcpError,
 } from "../src/project-mcp-tools.mjs";
 import {
-  acquireDomainRunnerLock,
+  acquireTeamRunnerLock,
   authorizeLinearSetupWorkspace,
   ensureNeedsPrincipalProjectStatus,
   promptLinearWorkspacePicker,
-  promoteSetupCredentialToDomain,
+  promoteSetupCredentialToTeam,
   removeLocalLinearSetup,
-  resolveGitHubPhaseResumeDomain,
-  resolveSetupCommandDomainNameHint,
+  resolveGitHubPhaseResumeTeam,
+  resolveSetupCommandTeamNameHint,
 } from "../cli.mjs";
 import { setupStatePathForCache } from "../src/local-state.mjs";
+import { createSetupStateStore } from "../src/setup-orchestrator.mjs";
 import {
   ENGINE_VERSION,
   RUN_ARTIFACT_SCHEMA_VERSION,
@@ -110,6 +110,7 @@ import {
   digestTraceField,
 } from "../../../engine/trace-contract.mjs";
 import { finishWakeFromRunnerResult, runDecompositionOrchestrator } from "../src/trigger-runner.mjs";
+import { acquireGatewayLock } from "../src/gateway-loop.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 
@@ -494,8 +495,8 @@ test("setup authorization provisions missing Principal Escalation with one-shot 
     config,
     repoRoot,
     credentialStore,
-    registry: emptyDomainRegistry(),
-    domainNameHint: "First Domain",
+    registry: emptyTeamRegistry(),
+    teamNameHint: "First Team",
     isTTY: true,
     createSetupAuth: () =>
       fakeSetupAuth(appClient, {
@@ -551,12 +552,12 @@ test("setup authorization provisions missing Principal Escalation with one-shot 
   assert.ok(logs.some((line) => /read\/write access only/i.test(line)));
 
   let writtenCache = null;
-  await setupLinearDomain({
+  await setupLinearTeam({
     client: authorization.setupAuth.client,
     config,
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     repoRoot,
-    domainName: "First Domain",
+    teamName: "First Team",
     cache: {
       projectStatuses: {
         needs_principal: authorization.needsPrincipalProjectStatus.id,
@@ -619,7 +620,7 @@ test("typing R to reopen the workspace picker forces Linear's consent screen on 
     config,
     repoRoot,
     credentialStore: {},
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     isTTY: true,
     createSetupAuth: (options) => {
       authPrompts.push(options.prompt ?? null);
@@ -655,7 +656,7 @@ test("setup authorization fails closed without prompting when Principal Escalati
         config,
         repoRoot,
         credentialStore: {},
-        registry: emptyDomainRegistry(),
+        registry: emptyTeamRegistry(),
         isTTY: false,
         createSetupAuth: () =>
           fakeSetupAuth(appClient, {
@@ -1311,8 +1312,8 @@ test("Teami project MCP tools create Backlog project, write body, and require co
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   const initialized = await initLinear({ client, config });
-  const cache = mcpDomainCache(initialized.cache);
-  const registry = mcpDomainRegistry({ config, client });
+  const cache = mcpTeamCache(initialized.cache);
+  const registry = mcpTeamRegistry({ config, client });
   const updateInputs = [];
   const originalUpdateProject = client.updateProject.bind(client);
   client.updateProject = async (projectId, input) => {
@@ -1334,16 +1335,16 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     );
 
     const resolved = await mcp.client.callTool({
-      name: "resolve_domain",
-      arguments: { domain: "support-ops" },
+      name: "resolve_team",
+      arguments: { team: "support-ops" },
     });
-    assert.equal(resolved.structuredContent.domain.domain_id, "support-ops");
-    assert.equal(resolved.structuredContent.domain.team_id, "team-1");
+    assert.equal(resolved.structuredContent.team.team_ref, "support-ops");
+    assert.equal(resolved.structuredContent.team.team_id, "team-1");
 
     const created = await mcp.client.callTool({
       name: "project_create",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         name: "Customer onboarding pilot",
         description: "Make onboarding measurable.",
       },
@@ -1362,7 +1363,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     const written = await mcp.client.callTool({
       name: "project_write_body",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
         content: body,
       },
@@ -1373,7 +1374,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
 
     const slots = {
       problem: "Activation stalls because founders cannot turn intent into decomposition-ready work.",
-      audience: "Non-technical founders using Teami with a connected Linear domain.",
+      audience: "Non-technical founders using Teami with a connected Linear team.",
       desired_outcome: "A byte-stable Linear project body that the factory can decompose.",
       acceptance: [
         "project_write_body stores exactly renderPlanningBody(slots).",
@@ -1388,7 +1389,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     const slotsWritten = await mcp.client.callTool({
       name: "project_write_body",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
         slots,
       },
@@ -1402,7 +1403,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     const slotsPreferred = await mcp.client.callTool({
       name: "project_write_body",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
         content: staleContent,
         slots,
@@ -1421,7 +1422,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     });
     await assert.rejects(
       () => actions.project_move_status({
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
       }),
       (error) => {
@@ -1436,7 +1437,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     const rejectedMove = await mcp.client.callTool({
       name: "project_move_status",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
       },
     });
@@ -1447,7 +1448,7 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     const moved = await mcp.client.callTool({
       name: "project_move_status",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
         confirm: true,
       },
@@ -1461,12 +1462,105 @@ test("Teami project MCP tools create Backlog project, write body, and require co
   }
 });
 
+test("a planning mutation paused across uninstall retains exclusive Team authority", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-planning-uninstall-authority-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  const cache = mcpTeamCache(initialized.cache);
+  const registry = mcpTeamRegistry({ config, client });
+  writeTeamRegistry({ home }, registry);
+  let markMutationStarted;
+  let releaseMutation;
+  const mutationStarted = new Promise((resolve) => { markMutationStarted = resolve; });
+  const mutationMayFinish = new Promise((resolve) => { releaseMutation = resolve; });
+  const createProject = client.createProject.bind(client);
+  client.createProject = async (input) => {
+    markMutationStarted();
+    await mutationMayFinish;
+    return createProject(input);
+  };
+  const actions = createProjectMcpToolActions({
+    config,
+    registry,
+    readCache: () => cache,
+    linearClient: client,
+    repoRoot: home,
+    home,
+  });
+
+  const planning = actions.project_create({
+    team: "support-ops",
+    name: "Authority-safe planning",
+  });
+  await mutationStarted;
+  let destructiveCleanupCalled = false;
+  const cachePath = cachePathForConfig(config, home);
+  const blockedUninstall = await removeLocalLinearSetup(cachePath, setupStatePathForCache(cachePath), {
+    config,
+    repoRoot: home,
+    home,
+    teamRef: "support-ops",
+    log: () => {},
+    removeTeamSetup: async () => {
+      destructiveCleanupCalled = true;
+      return { ok: true };
+    },
+  });
+
+  assert.equal(blockedUninstall.ok, false);
+  assert.equal(blockedUninstall.reason, "team_operation_active");
+  assert.equal(destructiveCleanupCalled, false);
+  assert.equal(readTeamRegistry({ home }).teams[0].status, "active");
+  releaseMutation();
+  const created = await planning;
+  assert.equal(created.ok, true);
+  assert.equal(client.projects.length, 1);
+});
+
+test("planning can move a project to Planned while the gateway is live", async (t) => {
+  const config = loadLinearConfig({ repoRoot });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-live-gateway-planning-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const client = new MemoryLinearClient();
+  const initialized = await initLinear({ client, config });
+  const cache = mcpTeamCache(initialized.cache);
+  const registry = mcpTeamRegistry({ config, client });
+  const actions = createProjectMcpToolActions({
+    config,
+    registry,
+    readCache: () => cache,
+    linearClient: client,
+    repoRoot: home,
+    home,
+  });
+  const created = await actions.project_create({
+    team: "support-ops",
+    name: "Plan while listening",
+  });
+  const gateway = acquireGatewayLock({ home, installHandlers: false });
+  assert.equal(gateway.ok, true);
+  try {
+    const moved = await actions.project_move_status({
+      team: "support-ops",
+      project_id: created.project.id,
+      confirm: true,
+    });
+    assert.equal(moved.ok, true);
+    assert.equal(moved.status.id, "status-planned");
+    assert.equal(client.projects[0].status.id, "status-planned");
+  } finally {
+    gateway.release();
+  }
+});
+
 test("Teami project MCP body and Planned mutations fail closed outside one resolved team", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   const initialized = await initLinear({ client, config });
-  const cache = mcpDomainCache(initialized.cache);
-  const registry = mcpDomainRegistry({ config, client });
+  const cache = mcpTeamCache(initialized.cache);
+  const registry = mcpTeamRegistry({ config, client });
   const backlog = client.projectStatuses.find((status) => status.id === cache.projectStatuses.backlog);
   const projects = [
     { id: "project-foreign", name: "Foreign project", teamIds: ["team-other"], status: backlog, content: "before" },
@@ -1496,9 +1590,9 @@ test("Teami project MCP body and Planned mutations fail closed outside one resol
   });
 
   const rejectedTargets = [
-    ["project-foreign", "project_outside_domain"],
-    ["project-multi", "project_domain_ambiguous"],
-    ["project-empty-team", "project_domain_unresolved"],
+    ["project-foreign", "project_outside_team"],
+    ["project-multi", "project_team_ambiguous"],
+    ["project-empty-team", "project_team_unresolved"],
     ["project-missing", "project_not_found"],
   ];
   try {
@@ -1510,7 +1604,7 @@ test("Teami project MCP body and Planned mutations fail closed outside one resol
         const result = await mcp.client.callTool({
           name,
           arguments: {
-            domain: "support-ops",
+            team: "support-ops",
             project_id: projectId,
             ...extraArguments,
           },
@@ -1523,7 +1617,7 @@ test("Teami project MCP body and Planned mutations fail closed outside one resol
       }
     }
 
-    assert.deepEqual(updateCalls, [], "domain rejection must happen before every project mutation");
+    assert.deepEqual(updateCalls, [], "team rejection must happen before every project mutation");
     assert.equal(planningTraceFinishes(traceEvents).length, 0, "rejected status moves must emit no planning trace");
     assert.deepEqual(
       projects.map((project) => ({ id: project.id, content: project.content, statusId: project.status.id })),
@@ -1539,8 +1633,8 @@ test("Teami project MCP tools emit planning session traces for created and commi
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   const initialized = await initLinear({ client, config });
-  const cache = mcpDomainCache(initialized.cache);
-  const registry = mcpDomainRegistry({ config, client });
+  const cache = mcpTeamCache(initialized.cache);
+  const registry = mcpTeamRegistry({ config, client });
   const traceEvents = [];
   const traceSink = capturingPlanningTraceSink(traceEvents);
 
@@ -1556,7 +1650,7 @@ test("Teami project MCP tools emit planning session traces for created and commi
     const created = await mcp.client.callTool({
       name: "project_create",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         name: "Loop-ready planning",
         description: "Emit the planning trace join key.",
       },
@@ -1580,7 +1674,7 @@ test("Teami project MCP tools emit planning session traces for created and commi
     const written = await mcp.client.callTool({
       name: "project_write_body",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
         content: body,
       },
@@ -1597,7 +1691,7 @@ test("Teami project MCP tools emit planning session traces for created and commi
     const moved = await mcp.client.callTool({
       name: "project_move_status",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
         confirm: true,
         planning_telemetry: planningTelemetry,
@@ -1627,8 +1721,8 @@ test("Teami project MCP planning trace failures are graceful and telemetry stays
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   const initialized = await initLinear({ client, config });
-  const cache = mcpDomainCache(initialized.cache);
-  const registry = mcpDomainRegistry({ config, client });
+  const cache = mcpTeamCache(initialized.cache);
+  const registry = mcpTeamRegistry({ config, client });
   const traceEvents = [];
 
   const mcp = await connectedProjectMcpClient({
@@ -1643,7 +1737,7 @@ test("Teami project MCP planning trace failures are graceful and telemetry stays
     const created = await mcp.client.callTool({
       name: "project_create",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         name: "Phoenix absent planning",
       },
     });
@@ -1653,7 +1747,7 @@ test("Teami project MCP planning trace failures are graceful and telemetry stays
     const moved = await mcp.client.callTool({
       name: "project_move_status",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         project_id: projectId,
         confirm: true,
       },
@@ -1673,7 +1767,7 @@ test("Teami project MCP tool errors return opaque reauthorize without credential
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   await initLinear({ client, config });
-  const registry = mcpDomainRegistry({ config, client });
+  const registry = mcpTeamRegistry({ config, client });
   // Assemble the fake leaked credential at runtime so the tracked source carries no
   // scanner-flaggable token literal (the pre-push secret scan reads source text); the
   // runtime value still contains the sensitive substrings the tool must redact below.
@@ -1691,7 +1785,7 @@ test("Teami project MCP tool errors return opaque reauthorize without credential
     const result = await mcp.client.callTool({
       name: "project_create",
       arguments: {
-        domain: "support-ops",
+        team: "support-ops",
         name: "Credential-safe failure",
       },
     });
@@ -1710,7 +1804,7 @@ test("Teami project MCP tool errors return opaque reauthorize without credential
   }
 });
 
-test("Init without a domain name does not mutate anything", async () => {
+test("Init without a team name does not mutate anything", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   let wroteCache = false;
@@ -1718,11 +1812,11 @@ test("Init without a domain name does not mutate anything", async () => {
 
   await assert.rejects(
     () =>
-      setupLinearDomain({
+      setupLinearTeam({
         client,
         config,
-        registry: emptyDomainRegistry(),
-        domainName: "",
+        registry: emptyTeamRegistry(),
+        teamName: "",
         registerWebhook: async () => {
           throw new Error("must not register webhook");
         },
@@ -1736,7 +1830,7 @@ test("Init without a domain name does not mutate anything", async () => {
           wroteRegistry = true;
         },
       }),
-    /explicit domain name/i,
+    /explicit team name/i,
   );
 
   assert.equal(client.teams.length, 0);
@@ -1745,17 +1839,17 @@ test("Init without a domain name does not mutate anything", async () => {
   assert.equal(wroteRegistry, false);
 });
 
-test("Created team name equals the adopter-provided domain name", async () => {
+test("Created team name equals the adopter-provided team name", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   let preview = null;
 
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client,
     config,
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     repoRoot,
-    domainName: "Customer Success Pilot",
+    teamName: "Customer Success Pilot",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: `webhook-${teamId}`, workspaceId },
@@ -1772,24 +1866,24 @@ test("Created team name equals the adopter-provided domain name", async () => {
   });
 
   assert.equal(client.teams[0].name, "Customer Success Pilot");
-  assert.equal(result.domain.id, "customer-success-pilot");
-  assert.equal(result.domain.status, "active");
-  assert.equal(result.context.domainId, "customer-success-pilot");
+  assert.equal(result.team.id, "customer-success-pilot");
+  assert.equal(result.team.status, "active");
+  assert.equal(result.context.teamRef, "customer-success-pilot");
   assert.equal(preview, "will create Linear team 'Customer Success Pilot' in workspace Example Workspace and register one webhook");
 });
 
 test("setup chooses a unique Linear team name and key when the requested display name already exists", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
-  const existing = await client.createTeam({ name: "Launch Readiness Domain", key: "LRD" });
+  const existing = await client.createTeam({ name: "Launch Readiness Team", key: "LRD" });
   let writtenRegistry = null;
 
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client,
     config,
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     repoRoot,
-    domainName: "Launch Readiness Domain",
+    teamName: "Launch Readiness Team",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: `webhook-${teamId}`, workspaceId },
@@ -1806,28 +1900,28 @@ test("setup chooses a unique Linear team name and key when the requested display
 
   assert.equal(client.teams.length, 2);
   const created = client.teams[1];
-  assert.equal(created.name, "Launch Readiness Domain (2)");
+  assert.equal(created.name, "Launch Readiness Team (2)");
   assert.notEqual(created.key, existing.key);
-  assert.equal(result.domain.id, "launch-readiness-domain");
-  assert.equal(result.domain.adopter_provided_name, "Launch Readiness Domain");
-  assert.equal(result.domain.linear.team_id, created.id);
-  assert.equal(result.domain.linear.team_name, created.name);
-  assert.equal(writtenRegistry.domains[0].linear.team_name, created.name);
+  assert.equal(result.team.id, "launch-readiness-team");
+  assert.equal(result.team.adopter_provided_name, "Launch Readiness Team");
+  assert.equal(result.team.linear.team_id, created.id);
+  assert.equal(result.team.linear.team_name, created.name);
+  assert.equal(writtenRegistry.teams[0].linear.team_name, created.name);
 });
 
 test("setup resumes a recorded setup_incomplete team by id after the Linear team is renamed", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
-  let registry = emptyDomainRegistry();
+  let registry = emptyTeamRegistry();
 
   await assert.rejects(
     () =>
-      setupLinearDomain({
+      setupLinearTeam({
         client,
         config,
         registry,
         repoRoot,
-        domainName: "Support Ops",
+        teamName: "Support Ops",
         registerWebhook: async () => {
           throw new Error("webhook unavailable");
         },
@@ -1848,12 +1942,12 @@ test("setup resumes a recorded setup_incomplete team by id after the Linear team
   const recordedTeamId = client.teams[0].id;
   client.teams[0].name = "Support Automation";
 
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client,
     config,
     registry,
     repoRoot,
-    domainName: "Support Ops",
+    teamName: "Support Ops",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: `webhook-${teamId}`, workspaceId },
@@ -1869,10 +1963,10 @@ test("setup resumes a recorded setup_incomplete team by id after the Linear team
   });
 
   assert.equal(client.teams.length, 1);
-  assert.equal(result.domain.status, "active");
-  assert.equal(result.domain.linear.team_id, recordedTeamId);
-  assert.equal(result.domain.linear.team_name, "Support Automation");
-  assert.equal(registry.domains[0].linear.team_id, recordedTeamId);
+  assert.equal(result.team.status, "active");
+  assert.equal(result.team.linear.team_id, recordedTeamId);
+  assert.equal(result.team.linear.team_name, "Support Automation");
+  assert.equal(registry.teams[0].linear.team_id, recordedTeamId);
 });
 
 test("init follows cached Linear team id after setup when the display name is renamed", async () => {
@@ -1880,12 +1974,12 @@ test("init follows cached Linear team id after setup when the display name is re
   const client = new MemoryLinearClient();
   let writtenCache = null;
 
-  await setupLinearDomain({
+  await setupLinearTeam({
     client,
     config,
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     repoRoot,
-    domainName: "Rename Friendly",
+    teamName: "Rename Friendly",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: `webhook-${teamId}`, workspaceId },
@@ -1909,12 +2003,12 @@ test("init follows cached Linear team id after setup when the display name is re
   assert.equal(result.cache.teamKey, client.teams[0].key);
 });
 
-test("explicit init domain hint resolves an existing complete domain without shadowing incomplete resume", () => {
-  const registry = upsertDomainRecord(
-    upsertDomainRecord(
-      emptyDomainRegistry(),
-      makeDomainRecord({
-        domainId: "support-ops",
+test("explicit Team ref resolves exactly while an ambiguous display name fails closed", () => {
+  const registry = upsertTeamRecord(
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         adopterProvidedName: "Support Ops",
         workspaceId: "workspace-1",
@@ -1924,8 +2018,8 @@ test("explicit init domain hint resolves an existing complete domain without sha
         teamName: "Support Ops",
       }),
     ),
-    makeDomainRecord({
-      domainId: "support-ops-2",
+    makeTeamRecord({
+      teamRef: "support-ops-2",
       status: "setup_incomplete",
       adopterProvidedName: "Support Ops",
       workspaceId: "workspace-1",
@@ -1933,18 +2027,97 @@ test("explicit init domain hint resolves an existing complete domain without sha
     }),
   );
 
-  const byId = resolveSetupCommandDomainNameHint(["--domain", "support-ops"], registry);
-  assert.equal(byId.completeResumeDomain.id, "support-ops");
-  assert.equal(byId.resumeDomain, null);
+  const byId = resolveSetupCommandTeamNameHint(["--team", "support-ops"], registry);
+  assert.equal(byId.completeResumeTeam.id, "support-ops");
+  assert.equal(byId.resumeTeam, null);
 
-  const byDisplayName = resolveSetupCommandDomainNameHint(["--domain", "Support Ops"], registry);
-  assert.equal(byDisplayName.resumeDomain.id, "support-ops-2");
-  assert.equal(byDisplayName.completeResumeDomain, null);
+  assert.throws(
+    () => resolveSetupCommandTeamNameHint(["--team", "Support Ops"], registry),
+    (error) => error?.code === "team_name_ambiguous" && error?.candidates?.length === 2,
+  );
 });
 
-test("init over a removed domain record takes the fresh browser-auth path and replaces the tombstone", async (t) => {
+test("same-named Teams fail closed until their Linear workspace is explicit", () => {
+  const registry = upsertTeamRecord(
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "operations-east",
+        status: "setup_incomplete",
+        adopterProvidedName: "Operations",
+        workspaceId: "workspace-east",
+        workspaceName: "East Workspace",
+      }),
+    ),
+    makeTeamRecord({
+      teamRef: "operations-west",
+      status: "setup_incomplete",
+      adopterProvidedName: "Operations",
+      workspaceId: "workspace-west",
+      workspaceName: "West Workspace",
+    }),
+  );
+
+  assert.throws(
+    () => resolveSetupCommandTeamNameHint(["--team", "Operations"], registry),
+    (error) => {
+      assert.equal(error.code, "team_name_ambiguous");
+      assert.match(error.message, /Choose its Linear workspace explicitly/);
+      assert.deepEqual(
+        error.candidates.map((candidate) => candidate.workspaceId),
+        ["workspace-east", "workspace-west"],
+      );
+      return true;
+    },
+  );
+
+  const byWorkspaceId = resolveSetupCommandTeamNameHint(
+    ["--team", "Operations", "--workspace", "workspace-west"],
+    registry,
+  );
+  assert.equal(byWorkspaceId.resumeTeam.id, "operations-west");
+
+  const byWorkspaceName = resolveSetupCommandTeamNameHint(
+    ["--team", "Operations", "--workspace", "east workspace"],
+    registry,
+  );
+  assert.equal(byWorkspaceName.resumeTeam.id, "operations-east");
+});
+
+test("same-name Teams in one workspace remain ambiguous across lifecycle states", () => {
+  const registry = {
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [
+      makeTeamRecord({
+        teamRef: "ops-active",
+        status: "active",
+        adopterProvidedName: "Operations",
+        workspaceId: "workspace-1",
+        teamId: "linear-ops-active",
+        teamKey: "OPA",
+        teamName: "Operations",
+      }),
+      makeTeamRecord({
+        teamRef: "ops-incomplete",
+        status: "setup_incomplete",
+        adopterProvidedName: "Operations",
+        workspaceId: "workspace-1",
+        teamId: "linear-ops-incomplete",
+        teamKey: "OPI",
+        teamName: "Operations",
+      }),
+    ],
+  };
+
+  assert.throws(
+    () => resolveSetupCommandTeamNameHint(["--team", "Operations", "--workspace", "workspace-1"], registry),
+    (error) => error?.code === "team_name_ambiguous" && error?.candidates?.length === 2,
+  );
+});
+
+test("init over a removed Team uses a fresh identity when Linear creates a different Team", async (t) => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-init-removed-domain-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-init-removed-team-"));
   const previousHome = process.env.TEAMI_HOME;
   process.env.TEAMI_HOME = tempRoot;
   t.after(() => {
@@ -1952,10 +2125,10 @@ test("init over a removed domain record takes the fresh browser-auth path and re
     else process.env.TEAMI_HOME = previousHome;
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
-  let registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "livetest",
+  let registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "livetest",
       status: "removed",
       adopterProvidedName: "livetest",
       workspaceId: "workspace-1",
@@ -1965,11 +2138,23 @@ test("init over a removed domain record takes the fresh browser-auth path and re
       teamName: "livetest",
     }),
   );
-  writeDomainRegistry({ home: tempRoot }, registry);
+  writeTeamRegistry({ home: tempRoot }, registry);
+  const bootstrapStore = createLinearCredentialStore({
+    config,
+    repoRoot: tempRoot,
+    home: tempRoot,
+    target: legacyCredentialTargetForConfig(config),
+  });
+  await bootstrapStore.writeTokenSet({
+    accessToken: "test-access-token",
+    refreshToken: "test-refresh-token",
+    tokenType: "Bearer",
+    scope: "read write",
+  });
 
-  const resolution = resolveSetupCommandDomainNameHint(["--domain", "livetest"], registry);
-  assert.equal(resolution.resumeDomain, null);
-  assert.equal(resolution.completeResumeDomain, null);
+  const resolution = resolveSetupCommandTeamNameHint(["--team", "livetest"], registry);
+  assert.equal(resolution.resumeTeam, null);
+  assert.equal(resolution.completeResumeTeam, null);
 
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   const output = captureSetupOutput();
@@ -1980,7 +2165,7 @@ test("init over a removed domain record takes the fresh browser-auth path and re
   try {
     await runLinearSetupCommand({
       command: "init",
-      args: ["--domain", "livetest"],
+      args: ["--team", "livetest"],
       context: {
         config,
         repoRoot: tempRoot,
@@ -2024,25 +2209,103 @@ test("init over a removed domain record takes the fresh browser-auth path and re
     process.exitCode = previousExitCode;
   }
 
-  registry = readDomainRegistry({ home: tempRoot });
-  const domain = registry.domains.find((candidate) => candidate.id === "livetest");
-  assert.equal(domain.status, "active");
-  assert.equal(domain.linear.workspace_id, "workspace-1");
-  assert.equal(registry.domains.filter((candidate) => candidate.id === "livetest").length, 1);
+  registry = readTeamRegistry({ home: tempRoot });
+  const priorTeam = registry.teams.find((candidate) => candidate.id === "livetest");
+  const newTeam = registry.teams.find((candidate) => candidate.id === "livetest-2");
+  assert.equal(priorTeam.status, "removed");
+  assert.equal(priorTeam.linear.team_id, "team-old");
+  assert.equal(newTeam.status, "active");
+  assert.equal(newTeam.linear.workspace_id, "workspace-1");
+  assert.notEqual(newTeam.linear.team_id, "team-old");
   assert.deepEqual(authOptions, [{ allowBrowserAuth: true, deferTokenPersistence: true }]);
   assert.deepEqual(events, ["persist-browser-token"]);
-  assert.doesNotMatch(output.text(), /Refreshing existing domain/);
+  assert.doesNotMatch(output.text(), /Refreshing existing team/);
   assert.doesNotMatch(output.text(), /Resuming incomplete setup/);
 });
-test("complete-domain init resumes non-interactively with the domain credential and existing team", async (t) => {
+
+test("re-adopting the exact removed Linear Team resurrects its stable Team identity", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  client.teams.push({ id: "team-old", key: "NEW", name: "Operations Renamed" });
+  let registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "operations",
+      status: "removed",
+      adopterProvidedName: "Operations",
+      workspaceId: "workspace-1",
+      workspaceName: "Workspace One",
+      teamId: "team-old",
+      teamKey: "OLD",
+      teamName: "Operations",
+      resources: [],
+    }),
+  );
+
+  const result = await setupLinearTeam({
+    client,
+    config,
+    registry,
+    teamName: "Operations Renamed",
+    selectedExistingTeamId: "team-old",
+    writeRegistry: async (nextRegistry) => {
+      registry = nextRegistry;
+    },
+  });
+
+  assert.equal(result.team.id, "operations");
+  assert.equal(result.team.status, "active");
+  assert.equal(result.team.linear.team_id, "team-old");
+  assert.equal(registry.teams.find((team) => team.id === "operations").status, "active");
+  assert.equal(registry.teams.find((team) => team.id === "operations-renamed").status, "removed");
+});
+
+test("re-adoption fails closed when removed history duplicates one Linear Team identity", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
+  client.teams.push({ id: "team-old", key: "OPS", name: "Operations Renamed" });
+  const registry = {
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [
+      makeTeamRecord({
+        teamRef: "operations",
+        status: "removed",
+        workspaceId: "workspace-1",
+        teamId: "team-old",
+        teamKey: "OLD",
+        teamName: "Operations",
+      }),
+      makeTeamRecord({
+        teamRef: "operations-history-copy",
+        status: "removed",
+        workspaceId: "workspace-1",
+        teamId: "team-old",
+        teamKey: "OLD",
+        teamName: "Operations",
+      }),
+    ],
+  };
+
+  await assert.rejects(
+    () => setupLinearTeam({
+      client,
+      config,
+      registry,
+      teamName: "Operations Renamed",
+      selectedExistingTeamId: "team-old",
+    }),
+    /duplicate_linear_team:workspace-1:team-old/,
+  );
+});
+test("complete-team init resumes non-interactively with the team credential and existing team", async (t) => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-complete-resume-"));
   process.env.TEAMI_HOME = tempRoot;
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
-  let registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+  let registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "active",
       adopterProvidedName: "Support Ops",
       workspaceId: "workspace-1",
@@ -2053,16 +2316,16 @@ test("complete-domain init resumes non-interactively with the domain credential 
       webhookId: "webhook-support",
     }),
   );
-  writeDomainRegistry({ home: tempRoot }, registry);
+  writeTeamRegistry({ home: tempRoot }, registry);
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   client.teams.push({ id: "team-support", key: "SUP", name: "Support Ops" });
-  const domainStore = createLinearCredentialStore({
+  const teamStore = createLinearCredentialStore({
     config,
     repoRoot: tempRoot,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
   });
-  await domainStore.writeTokenSet({
+  await teamStore.writeTokenSet({
     accessToken: "fake-tok",
     refreshToken: "fake-refresh",
     expiresAt: Date.now() + 60_000,
@@ -2082,7 +2345,7 @@ test("complete-domain init resumes non-interactively with the domain credential 
   try {
     await runLinearSetupCommand({
       command: "init",
-      args: ["--domain", "support-ops"],
+      args: ["--team", "support-ops"],
       context: {
         config,
         repoRoot: tempRoot,
@@ -2092,7 +2355,7 @@ test("complete-domain init resumes non-interactively with the domain credential 
         confirmSetupEffects: async () => true,
         createLinearSetupAuth: ({ credentialStore, allowBrowserAuth, deferTokenPersistence }) => {
           authCalls += 1;
-          assert.equal(credentialStore.target, domainStore.target);
+          assert.equal(credentialStore.target, teamStore.target);
           assert.equal(allowBrowserAuth, false);
           assert.equal(deferTokenPersistence, false);
           return fakeSetupAuth(client, { tokenSource: "stored" });
@@ -2119,16 +2382,16 @@ test("complete-domain init resumes non-interactively with the domain credential 
     process.exitCode = previousExitCode;
   }
 
-  registry = readDomainRegistry({ home: tempRoot });
-  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
-  const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, domain.linear.cache_path), "utf8"));
+  registry = readTeamRegistry({ home: tempRoot });
+  const team = registry.teams.find((candidate) => candidate.id === "support-ops");
+  const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, team.linear.cache_path), "utf8"));
   assert.equal(authCalls, 2, "the saved grant is validated before the resumable setup uses it");
   assert.equal(repoDiscoveryCalled, false);
   assert.equal(client.teams.length, 1);
-  assert.equal(domain.status, "active");
-  assert.equal(domain.linear.team_id, "team-support");
-  assert.equal(domain.linear.team_name, "Support Ops");
-  assert.equal(cache.domainId, "support-ops");
+  assert.equal(team.status, "active");
+  assert.equal(team.linear.team_id, "team-support");
+  assert.equal(team.linear.team_name, "Support Ops");
+  assert.equal(cache.teamRef, "support-ops");
   assert.equal(cache.workspaceId, "workspace-1");
   assert.equal(cache.teamId, "team-support");
   assert.equal(await bootstrapStore.readTokenSet(), null);
@@ -2139,7 +2402,7 @@ test("complete-domain init resumes non-interactively with the domain credential 
   assert.match(output.text(), /Product repositories: none/);
 });
 
-test("complete-domain init deleted team renders guided recovery and preserves machine prefix", async (t) => {
+test("complete-team init deleted team renders guided recovery and preserves machine prefix", async (t) => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-complete-resume-deleted-team-"));
   const previousHome = process.env.TEAMI_HOME;
@@ -2149,10 +2412,10 @@ test("complete-domain init deleted team renders guided recovery and preserves ma
     else process.env.TEAMI_HOME = previousHome;
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+  const registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "active",
       adopterProvidedName: "Support Ops",
       workspaceId: "workspace-1",
@@ -2163,14 +2426,14 @@ test("complete-domain init deleted team renders guided recovery and preserves ma
       webhookId: "webhook-support",
     }),
   );
-  writeDomainRegistry({ home: tempRoot }, registry);
-  const domainStore = createLinearCredentialStore({
+  writeTeamRegistry({ home: tempRoot }, registry);
+  const teamStore = createLinearCredentialStore({
     config,
     repoRoot: tempRoot,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
   });
-  await domainStore.writeTokenSet({
+  await teamStore.writeTokenSet({
     accessToken: "fake-tok",
     refreshToken: "fake-refresh",
     expiresAt: Date.now() + 60_000,
@@ -2183,7 +2446,7 @@ test("complete-domain init deleted team renders guided recovery and preserves ma
   try {
     await runLinearSetupCommand({
       command: "init",
-      args: ["--domain", "support-ops"],
+      args: ["--team", "support-ops"],
       context: {
         config,
         repoRoot: tempRoot,
@@ -2200,22 +2463,22 @@ test("complete-domain init deleted team renders guided recovery and preserves ma
   }
 
   const text = output.text();
-  assert.match(text, /The Linear team saved for domain "support-ops" no longer exists in workspace Workspace One/);
-  assert.match(text, /complete_domain_team_missing: domain support-ops records Linear team team-support/);
+  assert.match(text, /The Linear team saved for team "support-ops" no longer exists in workspace Workspace One/);
+  assert.match(text, /configured_linear_team_missing: Team support-ops points to Linear team team-support/);
   assert.match(text, /will not guess by name or silently recreate it/);
-  assert.ok(text.includes(formatCommand("uninstall --domain support-ops")));
-  assert.ok(text.includes(formatCommand("init --domain support-ops")));
+  assert.ok(text.includes(formatCommand("uninstall --team support-ops")));
+  assert.ok(text.includes(formatCommand("init --team support-ops")));
 });
 
-test("complete-domain init repairs a deleted cached Principal Escalation status with one-shot admin", async (t) => {
+test("complete-team init repairs a deleted cached Principal Escalation status with one-shot admin", async (t) => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-complete-resume-status-repair-"));
   process.env.TEAMI_HOME = tempRoot;
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
-  let registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+  let registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "active",
       adopterProvidedName: "Support Ops",
       workspaceId: "workspace-1",
@@ -2226,10 +2489,10 @@ test("complete-domain init repairs a deleted cached Principal Escalation status 
       webhookId: "webhook-support",
     }),
   );
-  writeDomainRegistry({ home: tempRoot }, registry);
-  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
-  writeLinearCache(path.resolve(tempRoot, domain.linear.cache_path), {
-    domainId: "support-ops",
+  writeTeamRegistry({ home: tempRoot }, registry);
+  const team = registry.teams.find((candidate) => candidate.id === "support-ops");
+  writeLinearCache(path.resolve(tempRoot, team.linear.cache_path), {
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-support",
     projectStatuses: {
@@ -2260,13 +2523,13 @@ test("complete-domain init repairs a deleted cached Principal Escalation status 
     viewerName: "Workspace Admin",
     adminGrant: true,
   });
-  const domainStore = createLinearCredentialStore({
+  const teamStore = createLinearCredentialStore({
     config,
     repoRoot: tempRoot,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
   });
-  await domainStore.writeTokenSet({
+  await teamStore.writeTokenSet({
     accessToken: "fake-tok",
     refreshToken: "fake-refresh",
     expiresAt: Date.now() + 60_000,
@@ -2282,7 +2545,7 @@ test("complete-domain init repairs a deleted cached Principal Escalation status 
   try {
     await runLinearSetupCommand({
       command: "init",
-      args: ["--domain", "support-ops"],
+      args: ["--team", "support-ops"],
       context: {
         config,
         repoRoot: tempRoot,
@@ -2293,7 +2556,7 @@ test("complete-domain init repairs a deleted cached Principal Escalation status 
         isTTY: true,
         createLinearSetupAuth: ({ credentialStore, allowBrowserAuth, deferTokenPersistence }) => {
           appAuthCalls += 1;
-          assert.equal(credentialStore.target, domainStore.target);
+          assert.equal(credentialStore.target, teamStore.target);
           assert.equal(allowBrowserAuth, false);
           assert.equal(deferTokenPersistence, false);
           return fakeSetupAuth(client, { tokenSource: "stored" });
@@ -2339,9 +2602,9 @@ test("complete-domain init repairs a deleted cached Principal Escalation status 
     process.exitCode = previousExitCode;
   }
 
-  registry = readDomainRegistry({ home: tempRoot });
-  const repairedDomain = registry.domains.find((candidate) => candidate.id === "support-ops");
-  const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, repairedDomain.linear.cache_path), "utf8"));
+  registry = readTeamRegistry({ home: tempRoot });
+  const repairedTeam = registry.teams.find((candidate) => candidate.id === "support-ops");
+  const cache = JSON.parse(fs.readFileSync(path.resolve(tempRoot, repairedTeam.linear.cache_path), "utf8"));
   assert.equal(appAuthCalls, 3, "the saved grant is validated before setup and revalidated after just-in-time admin consent");
   assert.equal(adminAuthCalls, 1);
   assert.equal(teardownCalls, 1);
@@ -2354,14 +2617,14 @@ test("complete-domain init repairs a deleted cached Principal Escalation status 
   }]);
   assert.equal(cache.projectStatuses.needs_principal, "status-principal-escalation");
   assert.equal(cache.projectStatusTypes.needs_principal, "planned");
-  assert.equal(repairedDomain.status, "active");
+  assert.equal(repairedTeam.status, "active");
 });
 
 test("workspace picker known workspace match proceeds before shared setup mutations", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   let registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2379,12 +2642,12 @@ test("workspace picker known workspace match proceeds before shared setup mutati
     promptReauthorize: async () => "x",
     log: () => {},
   });
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client: authorization.setupAuth.client,
     config,
     registry,
     repoRoot,
-    domainName: "Sales Ops",
+    teamName: "Sales Ops",
     workspace: authorization.workspace,
     declaredWorkspace: authorization.declaredWorkspace,
     registerWebhook: async ({ workspaceId, teamId }) => ({
@@ -2404,10 +2667,10 @@ test("workspace picker known workspace match proceeds before shared setup mutati
     },
   });
 
-  assert.equal(result.domain.status, "active");
-  assert.equal(result.domain.linear.workspace_id, "workspace-1");
+  assert.equal(result.team.status, "active");
+  assert.equal(result.team.linear.workspace_id, "workspace-1");
   assert.equal(client.teams.length, 1);
-  assert.equal(registry.domains.some((domain) => domain.id === "sales-ops" && domain.status === "active"), true);
+  assert.equal(registry.teams.some((team) => team.id === "sales-ops" && team.status === "active"), true);
   assert.equal(preview, "will create Linear team 'Sales Ops' in workspace Workspace One and register one webhook");
 });
 
@@ -2422,7 +2685,7 @@ test("workspace picker known workspace mismatch fails closed before mutations", 
     return [];
   };
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2462,7 +2725,7 @@ test("workspace picker known workspace mismatch fails closed before mutations", 
   assert.equal(persistCalls, 0);
   assert.equal(discardCalls, 1);
   assert.equal(client.teams.length, 0);
-  assert.equal(registry.domains.some((domain) => domain.id === "sales-ops"), false);
+  assert.equal(registry.teams.some((team) => team.id === "sales-ops"), false);
 });
 
 test("stored setup credential workspace mismatch triggers fresh browser auth", async () => {
@@ -2470,7 +2733,7 @@ test("stored setup credential workspace mismatch triggers fresh browser auth", a
   const staleClient = new MemoryLinearClient({ workspaceId: "workspace-2", workspaceName: "Sandbox Workspace" });
   const freshClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2516,7 +2779,7 @@ test("setup authorization wait escape retries the browser attempt through the se
   const config = loadLinearConfig({ repoRoot });
   const freshClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2590,7 +2853,7 @@ test("setup authorization wait escape retries the browser attempt through the se
 test("setup authorization wait escape respects max authorization attempts", async () => {
   const config = loadLinearConfig({ repoRoot });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2639,10 +2902,10 @@ test("setup authorization wait escape respects max authorization attempts", asyn
   assert.equal(authCalls, 1);
   assert.equal(promptCalls, 1);
 });
-test("complete-domain refresh reauthorizes when the stored token yields HTTP 401", async () => {
+test("complete-team refresh reauthorizes when the stored token yields HTTP 401", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const resumeDomain = makeDomainRecord({
-    domainId: "support-ops",
+  const resumeTeam = makeTeamRecord({
+    teamRef: "support-ops",
     status: "active",
     adopterProvidedName: "Support Ops",
     workspaceId: "workspace-1",
@@ -2651,7 +2914,7 @@ test("complete-domain refresh reauthorizes when the stored token yields HTTP 401
     teamKey: "SUP",
     teamName: "Support Ops",
   });
-  const registry = upsertDomainRecord(emptyDomainRegistry(), resumeDomain);
+  const registry = upsertTeamRecord(emptyTeamRegistry(), resumeTeam);
   const freshClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   const authOptions = [];
   let authCalls = 0;
@@ -2664,8 +2927,8 @@ test("complete-domain refresh reauthorizes when the stored token yields HTTP 401
     repoRoot,
     credentialStore: {},
     registry,
-    domainNameHint: "Support Ops",
-    resumeDomain,
+    teamNameHint: "Support Ops",
+    resumeTeam,
     isTTY: true,
     createSetupAuth: (options) => {
       authCalls += 1;
@@ -2720,10 +2983,10 @@ test("complete-domain refresh reauthorizes when the stored token yields HTTP 401
   ]);
 });
 
-test("complete-domain workspace mismatch never clears the stored domain credential", async () => {
+test("complete-team workspace mismatch never clears the stored team credential", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const resumeDomain = makeDomainRecord({
-    domainId: "support-ops",
+  const resumeTeam = makeTeamRecord({
+    teamRef: "support-ops",
     status: "active",
     adopterProvidedName: "Support Ops",
     workspaceId: "workspace-1",
@@ -2732,7 +2995,7 @@ test("complete-domain workspace mismatch never clears the stored domain credenti
     teamKey: "SUP",
     teamName: "Support Ops",
   });
-  const registry = upsertDomainRecord(emptyDomainRegistry(), resumeDomain);
+  const registry = upsertTeamRecord(emptyTeamRegistry(), resumeTeam);
   const mismatchingClient = new MemoryLinearClient({ workspaceId: "workspace-2", workspaceName: "Sandbox Workspace" });
   let clearCalls = 0;
 
@@ -2743,8 +3006,8 @@ test("complete-domain workspace mismatch never clears the stored domain credenti
         repoRoot,
         credentialStore: {},
         registry,
-        domainNameHint: "Support Ops",
-        resumeDomain,
+        teamNameHint: "Support Ops",
+        resumeTeam,
         isTTY: false,
         createSetupAuth: ({ allowBrowserAuth }) => {
           assert.equal(allowBrowserAuth, false);
@@ -2757,7 +3020,7 @@ test("complete-domain workspace mismatch never clears the stored domain credenti
         },
         log: () => {},
       }),
-    /Linear authorization for existing domain "Support Ops".*--workspace "Workspace One"/,
+    /Linear authorization for existing team "Support Ops".*--workspace "Workspace One"/,
   );
 
   assert.equal(clearCalls, 0);
@@ -2767,7 +3030,7 @@ test("fresh grant workspace mismatch remains fail-closed with zero mutations", a
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-2", workspaceName: "Sandbox Workspace" });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2812,7 +3075,7 @@ test("fresh grant token persists after workspace verification, with no admin-tok
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2840,7 +3103,7 @@ test("fresh grant token persists after workspace verification, with no admin-tok
   assert.deepEqual(events, ["persist"]);
 });
 
-test("fresh domain setup still uses the bootstrap browser gate", async () => {
+test("fresh team setup still uses the bootstrap browser gate", async () => {
   const config = loadLinearConfig({ repoRoot });
   const credentialStore = { target: "bootstrap-target" };
   const client = new MemoryLinearClient({ workspaceId: "workspace-first", workspaceName: "First Workspace" });
@@ -2851,8 +3114,8 @@ test("fresh domain setup still uses the bootstrap browser gate", async () => {
     config,
     repoRoot,
     credentialStore,
-    registry: emptyDomainRegistry(),
-    domainNameHint: "First Domain",
+    registry: emptyTeamRegistry(),
+    teamNameHint: "First Team",
     isTTY: false,
     createSetupAuth: (options) => {
       seenOptions = options;
@@ -2877,7 +3140,7 @@ test("another workspace reflects a genuinely new grant and proceeds", async () =
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-new", workspaceName: "New Workspace" });
   let registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2893,12 +3156,12 @@ test("another workspace reflects a genuinely new grant and proceeds", async () =
     ensureAdminAuthorization: async ({ setupAuth }) => setupAuth,
     log: (line) => logs.push(line),
   });
-  await setupLinearDomain({
+  await setupLinearTeam({
     client: authorization.setupAuth.client,
     config,
     registry,
     repoRoot,
-    domainName: "Marketing Ops",
+    teamName: "Marketing Ops",
     workspace: authorization.workspace,
     declaredWorkspace: authorization.declaredWorkspace,
     registerWebhook: async ({ workspaceId, teamId }) => ({
@@ -2916,7 +3179,7 @@ test("another workspace reflects a genuinely new grant and proceeds", async () =
   });
 
   assert.equal(logs.includes("Authorized workspace: New Workspace"), true);
-  assert.equal(registry.domains.some((domain) => domain.id === "marketing-ops" && domain.status === "active"), true);
+  assert.equal(registry.teams.some((team) => team.id === "marketing-ops" && team.status === "active"), true);
 });
 
 test("new workspace confirmation prompt names the authorized workspace", async () => {
@@ -2928,7 +3191,7 @@ test("new workspace confirmation prompt names the authorized workspace", async (
     config,
     repoRoot,
     credentialStore: {},
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     isTTY: true,
     createSetupAuth: () => fakeSetupAuth(client),
     promptReauthorize: async ({ message }) => {
@@ -2947,11 +3210,11 @@ test("new workspace confirmation prompt names the authorized workspace", async (
   assert.match(promptMessage, /Nothing has been created yet/);
 });
 
-test("another workspace grant that already hosts domains fails closed before mutations", async () => {
+test("another workspace grant that already hosts teams fails closed before mutations", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -2972,13 +3235,13 @@ test("another workspace grant that already hosts domains fails closed before mut
   );
 
   assert.equal(client.teams.length, 0);
-  assert.equal(registry.domains.length, 1);
+  assert.equal(registry.teams.length, 1);
 });
 
 test("empty registry first init flows as another workspace with no picker", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-first", workspaceName: "First Workspace" });
-  let registry = emptyDomainRegistry();
+  let registry = emptyTeamRegistry();
   let pickerCalled = false;
 
   const authorization = await authorizeLinearSetupWorkspace({
@@ -2996,12 +3259,12 @@ test("empty registry first init flows as another workspace with no picker", asyn
     promptReauthorize: async () => "x",
     log: () => {},
   });
-  await setupLinearDomain({
+  await setupLinearTeam({
     client: authorization.setupAuth.client,
     config,
     registry,
     repoRoot,
-    domainName: "First Domain",
+    teamName: "First Team",
     workspace: authorization.workspace,
     declaredWorkspace: authorization.declaredWorkspace,
     registerWebhook: async ({ workspaceId, teamId }) => ({
@@ -3019,16 +3282,16 @@ test("empty registry first init flows as another workspace with no picker", asyn
   });
 
   assert.equal(pickerCalled, false);
-  assert.equal(registry.domains[0].linear.workspace_id, "workspace-first");
+  assert.equal(registry.teams[0].linear.workspace_id, "workspace-first");
 });
 
-test("bare init resumes a single setup_incomplete domain instead of asking for a workspace", async () => {
+test("bare init resumes a single setup_incomplete team instead of asking for a workspace", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "whoopwhoop",
+  const registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "whoopwhoop",
       status: "setup_incomplete",
       setupIncompleteCause: "linear_team_limit_reached",
       workspaceId: "workspace-1",
@@ -3037,13 +3300,13 @@ test("bare init resumes a single setup_incomplete domain instead of asking for a
   );
   let pickerCalled = false;
 
-  const domainNameResolution = resolveSetupCommandDomainNameHint([], registry);
+  const teamNameResolution = resolveSetupCommandTeamNameHint([], registry);
   const authorization = await authorizeLinearSetupWorkspace({
     config,
     repoRoot,
     credentialStore: {},
     registry,
-    domainNameHint: domainNameResolution.domainNameHint,
+    teamNameHint: teamNameResolution.teamNameHint,
     isTTY: true,
     createSetupAuth: () => fakeSetupAuth(client),
     promptWorkspace: async () => {
@@ -3054,20 +3317,20 @@ test("bare init resumes a single setup_incomplete domain instead of asking for a
     log: () => {},
   });
 
-  assert.equal(domainNameResolution.source, "single_setup_incomplete");
-  assert.equal(domainNameResolution.domainNameHint, "whoopwhoop");
+  assert.equal(teamNameResolution.source, "single_setup_incomplete");
+  assert.equal(teamNameResolution.teamNameHint, "whoopwhoop");
   assert.equal(pickerCalled, false);
   assert.equal(authorization.declaredWorkspace.workspaceId, "workspace-1");
   assert.equal(authorization.workspace.id, "workspace-1");
 });
 
-test("resume of setup_incomplete domain reauthorizes when the stored setup credential is missing", async () => {
+test("resume of setup_incomplete team reauthorizes when the stored setup credential is missing", async () => {
   const config = loadLinearConfig({ repoRoot });
   const freshClient = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
-  let registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+  let registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "setup_incomplete",
       setupIncompleteCause: "linear_team_limit_reached",
       adopterProvidedName: "Support Ops",
@@ -3075,7 +3338,7 @@ test("resume of setup_incomplete domain reauthorizes when the stored setup crede
       workspaceName: "Workspace One",
     }),
   );
-  const resolution = resolveSetupCommandDomainNameHint(["--domain", "Support Ops"], registry);
+  const resolution = resolveSetupCommandTeamNameHint(["--team", "Support Ops"], registry);
   const authOptions = [];
   let authCalls = 0;
   let clearCalls = 0;
@@ -3087,8 +3350,8 @@ test("resume of setup_incomplete domain reauthorizes when the stored setup crede
     repoRoot,
     credentialStore: {},
     registry,
-    domainNameHint: resolution.domainNameHint,
-    resumeDomain: resolution.resumeDomain,
+    teamNameHint: resolution.teamNameHint,
+    resumeTeam: resolution.resumeTeam,
     isTTY: true,
     createSetupAuth: (options) => {
       authCalls += 1;
@@ -3131,12 +3394,12 @@ test("resume of setup_incomplete domain reauthorizes when the stored setup crede
     log: () => {},
   });
 
-  await setupLinearDomain({
+  await setupLinearTeam({
     client: authorization.setupAuth.client,
     config,
     registry,
     repoRoot,
-    domainName: "Support Ops",
+    teamName: "Support Ops",
     workspace: authorization.workspace,
     declaredWorkspace: authorization.declaredWorkspace,
     registerWebhook: async ({ workspaceId, teamId }) => ({
@@ -3153,8 +3416,8 @@ test("resume of setup_incomplete domain reauthorizes when the stored setup crede
     },
   });
 
-  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
-  assert.equal(domain.status, "active");
+  const team = registry.teams.find((candidate) => candidate.id === "support-ops");
+  assert.equal(team.status, "active");
   assert.equal(authorization.workspace.id, "workspace-1");
   assert.equal(authCalls, 2);
   assert.equal(clearCalls, 1);
@@ -3167,8 +3430,8 @@ test("resume of setup_incomplete domain reauthorizes when the stored setup crede
 });
 test("bare init resumes GitHub when Linear is active but GitHub setup is incomplete", () => {
   const registry = {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [
       {
         id: "turnip",
         status: "active",
@@ -3183,7 +3446,7 @@ test("bare init resumes GitHub when Linear is active but GitHub setup is incompl
     ],
   };
 
-  const failed = resolveGitHubPhaseResumeDomain({
+  const failed = resolveGitHubPhaseResumeTeam({
     args: [],
     registry,
     repoRoot,
@@ -3198,7 +3461,7 @@ test("bare init resumes GitHub when Linear is active but GitHub setup is incompl
   });
   assert.equal(failed?.id, "turnip");
 
-  const missing = resolveGitHubPhaseResumeDomain({
+  const missing = resolveGitHubPhaseResumeTeam({
     args: [],
     registry,
     repoRoot,
@@ -3206,7 +3469,7 @@ test("bare init resumes GitHub when Linear is active but GitHub setup is incompl
   });
   assert.equal(missing?.id, "turnip");
 
-  const verified = resolveGitHubPhaseResumeDomain({
+  const verified = resolveGitHubPhaseResumeTeam({
     args: [],
     registry,
     repoRoot,
@@ -3221,25 +3484,25 @@ test("bare init resumes GitHub when Linear is active but GitHub setup is incompl
   });
   assert.equal(verified, null);
 
-  const explicitDomain = resolveGitHubPhaseResumeDomain({
-    args: ["--domain", "new-domain"],
+  const explicitTeam = resolveGitHubPhaseResumeTeam({
+    args: ["--team", "new-team"],
     registry,
     repoRoot,
     readConnectionState: () => ({ ok: false, reason: "missing_github_connection_state" }),
   });
-  assert.equal(explicitDomain, null);
+  assert.equal(explicitTeam, null);
 
-  const multipleActive = resolveGitHubPhaseResumeDomain({
+  const multipleActive = resolveGitHubPhaseResumeTeam({
     args: [],
     registry: {
       ...registry,
-      domains: [
-        ...registry.domains,
+      teams: [
+        ...registry.teams,
         {
-          ...registry.domains[0],
+          ...registry.teams[0],
           id: "another",
           adopter_provided_name: "another",
-          linear: { ...registry.domains[0].linear, team_id: "team-2", team_name: "another" },
+          linear: { ...registry.teams[0].linear, team_id: "team-2", team_name: "another" },
         },
       ],
     },
@@ -3277,7 +3540,7 @@ test("workspace picker asks for a numbered choice instead of a bare workspace la
 test("non-interactive workspace flag path matches exactly or fails closed", async () => {
   const config = loadLinearConfig({ repoRoot });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -3316,7 +3579,7 @@ test("non-interactive workspace flag path matches exactly or fails closed", asyn
 test("--workspace without a value fails closed instead of selecting another workspace", async () => {
   const config = loadLinearConfig({ repoRoot });
   const registry = registryWithWorkspace({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     workspaceName: "Workspace One",
   });
@@ -3352,17 +3615,17 @@ test("known workspace verification requires ids even when names match", () => {
   );
 });
 
-test("preview line contains workspace name for init and domain:add shared setup", async () => {
+test("preview line contains workspace name for init and team:add shared setup", async () => {
   const config = loadLinearConfig({ repoRoot });
   const previews = [];
 
-  for (const commandName of ["init", "domain:add"]) {
-    await setupLinearDomain({
+  for (const commandName of ["init", "team:add"]) {
+    await setupLinearTeam({
       client: new MemoryLinearClient({ workspaceId: `workspace-${commandName}`, workspaceName: `${commandName} Workspace` }),
       config,
-      registry: emptyDomainRegistry(),
+      registry: emptyTeamRegistry(),
       repoRoot,
-      domainName: `${commandName} Domain`,
+      teamName: `${commandName} Team`,
       registerWebhook: async ({ workspaceId, teamId }) => ({
         created: true,
         webhook: { id: `webhook-${teamId}`, workspaceId },
@@ -3378,16 +3641,16 @@ test("preview line contains workspace name for init and domain:add shared setup"
   }
 
   assert.match(previews.find((item) => item.commandName === "init").line, /in workspace init Workspace/);
-  assert.match(previews.find((item) => item.commandName === "domain:add").line, /in workspace domain:add Workspace/);
+  assert.match(previews.find((item) => item.commandName === "team:add").line, /in workspace team:add Workspace/);
 });
 
-test("resume of setup_incomplete domain verifies entry workspace without re-prompting", async () => {
+test("resume of setup_incomplete team verifies entry workspace without re-prompting", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
-  let registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+  let registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "setup_incomplete",
       workspaceId: "workspace-1",
       workspaceName: "Workspace One",
@@ -3399,7 +3662,7 @@ test("resume of setup_incomplete domain verifies entry workspace without re-prom
     repoRoot,
     credentialStore: {},
     registry,
-    domainNameHint: "Support Ops",
+    teamNameHint: "Support Ops",
     isTTY: true,
     createSetupAuth: () => fakeSetupAuth(client),
     ensureAdminAuthorization: async ({ setupAuth }) => setupAuth,
@@ -3409,12 +3672,12 @@ test("resume of setup_incomplete domain verifies entry workspace without re-prom
     promptReauthorize: async () => "x",
     log: () => {},
   });
-  await setupLinearDomain({
+  await setupLinearTeam({
     client: authorization.setupAuth.client,
     config,
     registry,
     repoRoot,
-    domainName: "Support Ops",
+    teamName: "Support Ops",
     workspace: authorization.workspace,
     declaredWorkspace: authorization.declaredWorkspace,
     registerWebhook: async ({ workspaceId, teamId }) => ({
@@ -3431,19 +3694,19 @@ test("resume of setup_incomplete domain verifies entry workspace without re-prom
     },
   });
 
-  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
-  assert.equal(domain.status, "active");
-  assert.equal(domain.linear.workspace_id, "workspace-1");
+  const team = registry.teams.find((candidate) => candidate.id === "support-ops");
+  assert.equal(team.status, "active");
+  assert.equal(team.linear.workspace_id, "workspace-1");
 });
 
-test("resume of collision-suffixed setup_incomplete domain uses original adopter name", async () => {
+test("resume of collision-suffixed setup_incomplete team uses original adopter name", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" });
-  let registry = upsertDomainRecord(
-    upsertDomainRecord(
-      emptyDomainRegistry(),
-      makeDomainRecord({
-        domainId: "support-ops",
+  let registry = upsertTeamRecord(
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         adopterProvidedName: "Support Ops",
         workspaceId: "workspace-1",
@@ -3454,8 +3717,8 @@ test("resume of collision-suffixed setup_incomplete domain uses original adopter
         webhookId: "webhook-support",
       }),
     ),
-    makeDomainRecord({
-      domainId: "support-ops-2",
+    makeTeamRecord({
+      teamRef: "support-ops-2",
       status: "setup_incomplete",
       adopterProvidedName: "Support Ops",
       workspaceId: "workspace-1",
@@ -3463,12 +3726,13 @@ test("resume of collision-suffixed setup_incomplete domain uses original adopter
     }),
   );
 
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client,
     config,
     registry,
     repoRoot,
-    domainName: "Support Ops",
+    teamName: "Support Ops",
+    resumeTeam: registry.teams.find((team) => team.id === "support-ops-2"),
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: `webhook-${teamId}`, workspaceId },
@@ -3483,10 +3747,10 @@ test("resume of collision-suffixed setup_incomplete domain uses original adopter
     },
   });
 
-  assert.equal(result.domain.id, "support-ops-2");
-  assert.equal(result.domain.adopter_provided_name, "Support Ops");
-  assert.equal(registry.domains.some((domain) => domain.id === "support-ops-3"), false);
-  assert.equal(registry.domains.find((domain) => domain.id === "support-ops-2").status, "active");
+  assert.equal(result.team.id, "support-ops-2");
+  assert.equal(result.team.adopter_provided_name, "Support Ops");
+  assert.equal(registry.teams.some((team) => team.id === "support-ops-3"), false);
+  assert.equal(registry.teams.find((team) => team.id === "support-ops-2").status, "active");
 });
 
 test("Each taxonomy failure leaves setup_incomplete with the right cause and no partial active state", async (t) => {
@@ -3552,12 +3816,12 @@ test("Each taxonomy failure leaves setup_incomplete with the right cause and no 
 
       await assert.rejects(
         () =>
-          setupLinearDomain({
+          setupLinearTeam({
             client,
             config,
-            registry: emptyDomainRegistry(),
+            registry: emptyTeamRegistry(),
             repoRoot,
-            domainName: "Blocked Domain",
+            teamName: "Blocked Team",
             registerWebhook: async () => {
               webhookCalled = true;
             },
@@ -3581,10 +3845,10 @@ test("Each taxonomy failure leaves setup_incomplete with the right cause and no 
 
       assert.equal(client.teams.length, 0);
       assert.equal(webhookCalled, false);
-      assert.equal(writtenRegistry.domains.length, 1);
-      assert.equal(writtenRegistry.domains[0].status, "setup_incomplete");
-      assert.equal(writtenRegistry.domains[0].setup_incomplete_cause, item.cause);
-      assert.equal(writtenRegistry.domains.some((domain) => domain.status === "active"), false);
+      assert.equal(writtenRegistry.teams.length, 1);
+      assert.equal(writtenRegistry.teams[0].status, "setup_incomplete");
+      assert.equal(writtenRegistry.teams[0].setup_incomplete_cause, item.cause);
+      assert.equal(writtenRegistry.teams.some((team) => team.status === "active"), false);
     });
   }
 });
@@ -3609,15 +3873,15 @@ test("team-limit recovery offers existing teams but adopts one only after exact 
       path: ["teamCreate"],
     }],
   };
-  let registry = emptyDomainRegistry();
+  let registry = emptyTeamRegistry();
   let offeredError = null;
   await assert.rejects(
-    () => setupLinearDomain({
+    () => setupLinearTeam({
       client,
       config,
       registry,
       repoRoot,
-      domainName: "Teami",
+      teamName: "Teami",
       writeCache: async () => {},
       writeRegistry: async (nextRegistry) => { registry = nextRegistry; },
     }),
@@ -3630,24 +3894,24 @@ test("team-limit recovery offers existing teams but adopts one only after exact 
   );
   assert.equal(client.teams.length, 1, "setup must never auto-adopt even the only existing team");
   assert.equal(client.projectLabels.length, 0);
-  assert.equal(registry.domains[0].status, "setup_incomplete");
+  assert.equal(registry.teams[0].status, "setup_incomplete");
   assert.equal(offeredError.workspace.id, "workspace-1");
 
   client.teamCreateError = null;
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client,
     config,
     registry,
     repoRoot,
-    domainName: "Teami",
+    teamName: "Teami",
     selectedExistingTeamId: existing.id,
     writeCache: async () => {},
     writeRegistry: async (nextRegistry) => { registry = nextRegistry; },
   });
 
   assert.equal(client.teams.length, 1);
-  assert.equal(result.domain.linear.team_id, existing.id);
-  assert.equal(result.domain.linear.provisioned_by_teami, false);
+  assert.equal(result.team.linear.team_id, existing.id);
+  assert.equal(result.team.linear.provisioned_by_teami, false);
   assert.equal(client.workflowStates.some((state) => state.name === "Human Review"), true);
   assert.equal(client.workflowStates.some((state) => state.name === "Principal Review"), true);
 });
@@ -3656,10 +3920,10 @@ test("existing-team selection rejects stale and already-bound team IDs before wo
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
   const existing = await client.createTeam({ name: "Shared Team", key: "SHR" });
-  const boundRegistry = upsertDomainRecord(emptyDomainRegistry(), makeDomainRecord({
-    domainId: "other-domain",
+  const boundRegistry = upsertTeamRecord(emptyTeamRegistry(), makeTeamRecord({
+    teamRef: "other-team",
     status: "active",
-    adopterProvidedName: "Other Domain",
+    adopterProvidedName: "Other Team",
     workspaceId: "workspace-1",
     workspaceName: "Example Workspace",
     teamId: existing.id,
@@ -3669,12 +3933,12 @@ test("existing-team selection rejects stale and already-bound team IDs before wo
 
   for (const selectedExistingTeamId of ["team-missing", existing.id]) {
     await assert.rejects(
-      () => setupLinearDomain({
+      () => setupLinearTeam({
         client,
         config,
         registry: boundRegistry,
         repoRoot,
-        domainName: "Teami",
+        teamName: "Teami",
         selectedExistingTeamId,
         writeCache: async () => { throw new Error("must not write cache"); },
         writeRegistry: async () => {},
@@ -3755,17 +4019,17 @@ test("Each mid-setup failure leaves setup_incomplete with the right cause and no
 
       await assert.rejects(
         () =>
-          setupLinearDomain({
+          setupLinearTeam({
             client,
             config,
-            registry: emptyDomainRegistry(),
+            registry: emptyTeamRegistry(),
             repoRoot,
-            domainName: "Mid Setup Domain",
+            teamName: "Mid Setup Team",
             registerWebhook: item.registerWebhook,
             ensureRunnerCredential: item.ensureRunnerCredential,
             writeCache: item.writeCache,
-            writeRegistry: async (registry, domain) => {
-              if (item.failActiveRegistryWrite && domain.status === "active") {
+            writeRegistry: async (registry, team) => {
+              if (item.failActiveRegistryWrite && team.status === "active") {
                 throw new Error("registry write down");
               }
               writtenRegistry = registry;
@@ -3775,12 +4039,12 @@ test("Each mid-setup failure leaves setup_incomplete with the right cause and no
       );
 
       assert.equal(client.teams.length, 1);
-      assert.equal(writtenRegistry.domains.length, 1);
-      assert.equal(writtenRegistry.domains[0].status, "setup_incomplete");
-      assert.equal(writtenRegistry.domains[0].setup_incomplete_cause, item.cause);
-      assert.equal(writtenRegistry.domains.some((domain) => domain.status === "active"), false);
+      assert.equal(writtenRegistry.teams.length, 1);
+      assert.equal(writtenRegistry.teams[0].status, "setup_incomplete");
+      assert.equal(writtenRegistry.teams[0].setup_incomplete_cause, item.cause);
+      assert.equal(writtenRegistry.teams.some((team) => team.status === "active"), false);
 
-      const doctor = doctorDomainRegistry({ registry: writtenRegistry });
+      const doctor = doctorTeamRegistry({ registry: writtenRegistry });
       assert.equal(doctor.healthy, false);
       assert.match(doctor.checks[0].message, new RegExp(item.cause));
       assert.match(doctor.checks[0].message, /npm run (init|reset)/);
@@ -3794,15 +4058,15 @@ test("Webhook id and team id land in the registry entry", async () => {
   let writtenRegistry = null;
   let writtenCache = null;
 
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client,
     config,
-    registry: emptyDomainRegistry(),
+    registry: emptyTeamRegistry(),
     repoRoot,
-    domainName: "Registry Domain",
+    teamName: "Registry Team",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
-      webhook: { id: "webhook-registry-domain", workspaceId, teamId },
+      webhook: { id: "webhook-registry-team", workspaceId, teamId },
     }),
     ensureRunnerCredential: async ({ workspaceId }) => ({
       created: true,
@@ -3816,24 +4080,24 @@ test("Webhook id and team id land in the registry entry", async () => {
     },
   });
 
-  const domain = writtenRegistry.domains[0];
-  assert.equal(domain.id, "registry-domain");
-  assert.equal(domain.linear.team_id, result.domain.linear.team_id);
-  assert.equal(domain.linear.webhook_id, "webhook-registry-domain");
-  assert.equal(writtenCache.domainId, "registry-domain");
+  const team = writtenRegistry.teams[0];
+  assert.equal(team.id, "registry-team");
+  assert.equal(team.linear.team_id, result.team.linear.team_id);
+  assert.equal(team.linear.webhook_id, "webhook-registry-team");
+  assert.equal(writtenCache.teamRef, "registry-team");
   assert.equal(writtenCache.workspaceId, "workspace-1");
-  assert.equal(writtenCache.teamId, result.domain.linear.team_id);
+  assert.equal(writtenCache.teamId, result.team.linear.team_id);
   assert.equal(Object.hasOwn(writtenCache, "inbox"), false);
   assert.equal(writtenCache.localRunner.triggerSource, "local_gateway_poll");
-  assert.equal(writtenCache.localRunner.legacyWebhook.id, "webhook-registry-domain");
+  assert.equal(writtenCache.localRunner.legacyWebhook.id, "webhook-registry-team");
   assert.equal(writtenCache.localRunner.legacyRunnerCredentialId, "runner-workspace-1");
 });
 
-test("Bootstrap to promotion flow lands tokens under the domain-scoped target before active registry", async () => {
+test("Bootstrap to promotion flow lands tokens under the team-scoped target before active registry", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-credential-promotion-"));
   const client = new MemoryLinearClient();
-  let registry = emptyDomainRegistry();
+  let registry = emptyTeamRegistry();
   const bootstrapStore = createLinearCredentialStore({
     config,
     repoRoot: tempRoot,
@@ -3842,12 +4106,12 @@ test("Bootstrap to promotion flow lands tokens under the domain-scoped target be
   await bootstrapStore.writeTokenSet({ refreshToken: "refresh-bootstrap", accessToken: "access-bootstrap" });
   let promotedBeforeActive = false;
 
-  const result = await setupLinearDomain({
+  const result = await setupLinearTeam({
     client,
     config,
     registry,
     repoRoot: tempRoot,
-    domainName: "Promotion Domain",
+    teamName: "Promotion Team",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: "webhook-promotion", workspaceId, teamId },
@@ -3857,47 +4121,81 @@ test("Bootstrap to promotion flow lands tokens under the domain-scoped target be
       credential: { credentialId: `runner-${workspaceId}` },
     }),
     promoteCredential: async ({ context }) => {
-      await promoteSetupCredentialToDomain({
+      await promoteSetupCredentialToTeam({
         setupCredentialStore: bootstrapStore,
         config,
         repoRoot: tempRoot,
-        domainContext: context,
+        teamContext: context,
       });
       promotedBeforeActive = true;
     },
     writeCache: async (cache, context) => {
       writeLinearCache(context.linear.cachePath, cache);
     },
-    writeRegistry: async (nextRegistry, domain) => {
-      if (domain.status === "active") assert.equal(promotedBeforeActive, true);
+    writeRegistry: async (nextRegistry, team) => {
+      if (team.status === "active") assert.equal(promotedBeforeActive, true);
       registry = nextRegistry;
-      writeDomainRegistry({ repoRoot: tempRoot }, nextRegistry);
+      writeTeamRegistry({ repoRoot: tempRoot }, nextRegistry);
     },
   });
 
-  const domainStore = createLinearCredentialStore({
+  const teamStore = createLinearCredentialStore({
     config,
     repoRoot: tempRoot,
-    domainContext: result.context,
+    teamContext: result.context,
   });
   assert.equal((await bootstrapStore.readTokenSet()), null);
-  assert.equal((await domainStore.readTokenSet()).refreshToken, "refresh-bootstrap");
-  assert.equal(result.domain.status, "active");
+  assert.equal((await teamStore.readTokenSet()).refreshToken, "refresh-bootstrap");
+  assert.equal(result.team.status, "active");
+});
+
+test("Bootstrap promotion never overwrites a newer canonical Team credential", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-credential-promotion-conflict-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const teamContext = { teamRef: "support-ops", workspaceId: "workspace-1" };
+  const bootstrapStore = createLinearCredentialStore({
+    config,
+    repoRoot: home,
+    home,
+    target: legacyCredentialTargetForConfig(config),
+  });
+  const teamStore = createLinearCredentialStore({
+    config,
+    repoRoot: home,
+    home,
+    teamContext,
+  });
+  await bootstrapStore.writeTokenSet({ refreshToken: "refresh-bootstrap" });
+  await teamStore.writeTokenSet({ refreshToken: "refresh-newer-team" });
+
+  await assert.rejects(
+    () => promoteSetupCredentialToTeam({
+      setupCredentialStore: bootstrapStore,
+      config,
+      repoRoot: home,
+      home,
+      teamContext,
+    }),
+    /newer Team credential already exists/,
+  );
+  assert.equal((await teamStore.readTokenSet()).refreshToken, "refresh-newer-team");
+  assert.equal((await bootstrapStore.readTokenSet()).refreshToken, "refresh-bootstrap");
 });
 
 test("Promotion failure leaves setup_incomplete with credential_promotion_failed and no active entry", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = new MemoryLinearClient();
-  let registry = emptyDomainRegistry();
+  let registry = emptyTeamRegistry();
 
   await assert.rejects(
     () =>
-      setupLinearDomain({
+      setupLinearTeam({
         client,
         config,
         registry,
         repoRoot,
-        domainName: "Promotion Broken",
+        teamName: "Promotion Broken",
         registerWebhook: async ({ workspaceId, teamId }) => ({
           created: true,
           webhook: { id: "webhook-promotion-broken", workspaceId, teamId },
@@ -3917,97 +4215,97 @@ test("Promotion failure leaves setup_incomplete with credential_promotion_failed
     /credential_promotion_failed/,
   );
 
-  const domain = registry.domains.find((candidate) => candidate.id === "promotion-broken");
-  assert.equal(domain.status, "setup_incomplete");
-  assert.equal(domain.setup_incomplete_cause, "credential_promotion_failed");
-  assert.equal(registry.domains.some((candidate) => candidate.status === "active"), false);
-  assert.match(doctorDomainRegistry({ registry }).checks[0].message, /Rerun npm run init/);
+  const team = registry.teams.find((candidate) => candidate.id === "promotion-broken");
+  assert.equal(team.status, "setup_incomplete");
+  assert.equal(team.setup_incomplete_cause, "credential_promotion_failed");
+  assert.equal(registry.teams.some((candidate) => candidate.status === "active"), false);
+  assert.match(doctorTeamRegistry({ registry }).checks[0].message, /Rerun npm run init/);
 });
 
-test("domain:add and init share setupLinearDomain for a second workspace with isolated targets and cache paths", async () => {
+test("team:add and init share setupLinearTeam for a second workspace with isolated targets and cache paths", async () => {
   const config = loadLinearConfig({ repoRoot });
-  let registry = emptyDomainRegistry();
+  let registry = emptyTeamRegistry();
   const caches = new Map();
 
-  const first = await setupLinearDomain({
+  const first = await setupLinearTeam({
     client: new MemoryLinearClient({ workspaceId: "workspace-1", workspaceName: "Workspace One" }),
     config,
     registry,
     repoRoot,
-    domainName: "Support Ops",
+    teamName: "Support Ops",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: "webhook-support", workspaceId, teamId },
     }),
-    ensureRunnerCredential: async ({ workspaceId, domainId }) => ({
+    ensureRunnerCredential: async ({ workspaceId, teamRef }) => ({
       created: true,
-      credential: { credentialId: `runner-${domainId}-${workspaceId}` },
+      credential: { credentialId: `runner-${teamRef}-${workspaceId}` },
     }),
     writeCache: async (cache, context) => {
-      caches.set(context.domainId, { path: context.linear.cachePath, bytes: JSON.stringify(cache) });
+      caches.set(context.teamRef, { path: context.linear.cachePath, bytes: JSON.stringify(cache) });
     },
     writeRegistry: async (nextRegistry) => {
       registry = nextRegistry;
     },
   });
 
-  const second = await setupLinearDomain({
+  const second = await setupLinearTeam({
     client: new MemoryLinearClient({ workspaceId: "workspace-2", workspaceName: "Workspace Two" }),
     config,
     registry,
     repoRoot,
-    domainName: "Sales Ops",
+    teamName: "Sales Ops",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: "webhook-sales", workspaceId, teamId },
     }),
-    ensureRunnerCredential: async ({ workspaceId, domainId }) => ({
+    ensureRunnerCredential: async ({ workspaceId, teamRef }) => ({
       created: true,
-      credential: { credentialId: `runner-${domainId}-${workspaceId}` },
+      credential: { credentialId: `runner-${teamRef}-${workspaceId}` },
     }),
     writeCache: async (cache, context) => {
-      caches.set(context.domainId, { path: context.linear.cachePath, bytes: JSON.stringify(cache) });
+      caches.set(context.teamRef, { path: context.linear.cachePath, bytes: JSON.stringify(cache) });
     },
     writeRegistry: async (nextRegistry) => {
       registry = nextRegistry;
     },
   });
 
-  validateDomainRegistry(registry);
-  assert.deepEqual(registry.domains.map((domain) => domain.id), ["support-ops", "sales-ops"]);
+  validateTeamRegistry(registry);
+  assert.deepEqual(registry.teams.map((team) => team.id), ["support-ops", "sales-ops"]);
   assert.notEqual(first.context.credentialTargets.linearOAuth, second.context.credentialTargets.linearOAuth);
   assert.equal(Object.hasOwn(first.context.credentialTargets, "runnerInbox"), false);
   assert.equal(Object.hasOwn(second.context.credentialTargets, "runnerInbox"), false);
   assert.notEqual(caches.get("support-ops").path, caches.get("sales-ops").path);
   assert.equal(JSON.parse(caches.get("support-ops").bytes).app_identity_id, "app-viewer-1");
   assert.equal(JSON.parse(caches.get("support-ops").bytes).app_identity_name, "Teami App");
-  assert.equal(registry.domains.find((domain) => domain.id === "support-ops").linear.webhook_id, "webhook-support");
-  assert.equal(registry.domains.find((domain) => domain.id === "sales-ops").linear.webhook_id, "webhook-sales");
+  assert.equal(registry.teams.find((team) => team.id === "support-ops").linear.webhook_id, "webhook-support");
+  assert.equal(registry.teams.find((team) => team.id === "sales-ops").linear.webhook_id, "webhook-sales");
 });
 
-test("Failure mid-add leaves the first domain registry entry, credentials, and cache byte-identical", async () => {
+test("Failure mid-add leaves the first team registry entry, credentials, and cache byte-identical", async () => {
   const config = loadLinearConfig({ repoRoot });
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-add-isolation-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-team-add-isolation-"));
   process.env.TEAMI_HOME = tempRoot;
-  let registry = emptyDomainRegistry();
-  const credentialStatePath = (domainId) =>
-    path.join(tempRoot, "domains", domainId, "runner-credential-state.json");
+  let registry = emptyTeamRegistry();
+  const credentialStatePath = (teamRef) =>
+    path.join(tempRoot, "teams", teamRef, "runner-credential-state.json");
 
-  await setupLinearDomain({
+  await setupLinearTeam({
     client: new MemoryLinearClient({ workspaceId: "workspace-1" }),
     config,
     registry,
     repoRoot: tempRoot,
     home: tempRoot,
-    domainName: "Support Ops",
+    teamName: "Support Ops",
     registerWebhook: async ({ workspaceId, teamId }) => ({
       created: true,
       webhook: { id: "webhook-support", workspaceId, teamId },
     }),
-    ensureRunnerCredential: async ({ workspaceId, domainId }) => {
-      const credential = { credentialId: `runner-${domainId}`, workspaceId };
-      fs.mkdirSync(path.dirname(credentialStatePath(domainId)), { recursive: true });
-      fs.writeFileSync(credentialStatePath(domainId), `${JSON.stringify(credential, null, 2)}\n`, "utf8");
+    ensureRunnerCredential: async ({ workspaceId, teamRef }) => {
+      const credential = { credentialId: `runner-${teamRef}`, workspaceId };
+      fs.mkdirSync(path.dirname(credentialStatePath(teamRef)), { recursive: true });
+      fs.writeFileSync(credentialStatePath(teamRef), `${JSON.stringify(credential, null, 2)}\n`, "utf8");
       return { created: true, credential };
     },
     writeCache: async (cache, context) => {
@@ -4015,25 +4313,25 @@ test("Failure mid-add leaves the first domain registry entry, credentials, and c
     },
     writeRegistry: async (nextRegistry) => {
       registry = nextRegistry;
-      writeDomainRegistry({ home: tempRoot }, nextRegistry);
-      writeDomainEntrySnapshot({ repoRoot: tempRoot, registry: nextRegistry, domainId: "support-ops" });
+      writeTeamRegistry({ home: tempRoot }, nextRegistry);
+      writeTeamEntrySnapshot({ repoRoot: tempRoot, registry: nextRegistry, teamRef: "support-ops" });
     },
   });
 
-  const firstDomain = registry.domains.find((domain) => domain.id === "support-ops");
-  const firstRegistryBefore = fs.readFileSync(domainEntrySnapshotPath(tempRoot, "support-ops"));
-  const firstCacheBefore = fs.readFileSync(path.resolve(tempRoot, firstDomain.linear.cache_path));
+  const firstTeam = registry.teams.find((team) => team.id === "support-ops");
+  const firstRegistryBefore = fs.readFileSync(teamEntrySnapshotPath(tempRoot, "support-ops"));
+  const firstCacheBefore = fs.readFileSync(path.resolve(tempRoot, firstTeam.linear.cache_path));
   const firstCredentialBefore = fs.readFileSync(credentialStatePath("support-ops"));
 
   await assert.rejects(
     () =>
-      setupLinearDomain({
+      setupLinearTeam({
         client: new MemoryLinearClient({ workspaceId: "workspace-2" }),
         config,
         registry,
         repoRoot: tempRoot,
         home: tempRoot,
-        domainName: "Sales Ops",
+        teamName: "Sales Ops",
         registerWebhook: async ({ workspaceId, teamId }) => ({
           created: true,
           webhook: { id: "webhook-sales", workspaceId, teamId },
@@ -4046,29 +4344,29 @@ test("Failure mid-add leaves the first domain registry entry, credentials, and c
         },
         writeRegistry: async (nextRegistry) => {
           registry = nextRegistry;
-          writeDomainRegistry({ home: tempRoot }, nextRegistry);
-          writeDomainEntrySnapshot({ repoRoot: tempRoot, registry: nextRegistry, domainId: "support-ops" });
+          writeTeamRegistry({ home: tempRoot }, nextRegistry);
+          writeTeamEntrySnapshot({ repoRoot: tempRoot, registry: nextRegistry, teamRef: "support-ops" });
         },
       }),
     /runner_authority_failed: Runner authority error: HTTP 400 invalid runner authority/,
   );
 
-  assert.deepEqual(fs.readFileSync(domainEntrySnapshotPath(tempRoot, "support-ops")), firstRegistryBefore);
-  assert.deepEqual(fs.readFileSync(path.resolve(tempRoot, firstDomain.linear.cache_path)), firstCacheBefore);
+  assert.deepEqual(fs.readFileSync(teamEntrySnapshotPath(tempRoot, "support-ops")), firstRegistryBefore);
+  assert.deepEqual(fs.readFileSync(path.resolve(tempRoot, firstTeam.linear.cache_path)), firstCacheBefore);
   assert.deepEqual(fs.readFileSync(credentialStatePath("support-ops")), firstCredentialBefore);
-  const failedDomain = registry.domains.find((domain) => domain.id === "sales-ops");
-  assert.equal(failedDomain.status, "setup_incomplete");
-  assert.equal(failedDomain.setup_incomplete_cause, "runner_authority_failed");
-  assert.equal(failedDomain.linear.webhook_id, "webhook-sales");
+  const failedTeam = registry.teams.find((team) => team.id === "sales-ops");
+  assert.equal(failedTeam.status, "setup_incomplete");
+  assert.equal(failedTeam.setup_incomplete_cause, "runner_authority_failed");
+  assert.equal(failedTeam.linear.webhook_id, "webhook-sales");
 });
 
-test("trigger-status all-domains display resolves wake contract identity through the local registry", () => {
+test("trigger-status all-teams display resolves wake contract identity through the local registry", () => {
   const config = loadLinearConfig({ repoRoot });
   const registry = {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [
-      makeDomainRecord({
-        domainId: "support-ops",
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         workspaceId: "workspace-1",
         teamId: "team-support",
@@ -4076,8 +4374,8 @@ test("trigger-status all-domains display resolves wake contract identity through
         teamName: "Support Ops",
         webhookId: "webhook-support",
       }),
-      makeDomainRecord({
-        domainId: "sales-ops",
+      makeTeamRecord({
+        teamRef: "sales-ops",
         status: "active",
         workspaceId: "workspace-2",
         teamId: "team-sales",
@@ -4088,7 +4386,7 @@ test("trigger-status all-domains display resolves wake contract identity through
     ],
   };
 
-  const views = decorateWakeViewsForDomains({
+  const views = decorateWakeViewsForTeams({
     registry,
     config,
     repoRoot,
@@ -4107,22 +4405,30 @@ test("trigger-status all-domains display resolves wake contract identity through
         team_ids: ["team-other"],
         status: "routing_error",
         routing_error_reason: "team_id_mismatch",
-        routing_candidates: [{ domainId: "sales-ops", status: "active", teamId: "team-sales" }],
+        routing_candidates: [{ teamRef: "sales-ops", status: "active", teamId: "team-sales" }],
       },
     ],
   });
 
-  assert.equal(views[0].domainLabel, "domain=support-ops");
-  assert.equal(views[0].resolvedDomainId, "support-ops");
-  assert.equal(views[1].domainLabel, "domain_unresolved=webhook_id_mismatch");
+  assert.equal(views[0].teamLabel, "team=support-ops");
+  assert.equal(views[0].resolvedTeamRef, "support-ops");
+  assert.equal(views[1].teamLabel, "team_unresolved=webhook_id_mismatch");
   assert.equal(views[1].displayReason, "team_id_mismatch");
-  assert.deepEqual(views[1].routingCandidates, [{ domainId: "sales-ops", status: "active", teamId: "team-sales" }]);
+  assert.deepEqual(views[1].routingCandidates, [{
+    teamRef: "sales-ops",
+    status: "active",
+    workspaceId: "workspace-2",
+    workspaceName: null,
+    teamId: "team-sales",
+    teamKey: "SAL",
+    teamName: "Sales Ops",
+  }]);
 });
 
 test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-dead-"));
   process.env.TEAMI_HOME = tempRoot;
-  const lockPath = path.join(tempRoot, ".teami", "domains", "support-ops", ".lock");
+  const lockPath = path.join(tempRoot, ".teami", "teams", "support-ops", ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(
     lockPath,
@@ -4131,10 +4437,10 @@ test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", 
   );
   const warnings = [];
 
-  const lock = acquireDomainRunnerLock({
+  const lock = acquireTeamRunnerLock({
     repoRoot: tempRoot,
     home: tempRoot,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     installHandlers: false,
     isProcessAlive: () => false,
     log: (line) => warnings.push(line),
@@ -4142,7 +4448,7 @@ test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", 
 
   try {
     assert.equal(lock.ok, true);
-    assert.match(warnings[0], /warning: breaking stale runner lock for domain support-ops \(dead_pid:999999\)/);
+    assert.match(warnings[0], /warning: breaking stale runner lock for team support-ops \(dead_pid:999999\)/);
     const parsed = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     assert.equal(parsed.pid, process.pid);
     assert.equal(typeof parsed.token, "string");
@@ -4158,7 +4464,7 @@ test("runner lock breaks a dead-pid lock and writes pid token created_at JSON", 
 test("runner lock breaks a stale live-pid lock after the stale age", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-stale-"));
   process.env.TEAMI_HOME = tempRoot;
-  const lockPath = path.join(tempRoot, ".teami", "domains", "support-ops", ".lock");
+  const lockPath = path.join(tempRoot, ".teami", "teams", "support-ops", ".lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   fs.writeFileSync(
     lockPath,
@@ -4167,10 +4473,10 @@ test("runner lock breaks a stale live-pid lock after the stale age", () => {
   );
   const warnings = [];
 
-  const lock = acquireDomainRunnerLock({
+  const lock = acquireTeamRunnerLock({
     repoRoot: tempRoot,
     home: tempRoot,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     staleMs: 1000,
     now: () => new Date("2026-06-11T00:01:00.000Z"),
     installHandlers: false,
@@ -4180,7 +4486,7 @@ test("runner lock breaks a stale live-pid lock after the stale age", () => {
 
   try {
     assert.equal(lock.ok, true);
-    assert.match(warnings[0], /warning: breaking stale runner lock for domain support-ops \(stale\)/);
+    assert.match(warnings[0], /warning: breaking stale runner lock for team support-ops \(stale\)/);
   } finally {
     lock.release();
   }
@@ -4189,24 +4495,24 @@ test("runner lock breaks a stale live-pid lock after the stale age", () => {
 test("runner lock live-pid contention yields the clean already-running message", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-live-"));
   process.env.TEAMI_HOME = tempRoot;
-  const lock = acquireDomainRunnerLock({
+  const lock = acquireTeamRunnerLock({
     repoRoot: tempRoot,
     home: tempRoot,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     installHandlers: false,
   });
   assert.equal(lock.ok, true);
   try {
-    const contender = acquireDomainRunnerLock({
+    const contender = acquireTeamRunnerLock({
       repoRoot: tempRoot,
       home: tempRoot,
-      domainId: "support-ops",
+      teamRef: "support-ops",
       installHandlers: false,
       isProcessAlive: () => true,
     });
     assert.equal(contender.ok, false);
-    assert.equal(contender.reason, "already_running_for_domain");
-    assert.equal(contender.message, "already running for domain support-ops");
+    assert.equal(contender.reason, "already_running_for_team");
+    assert.equal(contender.message, "already running for team support-ops");
   } finally {
     lock.release();
   }
@@ -4215,10 +4521,10 @@ test("runner lock live-pid contention yields the clean already-running message",
 test("runner lock release only removes the lock when the token still matches", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-runner-lock-token-"));
   process.env.TEAMI_HOME = tempRoot;
-  const lock = acquireDomainRunnerLock({
+  const lock = acquireTeamRunnerLock({
     repoRoot: tempRoot,
     home: tempRoot,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     installHandlers: false,
   });
   assert.equal(lock.ok, true);
@@ -4236,16 +4542,16 @@ test("runner lock release only removes the lock when the token still matches", (
   fs.rmSync(lockPath, { force: true });
 });
 
-test("uninstall with a registry and ambiguous domain selection fails before cleanup", async () => {
+test("uninstall with a registry and ambiguous team selection fails before cleanup", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-ambiguous-uninstall-"));
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const registry = upsertDomainRecord(
-    upsertDomainRecord(
-      emptyDomainRegistry(),
-      makeDomainRecord({
-        domainId: "support-ops",
+  const registry = upsertTeamRecord(
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         workspaceId: "workspace-1",
         teamId: "team-support",
@@ -4254,8 +4560,8 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
         webhookId: "webhook-support",
       }),
     ),
-    makeDomainRecord({
-      domainId: "sales-ops",
+    makeTeamRecord({
+      teamRef: "sales-ops",
       status: "active",
       workspaceId: "workspace-2",
       teamId: "team-sales",
@@ -4264,7 +4570,7 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
       webhookId: "webhook-sales",
     }),
   );
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
+  writeTeamRegistry({ repoRoot: tempRoot }, registry);
   writeLinearCache(cachePath, { workspaceId: "workspace-legacy" });
 
   const { result, logs } = await captureConsoleLogs(() =>
@@ -4274,25 +4580,25 @@ test("uninstall with a registry and ambiguous domain selection fails before clea
       createSetupAuth: () => {
         throw new Error("must not create setup auth");
       },
-      removeDomainSetup: async () => {
-        throw new Error("must not remove a domain");
+      removeTeamSetup: async () => {
+        throw new Error("must not remove a team");
       },
     }));
 
   assert.equal(result.ok, false);
-  assert.deepEqual(logs, ["could not resolve a single domain to uninstall; pass --domain <domain_id>."]);
+  assert.deepEqual(logs, ["could not resolve a single team to uninstall; pass --team <team_ref>."]);
   assert.equal(fs.existsSync(cachePath), true);
 });
 
-test("uninstall with a registry and one active domain still marks only that domain removed", async () => {
+test("uninstall with a registry and one active team still marks only that team removed", async () => {
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-single-domain-uninstall-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-single-team-uninstall-"));
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+  const registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "active",
       workspaceId: "workspace-1",
       teamId: "team-support",
@@ -4301,23 +4607,176 @@ test("uninstall with a registry and one active domain still marks only that doma
       webhookId: "webhook-support",
     }),
   );
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
+  writeTeamRegistry({ repoRoot: tempRoot }, registry);
 
-  const removedDomains = [];
+  const removedTeams = [];
   const { result, logs } = await captureConsoleLogs(() =>
     removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot: tempRoot,
-      removeDomainSetup: async ({ domain }) => {
-        removedDomains.push(domain.id);
+      removeTeamSetup: async ({ team }) => {
+        removedTeams.push(team.id);
         return { ok: true };
       },
     }));
 
   assert.equal(result.ok, true);
-  assert.deepEqual(removedDomains, ["support-ops"]);
-  assert.equal(readDomainRegistry({ repoRoot: tempRoot }).domains[0].status, "removed");
-  assert.equal(logs.includes("marked removed: domain support-ops"), true);
+  assert.deepEqual(removedTeams, ["support-ops"]);
+  assert.equal(readTeamRegistry({ repoRoot: tempRoot }).teams[0].status, "removed");
+  assert.equal(logs.includes("marked removed before local cleanup: team support-ops"), true);
+});
+
+test("uninstall preserves a concurrent update to another Team", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-concurrent-uninstall-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const cachePath = cachePathForConfig(config, home);
+  const setupStatePath = setupStatePathForCache(cachePath);
+  const support = makeTeamRecord({
+    teamRef: "support-ops",
+    status: "active",
+    workspaceId: "workspace-1",
+    teamId: "team-support",
+    teamKey: "SUP",
+    teamName: "Support Ops",
+  });
+  const sales = makeTeamRecord({
+    teamRef: "sales-ops",
+    status: "active",
+    workspaceId: "workspace-2",
+    teamId: "team-sales",
+    teamKey: "SAL",
+    teamName: "Sales Ops",
+  });
+  writeTeamRegistry({ home }, upsertTeamRecord(upsertTeamRecord(emptyTeamRegistry(), support), sales));
+
+  const result = await removeLocalLinearSetup(cachePath, setupStatePath, {
+    config,
+    repoRoot: home,
+    home,
+    teamRef: "support-ops",
+    log: () => {},
+    removeTeamSetup: async () => {
+      updateTeamRegistry({ home }, (registry) => {
+        registry.teams.find((team) => team.id === "sales-ops").linear.team_name = "Sales renamed";
+        return { registry };
+      });
+      return { ok: true };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  const registry = readTeamRegistry({ home });
+  assert.equal(registry.teams.find((team) => team.id === "support-ops").status, "removed");
+  assert.equal(registry.teams.find((team) => team.id === "sales-ops").linear.team_name, "Sales renamed");
+});
+
+test("uninstall durably removes the Team before destructive cleanup begins", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-conflicting-uninstall-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const cachePath = cachePathForConfig(config, home);
+  const setupStatePath = setupStatePathForCache(cachePath);
+  const support = makeTeamRecord({
+    teamRef: "support-ops",
+    status: "active",
+    workspaceId: "workspace-1",
+    teamId: "team-support",
+    teamKey: "SUP",
+    teamName: "Support Ops",
+  });
+  writeTeamRegistry({ home }, upsertTeamRecord(emptyTeamRegistry(), support));
+  const logs = [];
+
+  const result = await removeLocalLinearSetup(cachePath, setupStatePath, {
+    config,
+    repoRoot: home,
+    home,
+    teamRef: "support-ops",
+    log: (line) => logs.push(line),
+    removeTeamSetup: async () => {
+      assert.equal(readTeamRegistry({ home }).teams[0].status, "removed");
+      return { ok: false };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(readTeamRegistry({ home }).teams[0].status, "removed");
+  assert.match(logs.at(-1), /marked removed.*cleanup did not complete/i);
+});
+
+test("uninstall holds the shared setup lock through destructive Team cleanup", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-uninstall-setup-lock-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const cachePath = cachePathForConfig(config, home);
+  const setupStatePath = setupStatePathForCache(cachePath);
+  const team = makeTeamRecord({
+    teamRef: "support-ops",
+    status: "active",
+    workspaceId: "workspace-1",
+    teamId: "team-support",
+    teamKey: "SUP",
+    teamName: "Support Ops",
+  });
+  writeTeamRegistry({ home }, upsertTeamRecord(emptyTeamRegistry(), team));
+  const setupStore = createSetupStateStore({ home });
+
+  const result = await removeLocalLinearSetup(cachePath, setupStatePath, {
+    config,
+    repoRoot: home,
+    home,
+    teamRef: "support-ops",
+    setupStateStore: setupStore,
+    log: () => {},
+    removeTeamSetup: async () => {
+      const concurrentSetup = setupStore.acquire({ purpose: "setup" });
+      assert.equal(concurrentSetup.ok, false);
+      assert.equal(concurrentSetup.reason, "lock_held");
+      return { ok: true };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(readTeamRegistry({ home }).teams[0].status, "removed");
+});
+
+test("uninstall fails closed while the gateway owns Team authority", async (t) => {
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-uninstall-gateway-lock-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const cachePath = cachePathForConfig(config, home);
+  const setupStatePath = setupStatePathForCache(cachePath);
+  const team = makeTeamRecord({
+    teamRef: "support-ops",
+    status: "active",
+    workspaceId: "workspace-1",
+    teamId: "team-support",
+    teamKey: "SUP",
+    teamName: "Support Ops",
+  });
+  writeTeamRegistry({ home }, upsertTeamRecord(emptyTeamRegistry(), team));
+  const gateway = acquireGatewayLock({ home, installHandlers: false });
+  assert.equal(gateway.ok, true);
+  let destructiveCleanupCalled = false;
+
+  const blocked = await removeLocalLinearSetup(cachePath, setupStatePath, {
+    config,
+    repoRoot: home,
+    home,
+    teamRef: "support-ops",
+    log: () => {},
+    removeTeamSetup: async () => {
+      destructiveCleanupCalled = true;
+      return { ok: true };
+    },
+  });
+
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.reason, "gateway_active");
+  assert.equal(destructiveCleanupCalled, false);
+  assert.equal(readTeamRegistry({ home }).teams[0].status, "active");
+  gateway.release();
 });
 
 test("reset with a removed-status ghost entry and no credentials completes and wipes local state", async () => {
@@ -4326,11 +4785,11 @@ test("reset with a removed-status ghost entry and no credentials completes and w
   process.env.TEAMI_HOME = tempRoot;
   const cachePath = cachePathForConfig(config, tempRoot);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const domainCachePath = path.join(tempRoot, "domains", "zztest-secondary", "linear.json");
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "zztest-secondary",
+  const teamCachePath = path.join(tempRoot, "teams", "zztest-secondary", "linear.json");
+  const registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "zztest-secondary",
       status: "removed",
       workspaceId: "workspace-sandbox",
       workspaceName: "Sandbox",
@@ -4340,33 +4799,33 @@ test("reset with a removed-status ghost entry and no credentials completes and w
       webhookId: "webhook-already-removed",
     }),
   );
-  writeDomainRegistry({ home: tempRoot }, registry);
+  writeTeamRegistry({ home: tempRoot }, registry);
   writeLinearCache(cachePath, { workspaceId: "workspace-legacy" });
-  writeLinearCache(domainCachePath, { domainId: "zztest-secondary", workspaceId: "workspace-sandbox" });
+  writeLinearCache(teamCachePath, { teamRef: "zztest-secondary", workspaceId: "workspace-sandbox" });
   fs.writeFileSync(setupStatePath, "{}\n", "utf8");
 
-  let removedDomainCleanupCalls = 0;
+  let removedTeamCleanupCalls = 0;
   const { result, logs } = await captureConsoleLogs(() =>
     removeLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot: tempRoot,
       home: tempRoot,
       fullReset: true,
-      removeDomainSetup: async () => {
-        removedDomainCleanupCalls += 1;
-        throw new Error("removed ghost should not require domain cleanup");
+      removeTeamSetup: async () => {
+        removedTeamCleanupCalls += 1;
+        throw new Error("removed ghost should not require team cleanup");
       },
     }));
 
   assert.equal(result.ok, true);
-  assert.equal(removedDomainCleanupCalls, 0);
+  assert.equal(removedTeamCleanupCalls, 0);
   assert.equal(fs.existsSync(cachePath), false);
   assert.equal(fs.existsSync(setupStatePath), false);
-  assert.equal(fs.existsSync(domainRegistryPath(tempRoot)), false);
-  assert.equal(fs.existsSync(path.dirname(domainCachePath)), false);
-  assert.equal(logs.includes("already clean: removed domain zztest-secondary local credentials"), true);
-  assert.equal(logs.includes("removed: domain registry"), true);
-  assert.equal(logs.includes("removed: per-domain Linear caches"), true);
+  assert.equal(fs.existsSync(teamRegistryPath(tempRoot)), false);
+  assert.equal(fs.existsSync(path.dirname(teamCachePath)), false);
+  assert.equal(logs.includes("already clean: removed team zztest-secondary local credentials"), true);
+  assert.equal(logs.includes("removed: team registry"), true);
+  assert.equal(logs.includes("removed: per-team Linear caches"), true);
 });
 
 test("doctor fails closed when project status native type mappings are ambiguous", async () => {
@@ -4448,12 +4907,12 @@ test("doctor surfaces project status listing failures without repair copy", asyn
   assert.doesNotMatch(message, /recreate the Principal Escalation project status/);
 });
 
-test("doctor on a healthy single-domain setup shows one domain block", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-doctor-"));
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+test("doctor on a healthy single-team setup shows one team block", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-team-doctor-"));
+  const registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "active",
       workspaceId: "workspace-1",
       workspaceName: "Example Workspace",
@@ -4463,24 +4922,24 @@ test("doctor on a healthy single-domain setup shows one domain block", () => {
       webhookId: "webhook-1",
     }),
   );
-  writeDomainRegistry({ repoRoot: tempRoot }, registry);
+  writeTeamRegistry({ repoRoot: tempRoot }, registry);
 
-  const result = doctorDomainRegistryFromDisk({ repoRoot: tempRoot });
+  const result = doctorTeamRegistryFromDisk({ repoRoot: tempRoot });
 
   assert.equal(result.healthy, true);
   assert.equal(result.registryAvailable, true);
   assert.equal(result.checks.length, 1);
-  assert.equal(result.checks[0].name, "domain support-ops");
+  assert.equal(result.checks[0].name, "team support-ops");
   assert.match(result.checks[0].message, /active/);
   assert.match(result.checks[0].message, /team=team-1 AF Teami/);
 });
 
-test("doctor on a two-domain fixture reports each domain independently with setup repair text", () => {
-  const registry = upsertDomainRecord(
-    upsertDomainRecord(
-      emptyDomainRegistry(),
-      makeDomainRecord({
-        domainId: "support-ops",
+test("doctor on a two-team fixture reports each team independently with setup repair text", () => {
+  const registry = upsertTeamRecord(
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         workspaceId: "workspace-1",
         workspaceName: "Example Workspace",
@@ -4490,8 +4949,8 @@ test("doctor on a two-domain fixture reports each domain independently with setu
         webhookId: "webhook-1",
       }),
     ),
-    makeDomainRecord({
-      domainId: "sales-ops",
+    makeTeamRecord({
+      teamRef: "sales-ops",
       status: "setup_incomplete",
       setupIncompleteCause: "runner_authority_failed",
       workspaceId: "workspace-2",
@@ -4503,19 +4962,19 @@ test("doctor on a two-domain fixture reports each domain independently with setu
     }),
   );
 
-  const result = doctorDomainRegistry({ registry });
+  const result = doctorTeamRegistry({ registry });
 
   assert.equal(result.healthy, false);
-  assert.deepEqual(result.checks.map((check) => check.name), ["domain support-ops", "domain sales-ops"]);
+  assert.deepEqual(result.checks.map((check) => check.name), ["team support-ops", "team sales-ops"]);
   assert.match(result.checks[0].message, /active/);
   assert.match(result.checks[1].message, /runner_authority_failed/);
   assert.match(result.checks[1].message, /npm run (init|reset)/);
 });
 
 test("doctor with a deliberately corrupted registry refuses to guess and names the repair path", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-domain-doctor-corrupt-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-team-doctor-corrupt-"));
   process.env.TEAMI_HOME = tempRoot;
-  const registryPath = path.join(tempRoot, "domains.json");
+  const registryPath = path.join(tempRoot, "teams.json");
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
   fs.writeFileSync(registryPath, "{ not json", "utf8");
   const legacyCachePath = path.join(tempRoot, ".teami", "linear.json");
@@ -4531,7 +4990,7 @@ test("doctor with a deliberately corrupted registry refuses to guess and names t
     }),
   );
 
-  const result = doctorDomainRegistryFromDisk({
+  const result = doctorTeamRegistryFromDisk({
     repoRoot: tempRoot,
     home: tempRoot,
     orphanHints: [
@@ -4543,10 +5002,10 @@ test("doctor with a deliberately corrupted registry refuses to guess and names t
 
   assert.equal(result.healthy, false);
   assert.equal(result.registryAvailable, false);
-  assert.equal(result.checks[0].name, "domain registry");
+  assert.equal(result.checks[0].name, "team registry");
   assert.match(result.checks[0].message, /Likely orphaned local state/);
   assert.match(result.checks[0].message, /npm run reset/);
-  assert.match(result.checks[0].message, /no domain was inferred from names/);
+  assert.match(result.checks[0].message, /no team was inferred from names/);
 });
 
 test("init fails closed when the configured team key is already taken without local setup state", async () => {
@@ -5946,8 +6405,8 @@ test("replay reruns terminal validation and gate before applying a persisted com
     projectId: project.id,
     runId: "run-replay-gate-blocked",
     runStoreDir,
-    domainContext: testDomainContext({
-      domainId: "support-ops",
+    teamContext: testTeamContext({
+      teamRef: "support-ops",
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
@@ -6076,7 +6535,7 @@ test("accepted artifacts persist before Linear mutation and replay ignores chang
   const persisted = readRunArtifact({ runId: "run-replay", runStoreDir });
   assert.equal(persisted.kind, "commit");
   assert.equal(persisted.schema_version, RUN_ARTIFACT_SCHEMA_VERSION);
-  assert.equal(persisted.domain_id, "support-ops");
+  assert.equal(persisted.team_ref, "support-ops");
   assert.equal(persisted.workspace_id, "workspace-1");
   assert.equal(persisted.team_id, "team-1");
   assert.equal(persisted.final_issues[0].title, "Prepare execution setup");
@@ -6101,8 +6560,8 @@ test("accepted artifacts persist before Linear mutation and replay ignores chang
   client.failCreateIssueAfterCount = null;
   const changedIssues = commitFinalIssues("run-replay");
   changedIssues[0].title = "Changed title that must not be replayed";
-  const supportContext = testDomainContext({
-    domainId: "support-ops",
+  const supportContext = testTeamContext({
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     teamKey: "AF",
@@ -6116,7 +6575,7 @@ test("accepted artifacts persist before Linear mutation and replay ignores chang
     projectId: project.id,
     runId: "run-replay",
     runStoreDir,
-    domainContext: supportContext,
+    teamContext: supportContext,
   });
 
   assert.equal(replayed.status, "completed");
@@ -6169,8 +6628,8 @@ test("replay skips the Linear issue effect when the probe sees the committed sta
     runId,
     runStoreDir,
     retryCommit: true,
-    domainContext: testDomainContext({
-      domainId: "support-ops",
+    teamContext: testTeamContext({
+      teamRef: "support-ops",
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
@@ -6305,8 +6764,8 @@ test("legacy v3 commit artifacts migrate on read and replay intentionally", asyn
     projectId: project.id,
     runId: legacy.run_id,
     runStoreDir,
-    domainContext: testDomainContext({
-      domainId: "support-ops",
+    teamContext: testTeamContext({
+      teamRef: "support-ops",
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
@@ -6322,7 +6781,7 @@ test("legacy v3 commit artifacts migrate on read and replay intentionally", asyn
   assert.equal(client.projectUpdates.length, 1);
 });
 
-test("persisted artifact replayed under the wrong domain fails closed", async () => {
+test("persisted artifact replayed under the wrong team fails closed", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
@@ -6336,13 +6795,13 @@ test("persisted artifact replayed under the wrong domain fails closed", async ()
     projectId: project.id,
     runStoreDir,
     environment: safeEnvironment(),
-    runtimeEvidence: runtimeEvidenceForRun("run-wrong-domain-replay"),
-    runResult: commitRunResult("run-wrong-domain-replay"),
+    runtimeEvidence: runtimeEvidenceForRun("run-wrong-team-replay"),
+    runResult: commitRunResult("run-wrong-team-replay"),
   });
   assert.equal(first.status, "pending");
   assert.equal(first.pending_effect_id, "linear_issues");
   assert.match(first.reason, /simulated issue creation failure/);
-  assert.equal(readRunArtifact({ runId: "run-wrong-domain-replay", runStoreDir }).domain_id, "support-ops");
+  assert.equal(readRunArtifact({ runId: "run-wrong-team-replay", runStoreDir }).team_ref, "support-ops");
 
   client.failCreateIssueAfterCount = null;
   const readCalls = [];
@@ -6350,7 +6809,7 @@ test("persisted artifact replayed under the wrong domain fails closed", async ()
     get(_target, prop) {
       return async () => {
         readCalls.push(String(prop));
-        throw new Error(`client_read_before_domain_validation:${String(prop)}`);
+        throw new Error(`client_read_before_team_validation:${String(prop)}`);
       };
     },
   });
@@ -6361,10 +6820,10 @@ test("persisted artifact replayed under the wrong domain fails closed", async ()
         config,
         cache: client.cache,
         projectId: project.id,
-        runId: "run-wrong-domain-replay",
+        runId: "run-wrong-team-replay",
         runStoreDir,
-        domainContext: testDomainContext({
-          domainId: "sales-ops",
+        teamContext: testTeamContext({
+          teamRef: "sales-ops",
           workspaceId: "workspace-2",
           teamId: "team-sales",
           teamKey: "SAL",
@@ -6372,7 +6831,7 @@ test("persisted artifact replayed under the wrong domain fails closed", async ()
           webhookId: "webhook-sales",
         }),
       }),
-    new RegExp(ARTIFACT_DOMAIN_MISMATCH_REASON),
+    new RegExp(ARTIFACT_TEAM_MISMATCH_REASON),
   );
 
   assert.deepEqual(readCalls, []);
@@ -6425,8 +6884,8 @@ test("persisted artifact replayed against the wrong project fails before Linear 
         projectId: otherProject.id,
         runId: "run-wrong-project-replay",
         runStoreDir,
-        domainContext: testDomainContext({
-          domainId: "support-ops",
+        teamContext: testTeamContext({
+          teamRef: "support-ops",
           workspaceId: "workspace-1",
           teamId: "team-1",
           teamKey: "AF",
@@ -6454,7 +6913,7 @@ test("checkpoint artifacts are explicit non-terminal replay states", async () =>
       workflow_version: DECOMPOSITION_FUNCTION_VERSION,
       kind: "checkpoint",
       run_id: "run-checkpoint-only",
-      domain_id: "support-ops",
+      team_ref: "support-ops",
       workspace_id: "workspace-1",
       team_id: "team-1",
       phase_packets: [pmContinue("run-checkpoint-only")],
@@ -6473,8 +6932,8 @@ test("checkpoint artifacts are explicit non-terminal replay states", async () =>
         projectId: project.id,
         runId: "run-checkpoint-only",
         runStoreDir,
-        domainContext: testDomainContext({
-          domainId: "support-ops",
+        teamContext: testTeamContext({
+          teamRef: "support-ops",
           workspaceId: "workspace-1",
           teamId: "team-1",
           teamKey: "AF",
@@ -6505,8 +6964,8 @@ test("legacy v3 checkpoint artifacts are readable but still rejected at replay",
         projectId: project.id,
         runId: legacy.run_id,
         runStoreDir,
-        domainContext: testDomainContext({
-          domainId: "support-ops",
+        teamContext: testTeamContext({
+          teamRef: "support-ops",
           workspaceId: "workspace-1",
           teamId: "team-1",
           teamKey: "AF",
@@ -6527,7 +6986,7 @@ test("run-store writes are atomic, schema-versioned, and read-back validated", (
     function_version: DECOMPOSITION_FUNCTION_VERSION,
     kind: "checkpoint",
     run_id: "run-atomic",
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     phase_packets: [pmContinue("run-atomic")],
@@ -6641,8 +7100,8 @@ test("replaying a persisted run never overwrites the original project snapshot",
     projectId: project.id,
     runId: "run-snapshot-replay",
     runStoreDir,
-    domainContext: testDomainContext({
-      domainId: "support-ops",
+    teamContext: testTeamContext({
+      teamRef: "support-ops",
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "AF",
@@ -6760,7 +7219,7 @@ test("project snapshot store fails closed on missing, tampered, or invalid snaps
   );
 });
 
-test("traces include stable domain_id, workspace_id, team_id, and behavior repo id", async () => {
+test("traces include stable team_ref, workspace_id, team_id, and behavior repo id", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-planned", labelIds: [] });
@@ -6770,74 +7229,74 @@ test("traces include stable domain_id, workspace_id, team_id, and behavior repo 
     cache: client.cache,
     projectId: project.id,
     runStoreDir: tempRunStore(),
-    domainContext: testDomainContext(),
-    runResult: pauseRunResult("run-domain-trace", {
+    teamContext: testTeamContext(),
+    runResult: pauseRunResult("run-team-trace", {
       packet: {
-        ...packetBase("run-domain-trace", "pm_product_sufficiency_pass"),
+        ...packetBase("run-team-trace", "pm_product_sufficiency_pass"),
         status: "pause",
         reason: "product_questions",
-        open_questions_markdown: "- Question: Which segment owns this domain?\n  Owner: Human",
-        project_update_markdown: "run_id: run-domain-trace\n\nPM paused for product questions.",
+        open_questions_markdown: "- Question: Which segment owns this team?\n  Owner: Human",
+        project_update_markdown: "run_id: run-team-trace\n\nPM paused for product questions.",
       },
     }),
   });
 
-  assert.equal(result.trace.attributes["teami.domain_id"], "domain-a");
+  assert.equal(result.trace.attributes["teami.team_ref"], "team-a");
   assert.equal(result.trace.attributes["linear.workspace_id"], "workspace-a");
   assert.equal(result.trace.attributes["linear.team_id"], "team-a");
   assert.equal(result.trace.attributes["teami.behavior_repo_id"], "local:test-behavior");
-  assert.equal(Object.hasOwn(result.trace.attributes, "teami.domain_name"), false);
+  assert.equal(Object.hasOwn(result.trace.attributes, "teami.team_name"), false);
 });
 
-test("emitted trace attrs never contain fabricated domain_id without context or cache identity", async () => {
+test("emitted trace attrs never contain fabricated team_ref without context or cache identity", async () => {
   const config = loadLinearConfig({ repoRoot });
   const client = await initializedClient(config);
   const project = await seedProject(client, { statusId: "status-backlog", labelIds: [] });
-  const cacheWithoutDomain = { ...client.cache };
-  delete cacheWithoutDomain.domainId;
+  const cacheWithoutTeam = { ...client.cache };
+  delete cacheWithoutTeam.teamRef;
 
   const result = await runDecomposition({
     client,
     config,
-    cache: cacheWithoutDomain,
+    cache: cacheWithoutTeam,
     projectId: project.id,
     runStoreDir: tempRunStore(),
-    runResult: commitRunResult("run-no-domain-trace"),
+    runResult: commitRunResult("run-no-team-trace"),
   });
 
   assert.equal(result.status, "ineligible");
-  assert.equal(Object.hasOwn(result.trace.attributes, "teami.domain_id"), false);
-  assert.equal(Object.hasOwn(result.trace.attributes, "domain_id"), false);
+  assert.equal(Object.hasOwn(result.trace.attributes, "teami.team_ref"), false);
+  assert.equal(Object.hasOwn(result.trace.attributes, "team_ref"), false);
   assert.equal(result.trace.attributes["linear.workspace_id"], "workspace-1");
   assert.equal(result.trace.attributes["linear.team_id"], "team-1");
 });
 
-test("run artifact includes domain_id and validates it", () => {
+test("run artifact includes team_ref and validates it", () => {
   const runStoreDir = tempRunStore();
   const artifact = {
     schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
     kind: "checkpoint",
-    run_id: "run-domain-artifact",
-    domain_id: "domain-a",
+    run_id: "run-team-artifact",
+    team_ref: "team-a",
     workspace_id: "workspace-a",
     team_id: "team-a",
-    phase_packets: [pmContinue("run-domain-artifact")],
+    phase_packets: [pmContinue("run-team-artifact")],
     runtime_assignments: { pm: { runtime: "claude" }, sr_eng: { runtime: "codex" } },
     runtime_metadata: { pm: { runtime_name: "claude" }, sr_eng: { runtime_name: "codex" } },
   };
 
-  writeRunArtifact({ runId: "run-domain-artifact", runStoreDir }, artifact);
-  assert.equal(readRunArtifact({ runId: "run-domain-artifact", runStoreDir }).domain_id, "domain-a");
-  assert.equal(readRunArtifact({ runId: "run-domain-artifact", runStoreDir }).workspace_id, "workspace-a");
-  assert.equal(readRunArtifact({ runId: "run-domain-artifact", runStoreDir }).team_id, "team-a");
+  writeRunArtifact({ runId: "run-team-artifact", runStoreDir }, artifact);
+  assert.equal(readRunArtifact({ runId: "run-team-artifact", runStoreDir }).team_ref, "team-a");
+  assert.equal(readRunArtifact({ runId: "run-team-artifact", runStoreDir }).workspace_id, "workspace-a");
+  assert.equal(readRunArtifact({ runId: "run-team-artifact", runStoreDir }).team_id, "team-a");
   assert.throws(
     () =>
       writeRunArtifact(
-        { runId: "run-missing-domain", runStoreDir },
-        { ...artifact, run_id: "run-missing-domain", domain_id: undefined },
+        { runId: "run-missing-team", runStoreDir },
+        { ...artifact, run_id: "run-missing-team", team_ref: undefined },
       ),
-    /missing_domain_id/,
+    /missing_team_ref/,
   );
   assert.throws(
     () =>
@@ -7687,12 +8146,12 @@ class InProcessMcpTransport {
   }
 }
 
-function mcpDomainRegistry({ config, client }) {
+function mcpTeamRegistry({ config, client }) {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [
-      makeDomainRecord({
-        domainId: "support-ops",
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         workspaceId: client.workspaceId,
         workspaceName: client.workspaceName,
@@ -7705,10 +8164,10 @@ function mcpDomainRegistry({ config, client }) {
   };
 }
 
-function mcpDomainCache(cache) {
+function mcpTeamCache(cache) {
   return {
     ...cache,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
   };
@@ -7722,7 +8181,7 @@ async function initializedClient(config) {
     writeCache: (cache) => {
       client.cache = {
         ...cache,
-        domainId: "support-ops",
+        teamRef: "support-ops",
         workspaceId: "workspace-1",
         teamId: "team-1",
       };
@@ -8312,29 +8771,29 @@ function fileCredentialConfig(config) {
   return next;
 }
 
-function domainEntrySnapshotPath(repoRoot, domainId) {
-  return path.join(repoRoot, "domains", domainId, "registry-entry.json");
+function teamEntrySnapshotPath(repoRoot, teamRef) {
+  return path.join(repoRoot, "teams", teamRef, "registry-entry.json");
 }
 
-function writeDomainEntrySnapshot({ repoRoot, registry, domainId }) {
-  const domain = registry.domains.find((candidate) => candidate.id === domainId);
-  if (!domain) return;
-  const snapshotPath = domainEntrySnapshotPath(repoRoot, domainId);
+function writeTeamEntrySnapshot({ repoRoot, registry, teamRef }) {
+  const team = registry.teams.find((candidate) => candidate.id === teamRef);
+  if (!team) return;
+  const snapshotPath = teamEntrySnapshotPath(repoRoot, teamRef);
   fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
-  fs.writeFileSync(snapshotPath, `${JSON.stringify(domain, null, 2)}\n`, "utf8");
+  fs.writeFileSync(snapshotPath, `${JSON.stringify(team, null, 2)}\n`, "utf8");
 }
 
-function testDomainContext({
-  domainId = "domain-a",
+function testTeamContext({
+  teamRef = "team-a",
   workspaceId = "workspace-a",
   teamId = "team-a",
   teamKey = "DA",
-  teamName = "Domain A",
+  teamName = "Team A",
   webhookId = "webhook-a",
   behaviorRepoId = "local:test-behavior",
 } = {}) {
   return Object.freeze({
-    domainId,
+    teamRef,
     status: "active",
     linear: Object.freeze({
       workspaceId,
@@ -8349,7 +8808,7 @@ function testDomainContext({
       runnerInbox: "runner-target",
     }),
     trace: Object.freeze({
-      domain_id: domainId,
+      team_ref: teamRef,
       workspace_id: workspaceId,
       team_id: teamId,
       behavior_repo_id: behaviorRepoId,
@@ -8446,19 +8905,19 @@ function instantBrowserAuthorization() {
 }
 
 function registryWithWorkspace({
-  domainId,
+  teamRef,
   workspaceId,
   workspaceName,
   status = "active",
-  teamId = `team-${domainId}`,
-  teamKey = generatedTeamKey(domainId, 1),
-  teamName = domainId,
-  webhookId = `webhook-${domainId}`,
+  teamId = `team-${teamRef}`,
+  teamKey = generatedTeamKey(teamRef, 1),
+  teamName = teamRef,
+  webhookId = `webhook-${teamRef}`,
 }) {
-  return upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId,
+  return upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef,
       status,
       workspaceId,
       workspaceName,

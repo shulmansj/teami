@@ -134,12 +134,12 @@ export function assertNoHostedEndpointReferences(value, { label = "records" } = 
 
 export function findHostedConfigurationFindings({
   config = null,
-  domainRegistry = null,
+  teamRegistry = null,
   githubConnection = null,
 } = {}) {
   const surfaces = [
     { label: "config", value: config, source: "config" },
-    { label: "domain_registry", value: domainRegistry, source: "domain_registry" },
+    { label: "team_registry", value: teamRegistry, source: "team_registry" },
     { label: "github_connection", value: githubConnection, source: "github_connection" },
   ];
   const findings = [];
@@ -213,7 +213,7 @@ function findHostedKeyFindings({ label, value, source }) {
         findings.push({
           id: "hosted_linear_webhook_id",
           path: recordPath.join("."),
-          reason: "domain_state_has_legacy_webhook_id",
+          reason: "team_state_has_legacy_webhook_id",
         });
       }
       return;
@@ -265,7 +265,7 @@ function visitRecord(value, trail, onLeaf) {
 }
 
 function shouldRejectKey({ source, normalizedKey, value }) {
-  if (source === "domain_registry" && normalizedKey === "webhook_id") return hasMeaningfulValue(value);
+  if (source === "team_registry" && normalizedKey === "webhook_id") return hasMeaningfulValue(value);
   if (normalizedKey === "hosted") return hasMeaningfulValue(value);
   return value !== null && value !== undefined;
 }

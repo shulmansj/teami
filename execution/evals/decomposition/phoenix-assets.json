@@ -96,7 +96,7 @@
       "accepted_tag": "teami_accepted",
       "candidate_tag": "teami_promotion_candidate",
       "snapshot_path": "execution/evals/decomposition/accepted-prompts/orchestrator-governing.md",
-      "snapshot_sha256": "ac0bb976bcefa1c8b753bb7aa9b4c99e41f0e59252eb652524503859a4d1b126",
+      "snapshot_sha256": "0f6a97d3f1c4d84a377828be2f26a61695cedc6a7271fc632d00dad3bf842d33",
       "prompt_version": "unpinned-initial"
     }
   ],

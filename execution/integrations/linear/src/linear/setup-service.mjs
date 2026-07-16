@@ -1,12 +1,12 @@
 import {
   TEAM_CREATE_SETUP_CAUSES,
-  emptyDomainRegistry,
-  makeDomainRecord,
-  mintDomainId,
-  upsertDomainRecord,
-  validateDomainRegistry,
-} from "../domain-registry.mjs";
-import { buildDomainContext } from "../domain-resolver.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  mintTeamRef,
+  upsertTeamRecord,
+  validateTeamRegistry,
+} from "../team-registry.mjs";
+import { buildTeamContext } from "../team-resolver.mjs";
 import { doctorCheck } from "../doctor-check.mjs";
 import {
   findOrCreateIssueLabel,
@@ -22,7 +22,7 @@ import {
 } from "./label-metadata.mjs";
 import {
   configWithLinearTeam,
-  domainNameMatchesRegistryDomain,
+  teamNameMatchesRegistryTeam,
   equalsFolded,
   issueLabelRoles,
   knownRegistryWorkspaces,
@@ -45,7 +45,7 @@ export async function resolveLinearSetupWorkspace({ client, workspace = null } =
   return resolved;
 }
 
-export function verifyDeclaredWorkspace({ registry = emptyDomainRegistry(), declaredWorkspace = null, grantedWorkspace } = {}) {
+export function verifyDeclaredWorkspace({ registry = emptyTeamRegistry(), declaredWorkspace = null, grantedWorkspace } = {}) {
   const declared = normalizeDeclaredWorkspace(declaredWorkspace);
   if (!declared) return { ok: true, mode: "undeclared" };
 
@@ -93,7 +93,7 @@ export function verifyDeclaredWorkspace({ registry = emptyDomainRegistry(), decl
       granted,
       declared: { value: "a different workspace" },
       detail: "different_workspace_already_known",
-      domains: known.domains.map((domain) => domain.id),
+      teams: known.teams.map((team) => team.id),
     });
   }
 
@@ -104,46 +104,97 @@ export function isWorkspaceMismatchError(error) {
   return error?.code === "workspace_mismatch";
 }
 
-export function setupIncompleteDomainForName(registry = emptyDomainRegistry(), domainName = "") {
-  const matches = setupDomainsForName(registry, domainName);
-  return matches.find((domain) => domain.status === "setup_incomplete") || null;
+export function setupIncompleteTeamForName(
+  registry = emptyTeamRegistry(),
+  teamName = "",
+  workspace = null,
+) {
+  const matches = setupTeamsForName(registry, teamName, workspace);
+  assertUnambiguousSetupWorkspace(matches, teamName);
+  return uniqueSetupTeamForName(
+    matches.filter((team) => team.status === "setup_incomplete"),
+    teamName,
+  );
 }
 
-export function setupCompleteDomainForName(registry = emptyDomainRegistry(), domainName = "") {
-  const matches = setupDomainsForName(registry, domainName);
-  return matches.find((domain) => domain.status !== "setup_incomplete") || null;
+export function setupCompleteTeamForName(
+  registry = emptyTeamRegistry(),
+  teamName = "",
+  workspace = null,
+) {
+  const matches = setupTeamsForName(registry, teamName, workspace);
+  assertUnambiguousSetupWorkspace(matches, teamName);
+  return uniqueSetupTeamForName(
+    matches.filter((team) => team.status !== "setup_incomplete"),
+    teamName,
+  );
 }
 
-function setupDomainsForName(registry = emptyDomainRegistry(), domainName = "") {
-  if (typeof domainName !== "string" || domainName.trim() === "") return [];
-  const trimmed = domainName.trim();
+function setupTeamsForName(registry = emptyTeamRegistry(), teamName = "", workspace = null) {
+  if (typeof teamName !== "string" || teamName.trim() === "") return [];
+  const trimmed = teamName.trim();
   const slug = (() => {
     try {
-      return mintDomainId(trimmed, []);
+      return mintTeamRef(trimmed, []);
     } catch {
       return null;
     }
   })();
-  return (registry?.domains || []).filter((domain) =>
-    domainNameMatchesRegistryDomain(domain, trimmed, slug),
+  return (registry?.teams || [])
+    .filter((team) => team?.status !== "removed")
+    .filter((team) => teamNameMatchesRegistryTeam(team, trimmed, slug))
+    .filter((team) => teamMatchesWorkspace(team, workspace));
+}
+
+function uniqueSetupTeamForName(matches, teamName) {
+  if (matches.length <= 1) return matches[0] || null;
+  const error = new Error(
+    `More than one Teami Team matches "${String(teamName).trim()}". Choose its Linear workspace explicitly and retry.`,
+  );
+  error.code = "team_name_ambiguous";
+  error.candidates = matches.map((team) => ({
+    teamRef: team.id,
+    workspaceId: team.linear?.workspace_id || null,
+    workspaceName: team.linear?.workspace_name || null,
+    linearTeamId: team.linear?.team_id || null,
+    linearTeamKey: team.linear?.team_key || null,
+    linearTeamName: team.linear?.team_name || null,
+  }));
+  throw error;
+}
+
+function assertUnambiguousSetupWorkspace(matches, teamName) {
+  if (matches.length > 1) uniqueSetupTeamForName(matches, teamName);
+}
+
+function teamMatchesWorkspace(team, workspace) {
+  if (!workspace) return true;
+  const value = typeof workspace === "string" ? workspace.trim() : null;
+  const workspaceId = workspace?.id || workspace?.workspaceId || value;
+  const workspaceName = workspace?.name || workspace?.workspaceName || value;
+  if (workspaceId && team?.linear?.workspace_id === workspaceId) return true;
+  return Boolean(
+    workspaceName
+    && team?.linear?.workspace_name
+    && equalsFolded(team.linear.workspace_name, workspaceName),
   );
 }
 
-export function declaredWorkspaceFromResumeDomain(domain = null) {
-  if (!domain?.linear?.workspace_id) return null;
+export function declaredWorkspaceFromResumeTeam(team = null) {
+  if (!team?.linear?.workspace_id) return null;
   return {
     mode: "known",
-    workspaceId: domain.linear.workspace_id,
-    workspaceName: domain.linear.workspace_name || null,
+    workspaceId: team.linear.workspace_id,
+    workspaceName: team.linear.workspace_name || null,
   };
 }
 
-export async function setupLinearDomain({
+export async function setupLinearTeam({
   client,
   config,
   registry = null,
   repoRoot = process.cwd(),
-  domainName,
+  teamName,
   cache = null,
   writeCache = async () => {},
   writeRegistry = async () => {},
@@ -152,38 +203,43 @@ export async function setupLinearDomain({
   promoteCredential = async () => {},
   workspace = null,
   declaredWorkspace = null,
-  resumeDomain = null,
+  resumeTeam = null,
   onPreview = () => {},
   behaviorRepoId,
   ensureNeedsPrincipalProjectStatus = null,
   selectedExistingTeamId = null,
 } = {}) {
-  if (!client) throw new Error("Linear client is required for domain setup.");
-  if (!config) throw new Error("Linear config is required for domain setup.");
-  if (typeof domainName !== "string" || domainName.trim() === "") {
-    throw new Error("An explicit domain name is required before Linear setup can mutate anything.");
+  if (!client) throw new Error("Linear client is required for team setup.");
+  if (!config) throw new Error("Linear config is required for team setup.");
+  if (typeof teamName !== "string" || teamName.trim() === "") {
+    throw new Error("An explicit team name is required before Linear setup can mutate anything.");
   }
-  const currentRegistry = registry || emptyDomainRegistry();
-  validateDomainRegistry(currentRegistry);
-  const trimmedDomainName = domainName.trim();
-  const matchedResumeDomain = resumeDomain || setupIncompleteDomainForName(currentRegistry, trimmedDomainName);
-  const completeResume = Boolean(matchedResumeDomain && matchedResumeDomain.status !== "setup_incomplete");
-  const adopterProvidedName = matchedResumeDomain?.adopter_provided_name || trimmedDomainName;
-  const domainId = matchedResumeDomain?.id || mintDomainId(trimmedDomainName, currentRegistry.domains.map((domain) => domain.id));
+  const currentRegistry = registry || emptyTeamRegistry();
+  validateTeamRegistry(currentRegistry);
+  const trimmedTeamName = teamName.trim();
   const organization = await resolveLinearSetupWorkspace({ client, workspace });
-  const effectiveDeclaredWorkspace = declaredWorkspace || declaredWorkspaceFromResumeDomain(matchedResumeDomain);
+  const matchedResumeTeam = resumeTeam || setupIncompleteTeamForName(
+    currentRegistry,
+    trimmedTeamName,
+    organization,
+  );
+  const completeResume = Boolean(matchedResumeTeam && matchedResumeTeam.status !== "setup_incomplete");
+  const adopterProvidedName = matchedResumeTeam?.adopter_provided_name || trimmedTeamName;
+  let teamRef = matchedResumeTeam?.id || mintTeamRef(trimmedTeamName, currentRegistry.teams.map((team) => team.id));
+  let identitySourceTeam = matchedResumeTeam;
+  const effectiveDeclaredWorkspace = declaredWorkspace || declaredWorkspaceFromResumeTeam(matchedResumeTeam);
   verifyDeclaredWorkspace({
-    registry: currentRegistry,
+    registry: registryWithoutRemovedTeams(currentRegistry),
     declaredWorkspace: effectiveDeclaredWorkspace,
     grantedWorkspace: organization,
   });
   const workspaceId = organization.id;
   const workspaceName = organization.name;
   let latestRegistry = currentRegistry;
-  let teamProvisionedByTeami = matchedResumeDomain?.linear?.provisioned_by_teami ?? true;
-  let latestSetupDomain = matchedResumeDomain || makeSetupIncompleteDomain({
-    domainId,
-    domainName: adopterProvidedName,
+  let teamProvisionedByTeami = matchedResumeTeam?.linear?.provisioned_by_teami ?? true;
+  let latestSetupTeam = matchedResumeTeam || makeSetupIncompleteTeam({
+    teamRef,
+    teamName: adopterProvidedName,
     workspaceId,
     workspaceName,
   });
@@ -193,9 +249,9 @@ export async function setupLinearDomain({
     team: setupTeam = null,
     webhook = null,
   } = {}) {
-    const domain = makeSetupIncompleteDomain({
-      domainId,
-      domainName: adopterProvidedName,
+    const team = makeSetupIncompleteTeam({
+      teamRef,
+      teamName: adopterProvidedName,
       setupIncompleteCause,
       workspaceId,
       workspaceName,
@@ -203,32 +259,32 @@ export async function setupLinearDomain({
       webhook,
       provisionedByTeami: teamProvisionedByTeami,
     });
-    const nextRegistry = upsertDomainRecord(latestRegistry, domain);
-    await writeRegistry(nextRegistry, domain);
-    latestRegistry = nextRegistry;
-    latestSetupDomain = domain;
-    return { registry: nextRegistry, domain };
+    const nextRegistry = upsertTeamRecord(latestRegistry, team);
+    const writeOutcome = await writeRegistry(nextRegistry, team);
+    latestRegistry = writeOutcome?.registry || nextRegistry;
+    latestSetupTeam = team;
+    return { registry: latestRegistry, team };
   }
 
   async function failWithSetupIncomplete(cause, originalError, state = {}) {
     if (completeResume) {
       throw setupIncompleteError({
         cause,
-        domain: matchedResumeDomain,
+        team: matchedResumeTeam,
         registry: latestRegistry,
         originalError,
       });
     }
-    const fallbackDomain = makeSetupIncompleteDomain({
-      domainId,
-      domainName: adopterProvidedName,
+    const fallbackTeam = makeSetupIncompleteTeam({
+      teamRef,
+      teamName: adopterProvidedName,
       setupIncompleteCause: cause,
       workspaceId,
       workspaceName,
       provisionedByTeami: teamProvisionedByTeami,
       ...state,
     });
-    let result = { registry: upsertDomainRecord(latestRegistry, fallbackDomain), domain: fallbackDomain };
+    let result = { registry: upsertTeamRecord(latestRegistry, fallbackTeam), team: fallbackTeam };
     try {
       result = await persistSetupIncomplete({
         setupIncompleteCause: cause,
@@ -238,7 +294,7 @@ export async function setupLinearDomain({
       if (cause !== "registry_write_failed") {
         const setupError = setupIncompleteError({
           cause: "registry_write_failed",
-          domain: fallbackDomain,
+          team: fallbackTeam,
           registry: result.registry,
           originalError: writeError,
         });
@@ -248,10 +304,20 @@ export async function setupLinearDomain({
     }
     throw setupIncompleteError({
       cause,
-      domain: result.domain,
+      team: result.team,
       registry: result.registry,
       originalError,
     });
+  }
+
+  async function retireProvisionalTeam(provisionalTeamRef) {
+    const provisional = latestRegistry.teams.find((candidate) => candidate.id === provisionalTeamRef);
+    if (!provisional) return;
+    const retired = { ...structuredClone(provisional), status: "removed" };
+    delete retired.setup_incomplete_cause;
+    const nextRegistry = upsertTeamRecord(latestRegistry, retired);
+    const writeOutcome = await writeRegistry(nextRegistry, retired);
+    latestRegistry = writeOutcome?.registry || nextRegistry;
   }
 
   if (!completeResume) {
@@ -260,7 +326,7 @@ export async function setupLinearDomain({
     } catch (error) {
       throw setupIncompleteError({
         cause: "registry_write_failed",
-        domain: latestSetupDomain,
+        team: latestSetupTeam,
         registry: latestRegistry,
         originalError: error,
       });
@@ -269,9 +335,9 @@ export async function setupLinearDomain({
 
   const teamPlan = await resolveSetupTeamPlan({
     client,
-    requestedName: trimmedDomainName,
-    domainId,
-    resumeDomain: matchedResumeDomain,
+    requestedName: trimmedTeamName,
+    teamRef,
+    resumeTeam: matchedResumeTeam,
     cache,
     registry: currentRegistry,
     workspaceId,
@@ -281,10 +347,10 @@ export async function setupLinearDomain({
     ? false
     : teamPlan.mode === "create"
       ? true
-      : matchedResumeDomain?.linear?.provisioned_by_teami ?? true;
+      : matchedResumeTeam?.linear?.provisioned_by_teami ?? true;
   if (completeResume && !teamPlan.team) {
     throw new Error(
-      `complete_domain_team_missing: domain ${domainId} records Linear team ${matchedResumeDomain.linear?.team_id || "unknown"}, but that team was not found in workspace ${workspaceLabel(organization)}.`,
+      `configured_linear_team_missing: Team ${teamRef} points to Linear team ${matchedResumeTeam.linear?.team_id || "unknown"}, but that team was not found in workspace ${workspaceLabel(organization)}.`,
     );
   }
 
@@ -316,7 +382,7 @@ export async function setupLinearDomain({
     } catch (setupError) {
       if (setupIncompleteCause === "linear_team_limit_reached") {
         setupError.availableTeams = safeExistingTeamChoices(
-          unboundExistingTeams(teamPlan.existingTeams, currentRegistry, { workspaceId, domainId }),
+          unboundExistingTeams(teamPlan.existingTeams, currentRegistry, { workspaceId, teamRef }),
         );
         setupError.workspace = { id: workspaceId, name: workspaceName };
       }
@@ -328,16 +394,30 @@ export async function setupLinearDomain({
     throw new Error("Linear teamCreate did not return id, key, and name.");
   }
 
-  const configForDomain = configWithLinearTeam(config, team);
+  if (!matchedResumeTeam) {
+    const removedIdentityTeam = removedTeamForLinearIdentity(currentRegistry, {
+      workspaceId,
+      linearTeamId: team.id,
+    });
+    if (removedIdentityTeam && removedIdentityTeam.id !== teamRef) {
+      const provisionalTeamRef = teamRef;
+      await retireProvisionalTeam(provisionalTeamRef);
+      teamRef = removedIdentityTeam.id;
+      identitySourceTeam = removedIdentityTeam;
+      teamProvisionedByTeami = removedIdentityTeam.linear?.provisioned_by_teami ?? teamProvisionedByTeami;
+    }
+  }
+
+  const configForTeam = configWithLinearTeam(config, team);
   if (!completeResume) {
     try {
       await persistSetupIncomplete({ team });
     } catch (error) {
       throw setupIncompleteError({
         cause: "registry_write_failed",
-        domain: makeSetupIncompleteDomain({
-          domainId,
-          domainName: adopterProvidedName,
+        team: makeSetupIncompleteTeam({
+          teamRef,
+          teamName: adopterProvidedName,
           workspaceId,
           workspaceName,
           team,
@@ -351,7 +431,7 @@ export async function setupLinearDomain({
   let initializedCache = null;
   const initResult = await initLinear({
     client,
-    config: configForDomain,
+    config: configForTeam,
     cache: { ...(cache || {}), teamId: team.id },
     ensureNeedsPrincipalProjectStatus,
     allowLegacyHumanReviewMigration: teamProvisionedByTeami !== false,
@@ -360,7 +440,7 @@ export async function setupLinearDomain({
     },
   });
   if (!initializedCache?.teamId) {
-    throw new Error("Linear domain setup did not produce a verified cache.");
+    throw new Error("Linear team setup did not produce a verified cache.");
   }
 
   let webhookRegistration = null;
@@ -368,7 +448,7 @@ export async function setupLinearDomain({
     try {
       webhookRegistration = await registerWebhook({
         client,
-        config: configForDomain,
+        config: configForTeam,
         cache: initializedCache,
         workspaceId,
         teamId: team.id,
@@ -381,9 +461,9 @@ export async function setupLinearDomain({
     } catch (error) {
       throw setupIncompleteError({
         cause: "registry_write_failed",
-        domain: makeSetupIncompleteDomain({
-          domainId,
-          domainName: adopterProvidedName,
+        team: makeSetupIncompleteTeam({
+          teamRef,
+          teamName: adopterProvidedName,
           workspaceId,
           workspaceName,
           team,
@@ -408,7 +488,7 @@ export async function setupLinearDomain({
       runnerCredential = await ensureRunnerCredential({
         workspaceId,
         teamId: team.id,
-        domainId,
+        teamRef,
       });
     } catch (error) {
       await failWithSetupIncomplete("runner_authority_failed", error, {
@@ -431,14 +511,14 @@ export async function setupLinearDomain({
   if (runnerCredentialId) localRunnerCache.legacyRunnerCredentialId = runnerCredentialId;
   const finalCache = {
     ...initializedCache,
-    domainId,
+    teamRef,
     workspaceId,
     teamId: team.id,
     localRunner: localRunnerCache,
   };
-  const activeDomain = makeDomainRecord({
-    domainId,
-    status: completeResume ? matchedResumeDomain.status : "active",
+  const activeTeam = makeTeamRecord({
+    teamRef,
+    status: completeResume ? matchedResumeTeam.status : "active",
     adopterProvidedName,
     workspaceId,
     workspaceName,
@@ -446,16 +526,16 @@ export async function setupLinearDomain({
     teamKey: team.key,
     teamName: team.name,
     teamNameLastSeenAt: new Date().toISOString(),
-    webhookId: webhookRegistration.webhook?.id || matchedResumeDomain?.linear?.webhook_id || null,
+    webhookId: webhookRegistration.webhook?.id || identitySourceTeam?.linear?.webhook_id || null,
     provisionedByAgenticFactory: teamProvisionedByTeami,
-    resources: matchedResumeDomain?.resources || [],
-    policyProfile: matchedResumeDomain?.policy_profile || "default",
-    policyOverlayRef: matchedResumeDomain?.policy_overlay_ref || null,
+    resources: identitySourceTeam?.resources || [],
+    policyProfile: identitySourceTeam?.policy_profile || "default",
+    policyOverlayRef: identitySourceTeam?.policy_overlay_ref || null,
   });
-  const nextRegistry = upsertDomainRecord(currentRegistry, activeDomain);
-  const context = buildDomainContext({
-    domain: activeDomain,
-    config: configForDomain,
+  const nextRegistry = upsertTeamRecord(latestRegistry, activeTeam);
+  const context = buildTeamContext({
+    team: activeTeam,
+    config: configForTeam,
     repoRoot,
     behaviorRepoId,
   });
@@ -472,7 +552,7 @@ export async function setupLinearDomain({
     await promoteCredential({
       context,
       cache: finalCache,
-      domain: activeDomain,
+      team: activeTeam,
       registry: nextRegistry,
     });
   } catch (error) {
@@ -482,12 +562,13 @@ export async function setupLinearDomain({
     });
   }
   try {
-    await writeRegistry(nextRegistry, activeDomain, context);
+    const writeOutcome = await writeRegistry(nextRegistry, activeTeam, context);
+    latestRegistry = writeOutcome?.registry || nextRegistry;
   } catch (error) {
     if (completeResume) {
       throw setupIncompleteError({
         cause: "registry_write_failed",
-        domain: activeDomain,
+        team: activeTeam,
         registry: nextRegistry,
         originalError: error,
       });
@@ -503,9 +584,9 @@ export async function setupLinearDomain({
     }
     throw setupIncompleteError({
       cause: "registry_write_failed",
-      domain: makeSetupIncompleteDomain({
-        domainId,
-        domainName: adopterProvidedName,
+      team: makeSetupIncompleteTeam({
+        teamRef,
+        teamName: adopterProvidedName,
         setupIncompleteCause: "registry_write_failed",
         workspaceId,
         workspaceName,
@@ -521,11 +602,31 @@ export async function setupLinearDomain({
     ok: initResult.ok,
     summary: initResult.summary,
     cache: finalCache,
-    registry: nextRegistry,
-    domain: activeDomain,
+    registry: latestRegistry,
+    team: activeTeam,
     context,
     webhookRegistration,
     runnerCredential,
+  };
+}
+
+function removedTeamForLinearIdentity(registry, { workspaceId, linearTeamId } = {}) {
+  const matches = (registry?.teams || []).filter((team) =>
+    team?.status === "removed" &&
+    team?.linear?.workspace_id === workspaceId &&
+    team?.linear?.team_id === linearTeamId);
+  if (matches.length <= 1) return matches[0] || null;
+  const error = new Error(
+    `More than one removed Teami Team records Linear team ${linearTeamId} in workspace ${workspaceId}; repair the duplicate history before setup continues.`,
+  );
+  error.code = "removed_team_identity_ambiguous";
+  throw error;
+}
+
+function registryWithoutRemovedTeams(registry = emptyTeamRegistry()) {
+  return {
+    ...registry,
+    teams: (registry?.teams || []).filter((team) => team?.status !== "removed"),
   };
 }
 
@@ -537,9 +638,9 @@ function setupPreviewLine({ action, teamName, organization, registerWebhook }) {
   return `will ${verb} Linear team '${teamName}' in workspace ${workspaceLabel(organization)}${suffix}`;
 }
 
-function makeSetupIncompleteDomain({
-  domainId,
-  domainName = null,
+function makeSetupIncompleteTeam({
+  teamRef,
+  teamName = null,
   setupIncompleteCause = null,
   workspaceId = null,
   workspaceName = null,
@@ -547,10 +648,10 @@ function makeSetupIncompleteDomain({
   webhook = null,
   provisionedByTeami = true,
 } = {}) {
-  return makeDomainRecord({
-    domainId,
+  return makeTeamRecord({
+    teamRef,
     status: "setup_incomplete",
-    adopterProvidedName: domainName,
+    adopterProvidedName: teamName,
     setupIncompleteCause,
     workspaceId,
     workspaceName,
@@ -566,22 +667,22 @@ function makeSetupIncompleteDomain({
 async function resolveSetupTeamPlan({
   client,
   requestedName,
-  domainId,
-  resumeDomain = null,
+  teamRef,
+  resumeTeam = null,
   cache = null,
-  registry = emptyDomainRegistry(),
+  registry = emptyTeamRegistry(),
   workspaceId = null,
   selectedExistingTeamId = null,
 } = {}) {
   const existingTeams = await client.listTeams?.() || [];
-  const recordedTeam = findRecordedSetupTeam(existingTeams, { domainId, resumeDomain, cache });
+  const recordedTeam = findRecordedSetupTeam(existingTeams, { teamRef, resumeTeam, cache });
   const selectedTeamId = typeof selectedExistingTeamId === "string"
     ? selectedExistingTeamId.trim()
     : "";
   if (recordedTeam && selectedTeamId && recordedTeam.id !== selectedTeamId) {
     throw linearTeamSelectionError(
       "linear_team_selection_conflicts_with_recorded_team",
-      "The selected Linear team differs from the team already recorded for this Teami domain.",
+      "The selected Linear team differs from the team already recorded for this Teami team.",
       existingTeams,
     );
   }
@@ -603,13 +704,13 @@ async function resolveSetupTeamPlan({
         existingTeams,
       );
     }
-    const alreadyBound = (registry?.domains || []).find((domain) =>
-      domain?.id !== domainId && domain?.status !== "removed" &&
-      domain?.linear?.workspace_id === workspaceId && domain?.linear?.team_id === selectedTeamId);
+    const alreadyBound = (registry?.teams || []).find((team) =>
+      team?.id !== teamRef && team?.status !== "removed" &&
+      team?.linear?.workspace_id === workspaceId && team?.linear?.team_id === selectedTeamId);
     if (alreadyBound) {
       throw linearTeamSelectionError(
         "linear_team_already_bound",
-        `The selected Linear team is already connected to Teami domain ${alreadyBound.id}.`,
+        `The selected Linear team is already connected to Teami team ${alreadyBound.id}.`,
         existingTeams,
       );
     }
@@ -640,11 +741,11 @@ function safeExistingTeamChoices(teams = []) {
     .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
-function unboundExistingTeams(teams, registry, { workspaceId, domainId } = {}) {
-  const boundTeamIds = new Set((registry?.domains || [])
-    .filter((domain) => domain?.id !== domainId && domain?.status !== "removed" &&
-      domain?.linear?.workspace_id === workspaceId)
-    .map((domain) => domain?.linear?.team_id)
+function unboundExistingTeams(teams, registry, { workspaceId, teamRef } = {}) {
+  const boundTeamIds = new Set((registry?.teams || [])
+    .filter((team) => team?.id !== teamRef && team?.status !== "removed" &&
+      team?.linear?.workspace_id === workspaceId)
+    .map((team) => team?.linear?.team_id)
     .filter(Boolean));
   return (teams || []).filter((team) => !boundTeamIds.has(team?.id));
 }
@@ -656,16 +757,16 @@ function linearTeamSelectionError(code, message, teams) {
   return error;
 }
 
-function findRecordedSetupTeam(teams, { domainId, resumeDomain = null, cache = null } = {}) {
+function findRecordedSetupTeam(teams, { teamRef, resumeTeam = null, cache = null } = {}) {
   const recordedTeamId =
-    resumeDomain?.linear?.team_id ||
-    (cache?.domainId === domainId ? cache?.teamId : null);
+    resumeTeam?.linear?.team_id ||
+    (cache?.teamRef === teamRef ? cache?.teamId : null);
   if (recordedTeamId) {
     const team = teams.find((candidate) => candidate.id === recordedTeamId);
     if (team) return team;
   }
 
-  const recordedTeamKey = resumeDomain?.linear?.team_key || null;
+  const recordedTeamKey = resumeTeam?.linear?.team_key || null;
   if (recordedTeamKey) {
     const keyMatches = teams.filter((candidate) => candidate.key === recordedTeamKey);
     if (keyMatches.length === 1) return keyMatches[0];
@@ -729,7 +830,7 @@ function teamKeyBase(name) {
   return compact || "TEAM";
 }
 
-function setupIncompleteError({ cause, domain, registry, originalError } = {}) {
+function setupIncompleteError({ cause, team, registry, originalError } = {}) {
   const runnerAuthorityDetail =
     cause === "runner_authority_failed" && originalError?.message
       ? ` Runner authority error: ${originalError.message}.`
@@ -741,7 +842,7 @@ function setupIncompleteError({ cause, domain, registry, originalError } = {}) {
     `${cause}:${runnerAuthorityDetail}${teamCreateDetail} ${repairPathForSetupIncompleteCause(cause)}`,
   );
   setupError.setupIncompleteCause = cause;
-  setupError.domain = domain;
+  setupError.team = team;
   setupError.registry = registry;
   setupError.originalError = originalError;
   if (originalError) setupError.cause = originalError;
@@ -835,13 +936,13 @@ export function repairPathForSetupIncompleteCause(cause) {
     return "Rerun npm run init after repairing the local runner authority issue; npm run reset removes local setup state if needed.";
   }
   if (cause === "credential_promotion_failed") {
-    return "Rerun npm run init to move the setup OAuth credential into the domain-scoped credential target; npm run reset removes local setup state if needed.";
+    return "Rerun npm run init to move the setup OAuth credential into the team-scoped credential target; npm run reset removes local setup state if needed.";
   }
   if (cause === "cache_write_failed") {
     return "Fix local filesystem permissions for .teami, then rerun npm run init or npm run reset.";
   }
   if (cause === "registry_write_failed") {
-    return "Fix local filesystem permissions for .teami/domains.json, then rerun npm run init or npm run reset.";
+    return "Fix local filesystem permissions for .teami/teams.json, then rerun npm run init or npm run reset.";
   }
   if (TEAM_CREATE_SETUP_CAUSES.includes(cause)) {
     return "Review the Linear teamCreate error, repair the workspace condition, then rerun npm run init.";

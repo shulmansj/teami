@@ -11,7 +11,7 @@ import {
   registerExecutionWorkflowForTest,
   runTriggeredExecutionForTest as runTriggeredExecution,
 } from "../src/trigger-runner.mjs";
-import { DOMAIN_REGISTRY_SCHEMA_VERSION } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION } from "../src/team-registry.mjs";
 import {
   parseRemediationMarker,
   renderRemediationMarker,
@@ -185,7 +185,7 @@ test("runTriggeredExecution materializes only the resource_target selected repo"
     repoRoot: tempRoot,
     store,
     runDeps,
-    registry: domainRegistry({ resources }),
+    registry: teamRegistry({ resources }),
     issueContext: defaultIssueContext({
       resource_target: { kind: "git_repo", id: "repo-2" },
       work_type: "code",
@@ -210,7 +210,7 @@ test("runTriggeredExecution materializes only the resource_target selected repo"
   }));
 
   assert.equal(result.status, "completed");
-  assert.deepEqual(runDeps.materializeCalls[0].domainResources.map((resource) => resource.id), ["repo-2"]);
+  assert.deepEqual(runDeps.materializeCalls[0].teamResources.map((resource) => resource.id), ["repo-2"]);
   assert.equal(turns[0].cwd, repoTwo);
   assert.equal(result.result.trace.attributes.selected_resource_id, "repo-2");
   assert.equal(result.result.trace.attributes["resource.id"], "repo-2");
@@ -634,7 +634,7 @@ test("runTriggeredExecution rejects multi-repo missing or invalid resource_targe
       repoRoot: tempRoot,
       store,
       runDeps,
-      registry: domainRegistry({ resources }),
+      registry: teamRegistry({ resources }),
       issueContext: fixture.issueContext,
       orchestratorTurnExecutor: async () => {
         throw new Error("orchestrator should not run without a selected resource");
@@ -652,8 +652,8 @@ function runOptions({
   store,
   runDeps,
   issueId = "issue-1",
-  domainContext: selectedDomainContext = domainContext(),
-  registry = domainRegistry(),
+  teamContext: selectedTeamContext = teamContext(),
+  registry = teamRegistry(),
   issueContext = defaultIssueContext(),
   linearClient = null,
   orchestratorTurnExecutor = null,
@@ -661,7 +661,7 @@ function runOptions({
   return {
     executionReadiness: () => ({ ok: true }),
     issueId,
-    domainContext: selectedDomainContext,
+    teamContext: selectedTeamContext,
     registry,
     claim: {
       ok: true,
@@ -674,7 +674,7 @@ function runOptions({
       wake: {
         id: `wake-${issueId}`,
         workspace_id: "workspace-1",
-        domain_id: "domain-1",
+        team_ref: "team-1",
         trigger_type: "linear.issue.ready",
         workflow_type: "execution",
         object_type: "issue",
@@ -716,7 +716,7 @@ function runOptions({
     },
     repoRoot,
     home: repoRoot,
-    runStoreDir: path.join(repoRoot, "domains", "domain-1", "runs"),
+    runStoreDir: path.join(repoRoot, "teams", "team-1", "runs"),
     runtimeExecutor: {
       async executeSubagent() {
         throw new Error("subagent executor should not be called by this one-turn fixture");
@@ -1098,7 +1098,7 @@ function createRunDeps({ tempRoot, store, workingDirsByResourceId = {}, handleEn
     executionProfilePreflight: greenExecutionProfilePreflight,
     async materialize(input) {
       runDeps.materializeCalls.push(input);
-      const selected = input.domainResources[0];
+      const selected = input.teamResources[0];
       const selectedResourceId = selected?.id || "repo-1";
       const workingDir = workingDirsByResourceId[selectedResourceId] || tempRoot;
       const selectedResource = {
@@ -1204,7 +1204,7 @@ function createFakeStore() {
     async renewLease({ wakeId }) {
       return { ok: true, wake: wakes.get(wakeId) || null };
     },
-    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, domainId }) {
+    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, teamRef }) {
       const wake = wakes.get(wakeId) || {
         id: wakeId,
         workspace_id: "workspace-1",
@@ -1217,7 +1217,7 @@ function createFakeStore() {
         runner_id: runnerId,
         lease_token: leaseToken,
         run_id: runId,
-        domain_id: domainId,
+        team_ref: teamRef,
       });
       wakes.set(wakeId, wake);
       runs.set(runId, { run_id: runId, wake_id: wakeId, status: "running" });
@@ -1277,9 +1277,9 @@ function writeExecutionAcceptedPromptFixture(repoRoot) {
   return namespaceRoot;
 }
 
-function domainContext({ resources = null } = {}) {
+function teamContext({ resources = null } = {}) {
   const context = {
-    domainId: "domain-1",
+    teamRef: "team-1",
     status: "active",
     linear: {
       workspaceId: "workspace-1",
@@ -1290,7 +1290,7 @@ function domainContext({ resources = null } = {}) {
       cachePath: "unused-cache.json",
     },
     trace: {
-      domain_id: "domain-1",
+      team_ref: "team-1",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test",
@@ -1300,11 +1300,11 @@ function domainContext({ resources = null } = {}) {
   return context;
 }
 
-function domainRegistry({ resources = [gitRepoResource()] } = {}) {
+function teamRegistry({ resources = [gitRepoResource()] } = {}) {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [{
-      id: "domain-1",
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [{
+      id: "team-1",
       status: "active",
       linear: {
         workspace_id: "workspace-1",
@@ -1315,7 +1315,7 @@ function domainRegistry({ resources = [gitRepoResource()] } = {}) {
         team_name_last_seen_at: "2026-06-26T00:00:00.000Z",
         provisioned_by_teami: true,
         webhook_id: "webhook-1",
-        cache_path: "domains/domain-1/linear.json",
+        cache_path: "teams/team-1/linear.json",
       },
       resources,
       policy_profile: "default",

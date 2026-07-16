@@ -13,11 +13,11 @@ import {
   renderPromotionMarkerBlock,
 } from "../src/promote-candidate.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  upsertDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  upsertTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import { buildPromotionPrBody } from "../src/promotion-pr-body.mjs";
 import {
   acquireImprovementDraftLock,
@@ -506,7 +506,7 @@ test("drafter emits a github_behavior_repo trace with asked, did, outcome, and s
 
   assert.equal(result.ok, true);
   assert.equal(result.chain_state, "tagged");
-  assert.equal(startArgs.domainId, "support-ops");
+  assert.equal(startArgs.teamRef, "support-ops");
   assert.equal(startArgs.agentRole, "self_improvement_drafter");
   assert.equal(startArgs.workflowType, "self_improvement_draft");
   assert.deepEqual(startArgs.resource, {
@@ -523,7 +523,7 @@ test("drafter emits a github_behavior_repo trace with asked, did, outcome, and s
   assert.equal(trace.attributes["resource.label"], "octo/teami");
   assert.equal(trace.attributes["github.behavior_repo_id"], "R_behavior_repo_1");
   assert.equal(trace.attributes["github.behavior_repo_label"], "octo/teami");
-  assert.equal(trace.attributes["teami.domain_id"], "support-ops");
+  assert.equal(trace.attributes["teami.team_ref"], "support-ops");
   assert.equal(trace.attributes["teami.agent_role"], "self_improvement_drafter");
 
   const spans = Object.fromEntries(trace.spans.map((span) => [span.name, span.attributes]));
@@ -1664,12 +1664,12 @@ function makeTempRepo({
     `${JSON.stringify(policy({ maxDrafts }), null, 2)}\n`,
     "utf8",
   );
-  writeDomainRegistry(
+  writeTeamRegistry(
     { repoRoot },
-    upsertDomainRecord(
-      emptyDomainRegistry(),
-      makeDomainRecord({
-        domainId: "support-ops",
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "support-ops",
         status: "active",
         workspaceId: "workspace-a",
         workspaceName: "Support Ops",

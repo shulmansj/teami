@@ -300,8 +300,8 @@ test("dependency-blocked fresh runner result does not write trigger suppression"
   const result = await processPlannedProject({
     repoRoot,
     config: configFixture(),
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     client: {
       async getProjectSnapshotContext(projectId) {
         snapshotReads += 1;
@@ -441,13 +441,13 @@ function projectSnapshot(id) {
   };
 }
 
-function domainFixture() {
+function teamFixture() {
   return { id: "support-ops" };
 }
 
-function domainContextFixture() {
+function teamContextFixture() {
   return {
-    domainId: "support-ops",
+    teamRef: "support-ops",
     linear: {
       workspaceId: "workspace-1",
       teamId: "team-1",

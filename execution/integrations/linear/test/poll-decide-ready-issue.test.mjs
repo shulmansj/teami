@@ -9,7 +9,7 @@ import {
   RUN_ARTIFACT_SCHEMA_VERSION,
 } from "../../../engine/engine-contract-constants.mjs";
 import { branchNameForIssue } from "../../git/git-branch-names.mjs";
-import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION, makeTeamRecord } from "../src/team-registry.mjs";
 import { writeLinearCache } from "../src/cache.mjs";
 import {
   AF_REVIEW_STATUS_CONTEXT,
@@ -19,7 +19,7 @@ import {
   decideReadyIssue,
   gatewayPollTargets,
   gatewayState,
-  pollGatewayDomain,
+  pollGatewayTeam,
   processReadyIssue,
   sweepIssueReplayMarker,
 } from "../src/gateway-loop.mjs";
@@ -52,7 +52,7 @@ test("dependency-blocked Ready issues are not suppressed and run after the block
   });
   let suppressionReads = 0;
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: blocked,
     config: configWithReadyStatus(),
@@ -76,8 +76,8 @@ test("dependency-blocked Ready issues are not suppressed and run after the block
   let freshRuns = 0;
   const state = gatewayState();
   const options = {
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -125,7 +125,7 @@ test("dependency-blocked Ready issues are not suppressed and run after the block
 test("a Ready issue with a git replay marker replays instead of starting a fresh run", async () => {
   const issueId = "issue-open-pr";
   const pending = {
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectId: issueId,
     runId: "run-open-pr",
     artifactKind: "commit",
@@ -144,8 +144,8 @@ test("a Ready issue with a git replay marker replays instead of starting a fresh
   const state = gatewayState();
 
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     candidate: { id: issueId },
     state,
     client: {
@@ -192,7 +192,7 @@ test("Ready fix-mode chooses warm_resume before retained replay markers", async 
   let suppressionReads = 0;
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     fingerprint: "a".repeat(64),
@@ -241,7 +241,7 @@ test("Ready fix-mode resumes a Todo send-back even when the current review check
   let replayReads = 0;
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     fingerprint: "a".repeat(64),
@@ -287,8 +287,8 @@ test("processReadyIssue dispatches a green-check Todo send-back to warm_resume",
   let freshRuns = 0;
 
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextWithRepoFixture(),
+    team: teamFixture(),
+    teamContext: teamContextWithRepoFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -375,7 +375,7 @@ test("Ready fix-mode resolves the produced PR when a discarded PR makes branch d
   };
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -450,7 +450,7 @@ test("Ready fix-mode walks past a non-producing failed resume run to the produce
   };
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -537,7 +537,7 @@ test("A rejected resume attempt is transparent to the ready-fix decide", async (
   };
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -578,8 +578,8 @@ test("A warm resume rejected by the branch-ownership fence surfaces on the issue
   });
 
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextWithRepoFixture(),
+    team: teamFixture(),
+    teamContext: teamContextWithRepoFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -636,8 +636,8 @@ test("A warm resume that fails closed before dispatch surfaces on the issue", as
   const updates = [];
 
   await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextWithRepoFixture(),
+    team: teamFixture(),
+    teamContext: teamContextWithRepoFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -682,8 +682,8 @@ test("Ready fix-mode has no review-round bound across repeated green Todo re-ent
     });
 
     const result = await processReadyIssue({
-      domain: domainFixture(),
-      domainContext: domainContextWithRepoFixture(),
+      team: teamFixture(),
+      teamContext: teamContextWithRepoFixture(),
       config: configWithReadyStatus(),
       cache: linearCacheFixture(),
       candidate: { id: issueId },
@@ -758,7 +758,7 @@ test("Ready fix-mode escalates on the first persisted paused warm-resume run", a
   const adapter = githubProbeMustNotRun();
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({
       id: issueId,
@@ -811,7 +811,7 @@ test("Ready fix-mode releases paused warm-resume Todo re-entry into the existing
   });
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -840,7 +840,7 @@ test("Ready issues with no prior execution run do not probe GitHub and remain fr
   const issueId = "issue-no-prior-run";
   let replayReads = 0;
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -871,14 +871,14 @@ test("Ready code issue resource routing is emitted through the gateway trace sin
   const issueId = "issue-wrong-resource";
   const traceSink = recordingTraceSink();
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({
       id: issueId,
       description: descriptionWithResourceTarget({ kind: "git_repo", id: "repo-3" }),
       labels: [{ id: WORK_TYPE_CODE_LABEL_ID, name: "Code" }],
     }),
-    domainContext: domainContextWithAllowedRepoPacket(),
+    teamContext: teamContextWithAllowedRepoPacket(),
     config: configWithReadyStatusAndWorkTypeLabels(),
     cache: linearCacheWithWorkTypeLabels(),
     fingerprint: "a".repeat(64),
@@ -926,7 +926,7 @@ test("Ready fix-mode escalates prior-run issues when the execution PR is closed 
       const issueId = `issue-pr-${entry.name}`;
       const repoRoot = tempRepo();
       const decision = await decideReadyIssue({
-        domainId: "domain-1",
+        teamRef: "team-1",
         issueId,
         issueContext: readyIssue({ id: issueId }),
         fingerprint: "a".repeat(64),
@@ -956,7 +956,7 @@ test("Ready fix-mode dispatches fresh when a non-resumable prior run left no sur
   let replayReads = 0;
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -987,7 +987,7 @@ test("Ready fix-mode still escalates a non-resumable prior run when its PR exist
   const adapter = createReadyFixPrAdapter();
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -1020,7 +1020,7 @@ test("Ready fix-mode escalates a non-resumable prior run whose artifact records 
   const issueId = "issue-surface-recorded";
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -1066,7 +1066,7 @@ test("Ready fix-mode escalates a non-resumable prior run when the PR probe is de
   };
 
   const decision = await decideReadyIssue({
-    domainId: "domain-1",
+    teamRef: "team-1",
     issueId,
     issueContext: readyIssue({ id: issueId }),
     config: configWithReadyStatus(),
@@ -1115,7 +1115,7 @@ test("Ready fix-mode dispatches fresh for surviving prior-run defects with no su
       const adapter = createReadyFixPrAdapter({ pullRequests: [] });
 
       const decision = await decideReadyIssue({
-        domainId: "domain-1",
+        teamRef: "team-1",
         issueId,
         issueContext: readyIssue({ id: issueId }),
         config: configWithReadyStatus(),
@@ -1143,8 +1143,8 @@ test("Ready fix-mode escalation posts one explanatory comment when it transition
   const updates = [];
 
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextWithRepoFixture(),
+    team: teamFixture(),
+    teamContext: teamContextWithRepoFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -1184,8 +1184,8 @@ test("Ready fix-mode escalation completes a missing comment for an issue already
   };
 
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextWithRepoFixture(),
+    team: teamFixture(),
+    teamContext: teamContextWithRepoFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -1215,8 +1215,8 @@ test("Ready fix-mode escalation does not move status when the required comment p
   const updates = [];
 
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextWithRepoFixture(),
+    team: teamFixture(),
+    teamContext: teamContextWithRepoFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -1253,8 +1253,8 @@ test("processReadyIssue dispatches warm_resume without reaching fresh execution"
   const state = gatewayState();
 
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextWithRepoFixture(),
+    team: teamFixture(),
+    teamContext: teamContextWithRepoFixture(),
     candidate: { id: issueId },
     state,
     client: {
@@ -1315,8 +1315,8 @@ test("In Progress fix-mode cold-reconstructs when the local run store is empty",
   const result = await inProgressTarget.process(
     { id: issueId },
     {
-      domain: domainFixture(),
-      domainContext: domainContextWithRepoFixture(),
+      team: teamFixture(),
+      teamContext: teamContextWithRepoFixture(),
       candidate: { id: issueId },
       state,
       client: {
@@ -1362,8 +1362,8 @@ test("Ready issue deterministic git failures write suppression after current-sta
   const writes = [];
   const contexts = [readyIssue({ id: issueId }), readyIssue({ id: issueId })];
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -1413,8 +1413,8 @@ test("claimed In Progress issue deterministic git failures still write suppressi
     }),
   ];
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     config: configWithReadyStatus(),
     cache: linearCacheFixture(),
     candidate: { id: issueId },
@@ -1455,13 +1455,13 @@ test("project polling still runs first and issue dispatch does not block the des
   const state = gatewayState();
   const issueRun = deferred();
   const repoRoot = tempRepo();
-  writeDomainCache(repoRoot);
-  const result = await pollGatewayDomain({
+  writeTeamCache(repoRoot);
+  const result = await pollGatewayTeam({
     repoRoot,
     home: repoRoot,
     config: configWithReadyStatus(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     state,
     idempotency: {
       listGitReplayPending: async () => [],
@@ -1531,8 +1531,8 @@ test("project polling still runs first and issue dispatch does not block the des
 test("maxInFlight gate prevents overlapping Ready issue execution", async () => {
   const state = gatewayState({ inFlight: new Set(["issue-active"]), maxInFlight: 1 });
   const result = await processReadyIssue({
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     candidate: { id: "issue-queued" },
     state,
     client: {
@@ -1573,7 +1573,7 @@ test("marker sweep clears issue git replay markers only after Linear reports com
   const retained = await sweepIssueReplayMarker({
     repoRoot,
     home: repoRoot,
-    domain: domainFixture(),
+    team: teamFixture(),
     client,
     marker: { objectId: "issue-review", runId: "run-review" },
     idempotency,
@@ -1581,7 +1581,7 @@ test("marker sweep clears issue git replay markers only after Linear reports com
   const done = await sweepIssueReplayMarker({
     repoRoot,
     home: repoRoot,
-    domain: domainFixture(),
+    team: teamFixture(),
     client,
     marker: { objectId: "issue-done", runId: "run-done" },
     idempotency,
@@ -1591,7 +1591,7 @@ test("marker sweep clears issue git replay markers only after Linear reports com
   assert.equal(retained.stateType, "started");
   assert.equal(done.status, "cleared");
   assert.deepEqual(cleared, [{
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectType: "issue",
     objectId: "issue-done",
     runId: "run-done",
@@ -1611,9 +1611,9 @@ function repoIdentityFixture() {
   };
 }
 
-function domainContextWithRepoFixture() {
+function teamContextWithRepoFixture() {
   return {
-    ...domainContextFixture(),
+    ...teamContextFixture(),
     resources: [{
       id: "repo-1",
       kind: "git_repo",
@@ -1744,7 +1744,7 @@ function writePausedResumeArtifact(repoRoot, {
     workflow_version: "test-execution",
     kind: "pause",
     run_id: runId,
-    domain_id: "domain-1",
+    team_ref: "team-1",
     workspace_id: "workspace-1",
     team_id: "team-1",
     linear_issue_id: issueId,
@@ -1764,7 +1764,7 @@ function writePausedResumeArtifact(repoRoot, {
     pause_packet: {},
     resume,
   };
-  const runDir = path.join(repoRoot, "domains", "domain-1", "runs");
+  const runDir = path.join(repoRoot, "teams", "team-1", "runs");
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(path.join(runDir, `${runId}.json`), `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
 }
@@ -1893,14 +1893,14 @@ function readyIssue({
 
 function registryFixture() {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [domainFixture()],
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [teamFixture()],
   };
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "domain-1",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "team-1",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",
@@ -1911,9 +1911,9 @@ function domainFixture() {
   });
 }
 
-function domainContextFixture() {
+function teamContextFixture() {
   return {
-    domainId: "domain-1",
+    teamRef: "team-1",
     status: "active",
     linear: {
       workspaceId: "workspace-1",
@@ -1924,7 +1924,7 @@ function domainContextFixture() {
       cachePath: "unused",
     },
     trace: {
-      domain_id: "domain-1",
+      team_ref: "team-1",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test",
@@ -1932,9 +1932,9 @@ function domainContextFixture() {
   };
 }
 
-function domainContextWithAllowedRepoPacket() {
+function teamContextWithAllowedRepoPacket() {
   return {
-    ...domainContextFixture(),
+    ...teamContextFixture(),
     allowedRepoPacket: allowedRepoPacketFixture(),
   };
 }
@@ -2052,7 +2052,7 @@ function recordingTraceSink() {
         traceId: "trace-ready-eligibility",
         run: {
           run_id: input.runId,
-          domain_id: input.wake?.domain_id || null,
+          team_ref: input.wake?.team_ref || null,
           workspace_id: input.wake?.workspace_id || null,
           team_id: input.wake?.team_id || null,
           workflow_type: input.wake?.workflow_type || null,
@@ -2069,9 +2069,9 @@ function recordingTraceSink() {
   };
 }
 
-function writeDomainCache(repoRoot) {
+function writeTeamCache(repoRoot) {
   writeLinearCache(
-    path.join(repoRoot, "domains", "domain-1", "linear.json"),
+    path.join(repoRoot, "teams", "team-1", "linear.json"),
     linearCacheFixture(),
   );
 }

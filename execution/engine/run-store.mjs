@@ -13,6 +13,10 @@ export {
 
 import { resolveTeamiHome, teamiHomePaths } from "../integrations/linear/src/app-home.mjs";
 import {
+  findLegacyTeamRunArtifactPath,
+  normalizeLegacyTeamIdentityForRead,
+} from "./legacy-team-state-compat.mjs";
+import {
   ENGINE_VERSION,
   LEGACY_RUN_ARTIFACT_SCHEMA_VERSION,
   RUN_ARTIFACT_SCHEMA_VERSION,
@@ -49,16 +53,16 @@ export const RUN_ARTIFACT_COMPATIBILITY = Object.freeze({
 export const RUN_ARTIFACT_KINDS = Object.freeze(["checkpoint", "pause", "commit", "resume"]);
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-export function defaultRunStoreDir({ home = resolveTeamiHome(), domainId } = {}) {
-  if (!domainId) throw new Error("domain_id is required for the local run artifact store.");
-  return path.join(teamiHomePaths({ home, domainId }).domainDir, "runs");
+export function defaultRunStoreDir({ home = resolveTeamiHome(), teamRef } = {}) {
+  if (!teamRef) throw new Error("team_ref is required for the local run artifact store.");
+  return path.join(teamiHomePaths({ home, teamRef }).teamDir, "runs");
 }
 
 export function runArtifactPath({
   runId,
   repoRoot = null,
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir,
 } = {}) {
   void repoRoot;
@@ -68,13 +72,15 @@ export function runArtifactPath({
   if (!SAFE_RUN_ID_PATTERN.test(runId)) {
     throw new Error(`Invalid run_id for local run artifact store: ${runId}`);
   }
-  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, teamRef }), `${runId}.json`);
 }
 
 export function readRunArtifact(options = {}) {
   const filePath = resolveReadableRunArtifactPath(options);
   if (!fs.existsSync(filePath)) return null;
-  const artifact = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const artifact = normalizeLegacyTeamIdentityForRead(
+    JSON.parse(fs.readFileSync(filePath, "utf8")),
+  );
   validateRunArtifact(artifact, options);
   const migrated = migrateLegacyRunArtifactForRead(artifact, options);
   validateRunArtifact(migrated, options);
@@ -84,7 +90,7 @@ export function readRunArtifact(options = {}) {
 export function writeRunArtifact(options = {}, artifact) {
   const filePath = runArtifactPath({
     ...options,
-    domainId: options.domainId || artifact?.domain_id || null,
+    teamRef: options.teamRef || artifact?.team_ref || null,
   });
   const normalized = normalizeRunArtifact(artifact, options);
   validateRunArtifact(normalized, options);
@@ -113,11 +119,11 @@ export function writeRunArtifact(options = {}, artifact) {
 export function assertRunStoreWritable({
   repoRoot = null,
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir,
 } = {}) {
   void repoRoot;
-  const dirPath = runStoreDir || defaultRunStoreDir({ home, domainId });
+  const dirPath = runStoreDir || defaultRunStoreDir({ home, teamRef });
   fs.mkdirSync(dirPath, { recursive: true });
   const probePath = path.join(
     dirPath,
@@ -142,8 +148,8 @@ export function validateRunArtifact(artifact, options = {}) {
   validateRunArtifactVersions(artifact, failures, options);
   if (!artifact?.run_id) failures.push("missing_run_id");
   else if (!SAFE_RUN_ID_PATTERN.test(artifact.run_id)) failures.push("invalid_run_id");
-  if (!artifact?.domain_id) failures.push("missing_domain_id");
-  else if (!SAFE_RUN_ID_PATTERN.test(artifact.domain_id)) failures.push("invalid_domain_id");
+  if (!artifact?.team_ref) failures.push("missing_team_ref");
+  else if (!SAFE_RUN_ID_PATTERN.test(artifact.team_ref)) failures.push("invalid_team_ref");
   if (!artifact?.workspace_id) failures.push("missing_workspace_id");
   if (!artifact?.team_id) failures.push("missing_team_id");
   if (!RUN_ARTIFACT_KINDS.includes(artifact?.kind)) {
@@ -452,15 +458,28 @@ function isRecord(value) {
 }
 
 function resolveReadableRunArtifactPath(options = {}) {
-  if (options.runStoreDir || options.domainId) return runArtifactPath(options);
+  if (options.runStoreDir) return runArtifactPath(options);
+  if (options.teamRef) {
+    const current = runArtifactPath(options);
+    if (fs.existsSync(current)) return current;
+    const home = teamiHomePaths({ home: options.home || resolveTeamiHome() }).home;
+    const prior = findLegacyTeamRunArtifactPath({
+      home,
+      teamRef: options.teamRef,
+      runId: options.runId,
+    });
+    return prior || current;
+  }
   const direct = path.join(teamiHomePaths({ home: options.home || resolveTeamiHome() }).home, "runs", `${options.runId}.json`);
   if (fs.existsSync(direct)) return direct;
   const home = teamiHomePaths({ home: options.home || resolveTeamiHome() }).home;
-  const domainsDir = path.join(home, "domains");
-  if (!fs.existsSync(domainsDir)) return direct;
-  for (const domainId of fs.readdirSync(domainsDir)) {
-    const candidate = runArtifactPath({ ...options, home, domainId });
+  const teamsDir = path.join(home, "teams");
+  if (fs.existsSync(path.join(home, "teams.json.migration.lock")) || !fs.existsSync(teamsDir)) {
+    return findLegacyTeamRunArtifactPath({ home, runId: options.runId }) || direct;
+  }
+  for (const teamRef of fs.readdirSync(teamsDir)) {
+    const candidate = runArtifactPath({ ...options, home, teamRef });
     if (fs.existsSync(candidate)) return candidate;
   }
-  return direct;
+  return findLegacyTeamRunArtifactPath({ home, runId: options.runId }) || direct;
 }

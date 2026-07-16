@@ -668,13 +668,13 @@ async function readPendingGitIntent(ctx = {}) {
   if (ctx.pendingGitIntent?.git) return ctx.pendingGitIntent;
   if (ctx.gitIntent?.git) return ctx.gitIntent;
 
-  const domainId = domainIdFromContext(ctx);
+  const teamRef = teamRefFromContext(ctx);
   const objectId = issueIdFromContext(ctx);
-  if (!domainId || !objectId) return null;
+  if (!teamRef || !objectId) return null;
   try {
     const { readGitReplayPending } = await import("../linear/src/trigger-idempotency.mjs");
     return readGitReplayPending({
-      domainId,
+      teamRef,
       objectId,
       repoRoot: ctx.repoRoot || process.cwd(),
       runStoreDir: ctx.runStoreDir || null,
@@ -701,15 +701,15 @@ async function persistGitIntent(ctx, git) {
     return result;
   }
 
-  const domainId = domainIdFromContext(ctx);
+  const teamRef = teamRefFromContext(ctx);
   const objectId = issueIdFromContext(ctx);
   const wakeId = ctx.wake?.id || ctx.traceContext?.wake_id || ctx.artifact?.wake_id;
-  if (!domainId || !objectId || !runId || !wakeId) {
+  if (!teamRef || !objectId || !runId || !wakeId) {
     throw new Error("git_repo_mutation_intent_store_unavailable");
   }
   const { writeMutationIntent } = await import("../linear/src/trigger-idempotency.mjs");
   return writeMutationIntent({
-    domainId,
+    teamRef,
     objectType: "issue",
     objectId,
     runId,
@@ -725,13 +725,13 @@ async function persistGitIntent(ctx, git) {
 }
 
 async function clearGitIntent(ctx = {}, { runId: runIdOverride = null } = {}) {
-  const domainId = domainIdFromContext(ctx);
+  const teamRef = teamRefFromContext(ctx);
   const objectId = issueIdFromContext(ctx);
   const runId = runIdOverride || ctx.runId || ctx.artifact?.run_id;
-  if (!domainId || !objectId || !runId) return { cleared: false, reason: "git_repo_intent_clear_scope_missing" };
+  if (!teamRef || !objectId || !runId) return { cleared: false, reason: "git_repo_intent_clear_scope_missing" };
   const { clearMutationIntent } = await import("../linear/src/trigger-idempotency.mjs");
   return clearMutationIntent({
-    domainId,
+    teamRef,
     objectType: "issue",
     objectId,
     runId,
@@ -885,12 +885,12 @@ function issueIdentifierFromContext(ctx = {}) {
   ]);
 }
 
-function domainIdFromContext(ctx = {}) {
+function teamRefFromContext(ctx = {}) {
   return firstNonEmptyString([
-    ctx.domainContext?.domainId,
-    ctx.domainContext?.domain_id,
-    ctx.artifact?.domain_id,
-    ctx.wake?.domain_id,
+    ctx.teamContext?.teamRef,
+    ctx.teamContext?.team_ref,
+    ctx.artifact?.team_ref,
+    ctx.wake?.team_ref,
   ]);
 }
 

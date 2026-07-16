@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { acquireExclusiveFileLock } from "../../../engine/exclusive-file-lock.mjs";
 import { readLinearCache } from "./cache.mjs";
-import { configWithDomainLinearTeam } from "./domain-command-context.mjs";
-import { emptyDomainRegistry, readDomainRegistry } from "./domain-registry.mjs";
-import { buildDomainContext } from "./domain-resolver.mjs";
+import { configWithTeamLinearTeam } from "./team-command-context.mjs";
+import { emptyTeamRegistry, readTeamRegistry } from "./team-registry.mjs";
+import { buildTeamContext } from "./team-resolver.mjs";
 import { createLinearCredentialStore } from "./linear-credential-store.mjs";
 import { formatCommand } from "./cli/operator-output.mjs";
 import { isLinearRateLimited } from "./linear-graphql-client.mjs";
@@ -38,12 +39,12 @@ import {
   runTriggeredReview,
 } from "./trigger-runner.mjs";
 import {
-  ARTIFACT_DOMAIN_MISMATCH_REASON,
+  ARTIFACT_TEAM_MISMATCH_REASON,
   ARTIFACT_PROJECT_MISMATCH_REASON,
   runDecomposition,
 } from "./linear-service.mjs";
 import * as triggerIdempotency from "./trigger-idempotency.mjs";
-import { materializeDomainResources } from "../../../engine/materialize.mjs";
+import { materializeTeamResources } from "../../../engine/materialize.mjs";
 import {
   defaultRunGit,
   registerGitRepoResourceKind,
@@ -253,7 +254,7 @@ export function gatewayLockPath(home = resolveTeamiHome()) {
 // Read-only gateway-lock liveness for the home screen / `gateway status` surfaces. It NEVER
 // acquires, writes, or breaks the lock — it only reports whether a live gateway currently holds
 // `.teami/gateway.lock`. A lock is "live" when it parses, names a valid pid +
-// created_at, and that pid is still alive (gatewayLockBreakReason === null); a missing, malformed,
+// acquisition time, and that pid is still alive (gatewayLockBreakReason === null); a missing, malformed,
 // or stale lock reports live:false. This is the reader S4 keys "listening" off of.
 export function readGatewayLockLiveness({
   repoRoot = null,
@@ -275,26 +276,20 @@ export function acquireGatewayLock({
   now = () => new Date(),
   isProcessAlive = defaultIsProcessAlive,
   installHandlers = true,
-  idGenerator = randomUUID,
+  acquireLock = acquireExclusiveFileLock,
+  fsApi = fs,
+  pid = process.pid,
 } = {}) {
   void repoRoot;
-  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-  const createdAt = toDate(now()).toISOString();
-  const token = idGenerator();
-  const created = tryCreateGatewayLock({ lockPath, token, createdAt });
-  if (created.ok) return gatewayLockHandle({ lockPath, token, installHandlers });
-  if (created.error?.code !== "EEXIST") throw created.error;
-
-  const existing = readGatewayLock(lockPath);
-  const breakReason = gatewayLockBreakReason({
-    lock: existing,
+  const reservation = acquireLock({
+    lockPath,
+    purpose: "gateway",
+    now: () => toDate(now()).getTime(),
+    pid,
     isProcessAlive,
+    fsApi,
   });
-  if (breakReason && removeGatewayLockIfTokenMatches({ lockPath, token: existing?.token })) {
-    const retry = tryCreateGatewayLock({ lockPath, token, createdAt });
-    if (retry.ok) return gatewayLockHandle({ lockPath, token, installHandlers });
-    if (retry.error?.code !== "EEXIST") throw retry.error;
-  }
+  if (reservation.ok) return gatewayLockHandle({ reservation, installHandlers });
 
   return {
     ok: false,
@@ -490,8 +485,8 @@ export async function runGatewayStartup(options = {}) {
     repoRoot = process.cwd(),
     home = resolveTeamiHome(),
     config,
-    registry = readDomainRegistry({ home }) || emptyDomainRegistry(),
-    domains = selectGatewayDomains({ registry }),
+    registry = readTeamRegistry({ home }) || emptyTeamRegistry(),
+    teams = selectGatewayTeams({ registry }),
     idempotency = triggerIdempotency,
     createLinearClient = createGatewayLinearClient,
     runReplayProject = replayPendingMutation,
@@ -499,18 +494,18 @@ export async function runGatewayStartup(options = {}) {
     emitStatus = createStatusEmitter(),
     state = gatewayState(options),
   } = options;
-  if (domains.length === 0) throw new Error(`no_active_domains: no active domains are configured. Run ${formatCommand("init")}.`);
+  if (teams.length === 0) throw new Error(`no_active_teams: no active teams are configured. Run ${formatCommand("init")}.`);
 
   recoverMutationState({ repoRoot, home });
 
   const replay = [];
-  for (const domain of domains) {
-    replay.push(...await drainReplayPendingForDomain({
+  for (const team of teams) {
+    replay.push(...await drainReplayPendingForTeam({
       ...options,
       repoRoot,
       config,
       registry,
-      domain,
+      team,
       idempotency,
       createLinearClient,
       runReplayProject,
@@ -529,58 +524,58 @@ export async function runGatewayPollIteration(options = {}) {
     repoRoot = process.cwd(),
     home = resolveTeamiHome(),
     config,
-    registry = readDomainRegistry({ home }) || emptyDomainRegistry(),
-    domains = selectGatewayDomains({ registry }),
+    registry = readTeamRegistry({ home }) || emptyTeamRegistry(),
+    teams = selectGatewayTeams({ registry }),
     state = gatewayState(options),
   } = options;
-  if (domains.length === 0) throw new Error(`no_active_domains: no active domains are configured. Run ${formatCommand("init")}.`);
+  if (teams.length === 0) throw new Error(`no_active_teams: no active teams are configured. Run ${formatCommand("init")}.`);
 
   const results = [];
-  for (const domain of domains) {
-    results.push(await pollGatewayDomain({
+  for (const team of teams) {
+    results.push(await pollGatewayTeam({
       ...options,
       repoRoot,
       config,
       registry,
-      domain,
+      team,
       state,
     }));
   }
-  return { domains: results };
+  return { teams: results };
 }
 
-export async function pollGatewayDomain(options = {}) {
+export async function pollGatewayTeam(options = {}) {
   const {
     repoRoot = process.cwd(),
     config,
     registry,
-    domain,
+    team,
     createLinearClient = createGatewayLinearClient,
     emitStatus = createStatusEmitter(),
     state = gatewayState(options),
     first = DEFAULT_CANDIDATE_PAGE_SIZE,
   } = options;
   const nowMs = timeMs(options.now);
-  const backoffUntil = state.domainBackoff.get(domain.id) || 0;
+  const backoffUntil = state.teamBackoff.get(team.id) || 0;
   if (backoffUntil > nowMs) {
     return {
-      domainId: domain.id,
+      teamRef: team.id,
       status: "backing_off",
       nextAttemptAt: backoffUntil,
     };
   }
 
-  const domainContext = buildDomainContext({ domain, config, repoRoot });
-  const cache = readLinearCache(domainContext.linear.cachePath);
-  const client = await createLinearClient({ config, repoRoot, domain, domainContext });
+  const teamContext = buildTeamContext({ team, config, repoRoot });
+  const cache = readLinearCache(teamContext.linear.cachePath);
+  const client = await createLinearClient({ config, repoRoot, team, teamContext });
   const processed = [];
-  const domainCtx = {
+  const teamCtx = {
     ...options,
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     cache,
     client,
     emitStatus,
@@ -590,14 +585,14 @@ export async function pollGatewayDomain(options = {}) {
     for (const descriptor of gatewayPollTargets()) {
       let after = null;
       do {
-        const page = await descriptor.listCandidates(domainCtx, { first, after });
+        const page = await descriptor.listCandidates(teamCtx, { first, after });
         for (const candidate of orderPollCandidates(page.candidates || [], descriptor.order)) {
-          const result = await descriptor.process(candidate, domainCtx);
-          const processedResult = withProcessedCandidateProjectId(result, candidate, domainCtx.pollScope);
+          const result = await descriptor.process(candidate, teamCtx);
+          const processedResult = withProcessedCandidateProjectId(result, candidate, teamCtx.pollScope);
           processed.push(processedResult);
           if (processedResult?.status === "rate_limited") {
             return {
-              domainId: domain.id,
+              teamRef: team.id,
               status: "rate_limited",
               nextAttemptAt: processedResult.nextAttemptAt,
               processed,
@@ -608,15 +603,15 @@ export async function pollGatewayDomain(options = {}) {
       } while (after);
     }
     return {
-      domainId: domain.id,
+      teamRef: team.id,
       status: "ok",
       processed,
     };
   } catch (error) {
     if (isRateLimitedError(options, error)) {
-      return handleRateLimitedDomain({
+      return handleRateLimitedTeam({
         ...options,
-        domainId: domain.id,
+        teamRef: team.id,
         projectId: null,
         error,
         emitStatus,
@@ -627,44 +622,44 @@ export async function pollGatewayDomain(options = {}) {
   }
 }
 
-export async function listPlannedProjectCandidates(domainCtx, page = {}) {
+export async function listPlannedProjectCandidates(teamCtx, page = {}) {
   const {
-    domain,
+    team,
     client,
     cache,
-  } = domainCtx;
+  } = teamCtx;
   const {
     first = DEFAULT_CANDIDATE_PAGE_SIZE,
     after = null,
   } = page;
-  assertValidPollScope(domainCtx.pollScope);
+  assertValidPollScope(teamCtx.pollScope);
   const plannedStateId = cache?.projectStatuses?.planned || null;
-  const candidatePage = await client.listPlannedProjectCandidates(domain.linear.team_id, {
+  const candidatePage = await client.listPlannedProjectCandidates(team.linear.team_id, {
     ...(plannedStateId ? { plannedStateId } : {}),
     first,
     after,
   });
-  return applyPollScopeToPage(candidatePage, domainCtx.pollScope, (candidate) => candidate?.id);
+  return applyPollScopeToPage(candidatePage, teamCtx.pollScope, (candidate) => candidate?.id);
 }
 
-function processPlannedProjectCandidate(candidate, domainCtx) {
+function processPlannedProjectCandidate(candidate, teamCtx) {
   const {
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     emitStatus,
     state,
-  } = domainCtx;
+  } = teamCtx;
   return processPlannedProject({
-    ...domainCtx,
+    ...teamCtx,
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     candidate,
     emitStatus,
@@ -680,14 +675,14 @@ function preserveCandidateOrder() {
   return 0;
 }
 
-export async function listIssueReplayMarkers(domainCtx, _page = {}) {
+export async function listIssueReplayMarkers(teamCtx, _page = {}) {
   const {
-    domain,
+    team,
     repoRoot = process.cwd(),
     home = resolveTeamiHome(),
     runStoreDir = null,
     idempotency = triggerIdempotency,
-  } = domainCtx;
+  } = teamCtx;
   if (typeof idempotency.listGitReplayPending !== "function") {
     return {
       candidates: [],
@@ -696,7 +691,7 @@ export async function listIssueReplayMarkers(domainCtx, _page = {}) {
   }
   return {
     candidates: await idempotency.listGitReplayPending({
-      domainId: domain.id,
+      teamRef: team.id,
       repoRoot,
       home,
       runStoreDir,
@@ -705,9 +700,9 @@ export async function listIssueReplayMarkers(domainCtx, _page = {}) {
   };
 }
 
-async function processIssueReplayMarker(marker, domainCtx) {
+async function processIssueReplayMarker(marker, teamCtx) {
   return sweepIssueReplayMarker({
-    ...domainCtx,
+    ...teamCtx,
     marker,
   });
 }
@@ -721,7 +716,7 @@ export async function sweepIssueReplayMarker(options = {}) {
     repoRoot = process.cwd(),
     home = resolveTeamiHome(),
     runStoreDir = null,
-    domain,
+    team,
     client,
     marker,
     idempotency = triggerIdempotency,
@@ -753,7 +748,7 @@ export async function sweepIssueReplayMarker(options = {}) {
   }
 
   const cleared = await idempotency.clearMutationIntent({
-    domainId: domain.id,
+    teamRef: team.id,
     objectType: "issue",
     objectId: issueId,
     runId: marker.runId,
@@ -778,49 +773,49 @@ async function parkRecordForMarkerSweep(options = {}) {
   return store.parkRecords({ issueId });
 }
 
-export async function listReadyIssueCandidates(domainCtx, page = {}) {
+export async function listReadyIssueCandidates(teamCtx, page = {}) {
   const {
-    domain,
+    team,
     client,
-  } = domainCtx;
+  } = teamCtx;
   const {
     first = DEFAULT_CANDIDATE_PAGE_SIZE,
     after = null,
   } = page;
-  assertValidPollScope(domainCtx.pollScope);
-  const readyStateId = await issueStatusIdForPollRole(domainCtx, "todo");
+  assertValidPollScope(teamCtx.pollScope);
+  const readyStateId = await issueStatusIdForPollRole(teamCtx, "todo");
   if (!readyStateId) {
     return applyPollScopeToPage(
       {
         candidates: [],
         pageInfo: { hasNextPage: false, endCursor: null },
       },
-      domainCtx.pollScope,
+      teamCtx.pollScope,
       candidateProjectId,
     );
   }
-  const candidatePage = await client.listReadyIssueCandidates(domain.linear.team_id, { readyStateId, first, after });
-  return applyPollScopeToPage(candidatePage, domainCtx.pollScope, candidateProjectId);
+  const candidatePage = await client.listReadyIssueCandidates(team.linear.team_id, { readyStateId, first, after });
+  return applyPollScopeToPage(candidatePage, teamCtx.pollScope, candidateProjectId);
 }
 
-function processReadyIssueCandidate(candidate, domainCtx) {
+function processReadyIssueCandidate(candidate, teamCtx) {
   const {
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     emitStatus,
     state,
-  } = domainCtx;
+  } = teamCtx;
   return processReadyIssue({
-    ...domainCtx,
+    ...teamCtx,
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     candidate,
     emitStatus,
@@ -839,22 +834,22 @@ export function oldestReadyIssueFirst(a, b) {
   );
 }
 
-async function processInProgressIssueCandidate(candidate, domainCtx) {
+async function processInProgressIssueCandidate(candidate, teamCtx) {
   const {
     repoRoot = process.cwd(),
     home = resolveTeamiHome(),
     runStoreDir = null,
     config = null,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     cache,
     client,
     emitStatus = createStatusEmitter(),
-    state = gatewayState(domainCtx),
+    state = gatewayState(teamCtx),
     runDeps = null,
     store = null,
-  } = domainCtx;
+  } = teamCtx;
   const issueId = candidate?.id;
   if (!issueId) return { action: "skipped", reason: "issue_id_missing" };
   if (state.inFlight.has(issueId)) {
@@ -870,7 +865,7 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
   if (await latestExecutionWakeLeaseIsLive({
     store: readyStore,
     run: priorRun,
-    now: domainCtx.now,
+    now: teamCtx.now,
   })) {
     return {
       action: "skipped",
@@ -898,15 +893,15 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
     const decision = await decideReadyIssueFixMode({
       issueId,
       issueContext,
-      domainContext,
+      teamContext,
       config,
       repoRoot,
       runStoreDir,
       store: readyStore,
       prAdapter: runDeps?.prAdapter || null,
       createPrAdapter: runDeps?.createPrAdapter || null,
-      resolveSessionHandle: domainCtx.resolveSessionHandle,
-      isRunResumable: domainCtx.isRunResumable,
+      resolveSessionHandle: teamCtx.resolveSessionHandle,
+      isRunResumable: teamCtx.isRunResumable,
       cache,
       allowColdReconstruct: true,
     }) || readyFixEscalationDecision({
@@ -918,17 +913,17 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
     if (decision.action === "warm_resume") {
       dispatchLaunched = true;
       return processWarmResumeIssueDecision({
-        ...domainCtx,
+        ...teamCtx,
         repoRoot,
         runStoreDir,
         registry,
-        domain,
-        domainContext,
+        team,
+        teamContext,
         client,
         issueId,
         issueContext,
         decision,
-        runWarmResumeIssue: domainCtx.runWarmResumeIssue || runWarmResumeIssueSyntheticWake,
+        runWarmResumeIssue: teamCtx.runWarmResumeIssue || runWarmResumeIssueSyntheticWake,
         emitStatus,
         state,
         store: readyStore,
@@ -941,11 +936,11 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
       cache,
       issueId,
       issueContext,
-      domainContext,
+      teamContext,
       decision,
     });
     emitStatus({
-      domainId: domain.id,
+      teamRef: team.id,
       issueId,
       state: "resume_attention",
       reason: decision.reason,
@@ -959,10 +954,10 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
       escalation,
     };
   } catch (error) {
-    if (isRateLimitedError(domainCtx, error)) {
-      return handleRateLimitedDomain({
-        ...domainCtx,
-        domainId: domain.id,
+    if (isRateLimitedError(teamCtx, error)) {
+      return handleRateLimitedTeam({
+        ...teamCtx,
+        teamRef: team.id,
         projectId: null,
         error,
         emitStatus,
@@ -975,46 +970,46 @@ async function processInProgressIssueCandidate(candidate, domainCtx) {
   }
 }
 
-export async function listInReviewIssueCandidates(domainCtx, page = {}) {
-  return listIssueCandidatesForStatusRole(domainCtx, "in_review", page);
+export async function listInReviewIssueCandidates(teamCtx, page = {}) {
+  return listIssueCandidatesForStatusRole(teamCtx, "in_review", page);
 }
 
-export async function listHumanReviewIssueCandidates(domainCtx, page = {}) {
-  return listIssueCandidatesForStatusRole(domainCtx, "human_review", page);
+export async function listHumanReviewIssueCandidates(teamCtx, page = {}) {
+  return listIssueCandidatesForStatusRole(teamCtx, "human_review", page);
 }
 
-async function listIssueCandidatesForStatusRole(domainCtx, role, page = {}) {
+async function listIssueCandidatesForStatusRole(teamCtx, role, page = {}) {
   const {
-    domain,
+    team,
     client,
-  } = domainCtx;
+  } = teamCtx;
   const {
     first = DEFAULT_CANDIDATE_PAGE_SIZE,
     after = null,
   } = page;
-  assertValidPollScope(domainCtx.pollScope);
-  const stateId = await issueStatusIdForPollRole(domainCtx, role);
+  assertValidPollScope(teamCtx.pollScope);
+  const stateId = await issueStatusIdForPollRole(teamCtx, role);
   if (!stateId) {
     return applyPollScopeToPage(
       {
         candidates: [],
         pageInfo: { hasNextPage: false, endCursor: null },
       },
-      domainCtx.pollScope,
+      teamCtx.pollScope,
       candidateProjectId,
     );
   }
-  const candidatePage = await client.listReadyIssueCandidates(domain.linear.team_id, {
+  const candidatePage = await client.listReadyIssueCandidates(team.linear.team_id, {
     readyStateId: stateId,
     first,
     after,
   });
-  return applyPollScopeToPage(candidatePage, domainCtx.pollScope, candidateProjectId);
+  return applyPollScopeToPage(candidatePage, teamCtx.pollScope, candidateProjectId);
 }
 
-export async function listMergeGateWatchlistCandidates(domainCtx, _page = {}) {
-  assertValidPollScope(domainCtx.pollScope);
-  const store = mergeGateStore(domainCtx);
+export async function listMergeGateWatchlistCandidates(teamCtx, _page = {}) {
+  assertValidPollScope(teamCtx.pollScope);
+  const store = mergeGateStore(teamCtx);
   if (typeof store?.parkRecords !== "function") {
     return {
       candidates: [],
@@ -1028,17 +1023,17 @@ export async function listMergeGateWatchlistCandidates(domainCtx, _page = {}) {
   };
 }
 
-export async function listInProgressIssueCandidates(domainCtx, page = {}) {
+export async function listInProgressIssueCandidates(teamCtx, page = {}) {
   const {
-    domain,
+    team,
     client,
     cache,
-  } = domainCtx;
+  } = teamCtx;
   const {
     first = DEFAULT_CANDIDATE_PAGE_SIZE,
     after = null,
   } = page;
-  assertValidPollScope(domainCtx.pollScope);
+  assertValidPollScope(teamCtx.pollScope);
   const inProgressStateId = cache?.issueStatuses?.in_progress || null;
   if (!inProgressStateId) {
     return applyPollScopeToPage(
@@ -1046,49 +1041,49 @@ export async function listInProgressIssueCandidates(domainCtx, page = {}) {
         candidates: [],
         pageInfo: { hasNextPage: false, endCursor: null },
       },
-      domainCtx.pollScope,
+      teamCtx.pollScope,
       candidateProjectId,
     );
   }
-  const candidatePage = await client.listReadyIssueCandidates(domain.linear.team_id, {
+  const candidatePage = await client.listReadyIssueCandidates(team.linear.team_id, {
     readyStateId: inProgressStateId,
     first,
     after,
   });
-  return applyPollScopeToPage(candidatePage, domainCtx.pollScope, candidateProjectId);
+  return applyPollScopeToPage(candidatePage, teamCtx.pollScope, candidateProjectId);
 }
 
-async function issueStatusIdForPollRole(domainCtx, role) {
+async function issueStatusIdForPollRole(teamCtx, role) {
   const {
     config,
-    domain,
+    team,
     client,
     cache,
-  } = domainCtx;
+  } = teamCtx;
   const cachedId = cache?.issueStatuses?.[role] || null;
   if (cachedId) return cachedId;
-  const issueStatuses = await resolveIssueStatuses(client, config, domain.linear.team_id, cache);
+  const issueStatuses = await resolveIssueStatuses(client, config, team.linear.team_id, cache);
   return issueStatuses[role]?.id || null;
 }
 
-async function processInReviewIssueCandidate(candidate, domainCtx) {
+async function processInReviewIssueCandidate(candidate, teamCtx) {
   const {
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     emitStatus,
     state,
-  } = domainCtx;
+  } = teamCtx;
   const gateResult = await processMergeGateIssueCandidate(candidate, {
-    ...domainCtx,
+    ...teamCtx,
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     emitStatus,
     state,
@@ -1097,12 +1092,12 @@ async function processInReviewIssueCandidate(candidate, domainCtx) {
   });
   if (gateResult?.action !== "review_loop") return gateResult;
   return processReviewIssue({
-    ...domainCtx,
+    ...teamCtx,
     repoRoot,
     config,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     candidate,
     emitStatus,
@@ -1114,16 +1109,16 @@ function inReviewIssueInFlightKey(candidate) {
   return candidate?.id || null;
 }
 
-function processHumanReviewIssueCandidate(candidate, domainCtx) {
+function processHumanReviewIssueCandidate(candidate, teamCtx) {
   return processMergeGateIssueCandidate(candidate, {
-    ...domainCtx,
+    ...teamCtx,
     source: "human_review_status",
   });
 }
 
-function processMergeGateWatchlistCandidate(candidate, domainCtx) {
+function processMergeGateWatchlistCandidate(candidate, teamCtx) {
   return processMergeGateIssueCandidate(candidate, {
-    ...domainCtx,
+    ...teamCtx,
     source: "park_record_watchlist",
   });
 }
@@ -1206,8 +1201,8 @@ export async function processPlannedProject(options = {}) {
   const {
     repoRoot = process.cwd(),
     runStoreDir = null,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     candidate,
     project = null,
@@ -1229,7 +1224,7 @@ export async function processPlannedProject(options = {}) {
     const snapshot = project || await client.getProjectSnapshotContext(projectId);
     const fingerprint = computeFingerprint(snapshot);
     const decision = await decidePlannedProject({
-      domainId: domain.id,
+      teamRef: team.id,
       projectId,
       fingerprint,
       repoRoot,
@@ -1242,8 +1237,8 @@ export async function processPlannedProject(options = {}) {
         ...options,
         repoRoot,
         runStoreDir,
-        domain,
-        domainContext,
+        team,
+        teamContext,
         client,
         projectId,
         pending: decision.replay,
@@ -1255,7 +1250,7 @@ export async function processPlannedProject(options = {}) {
 
     if (decision.action === "suppress") {
       emitStatus({
-        domainId: domain.id,
+        teamRef: team.id,
         projectId,
         state: "suppressed",
         reason: decision.suppression.reason,
@@ -1273,8 +1268,8 @@ export async function processPlannedProject(options = {}) {
       ...options,
       repoRoot,
       runStoreDir,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       client,
       projectId,
       fingerprint,
@@ -1286,9 +1281,9 @@ export async function processPlannedProject(options = {}) {
     });
   } catch (error) {
     if (isRateLimitedError(options, error)) {
-      return handleRateLimitedDomain({
+      return handleRateLimitedTeam({
         ...options,
-        domainId: domain.id,
+        teamRef: team.id,
         projectId,
         error,
         emitStatus,
@@ -1307,8 +1302,8 @@ export async function processReadyIssue(options = {}) {
     runStoreDir = null,
     config = null,
     cache = null,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     candidate,
     issue = null,
@@ -1345,10 +1340,10 @@ export async function processReadyIssue(options = {}) {
     readyEligibilityTraceSink = traceSink || createReadyEligibilityTraceSink({ createTraceSink, repoRoot });
     shouldShutdownReadyEligibilityTraceSink = !traceSink && Boolean(readyEligibilityTraceSink);
     const decision = await decideReadyIssue({
-      domainId: domain.id,
+      teamRef: team.id,
       issueId,
       issueContext,
-      domainContext,
+      teamContext,
       config,
       cache,
       fingerprint,
@@ -1368,8 +1363,8 @@ export async function processReadyIssue(options = {}) {
         ...options,
         repoRoot,
         runStoreDir,
-        domain,
-        domainContext,
+        team,
+        teamContext,
         client,
         issueId,
         issueContext,
@@ -1386,8 +1381,8 @@ export async function processReadyIssue(options = {}) {
         ...options,
         repoRoot,
         runStoreDir,
-        domain,
-        domainContext,
+        team,
+        teamContext,
         client,
         issueId,
         issueContext,
@@ -1400,7 +1395,7 @@ export async function processReadyIssue(options = {}) {
 
     if (decision.action === "suppress") {
       emitStatus({
-        domainId: domain.id,
+        teamRef: team.id,
         issueId,
         state: "suppressed",
         reason: decision.suppression.reason,
@@ -1421,11 +1416,11 @@ export async function processReadyIssue(options = {}) {
         cache,
         issueId,
         issueContext,
-        domainContext,
+        teamContext,
         decision,
       });
       emitStatus({
-        domainId: domain.id,
+        teamRef: team.id,
         issueId,
         state: "resume_attention",
         reason: decision.reason,
@@ -1467,8 +1462,8 @@ export async function processReadyIssue(options = {}) {
       ...options,
       repoRoot,
       runStoreDir,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       client,
       issueId,
       issueContext,
@@ -1480,9 +1475,9 @@ export async function processReadyIssue(options = {}) {
     });
   } catch (error) {
     if (isRateLimitedError(options, error)) {
-      return handleRateLimitedDomain({
+      return handleRateLimitedTeam({
         ...options,
-        domainId: domain.id,
+        teamRef: team.id,
         projectId: null,
         error,
         emitStatus,
@@ -1500,8 +1495,8 @@ export async function processReviewIssue(options = {}) {
   const {
     repoRoot = process.cwd(),
     runStoreDir = null,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     candidate,
     issue = null,
@@ -1527,10 +1522,10 @@ export async function processReviewIssue(options = {}) {
     const issueContext = issue || await client.getIssueContext(issueId);
     const reviewStore = store || runDeps?.store || createLocalTriggerStore({ repoRoot, home: options.home });
     const decision = await decideReviewIssue({
-      domainId: domain.id,
+      teamRef: team.id,
       issueId,
       issueContext,
-      domainContext,
+      teamContext,
       repoRoot,
       runStoreDir,
       store: reviewStore,
@@ -1553,8 +1548,8 @@ export async function processReviewIssue(options = {}) {
       ...options,
       repoRoot,
       runStoreDir,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       client,
       issueId,
       issueContext,
@@ -1566,9 +1561,9 @@ export async function processReviewIssue(options = {}) {
     });
   } catch (error) {
     if (isRateLimitedError(options, error)) {
-      return handleRateLimitedDomain({
+      return handleRateLimitedTeam({
         ...options,
-        domainId: domain.id,
+        teamRef: team.id,
         projectId: null,
         error,
         emitStatus,
@@ -1583,7 +1578,7 @@ export async function processReviewIssue(options = {}) {
 
 export async function processMergeGateIssueCandidate(candidate, options = {}) {
   const {
-    domain,
+    team,
     emitStatus = createStatusEmitter(),
     state = gatewayState(options),
     reviewLoopFallback = false,
@@ -1608,7 +1603,7 @@ export async function processMergeGateIssueCandidate(candidate, options = {}) {
       };
     }
     return surfaceMergeGateDecision({
-      domain,
+      team,
       issueId,
       emitStatus,
       reason: `merge gate snapshot unavailable: ${error?.message || "unknown error"}`,
@@ -1650,7 +1645,7 @@ export async function processMergeGateIssueCandidate(candidate, options = {}) {
   try {
     return await dispatchMergeGateDecision({
       ...options,
-      domain,
+      team,
       emitStatus,
       issueId,
       read,
@@ -1660,7 +1655,7 @@ export async function processMergeGateIssueCandidate(candidate, options = {}) {
   } catch (error) {
     if (isRateLimitedError(options, error)) throw error;
     return surfaceMergeGateDecision({
-      domain,
+      team,
       issueId,
       emitStatus,
       reason: `merge gate dispatch failed: ${error?.message || "unknown error"}`,
@@ -1679,7 +1674,7 @@ async function readMergeGateDecisionForCandidate({
   client,
   config = null,
   cache = null,
-  domainContext = null,
+  teamContext = null,
   runDeps = null,
   store,
   prAdapter = null,
@@ -1713,7 +1708,7 @@ async function readMergeGateDecisionForCandidate({
   }
   const prContext = await resolveMergeGatePrContext({
     issueContext,
-    domainContext,
+    teamContext,
     parkRecord,
     candidate,
     // The factory's own produced identity outranks branch-name discovery: a
@@ -1733,7 +1728,7 @@ async function readMergeGateDecisionForCandidate({
     client,
     config,
     cache,
-    domainContext,
+    teamContext,
     issueId,
     issueContext,
     store: effectiveStore,
@@ -1788,7 +1783,7 @@ function mergeGateHumanReviewLabelId({ config = null, cache = null } = {}) {
 
 async function resolveMergeGatePrContext({
   issueContext,
-  domainContext = null,
+  teamContext = null,
   parkRecord = null,
   candidate = null,
   producedPrNumber = null,
@@ -1803,7 +1798,7 @@ async function resolveMergeGatePrContext({
     candidate?.pullRequestNumber ??
     producedPrNumber,
   );
-  const repoIdentity = resolveMergeGateRepoIdentity({ issueContext, domainContext, prAdapter });
+  const repoIdentity = resolveMergeGateRepoIdentity({ issueContext, teamContext, prAdapter });
   const adapter = await resolveReadyFixPrAdapter({
     repoIdentity,
     prAdapter,
@@ -1836,9 +1831,9 @@ async function resolveMergeGatePrContext({
   };
 }
 
-function resolveMergeGateRepoIdentity({ issueContext, domainContext = null, prAdapter = null } = {}) {
+function resolveMergeGateRepoIdentity({ issueContext, teamContext = null, prAdapter = null } = {}) {
   try {
-    return resourcesToRepoIdentity(domainContext, {
+    return resourcesToRepoIdentity(teamContext, {
       resourceId: resourceIdFromIssueContext(issueContext),
     });
   } catch (error) {
@@ -1849,7 +1844,7 @@ function resolveMergeGateRepoIdentity({ issueContext, domainContext = null, prAd
 
 async function dispatchMergeGateDecision(options = {}) {
   const {
-    domain,
+    team,
     emitStatus = createStatusEmitter(),
     issueId,
     read,
@@ -1859,7 +1854,7 @@ async function dispatchMergeGateDecision(options = {}) {
 
   if (decision.action === "surface") {
     return surfaceMergeGateDecision({
-      domain,
+      team,
       issueId,
       emitStatus,
       reason: decision.reason,
@@ -1871,7 +1866,7 @@ async function dispatchMergeGateDecision(options = {}) {
   if (decision.action === "none" && decision.deleteParkRecord === true) {
     const deleted = await store.deleteParkRecord(issueId);
     emitMergeGateStatus({
-      domain,
+      team,
       emitStatus,
       issueId,
       state: "working",
@@ -1898,7 +1893,7 @@ async function dispatchMergeGateDecision(options = {}) {
       parked_at: toDate(typeof options.now === "function" ? options.now() : options.now || new Date()).toISOString(),
     });
     emitMergeGateStatus({
-      domain,
+      team,
       emitStatus,
       issueId,
       state: "working",
@@ -1924,7 +1919,7 @@ async function dispatchMergeGateDecision(options = {}) {
 
   if (decision.action === "invalidate") {
     emitMergeGateStatus({
-      domain,
+      team,
       emitStatus,
       issueId,
       state: "working",
@@ -1950,7 +1945,7 @@ async function dispatchMergeGateDecision(options = {}) {
   if (decision.action === "bounce") {
     const effect = decision.bounceTo === "todo" ? gateBounceToTodoEffect : gateBounceToInReviewEffect;
     emitMergeGateStatus({
-      domain,
+      team,
       emitStatus,
       issueId,
       state: "working",
@@ -1976,7 +1971,7 @@ async function dispatchMergeGateDecision(options = {}) {
 
   if (decision.action === "merge") {
     emitMergeGateStatus({
-      domain,
+      team,
       emitStatus,
       issueId,
       state: "working",
@@ -2007,7 +2002,7 @@ async function dispatchMergeGateDecision(options = {}) {
   }
 
   return surfaceMergeGateDecision({
-    domain,
+    team,
     issueId,
     emitStatus,
     reason: `unhandled merge gate action: ${decision.action}`,
@@ -2058,15 +2053,15 @@ async function applyMergeGateMoveEffects(options = {}) {
 
 async function applyMergeGateMergeEffects(options = {}) {
   const {
-    domain,
-    domainContext,
+    team,
+    teamContext,
     read,
     store,
     effects,
   } = options;
   const run = await startMergeGateRun({
-    domain,
-    domainContext,
+    team,
+    teamContext,
     store,
     issueId: read.issueId,
     now: options.now,
@@ -2164,19 +2159,19 @@ function mergeGateBridgeExpectedSourceRole(ctx = {}) {
 }
 
 async function startMergeGateRun({
-  domain,
-  domainContext = null,
+  team,
+  teamContext = null,
   store,
   issueId,
   now = () => new Date(),
 } = {}) {
   if (typeof store?.claimSyntheticIssueWake !== "function") throw new Error("merge_gate_store_claim_missing");
   if (typeof store?.markWakeRunning !== "function") throw new Error("merge_gate_store_mark_running_missing");
-  const runnerId = `local-runner:${domainContext?.domainId || domain?.id || "unknown"}`;
+  const runnerId = `local-runner:${teamContext?.teamRef || team?.id || "unknown"}`;
   const claim = await store.claimSyntheticIssueWake({
-    domainId: domainContext?.domainId || domain?.id,
-    workspaceId: domainContext?.linear?.workspaceId || domain?.linear?.workspace_id,
-    teamId: domainContext?.linear?.teamId || domain?.linear?.team_id,
+    teamRef: teamContext?.teamRef || team?.id,
+    workspaceId: teamContext?.linear?.workspaceId || team?.linear?.workspace_id,
+    teamId: teamContext?.linear?.teamId || team?.linear?.team_id,
     objectId: issueId,
     workflowType: MERGE_GATE_WORKFLOW_TYPE,
     triggerType: MERGE_GATE_TRIGGER_TYPE,
@@ -2191,7 +2186,7 @@ async function startMergeGateRun({
     runnerId,
     leaseToken: claim.leaseToken,
     runId,
-    domainId: domainContext?.domainId || domain?.id,
+    teamRef: teamContext?.teamRef || team?.id,
     at,
   });
   if (running?.ok !== true) throw new Error(running?.reason || "merge_gate_wake_start_failed");
@@ -2207,7 +2202,7 @@ function mergeGateEffectContext({
   client,
   config = null,
   cache = null,
-  domainContext = null,
+  teamContext = null,
   issueId,
   issueContext = null,
   store = null,
@@ -2224,7 +2219,7 @@ function mergeGateEffectContext({
     client,
     config,
     cache,
-    domainContext,
+    teamContext,
     issue: issueContext,
     issueId,
     linearIssueId: issueId,
@@ -2253,8 +2248,8 @@ function mergeGateTeamIdFromContext(ctx = {}) {
     ctx.shape?.team?.id ||
     ctx.cache?.teamId ||
     ctx.linearCache?.teamId ||
-    ctx.domainContext?.linear?.teamId ||
-    ctx.domainContext?.linear?.team_id ||
+    ctx.teamContext?.linear?.teamId ||
+    ctx.teamContext?.linear?.team_id ||
     ctx.issue?.teamId ||
     ctx.issue?.team?.id ||
     ctx.linearIssue?.teamId ||
@@ -2279,7 +2274,7 @@ function mergeGateTrace({ issueId, decision = null, snapshot = null, runId = nul
 }
 
 function surfaceMergeGateDecision({
-  domain,
+  team,
   issueId,
   emitStatus = createStatusEmitter(),
   reason,
@@ -2288,7 +2283,7 @@ function surfaceMergeGateDecision({
   error = null,
 } = {}) {
   emitMergeGateStatus({
-    domain,
+    team,
     emitStatus,
     issueId,
     state: "degraded",
@@ -2308,7 +2303,7 @@ function surfaceMergeGateDecision({
 }
 
 function emitMergeGateStatus({
-  domain,
+  team,
   emitStatus = createStatusEmitter(),
   issueId,
   state,
@@ -2317,7 +2312,7 @@ function emitMergeGateStatus({
   snapshot = null,
 } = {}) {
   emitStatus({
-    domainId: domain?.id || null,
+    teamRef: team?.id || null,
     issueId,
     state,
     reason,
@@ -2362,7 +2357,7 @@ function mergeGateStore(options = {}) {
 }
 
 export async function decidePlannedProject({
-  domainId,
+  teamRef,
   projectId,
   fingerprint,
   repoRoot = process.cwd(),
@@ -2371,7 +2366,7 @@ export async function decidePlannedProject({
   idempotency = triggerIdempotency,
 } = {}) {
   const replay = await idempotency.readReplayPending({
-    domainId,
+    teamRef,
     projectId,
     repoRoot,
     home,
@@ -2385,7 +2380,7 @@ export async function decidePlannedProject({
   }
 
   const suppression = await idempotency.readSuppression({
-    domainId,
+    teamRef,
     projectId,
     fingerprint,
     repoRoot,
@@ -2403,10 +2398,10 @@ export async function decidePlannedProject({
 }
 
 export async function decideReadyIssue({
-  domainId,
+  teamRef,
   issueId,
   issueContext,
-  domainContext = null,
+  teamContext = null,
   config = null,
   cache = null,
   fingerprint,
@@ -2426,7 +2421,7 @@ export async function decideReadyIssue({
   const fixMode = await decideReadyIssueFixMode({
     issueId,
     issueContext,
-    domainContext,
+    teamContext,
     config,
     repoIdentity,
     repoRoot,
@@ -2444,7 +2439,7 @@ export async function decideReadyIssue({
 
   const replay = typeof idempotency.readGitReplayPending === "function"
     ? await idempotency.readGitReplayPending({
-        domainId,
+        teamRef,
         objectId: issueId,
         repoRoot,
         home,
@@ -2461,14 +2456,14 @@ export async function decideReadyIssue({
   const eligibilityOptions = readyIssueEligibilityOptions({
     config,
     cache,
-    allowedRepoPacket: domainContext?.allowedRepoPacket,
+    allowedRepoPacket: teamContext?.allowedRepoPacket,
   });
   const eligibility = isReadyIssueEligible(issueContext, eligibilityOptions);
   await emitReadyIssueEligibilityTrace({
     traceSink,
-    domainId,
+    teamRef,
     issueId,
-    domainContext,
+    teamContext,
     eligibility,
   }).catch(() => null);
   if (!eligibility.eligible) {
@@ -2498,7 +2493,7 @@ export async function decideReadyIssue({
 
   const suppression = typeof idempotency.readSuppression === "function"
     ? await idempotency.readSuppression({
-        domainId,
+        teamRef,
         objectType: "issue",
         objectId: issueId,
         fingerprint,
@@ -2519,9 +2514,9 @@ export async function decideReadyIssue({
 
 async function emitReadyIssueEligibilityTrace({
   traceSink = null,
-  domainId = null,
+  teamRef = null,
   issueId = null,
-  domainContext = null,
+  teamContext = null,
   eligibility = null,
 } = {}) {
   const routing = eligibility?.resourceRouting;
@@ -2535,10 +2530,10 @@ async function emitReadyIssueEligibilityTrace({
     allowed_resource_ids: routing.allowed_resource_ids,
     reason: routing.reason,
     "workflow.name": "ready_issue_eligibility",
-    "teami.domain_id": domainContext?.trace?.domain_id || domainId,
-    "teami.behavior_repo_id": domainContext?.trace?.behavior_repo_id,
-    "linear.workspace_id": domainContext?.trace?.workspace_id || domainContext?.linear?.workspaceId,
-    "linear.team_id": domainContext?.trace?.team_id || domainContext?.linear?.teamId,
+    "teami.team_ref": teamContext?.trace?.team_ref || teamRef,
+    "teami.behavior_repo_id": teamContext?.trace?.behavior_repo_id,
+    "linear.workspace_id": teamContext?.trace?.workspace_id || teamContext?.linear?.workspaceId,
+    "linear.team_id": teamContext?.trace?.team_id || teamContext?.linear?.teamId,
     "linear.issue_id": issueId,
   });
   const trace = createTrace("ready_issue_eligibility", attributes);
@@ -2548,9 +2543,9 @@ async function emitReadyIssueEligibilityTrace({
 
   const wake = {
     id: `ready-issue-eligibility:${issueId || "unknown"}`,
-    domain_id: domainContext?.trace?.domain_id || domainId || null,
-    workspace_id: domainContext?.trace?.workspace_id || domainContext?.linear?.workspaceId || null,
-    team_id: domainContext?.trace?.team_id || domainContext?.linear?.teamId || null,
+    team_ref: teamContext?.trace?.team_ref || teamRef || null,
+    workspace_id: teamContext?.trace?.workspace_id || teamContext?.linear?.workspaceId || null,
+    team_id: teamContext?.trace?.team_id || teamContext?.linear?.teamId || null,
     object_id: issueId,
     workflow_type: "gateway",
     trigger_type: EXECUTION_READY_TRIGGER_TYPE,
@@ -2565,7 +2560,7 @@ async function emitReadyIssueEligibilityTrace({
     },
     runId: `ready-issue-eligibility-${issueId || "unknown"}-${Date.now()}`,
     workspaceId: wake.workspace_id,
-    domainContext,
+    teamContext,
   });
   return traceSink.finishRun?.({
     session,
@@ -2590,7 +2585,7 @@ function createReadyEligibilityTraceSink({ createTraceSink = null, repoRoot = pr
 async function decideReadyIssueFixMode({
   issueId,
   issueContext,
-  domainContext = null,
+  teamContext = null,
   config = null,
   repoIdentity = null,
   repoRoot = process.cwd(),
@@ -2695,10 +2690,10 @@ async function decideReadyIssueFixMode({
     const selectedResourceId = selectedReviewResourceId({
       issueContext,
       producedIdentity: priorProducedIdentity,
-      domainContext,
+      teamContext,
       repoIdentity,
     });
-    resolvedRepoIdentity = repoIdentity || resourcesToRepoIdentity(domainContext, {
+    resolvedRepoIdentity = repoIdentity || resourcesToRepoIdentity(teamContext, {
       resourceId: selectedResourceId,
     });
     adapter = await resolveReadyFixPrAdapter({
@@ -2827,7 +2822,7 @@ async function decideReadyIssueFixMode({
       repoRoot,
       runStoreDir,
       issueContext,
-      domainContext,
+      teamContext,
       repoIdentity: resolvedRepoIdentity,
       location,
     }),
@@ -2837,10 +2832,10 @@ async function decideReadyIssueFixMode({
 }
 
 export async function decideReviewIssue({
-  domainId,
+  teamRef,
   issueId,
   issueContext,
-  domainContext,
+  teamContext,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   runStoreDir = null,
@@ -2854,7 +2849,7 @@ export async function decideReviewIssue({
   now = () => new Date(),
   recentExecutionGraceMs = REVIEW_PR_CREATION_GRACE_MS,
 } = {}) {
-  void domainId;
+  void teamRef;
   const recentExecutionRun = latestExecutionRunForReview({ store, issueId });
   const producedIdentity = producedPrIdentityForRun({
     run: recentExecutionRun,
@@ -2864,10 +2859,10 @@ export async function decideReviewIssue({
   const selectedResourceId = selectedReviewResourceId({
     issueContext,
     producedIdentity,
-    domainContext,
+    teamContext,
     repoIdentity,
   });
-  const resolvedRepoIdentity = repoIdentity || resourcesToRepoIdentity(domainContext, {
+  const resolvedRepoIdentity = repoIdentity || resourcesToRepoIdentity(teamContext, {
     resourceId: selectedResourceId,
   });
   const producedLocation = shouldLocateProducedReviewPr(producedIdentity)
@@ -2961,7 +2956,7 @@ export async function replayPendingMutation({
   cache,
   projectId,
   pending,
-  domainContext,
+  teamContext,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   runStoreDir = null,
@@ -2973,9 +2968,9 @@ export async function replayPendingMutation({
       client,
       // Replay must resolve the same Linear team as the fresh path. The raw config
       // carries only a placeholder team, so resolveLinearShape would throw
-      // "Expected exactly one team, found 0"; merge the domain's team in (mirrors
-      // runFreshSyntheticWake's configWithDomainLinearTeam).
-      config: configWithDomainLinearTeam(config, domainContext),
+      // "Expected exactly one team, found 0"; merge the team's team in (mirrors
+      // runFreshSyntheticWake's configWithTeamLinearTeam).
+      config: configWithTeamLinearTeam(config, teamContext),
       cache,
       projectId,
       runId: pending.runId,
@@ -2983,16 +2978,16 @@ export async function replayPendingMutation({
       home,
       runStoreDir,
       retryCommit: true,
-      domainContext,
+      teamContext,
       traceContext: {
-        domain_id: domainContext?.domainId || pending.domainId,
+        team_ref: teamContext?.teamRef || pending.teamRef,
         source_object_id: projectId,
         trigger_type: "linear.project.planned",
       },
     });
     if (TERMINAL_REPLAY_STATUSES.has(result?.status)) {
       await clearMutationIntent({
-        domainId: pending.domainId,
+        teamRef: pending.teamRef,
         projectId,
         runId: pending.runId,
         repoRoot,
@@ -3039,8 +3034,8 @@ export async function runFreshSyntheticWake({
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   registry,
-  domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
+  team,
+  teamContext = buildTeamContext({ team, config, repoRoot, home }),
   projectId,
   createStore = createLocalTriggerStore,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
@@ -3048,19 +3043,20 @@ export async function runFreshSyntheticWake({
   runTriggeredDecompositionFn = runTriggeredDecomposition,
   createRuntimeExecutor = createProcessRuntimeExecutor,
 } = {}) {
-  const domainConfig = configWithDomainLinearTeam(config, domainContext);
-  const cache = readLinearCache(domainContext.linear.cachePath);
+  const teamConfig = configWithTeamLinearTeam(config, teamContext);
+  const cache = readLinearCache(teamContext.linear.cachePath);
   const credentialStore = createLinearCredentialStore({
     config,
     repoRoot,
-    domainContext,
+    home,
+    teamContext,
   });
-  const runnerId = `local-runner:${domainContext.domainId}`;
+  const runnerId = `local-runner:${teamContext.teamRef}`;
   const store = createStore({ repoRoot, home });
   const claim = await store.claimSyntheticWake({
-    domainId: domainContext.domainId,
-    workspaceId: domainContext.linear.workspaceId,
-    teamId: domainContext.linear.teamId,
+    teamRef: teamContext.teamRef,
+    workspaceId: teamContext.linear.workspaceId,
+    teamId: teamContext.linear.teamId,
     projectId,
   });
   if (!claim.ok) {
@@ -3081,7 +3077,7 @@ export async function runFreshSyntheticWake({
     return await runTriggeredDecompositionFn({
       store,
       runnerId,
-      workspaceId: domainContext.linear.workspaceId,
+      workspaceId: teamContext.linear.workspaceId,
       linearClientFactory: async () => createSetupGraphqlClient({
         config,
         repoRoot,
@@ -3089,7 +3085,7 @@ export async function runFreshSyntheticWake({
         allowBrowserAuth: false,
         allowRefresh: true,
       }).client,
-      config: domainConfig,
+      config: teamConfig,
       cache,
       runtimeExecutor,
       repoRoot,
@@ -3098,7 +3094,7 @@ export async function runFreshSyntheticWake({
       runnerVersion: process.version,
       capabilities: config?.runner?.required_capabilities || DECOMPOSITION_REQUIRED_CAPABILITIES,
       traceSink,
-      domainContext,
+      teamContext,
       registry,
       claim,
     });
@@ -3114,7 +3110,7 @@ export async function replayPendingExecutionIssue(options = {}) {
     issueId,
     issueContext = null,
     pending,
-    domainContext,
+    teamContext,
     repoRoot = process.cwd(),
     home = resolveTeamiHome(),
     runStoreDir = null,
@@ -3122,7 +3118,7 @@ export async function replayPendingExecutionIssue(options = {}) {
     idempotency = triggerIdempotency,
   } = options;
   const target = pending || await idempotency.readGitReplayPending?.({
-    domainId: domainContext?.domainId,
+    teamRef: teamContext?.teamRef,
     objectId: issueId,
     repoRoot,
     home,
@@ -3150,7 +3146,7 @@ export async function replayPendingExecutionIssue(options = {}) {
   const issue = issueContext || await client.getIssueContext(issueId || target.objectId);
   const gitRemoteResolution = gitRemoteResolutionOptions(options);
   const runContext = executionReplayRunContext({
-    domainContext,
+    teamContext,
     pending: target,
     runGit: runDeps.runGit || defaultRunGit,
     ...gitRemoteResolution,
@@ -3158,7 +3154,7 @@ export async function replayPendingExecutionIssue(options = {}) {
   const trace = {
     name: "execution_replay",
     attributes: {
-      domain_id: domainContext?.domainId || target.domainId,
+      team_ref: teamContext?.teamRef || target.teamRef,
       source_object_id: issueId || target.objectId,
       run_id: target.runId,
       trigger_type: EXECUTION_READY_TRIGGER_TYPE,
@@ -3170,7 +3166,7 @@ export async function replayPendingExecutionIssue(options = {}) {
     config,
     issue,
     issueId: issueId || target.objectId,
-    domainContext,
+    teamContext,
     runContext,
     resources: runContext.resources,
     resourceManifest: runContext.resourceManifest,
@@ -3190,7 +3186,7 @@ export async function replayPendingExecutionIssue(options = {}) {
     prAdapter: runDeps.prAdapter || null,
     wake: {
       id: `replay_${target.runId}`,
-      domain_id: domainContext?.domainId || target.domainId,
+      team_ref: teamContext?.teamRef || target.teamRef,
       object_type: "issue",
       object_id: issueId || target.objectId,
       workflow_type: EXECUTION_WORKFLOW_TYPE,
@@ -3231,8 +3227,8 @@ export async function runFreshIssueSyntheticWake({
   home = resolveTeamiHome(),
   runStoreDir = null,
   registry,
-  domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
+  team,
+  teamContext = buildTeamContext({ team, config, repoRoot, home }),
   issueId,
   retry = false,
   killPoint = null,
@@ -3249,19 +3245,20 @@ export async function runFreshIssueSyntheticWake({
   resolveGitRemoteUrl = null,
 } = {}) {
   registerGitRepoResourceKind();
-  const domainConfig = configWithDomainLinearTeam(config, domainContext);
-  const cache = readLinearCache(domainContext.linear.cachePath);
+  const teamConfig = configWithTeamLinearTeam(config, teamContext);
+  const cache = readLinearCache(teamContext.linear.cachePath);
   const credentialStore = createLinearCredentialStore({
     config,
     repoRoot,
-    domainContext,
+    home,
+    teamContext,
   });
-  const runnerId = `local-runner:${domainContext.domainId}`;
+  const runnerId = `local-runner:${teamContext.teamRef}`;
   const store = createStore({ repoRoot, home });
   const claim = await store.claimSyntheticIssueWake({
-    domainId: domainContext.domainId,
-    workspaceId: domainContext.linear.workspaceId,
-    teamId: domainContext.linear.teamId,
+    teamRef: teamContext.teamRef,
+    workspaceId: teamContext.linear.workspaceId,
+    teamId: teamContext.linear.teamId,
     objectId: issueId,
     workflowType: EXECUTION_WORKFLOW_TYPE,
     triggerType: EXECUTION_READY_TRIGGER_TYPE,
@@ -3288,7 +3285,7 @@ export async function runFreshIssueSyntheticWake({
     runDeps,
   });
   const executionRunDeps = {
-    materialize: materializeDomainResources,
+    materialize: materializeTeamResources,
     runGit,
     ...(runDeps || {}),
     ...gitRemoteResolution,
@@ -3301,7 +3298,7 @@ export async function runFreshIssueSyntheticWake({
       killPoint,
       store,
       runnerId,
-      workspaceId: domainContext.linear.workspaceId,
+      workspaceId: teamContext.linear.workspaceId,
       linearClientFactory: async () => createSetupGraphqlClient({
         config,
         repoRoot,
@@ -3309,7 +3306,7 @@ export async function runFreshIssueSyntheticWake({
         allowBrowserAuth: false,
         allowRefresh: true,
       }).client,
-      config: domainConfig,
+      config: teamConfig,
       cache,
       runtimeExecutor,
       repoRoot,
@@ -3319,7 +3316,7 @@ export async function runFreshIssueSyntheticWake({
       runnerVersion: process.version,
       capabilities: config?.runner?.required_capabilities || EXECUTION_REQUIRED_CAPABILITIES,
       traceSink,
-      domainContext,
+      teamContext,
       registry,
       claim,
       runDeps: executionRunDeps,
@@ -3337,8 +3334,8 @@ export async function runWarmResumeIssueSyntheticWake({
   home = resolveTeamiHome(),
   runStoreDir = null,
   registry,
-  domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
+  team,
+  teamContext = buildTeamContext({ team, config, repoRoot, home }),
   issueId,
   issueContext = null,
   priorRunId = null,
@@ -3367,7 +3364,7 @@ export async function runWarmResumeIssueSyntheticWake({
   const effectivePrNumber = prNumber ?? warmResumeDecision?.prNumber ?? warmResumeDecision?.pr_number ?? null;
   const emitResumeStatus = (record, reason = null) => {
     emitStatus({
-      domainId: domain?.id || domainContext?.domainId || null,
+      teamRef: team?.id || teamContext?.teamRef || null,
       issueId: effectiveIssueId,
       state: record.resume_status === "escalated_unresumable" ? "resume_attention" : "resume_working",
       reason: reason || record.resume_status,
@@ -3403,14 +3400,14 @@ export async function runWarmResumeIssueSyntheticWake({
     repoRoot,
     runStoreDir,
     issueContext,
-    domainContext,
+    teamContext,
     prNumber: effectivePrNumber,
     headSha: effectiveHeadSha,
     warmResumeDecision,
   });
   const coldAnchor = coldResumeAnchorFromDurableIdentity({
     identity: durableIdentity,
-    domainContext,
+    teamContext,
     issueContext,
     prNumber: effectivePrNumber,
     headSha: effectiveHeadSha,
@@ -3516,17 +3513,18 @@ export async function runWarmResumeIssueSyntheticWake({
     });
   }
 
-  const domainConfig = configWithDomainLinearTeam(config, domainContext);
-  const cache = readLinearCache(domainContext.linear.cachePath);
+  const teamConfig = configWithTeamLinearTeam(config, teamContext);
+  const cache = readLinearCache(teamContext.linear.cachePath);
   const credentialStore = createLinearCredentialStore({
     config,
     repoRoot,
-    domainContext,
+    home,
+    teamContext,
   });
   const resumeContext = await buildWarmResumeContextBlock({
     config,
     repoRoot,
-    domainContext,
+    teamContext,
     credentialStore,
     createSetupGraphqlClient,
     cache,
@@ -3543,7 +3541,7 @@ export async function runWarmResumeIssueSyntheticWake({
       durableIdentity.head_sha !== effectiveHeadSha,
     ),
   });
-  const runnerId = `local-runner:${domainContext.domainId}`;
+  const runnerId = `local-runner:${teamContext.teamRef}`;
   const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
   const smokeTests = smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache);
   const runtimeVersions = runtimeVersionsFromRuntimeSmokeCache(runtimeSmokeCache);
@@ -3559,7 +3557,7 @@ export async function runWarmResumeIssueSyntheticWake({
     runDeps,
   });
   const executionRunDeps = {
-    materialize: materializeDomainResources,
+    materialize: materializeTeamResources,
     runGit,
     ...(runDeps || {}),
     ...gitRemoteResolution,
@@ -3573,7 +3571,7 @@ export async function runWarmResumeIssueSyntheticWake({
       retry: true,
       store,
       runnerId,
-      workspaceId: domainContext.linear.workspaceId,
+      workspaceId: teamContext.linear.workspaceId,
       linearClientFactory: async () => createSetupGraphqlClient({
         config,
         repoRoot,
@@ -3581,7 +3579,7 @@ export async function runWarmResumeIssueSyntheticWake({
         allowBrowserAuth: false,
         allowRefresh: true,
       }).client,
-      config: domainConfig,
+      config: teamConfig,
       cache,
       runtimeExecutor,
       repoRoot,
@@ -3591,7 +3589,7 @@ export async function runWarmResumeIssueSyntheticWake({
       runnerVersion: process.version,
       capabilities: config?.runner?.required_capabilities || EXECUTION_REQUIRED_CAPABILITIES,
       traceSink,
-      domainContext,
+      teamContext,
       registry,
       runDeps: executionRunDeps,
       ...gitRemoteResolution,
@@ -3634,8 +3632,8 @@ export async function runFreshReviewSyntheticWake({
   home = resolveTeamiHome(),
   runStoreDir = null,
   registry,
-  domain,
-  domainContext = buildDomainContext({ domain, config, repoRoot, home }),
+  team,
+  teamContext = buildTeamContext({ team, config, repoRoot, home }),
   issueId,
   reviewDecision = null,
   createStore = createLocalTriggerStore,
@@ -3646,19 +3644,20 @@ export async function runFreshReviewSyntheticWake({
   runDeps = null,
   idGenerator = undefined,
 } = {}) {
-  const domainConfig = configWithDomainLinearTeam(config, domainContext);
-  const cache = readLinearCache(domainContext.linear.cachePath);
+  const teamConfig = configWithTeamLinearTeam(config, teamContext);
+  const cache = readLinearCache(teamContext.linear.cachePath);
   const credentialStore = createLinearCredentialStore({
     config,
     repoRoot,
-    domainContext,
+    home,
+    teamContext,
   });
-  const runnerId = `local-runner:${domainContext.domainId}`;
+  const runnerId = `local-runner:${teamContext.teamRef}`;
   const store = runDeps?.store || createStore({ repoRoot, home });
   const claim = await store.claimSyntheticIssueWake({
-    domainId: domainContext.domainId,
-    workspaceId: domainContext.linear.workspaceId,
-    teamId: domainContext.linear.teamId,
+    teamRef: teamContext.teamRef,
+    workspaceId: teamContext.linear.workspaceId,
+    teamId: teamContext.linear.teamId,
     objectId: issueId,
     workflowType: REVIEW_WORKFLOW_TYPE,
     triggerType: REVIEW_IN_REVIEW_TRIGGER_TYPE,
@@ -3688,7 +3687,7 @@ export async function runFreshReviewSyntheticWake({
       reviewDecision,
       store,
       runnerId,
-      workspaceId: domainContext.linear.workspaceId,
+      workspaceId: teamContext.linear.workspaceId,
       linearClientFactory: async () => createSetupGraphqlClient({
         config,
         repoRoot,
@@ -3696,7 +3695,7 @@ export async function runFreshReviewSyntheticWake({
         allowBrowserAuth: false,
         allowRefresh: true,
       }).client,
-      config: domainConfig,
+      config: teamConfig,
       cache,
       runtimeExecutor,
       repoRoot,
@@ -3706,7 +3705,7 @@ export async function runFreshReviewSyntheticWake({
       runnerVersion: process.version,
       capabilities: config?.runner?.required_capabilities || REVIEW_REQUIRED_CAPABILITIES,
       traceSink,
-      domainContext,
+      teamContext,
       registry,
       claim,
       runDeps: reviewRunDeps,
@@ -3718,7 +3717,7 @@ export async function runFreshReviewSyntheticWake({
 }
 
 function executionReplayRunContext({
-  domainContext,
+  teamContext,
   pending,
   runGit = defaultRunGit,
   gitRemoteUrlOverride = null,
@@ -3727,7 +3726,7 @@ function executionReplayRunContext({
 } = {}) {
   const resources = {};
   const resourceManifest = [];
-  const selected = gitResourceById(domainContext, pending?.git?.resource_id) || singleGitResource(domainContext);
+  const selected = gitResourceById(teamContext, pending?.git?.resource_id) || singleGitResource(teamContext);
   let selectedResource = null;
   let selectedResourceId = null;
   if (selected) {
@@ -4084,7 +4083,7 @@ function readyFixDurableIdentity({
   repoRoot = process.cwd(),
   runStoreDir = null,
   issueContext = null,
-  domainContext = null,
+  teamContext = null,
   repoIdentity = null,
   location = null,
   prNumber = null,
@@ -4102,10 +4101,10 @@ function readyFixDurableIdentity({
     produced?.resource_id,
     warmResumeDecision?.resource_id,
     resourceIdFromIssueContext(issueContext),
-    gitResourceForRepo({ domainContext, repoIdentity, produced, decisionIdentity })?.id,
-    singleGitResource(domainContext)?.id,
+    gitResourceForRepo({ teamContext, repoIdentity, produced, decisionIdentity })?.id,
+    singleGitResource(teamContext)?.id,
   );
-  const resource = gitResourceById(domainContext, resourceId);
+  const resource = gitResourceById(teamContext, resourceId);
   const binding = resource?.binding || {};
   const pullRequest = location?.pr || location?.pull_request || {};
   const branch = firstReadyFixString(
@@ -4164,7 +4163,7 @@ function producedPrIdentityFromArtifact(artifact) {
 
 function coldResumeAnchorFromDurableIdentity({
   identity,
-  domainContext = null,
+  teamContext = null,
   prNumber = null,
   headSha = null,
   priorRunId = null,
@@ -4173,7 +4172,7 @@ function coldResumeAnchorFromDurableIdentity({
     return { ok: false, reason: "cold_resume_identity_missing" };
   }
   const resourceId = firstReadyFixString(identity.resource_id);
-  const resource = gitResourceById(domainContext, resourceId);
+  const resource = gitResourceById(teamContext, resourceId);
   if (!resource) {
     return {
       ok: false,
@@ -4241,29 +4240,29 @@ function resourceIdFromIssueContext(issueContext = null) {
   return target?.kind === "git_repo" ? target.id : null;
 }
 
-function gitResourceForRepo({ domainContext = null, repoIdentity = null, produced = null, decisionIdentity = null } = {}) {
+function gitResourceForRepo({ teamContext = null, repoIdentity = null, produced = null, decisionIdentity = null } = {}) {
   const owner = firstReadyFixString(decisionIdentity?.owner, produced?.owner, repoIdentity?.owner);
   const repo = firstReadyFixString(decisionIdentity?.repo, produced?.repo, repoIdentity?.repo);
   if (!owner || !repo) return null;
-  return gitResources(domainContext).find((resource) =>
+  return gitResources(teamContext).find((resource) =>
     resource?.binding?.owner === owner &&
     resource?.binding?.repo === repo
   ) || null;
 }
 
-function gitResourceById(domainContext = null, resourceId = null) {
+function gitResourceById(teamContext = null, resourceId = null) {
   const normalized = firstReadyFixString(resourceId);
   if (!normalized) return null;
-  return gitResources(domainContext).find((resource) => resource.id === normalized) || null;
+  return gitResources(teamContext).find((resource) => resource.id === normalized) || null;
 }
 
-function singleGitResource(domainContext = null) {
-  const resources = gitResources(domainContext);
+function singleGitResource(teamContext = null) {
+  const resources = gitResources(teamContext);
   return resources.length === 1 ? resources[0] : null;
 }
 
-function gitResources(domainContext = null) {
-  return (Array.isArray(domainContext?.resources) ? domainContext.resources : [])
+function gitResources(teamContext = null) {
+  return (Array.isArray(teamContext?.resources) ? teamContext.resources : [])
     .filter((resource) => resource?.kind === "git_repo" && resource?.binding);
 }
 
@@ -4328,13 +4327,13 @@ function lookupReadyFixReviewMarker({ comments, pr } = {}) {
 }
 
 async function fetchWarmResumeReviewerNotes({
-  domainContext = null,
+  teamContext = null,
   runDeps = null,
   prNumber,
   headSha,
   resourceId = null,
 } = {}) {
-  const repoIdentity = resourcesToRepoIdentity(domainContext, { resourceId });
+  const repoIdentity = resourcesToRepoIdentity(teamContext, { resourceId });
   const adapter = await resolveReadyFixPrAdapter({
     repoIdentity,
     prAdapter: runDeps?.prAdapter || null,
@@ -4357,7 +4356,7 @@ async function fetchWarmResumeReviewerNotes({
 async function buildWarmResumeContextBlock({
   config = null,
   repoRoot = process.cwd(),
-  domainContext = null,
+  teamContext = null,
   credentialStore = null,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
   cache = null,
@@ -4371,7 +4370,7 @@ async function buildWarmResumeContextBlock({
   headMovedSinceProduced = false,
 } = {}) {
   const reviewerNotes = await fetchWarmResumeReviewerNotesIfPresent({
-    domainContext,
+    teamContext,
     runDeps,
     prNumber,
     headSha,
@@ -4381,7 +4380,7 @@ async function buildWarmResumeContextBlock({
   const humanComments = await fetchWarmResumeHumanLinearComments({
     config,
     repoRoot,
-    domainContext,
+    teamContext,
     credentialStore,
     createSetupGraphqlClient,
     cache,
@@ -4463,7 +4462,7 @@ function latestWarmResumeMergeRun({ store = null, issueId, prNumber, headSha } =
 async function fetchWarmResumeHumanLinearComments({
   config = null,
   repoRoot = process.cwd(),
-  domainContext = null,
+  teamContext = null,
   credentialStore = null,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
   cache = null,
@@ -4476,7 +4475,7 @@ async function fetchWarmResumeHumanLinearComments({
     const client = await warmResumeLinearClient({
       config,
       repoRoot,
-      domainContext,
+      teamContext,
       credentialStore,
       createSetupGraphqlClient,
       runDeps,
@@ -4493,7 +4492,7 @@ async function fetchWarmResumeHumanLinearComments({
 async function warmResumeLinearClient({
   config = null,
   repoRoot = process.cwd(),
-  domainContext = null,
+  teamContext = null,
   credentialStore = null,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
   runDeps = null,
@@ -4504,7 +4503,7 @@ async function warmResumeLinearClient({
     config,
     repoRoot,
     credentialStore,
-    domainContext,
+    teamContext,
     allowBrowserAuth: false,
     allowRefresh: true,
   }).client;
@@ -4636,14 +4635,14 @@ function reviewAlreadyAppliedAtHead(reviewState) {
 function selectedReviewResourceId({
   issueContext = null,
   producedIdentity = null,
-  domainContext = null,
+  teamContext = null,
   repoIdentity = null,
 } = {}) {
   return firstReadyFixString(
     resourceIdFromIssueContext(issueContext),
     producedIdentity?.resource_id,
-    gitResourceForRepo({ domainContext, repoIdentity, produced: producedIdentity })?.id,
-    singleGitResource(domainContext)?.id,
+    gitResourceForRepo({ teamContext, repoIdentity, produced: producedIdentity })?.id,
+    singleGitResource(teamContext)?.id,
   );
 }
 
@@ -4701,13 +4700,15 @@ function isExecutionRunInFlightOrRecent(run, {
 export async function createGatewayLinearClient({
   config,
   repoRoot = process.cwd(),
-  domainContext,
+  home = resolveTeamiHome(),
+  teamContext,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
 } = {}) {
   const credentialStore = createLinearCredentialStore({
     config,
     repoRoot,
-    domainContext,
+    home,
+    teamContext,
   });
   return createSetupGraphqlClient({
     config,
@@ -4718,21 +4719,21 @@ export async function createGatewayLinearClient({
   }).client;
 }
 
-export function selectGatewayDomains({ registry, domainId = null } = {}) {
-  const domains = registry?.domains || [];
-  if (!domainId) return domains.filter((domain) => domain.status === "active");
-  const domain = domains.find((candidate) => candidate.id === domainId);
-  if (!domain) throw new Error(`domain_not_found: ${domainId}`);
-  if (domain.status !== "active") {
-    throw new Error(`domain_not_active: ${domainId} status=${domain.status || "unknown"}`);
+export function selectGatewayTeams({ registry, teamRef = null } = {}) {
+  const teams = registry?.teams || [];
+  if (!teamRef) return teams.filter((team) => team.status === "active");
+  const team = teams.find((candidate) => candidate.id === teamRef);
+  if (!team) throw new Error(`team_not_found: ${teamRef}`);
+  if (team.status !== "active") {
+    throw new Error(`team_not_active: ${teamRef} status=${team.status || "unknown"}`);
   }
-  return [domain];
+  return [team];
 }
 
-export function gatewayState({ inFlight = null, domainBackoff = null, maxInFlight = 1 } = {}) {
+export function gatewayState({ inFlight = null, teamBackoff = null, maxInFlight = 1 } = {}) {
   return {
     inFlight: inFlight || new Set(),
-    domainBackoff: domainBackoff || new Map(),
+    teamBackoff: teamBackoff || new Map(),
     maxInFlight,
   };
 }
@@ -4746,8 +4747,8 @@ export function tryEnterInFlight(state, key) {
 
 function processReplayDecision(options = {}) {
   const {
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client,
     projectId,
     pending,
@@ -4756,7 +4757,7 @@ function processReplayDecision(options = {}) {
     state,
   } = options;
   emitStatus({
-    domainId: domain.id,
+    teamRef: team.id,
     projectId,
     state: "replaying",
     reason: "mutation_intent_pending",
@@ -4765,7 +4766,7 @@ function processReplayDecision(options = {}) {
   });
   return runWithWedgedBackstop({
     ...options,
-    domainId: domain.id,
+    teamRef: team.id,
     projectId,
     runId: pending.runId,
     artifactKind: pending.artifactKind,
@@ -4776,7 +4777,7 @@ function processReplayDecision(options = {}) {
         client,
         projectId,
         pending,
-        domainContext,
+        teamContext,
       });
       if (replay.status === "verified") {
         return {
@@ -4787,7 +4788,7 @@ function processReplayDecision(options = {}) {
         };
       }
       emitStatus({
-        domainId: domain.id,
+        teamRef: team.id,
         projectId,
         state: "degraded",
         reason: replay.reason || replay.status || "replay_not_verified",
@@ -4807,7 +4808,7 @@ function processReplayDecision(options = {}) {
 
 function processFreshDecision(options = {}) {
   const {
-    domain,
+    team,
     client,
     projectId,
     fingerprint,
@@ -4816,14 +4817,14 @@ function processFreshDecision(options = {}) {
     state,
   } = options;
   emitStatus({
-    domainId: domain.id,
+    teamRef: team.id,
     projectId,
     state: "working",
     reason: "fresh_decomposition_selected",
   });
   return runWithWedgedBackstop({
     ...options,
-    domainId: domain.id,
+    teamRef: team.id,
     projectId,
     emitStatus,
     run: async () => {
@@ -4834,7 +4835,7 @@ function processFreshDecision(options = {}) {
       if (isRateLimitedError(options, fresh?.error)) throw fresh.error;
       await maybeWriteFreshSuppression({
         ...options,
-        domainId: domain.id,
+        teamRef: team.id,
         client,
         projectId,
         fingerprint,
@@ -4853,7 +4854,7 @@ function processFreshDecision(options = {}) {
 
 function processReplayIssueDecision(options = {}) {
   const {
-    domain,
+    team,
     issueId,
     pending,
     runReplayIssue,
@@ -4861,7 +4862,7 @@ function processReplayIssueDecision(options = {}) {
     state,
   } = options;
   emitStatus({
-    domainId: domain.id,
+    teamRef: team.id,
     issueId,
     state: "replaying",
     reason: "git_mutation_intent_pending",
@@ -4898,12 +4899,12 @@ function processReplayIssueDecision(options = {}) {
 
 function processWarmResumeIssueDecision(options = {}) {
   const {
-    domain,
+    team,
     client,
     config = null,
     cache = null,
     issueContext = null,
-    domainContext = null,
+    teamContext = null,
     issueId,
     decision,
     runWarmResumeIssue,
@@ -4911,7 +4912,7 @@ function processWarmResumeIssueDecision(options = {}) {
     state,
   } = options;
   emitStatus({
-    domainId: domain.id,
+    teamRef: team.id,
     issueId,
     state: "resume_working",
     reason: "warm_resume_selected",
@@ -4951,7 +4952,7 @@ function processWarmResumeIssueDecision(options = {}) {
         cache,
         issueId,
         issueContext,
-        domainContext,
+        teamContext,
         decision: {
           action: "escalate",
           reason: failedClosedReason,
@@ -4960,7 +4961,7 @@ function processWarmResumeIssueDecision(options = {}) {
         },
       });
       emitStatus({
-        domainId: domain.id,
+        teamRef: team.id,
         issueId,
         state: "resume_attention",
         reason: failedClosedReason,
@@ -5000,7 +5001,7 @@ async function applyReadyIssueNeedsPrincipalEscalation({
   cache = null,
   issueId,
   issueContext = null,
-  domainContext = null,
+  teamContext = null,
   decision = null,
 } = {}) {
   const reason = stringOrNull(decision?.reason) || "ready_fix_escalation_required";
@@ -5010,7 +5011,7 @@ async function applyReadyIssueNeedsPrincipalEscalation({
     cache,
     issueId,
     issue: issueContext,
-    domainContext,
+    teamContext,
     trace: {
       name: "ready_fix_escalation",
       attributes: {
@@ -5065,8 +5066,8 @@ function needsPrincipalEscalationReasonSentence(decision = null) {
 
 function processFreshIssueDecision(options = {}) {
   const {
-    domain,
-    domainContext,
+    team,
+    teamContext,
     issueId,
     fingerprint,
     runFreshIssue,
@@ -5074,7 +5075,7 @@ function processFreshIssueDecision(options = {}) {
     state,
   } = options;
   emitStatus({
-    domainId: domain.id,
+    teamRef: team.id,
     issueId,
     state: "working",
     reason: "fresh_execution_selected",
@@ -5092,11 +5093,11 @@ function processFreshIssueDecision(options = {}) {
       if (isRateLimitedError(options, fresh?.error)) throw fresh.error;
       await maybeWriteReadyIssueFreshSuppression({
         ...options,
-        domainId: domain.id,
+        teamRef: team.id,
         issueId,
         fingerprint,
         fresh,
-        allowedRepoPacket: domainContext?.allowedRepoPacket,
+        allowedRepoPacket: teamContext?.allowedRepoPacket,
       });
       return {
         action: "fresh",
@@ -5116,7 +5117,7 @@ function processFreshIssueDecision(options = {}) {
 
 function processReviewDecision(options = {}) {
   const {
-    domain,
+    team,
     issueId,
     decision,
     runFreshReview,
@@ -5124,7 +5125,7 @@ function processReviewDecision(options = {}) {
     state,
   } = options;
   emitStatus({
-    domainId: domain.id,
+    teamRef: team.id,
     issueId,
     state: "working",
     reason: decision.action === "review" ? "fresh_review_selected" : "review_escalation_selected",
@@ -5159,7 +5160,7 @@ function processReviewDecision(options = {}) {
 
 function launchIssueDispatch(options = {}) {
   const {
-    domain,
+    team,
     issueId,
     state,
     emitStatus,
@@ -5168,16 +5169,16 @@ function launchIssueDispatch(options = {}) {
   } = options;
   runWithWedgedBackstop({
     ...options,
-    domainId: domain.id,
+    teamRef: team.id,
     issueId,
     projectId: null,
     emitStatus,
     run,
   }).catch((error) => {
     if (isRateLimitedError(options, error)) {
-      return handleRateLimitedDomain({
+      return handleRateLimitedTeam({
         ...options,
-        domainId: domain.id,
+        teamRef: team.id,
         projectId: null,
         error,
         emitStatus,
@@ -5185,7 +5186,7 @@ function launchIssueDispatch(options = {}) {
       });
     }
     emitStatus({
-      domainId: domain.id,
+      teamRef: team.id,
       issueId,
       state: "degraded",
       reason: error?.message || `${dispatchLabel || "issue"}_dispatch_failed`,
@@ -5203,7 +5204,7 @@ function launchIssueDispatch(options = {}) {
 
 async function maybeWriteFreshSuppression(options = {}) {
   const {
-    domainId,
+    teamRef,
     projectId,
     fingerprint,
     fresh,
@@ -5229,7 +5230,7 @@ async function maybeWriteFreshSuppression(options = {}) {
   const plannedStateId = cache?.projectStatuses?.planned || null;
   if (!plannedStateId || current?.status?.id !== plannedStateId) return null;
   return idempotency.writeSuppression({
-    domainId,
+    teamRef,
     projectId,
     fingerprint,
     runId: runIdForFreshResult(fresh),
@@ -5244,15 +5245,15 @@ async function maybeWriteFreshSuppression(options = {}) {
 
 async function maybeWriteReadyIssueFreshSuppression(options = {}) {
   const {
-    domainId,
+    teamRef,
     issueId,
     fingerprint,
     fresh,
     client,
     config = null,
     cache = null,
-    domainContext = null,
-    allowedRepoPacket = domainContext?.allowedRepoPacket,
+    teamContext = null,
+    allowedRepoPacket = teamContext?.allowedRepoPacket,
     issueContext = null,
     idempotency = triggerIdempotency,
     computeFingerprint = computeIssueTriggerFingerprint,
@@ -5286,7 +5287,7 @@ async function maybeWriteReadyIssueFreshSuppression(options = {}) {
     return null;
   }
   return idempotency.writeSuppression({
-    domainId,
+    teamRef,
     objectType: "issue",
     objectId: issueId,
     fingerprint,
@@ -5300,13 +5301,13 @@ async function maybeWriteReadyIssueFreshSuppression(options = {}) {
   });
 }
 
-async function drainReplayPendingForDomain(options = {}) {
+async function drainReplayPendingForTeam(options = {}) {
   const {
     repoRoot = process.cwd(),
     home = resolveTeamiHome(),
     runStoreDir = null,
     config,
-    domain,
+    team,
     idempotency = triggerIdempotency,
     createLinearClient,
     runReplayProject,
@@ -5314,15 +5315,15 @@ async function drainReplayPendingForDomain(options = {}) {
     state,
   } = options;
   const pending = await idempotency.listReplayPending({
-    domainId: domain.id,
+    teamRef: team.id,
     repoRoot,
     home,
     runStoreDir,
   });
   if (pending.length === 0) return [];
 
-  const domainContext = buildDomainContext({ domain, config, repoRoot, home });
-  const client = await createLinearClient({ config, repoRoot, domain, domainContext });
+  const teamContext = buildTeamContext({ team, config, repoRoot, home });
+  const client = await createLinearClient({ config, repoRoot, team, teamContext });
   const results = [];
   for (const item of pending) {
     if (!tryEnterInFlight(state, item.projectId)) {
@@ -5333,8 +5334,8 @@ async function drainReplayPendingForDomain(options = {}) {
       results.push(await processReplayDecision({
         ...options,
         repoRoot,
-        domain,
-        domainContext,
+        team,
+        teamContext,
         client,
         projectId: item.projectId,
         pending: item,
@@ -5344,9 +5345,9 @@ async function drainReplayPendingForDomain(options = {}) {
       }));
     } catch (error) {
       if (isRateLimitedError(options, error)) {
-        results.push(handleRateLimitedDomain({
+        results.push(handleRateLimitedTeam({
           ...options,
-          domainId: domain.id,
+          teamRef: team.id,
           projectId: item.projectId,
           error,
           emitStatus,
@@ -5363,7 +5364,7 @@ async function drainReplayPendingForDomain(options = {}) {
 }
 
 async function runWithWedgedBackstop({
-  domainId,
+  teamRef,
   projectId,
   issueId = null,
   runId = null,
@@ -5377,7 +5378,7 @@ async function runWithWedgedBackstop({
   if (Number.isFinite(runTimeoutMs) && runTimeoutMs > 0) {
     timer = setTimeout(() => {
       emitStatus({
-        domainId,
+        teamRef,
         projectId,
         issueId,
         state: "wedged",
@@ -5396,18 +5397,18 @@ async function runWithWedgedBackstop({
   }
 }
 
-function handleRateLimitedDomain(options = {}) {
+function handleRateLimitedTeam(options = {}) {
   const {
-    domainId,
+    teamRef,
     projectId = null,
     error,
     emitStatus,
     state,
   } = options;
   const resetAt = rateLimitResetAt(options, error);
-  state.domainBackoff.set(domainId, resetAt);
+  state.teamBackoff.set(teamRef, resetAt);
   emitStatus({
-    domainId,
+    teamRef,
     projectId,
     state: "rate_limited",
     reason: "linear_rate_limited",
@@ -5415,7 +5416,7 @@ function handleRateLimitedDomain(options = {}) {
     rateLimit: error?.rateLimit || null,
   });
   return {
-    domainId,
+    teamRef,
     projectId,
     status: "rate_limited",
     nextAttemptAt: resetAt,
@@ -5435,7 +5436,7 @@ function normalizeStatusEvent(event = {}) {
   const state = event.state;
   if (!STATUS_STATES.has(state)) throw new Error(`invalid_gateway_status_state:${state || "missing"}`);
   return {
-    domainId: event.domainId ?? null,
+    teamRef: event.teamRef ?? null,
     projectId: event.projectId ?? null,
     state,
     reason: event.reason || null,
@@ -5595,7 +5596,7 @@ function runIdForFreshResult(result) {
 function isReplayScopeMismatch(error) {
   const message = String(error?.message || "");
   return (
-    message.includes(ARTIFACT_DOMAIN_MISMATCH_REASON) ||
+    message.includes(ARTIFACT_TEAM_MISMATCH_REASON) ||
     message.includes(ARTIFACT_PROJECT_MISMATCH_REASON)
   );
 }
@@ -5658,34 +5659,17 @@ function isRecordLike(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function tryCreateGatewayLock({ lockPath, token, createdAt }) {
-  let fd = null;
-  try {
-    fd = fs.openSync(lockPath, "wx");
-    fs.writeFileSync(fd, `${JSON.stringify({
-      pid: process.pid,
-      token,
-      created_at: createdAt,
-    })}\n`, "utf8");
-    fs.closeSync(fd);
-    fd = null;
-    return { ok: true };
-  } catch (error) {
-    if (fd !== null) fs.closeSync(fd);
-    return { ok: false, error };
-  }
-}
-
-function gatewayLockHandle({ lockPath, token, installHandlers }) {
+function gatewayLockHandle({ reservation, installHandlers }) {
   const handlers = [];
   let released = false;
   const release = ({ removeHandlers = true } = {}) => {
-    if (released) return;
+    if (released) return false;
     released = true;
-    removeGatewayLockIfTokenMatches({ lockPath, token });
+    const removed = reservation.release();
     if (removeHandlers) {
       for (const [event, handler] of handlers) process.off(event, handler);
     }
+    return removed;
   };
 
   if (installHandlers) {
@@ -5706,15 +5690,17 @@ function gatewayLockHandle({ lockPath, token, installHandlers }) {
 
   return {
     ok: true,
-    lockPath,
-    token,
+    lockPath: reservation.lockPath,
+    owner: reservation.owner,
     release,
   };
 }
 
 function readGatewayLock(lockPath) {
   try {
-    return JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    const stat = fs.lstatSync(lockPath);
+    const ownerPath = stat.isDirectory() ? path.join(lockPath, "owner.json") : lockPath;
+    return JSON.parse(fs.readFileSync(ownerPath, "utf8"));
   } catch {
     return null;
   }
@@ -5722,24 +5708,22 @@ function readGatewayLock(lockPath) {
 
 function gatewayLockBreakReason({ lock, isProcessAlive }) {
   if (!lock || typeof lock !== "object") return "invalid_lock_file";
+  if (lock.schema_version === "teami-exclusive-file-lock/v2" && lock.purpose !== "gateway") {
+    return "invalid_lock_purpose";
+  }
   const pid = Number(lock.pid);
   if (!Number.isInteger(pid) || pid <= 0) return "invalid_pid";
-  const createdAt = Date.parse(lock.created_at);
+  const createdAt = Date.parse(lock.acquired_at || lock.created_at);
   if (!Number.isFinite(createdAt)) return "invalid_created_at";
-  if (!isProcessAlive(pid)) return `dead_pid:${pid}`;
-  return null;
-}
-
-function removeGatewayLockIfTokenMatches({ lockPath, token }) {
-  const current = readGatewayLock(lockPath);
-  if (token && current?.token !== token) return false;
-  if (!token && current?.token) return false;
+  let alive = null;
   try {
-    fs.rmSync(lockPath, { force: true });
-    return true;
+    alive = isProcessAlive(pid);
   } catch {
-    return false;
+    alive = null;
   }
+  if (alive === false) return `dead_pid:${pid}`;
+  if (alive !== true) return "indeterminate_process_liveness";
+  return null;
 }
 
 function defaultIsProcessAlive(pid) {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { acquireExclusiveFileLock } from "../../../engine/exclusive-file-lock.mjs";
 import { writeAtomicFile } from "../../../engine/atomic-file.mjs";
 import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
+import { normalizeLegacyMutationJournalForRead } from "../../../engine/legacy-team-state-compat.mjs";
 
 export const MUTATION_RECONCILIATION_SCHEMA_VERSION =
   "teami-mutation-reconciliation/v1";
@@ -16,7 +17,7 @@ export function mutationReconciliationJournalPath(home = resolveTeamiHome()) {
 export function appendMutationReconciliation({
   home = resolveTeamiHome(),
   journalPath = mutationReconciliationJournalPath(home),
-  domainId,
+  teamRef,
   objectType,
   objectId,
   runId,
@@ -30,7 +31,7 @@ export function appendMutationReconciliation({
   reconciledAt = new Date().toISOString(),
   onBoundary = () => {},
 } = {}) {
-  const scope = requiredScope({ domainId, objectType, objectId, runId, wakeId });
+  const scope = requiredScope({ teamRef, objectType, objectId, runId, wakeId });
   const lock = acquireExclusiveFileLock({
     lockPath: `${journalPath}.lock`,
     purpose: "mutation_reconciliation_journal",
@@ -76,13 +77,14 @@ export function readMutationReconciliationJournal({
   if (!fs.existsSync(journalPath)) return [];
   const text = fs.readFileSync(journalPath, "utf8");
   if (text.trim() === "") return [];
-  const records = text.trimEnd().split("\n").map((line, index) => {
+  const parsedRecords = text.trimEnd().split("\n").map((line, index) => {
     try {
       return JSON.parse(line);
     } catch {
       throw new Error(`mutation_reconciliation_journal_invalid_json:${index + 1}`);
     }
   });
+  const records = normalizeLegacyMutationJournalForRead(parsedRecords);
   let priorHash = null;
   for (const [index, record] of records.entries()) {
     validateRecord(record, { index, priorHash });
@@ -93,13 +95,13 @@ export function readMutationReconciliationJournal({
 
 export function findMutationReconciliation({
   records = [],
-  domainId,
+  teamRef,
   objectType,
   objectId,
   runId,
 } = {}) {
   return [...records].reverse().find((record) =>
-    record.domain_id === domainId &&
+    record.team_ref === teamRef &&
     record.object_type === objectType &&
     record.object_id === objectId &&
     record.run_id === runId
@@ -135,7 +137,7 @@ function validateRecord(record, { index, priorHash }) {
     throw new Error(`mutation_reconciliation_journal_schema_unsupported:${index + 1}`);
   }
   requiredScope({
-    domainId: record.domain_id,
+    teamRef: record.team_ref,
     objectType: record.object_type,
     objectId: record.object_id,
     runId: record.run_id,
@@ -159,9 +161,9 @@ function validateRecord(record, { index, priorHash }) {
   }
 }
 
-function requiredScope({ domainId, objectType, objectId, runId, wakeId }) {
+function requiredScope({ teamRef, objectType, objectId, runId, wakeId }) {
   return {
-    domain_id: requiredString(domainId, "domainId"),
+    team_ref: requiredString(teamRef, "teamRef"),
     object_type: requiredString(objectType, "objectType"),
     object_id: requiredString(objectId, "objectId"),
     run_id: requiredString(runId, "runId"),

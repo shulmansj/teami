@@ -1,30 +1,30 @@
-import { emptyDomainRegistry } from "../domain-registry.mjs";
-import { behaviorRepoIdForRepoRoot } from "../domain-resolver.mjs";
+import { emptyTeamRegistry } from "../team-registry.mjs";
+import { behaviorRepoIdForRepoRoot } from "../team-resolver.mjs";
 export { STABLE_KEY_PATTERN } from "../../../../engine/stable-key-pattern.mjs";
 
 export const CLOSED_ISSUE_TYPES = new Set(["completed", "canceled", "cancelled"]);
 
-export function knownRegistryWorkspaces(registry = emptyDomainRegistry()) {
+export function knownRegistryWorkspaces(registry = emptyTeamRegistry()) {
   const workspaces = new Map();
-  for (const domain of registry?.domains || []) {
-    const workspaceId = domain?.linear?.workspace_id || null;
+  for (const team of registry?.teams || []) {
+    const workspaceId = team?.linear?.workspace_id || null;
     if (!workspaceId) continue;
     if (!workspaces.has(workspaceId)) {
       workspaces.set(workspaceId, {
         mode: "known",
         workspaceId,
-        workspaceName: domain.linear?.workspace_name || null,
-        domains: [],
+        workspaceName: team.linear?.workspace_name || null,
+        teams: [],
       });
     }
     const workspace = workspaces.get(workspaceId);
-    if (!workspace.workspaceName && domain.linear?.workspace_name) {
-      workspace.workspaceName = domain.linear.workspace_name;
+    if (!workspace.workspaceName && team.linear?.workspace_name) {
+      workspace.workspaceName = team.linear.workspace_name;
     }
-    workspace.domains.push({
-      id: domain.id,
-      status: domain.status,
-      teamName: domain.linear?.team_name || null,
+    workspace.teams.push({
+      id: team.id,
+      status: team.status,
+      teamName: team.linear?.team_name || null,
     });
   }
   return [...workspaces.values()];
@@ -116,21 +116,21 @@ export function configWithLinearTeam(config, team) {
   return next;
 }
 
-export function resolveDomainTrace({ domainContext, traceContext = {}, cache = null, repoRoot = process.cwd() } = {}) {
+export function resolveTeamTrace({ teamContext, traceContext = {}, cache = null, repoRoot = process.cwd() } = {}) {
   return {
-    domain_id: domainContext?.trace?.domain_id || traceContext.domain_id || cache?.domainId || null,
+    team_ref: teamContext?.trace?.team_ref || traceContext.team_ref || cache?.teamRef || null,
     workspace_id:
-      domainContext?.trace?.workspace_id ||
+      teamContext?.trace?.workspace_id ||
       traceContext.workspace_id ||
       cache?.workspaceId ||
       null,
     team_id:
-      domainContext?.trace?.team_id ||
+      teamContext?.trace?.team_id ||
       traceContext.team_id ||
       cache?.teamId ||
       null,
     behavior_repo_id:
-      domainContext?.trace?.behavior_repo_id ||
+      teamContext?.trace?.behavior_repo_id ||
       traceContext.behavior_repo_id ||
       behaviorRepoIdForRepoRoot(repoRoot),
   };
@@ -165,15 +165,15 @@ export function normalizeDeclaredWorkspace(declaredWorkspace) {
   return { ...declaredWorkspace, mode };
 }
 
-export function domainNameMatchesRegistryDomain(domain, requestedName, requestedSlug = null) {
-  if (!domain) return false;
-  if (domain.adopter_provided_name && equalsFolded(domain.adopter_provided_name, requestedName)) return true;
-  if (domain.linear?.team_name && equalsFolded(domain.linear.team_name, requestedName)) return true;
-  if (domain.id && equalsFolded(domain.id, requestedName)) return true;
-  return Boolean(requestedSlug && domain.id === requestedSlug);
+export function teamNameMatchesRegistryTeam(team, requestedName, requestedSlug = null) {
+  if (!team) return false;
+  if (team.adopter_provided_name && equalsFolded(team.adopter_provided_name, requestedName)) return true;
+  if (team.linear?.team_name && equalsFolded(team.linear.team_name, requestedName)) return true;
+  if (team.id && equalsFolded(team.id, requestedName)) return true;
+  return Boolean(requestedSlug && team.id === requestedSlug);
 }
 
-export function workspaceMismatchError({ granted, declared, detail, domains = [] } = {}) {
+export function workspaceMismatchError({ granted, declared, detail, teams = [] } = {}) {
   const grantedWorkspace = normalizeLinearWorkspace(granted);
   const declaredWorkspace = normalizeDeclaredWorkspace(declared) || {};
   const grantedId = grantedWorkspace.id || "unknown";
@@ -184,7 +184,7 @@ export function workspaceMismatchError({ granted, declared, detail, domains = []
     `granted_name=${grantedName}`,
     `expected_name=${expectedName}`,
     detail ? `detail=${detail}` : null,
-    domains.length ? `domains=${domains.join(",")}` : null,
+    teams.length ? `teams=${teams.join(",")}` : null,
   ].filter(Boolean).join(" ");
   const error = new Error(
     `workspace_mismatch: granted=${grantedId} expected=${expectedId} (${secondary})`,
@@ -193,7 +193,7 @@ export function workspaceMismatchError({ granted, declared, detail, domains = []
   error.granted = grantedWorkspace;
   error.expected = declaredWorkspace;
   error.detail = detail;
-  error.domains = domains;
+  error.teams = teams;
   return error;
 }
 

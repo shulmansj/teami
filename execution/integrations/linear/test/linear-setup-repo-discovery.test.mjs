@@ -12,18 +12,19 @@ import {
   registerGitRepoResourceKind,
 } from "../../git/git-repo-materializer.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  readDomainRegistry,
-  upsertDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  upsertTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import {
+  persistTeamGitHubRepoAllowlist,
   runSetupGitHubRepoDiscoveryStep,
 } from "../src/cli/linear-setup-command.mjs";
 
 test("explicit repo grant helper persists confirmed coordinates-only resources", async (t) => {
-      const { repoRoot } = setupDomainRegistry(t);
+      const { repoRoot } = setupTeamRegistry(t);
       const output = captureOutput();
       const prompts = [];
       const { runCommand, calls } = fakeGhRunner({
@@ -39,15 +40,15 @@ test("explicit repo grant helper persists confirmed coordinates-only resources",
 
       const result = await runSetupGitHubRepoDiscoveryStep({
         repoRoot,
-        domainId: "main",
-        command: "domain:grant",
+        teamRef: "main",
+        command: "team:grant",
         output,
         runCommand,
         prompt: promptAnswers(["1,2"], prompts),
         isTTY: true,
       });
 
-      const resources = readDomainRegistry({ repoRoot }).domains[0].resources;
+      const resources = readTeamRegistry({ repoRoot }).teams[0].resources;
       assert.equal(result.persisted, true);
       assert.deepEqual(
         resources.map((resource) => resource.binding),
@@ -82,7 +83,7 @@ test("NONE selection is a first-class non-code team outcome and clears repo reso
     default_branch: "main",
     local_checkout_path: "placeholder-legacy-checkout",
   });
-  const { repoRoot } = setupDomainRegistry(t, { resources: [existing] });
+  const { repoRoot } = setupTeamRegistry(t, { resources: [existing] });
   const output = captureOutput();
   const prompts = [];
   const { runCommand } = fakeGhRunner({
@@ -91,7 +92,7 @@ test("NONE selection is a first-class non-code team outcome and clears repo reso
 
   const result = await runSetupGitHubRepoDiscoveryStep({
     repoRoot,
-    domainId: "main",
+    teamRef: "main",
     output,
     runCommand,
     prompt: promptAnswers(["n"], prompts),
@@ -99,13 +100,13 @@ test("NONE selection is a first-class non-code team outcome and clears repo reso
   });
 
   assert.equal(result.persisted, true);
-  assert.deepEqual(readDomainRegistry({ repoRoot }).domains[0].resources, []);
+  assert.deepEqual(readTeamRegistry({ repoRoot }).teams[0].resources, []);
   assert.equal(prompts.some((message) => /provider|model/i.test(message)), false);
   assert.match(output.text(), /non-code team/);
 });
 
 test("idempotent re-run does not duplicate confirmed repo resources", async (t) => {
-  const { repoRoot } = setupDomainRegistry(t);
+  const { repoRoot } = setupTeamRegistry(t);
   const firstOutput = captureOutput();
   const secondOutput = captureOutput();
   const firstGh = fakeGhRunner({
@@ -123,7 +124,7 @@ test("idempotent re-run does not duplicate confirmed repo resources", async (t) 
 
   await runSetupGitHubRepoDiscoveryStep({
     repoRoot,
-    domainId: "main",
+    teamRef: "main",
     output: firstOutput,
     runCommand: firstGh.runCommand,
     prompt: promptAnswers([""]),
@@ -131,14 +132,14 @@ test("idempotent re-run does not duplicate confirmed repo resources", async (t) 
   });
   await runSetupGitHubRepoDiscoveryStep({
     repoRoot,
-    domainId: "main",
+    teamRef: "main",
     output: secondOutput,
     runCommand: secondGh.runCommand,
     prompt: promptAnswers([""]),
     isTTY: true,
   });
 
-  const resources = readDomainRegistry({ repoRoot }).domains[0].resources;
+  const resources = readTeamRegistry({ repoRoot }).teams[0].resources;
   assert.equal(resources.length, 1);
   assert.deepEqual(resources[0], {
     id: "git_repo:acme/app",
@@ -152,13 +153,61 @@ test("idempotent re-run does not duplicate confirmed repo resources", async (t) 
   });
 });
 
+test("repo allowlist persistence preserves Team changes committed after setup read", async (t) => {
+  const { repoRoot } = setupTeamRegistry(t);
+  const staleSetupRegistry = readTeamRegistry({ home: repoRoot });
+  const secondTeam = makeTeamRecord({
+    teamRef: "second",
+    status: "active",
+    workspaceId: "workspace-2",
+    workspaceName: "Second Workspace",
+    teamId: "team-2",
+    teamKey: "SEC",
+    teamName: "Second Team",
+    resources: [gitRepoResource({ owner: "Acme", repo: "second", default_branch: "main" })],
+  });
+  writeTeamRegistry({ home: repoRoot }, upsertTeamRecord(staleSetupRegistry, secondTeam));
+
+  const result = await persistTeamGitHubRepoAllowlist({
+    home: repoRoot,
+    repoRoot,
+    teamRef: "main",
+    repos: [{ owner: "Acme", repo: "app", default_branch: "main" }],
+  });
+
+  assert.equal(result.registry.teams.length, 2);
+  assert.deepEqual(
+    result.registry.teams.find((team) => team.id === "second").resources,
+    secondTeam.resources,
+  );
+  assert.equal(
+    result.registry.teams.find((team) => team.id === "main").resources[0].id,
+    "git_repo:acme/app",
+  );
+});
+
+test("repo allowlist persistence refuses a removed Team", async (t) => {
+  const { repoRoot } = setupTeamRegistry(t, { status: "removed" });
+
+  await assert.rejects(
+    () => persistTeamGitHubRepoAllowlist({
+      home: repoRoot,
+      repoRoot,
+      teamRef: "main",
+      repos: [{ owner: "Acme", repo: "app", default_branch: "main" }],
+    }),
+    /github_repo_allowlist_team_removed:main/,
+  );
+  assert.deepEqual(readTeamRegistry({ home: repoRoot }).teams[0].resources, []);
+});
+
 test("gh unavailable path is actionable and does not wipe an existing allowlist", async (t) => {
   const existing = gitRepoResource({
     owner: "Acme",
     repo: "app",
     default_branch: "main",
   });
-  const { repoRoot } = setupDomainRegistry(t, { resources: [existing] });
+  const { repoRoot } = setupTeamRegistry(t, { resources: [existing] });
   const output = captureOutput();
   const { runCommand } = fakeGhRunner({
     authOk: false,
@@ -167,7 +216,7 @@ test("gh unavailable path is actionable and does not wipe an existing allowlist"
 
   const result = await runSetupGitHubRepoDiscoveryStep({
     repoRoot,
-    domainId: "main",
+    teamRef: "main",
     output,
     runCommand,
     prompt: promptAnswers([""]),
@@ -175,22 +224,22 @@ test("gh unavailable path is actionable and does not wipe an existing allowlist"
   });
 
   assert.equal(result.persisted, false);
-  assert.deepEqual(readDomainRegistry({ repoRoot }).domains[0].resources, [existing]);
+  assert.deepEqual(readTeamRegistry({ repoRoot }).teams[0].resources, [existing]);
   assert.match(output.text(), /GitHub repo discovery skipped/);
   assert.match(output.text(), /gh auth login --hostname github\.com/);
 });
 
-function setupDomainRegistry(t, { resources = [] } = {}) {
+function setupTeamRegistry(t, { resources = [], status = "active" } = {}) {
   resetResourceRegistry();
   registerGitRepoResourceKind();
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-setup-repos-"));
-  // Engine state (domain registry) now lives under the per-user home; isolate it here.
+  // Engine state (team registry) now lives under the per-user home; isolate it here.
   process.env.TEAMI_HOME = repoRoot;
-  const registry = upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "main",
-      status: "active",
+  const registry = upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "main",
+      status,
       workspaceId: "workspace-1",
       workspaceName: "Example Workspace",
       teamId: "team-1",
@@ -199,7 +248,7 @@ function setupDomainRegistry(t, { resources = [] } = {}) {
       resources,
     }),
   );
-  writeDomainRegistry({ repoRoot }, registry);
+  writeTeamRegistry({ repoRoot }, registry);
   t.after(() => {
     resetResourceRegistry();
     fs.rmSync(repoRoot, { recursive: true, force: true });

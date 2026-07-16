@@ -11,8 +11,8 @@ import { resolveBehaviorRepoIdentity } from "./github-setup.mjs";
 import { startAgentTrace } from "./agent-trace.mjs";
 import {
   behaviorRepoIdForRepoRoot,
-  resolveForegroundDomainContext,
-} from "./domain-resolver.mjs";
+  resolveForegroundTeamContext,
+} from "./team-resolver.mjs";
 import { ensurePhoenixReady, resolvePhoenixConfig } from "./local-phoenix-manager.mjs";
 import { runWorkflowExperiment } from "./phoenix-experiment.mjs";
 import { resolveMaterializerTarget } from "./promotion-materializer.mjs";
@@ -873,20 +873,20 @@ async function startImprovementDrafterTraceBestEffort({
       reportDrafterTraceUnavailable(onProgress, "missing_github_behavior_repo_identity");
       return null;
     }
-    const domain = resolveForegroundDomainContext({
+    const team = resolveForegroundTeamContext({
       repoRoot,
       config,
       behaviorRepoId,
     });
-    if (!domain.ok || !domain.context?.domainId) {
-      reportDrafterTraceUnavailable(onProgress, domain.reason || "missing_domain_id");
+    if (!team.ok || !team.context?.teamRef) {
+      reportDrafterTraceUnavailable(onProgress, team.reason || "missing_team_ref");
       return null;
     }
     const options = {
       agent_role: SELF_IMPROVEMENT_DRAFTER_AGENT_ROLE,
       run_id: makeDrafterTraceRunId({ startedAt, targetKey }),
       resource,
-      domain_id: domain.context.domainId,
+      team_ref: team.context.teamRef,
       workflow_type: SELF_IMPROVEMENT_DRAFT_WORKFLOW_TYPE,
       repoRoot,
       ensureReady,

@@ -159,7 +159,7 @@ test("invoke_one_off parses all required fields and a whitelisted runtime_role",
     const result = parseControlAction(
       {
         action: "invoke_one_off",
-        role_label: "domain-lens",
+        role_label: "team-lens",
         task: "Assess regulatory constraints",
         prompt: "You are a compliance reviewer...",
         runtime_role,
@@ -168,7 +168,7 @@ test("invoke_one_off parses all required fields and a whitelisted runtime_role",
     );
     assert.equal(result.ok, true, runtime_role);
     assert.equal(result.action.action, "invoke_one_off");
-    assert.equal(result.action.role_label, "domain-lens");
+    assert.equal(result.action.role_label, "team-lens");
     assert.equal(result.action.runtime_role, runtime_role);
   }
 });
@@ -177,7 +177,7 @@ test("invoke_one_off parses optional instance_id and still accepts role-only def
   const withInstance = parseControlAction(
     {
       action: "invoke_one_off",
-      role_label: "domain-lens",
+      role_label: "team-lens",
       task: "Assess regulatory constraints",
       prompt: "You are a compliance reviewer...",
       runtime_role: "pm",
@@ -191,7 +191,7 @@ test("invoke_one_off parses optional instance_id and still accepts role-only def
   const roleOnly = parseControlAction(
     {
       action: "invoke_one_off",
-      role_label: "domain-lens",
+      role_label: "team-lens",
       task: "Assess regulatory constraints",
       prompt: "You are a compliance reviewer...",
       runtime_role: "pm",
@@ -206,7 +206,7 @@ test("invoke_one_off rejects unsafe or role-mismatched instance_id values", () =
   const invalid = parseControlAction(
     {
       action: "invoke_one_off",
-      role_label: "domain-lens",
+      role_label: "team-lens",
       task: "Assess regulatory constraints",
       prompt: "You are a compliance reviewer...",
       runtime_role: "pm",
@@ -220,7 +220,7 @@ test("invoke_one_off rejects unsafe or role-mismatched instance_id values", () =
   const mismatched = parseControlAction(
     {
       action: "invoke_one_off",
-      role_label: "domain-lens",
+      role_label: "team-lens",
       task: "Assess regulatory constraints",
       prompt: "You are a compliance reviewer...",
       runtime_role: "pm",

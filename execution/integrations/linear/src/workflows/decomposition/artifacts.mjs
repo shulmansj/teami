@@ -28,7 +28,7 @@ import { projectBodyUpdateFromAuthoredOutput } from "./commit-payload.mjs";
 // Capture failures are recorded on the trace but never alter the run outcome,
 // so the live decision path is unchanged; a missing snapshot simply makes
 // rich promotion fail closed later.
-export function captureRunProjectSnapshot({ runId, project, shape, evalMode, repoRoot, home, domainId, runStoreDir, trace }) {
+export function captureRunProjectSnapshot({ runId, project, shape, evalMode, repoRoot, home, teamRef, runStoreDir, trace }) {
   if (!runId) {
     recordSpan(trace, "capture_project_snapshot", { ok: false, reason: "missing_run_id_for_snapshot" });
     return null;
@@ -41,7 +41,7 @@ export function captureRunProjectSnapshot({ runId, project, shape, evalMode, rep
       captureSource: evalMode ? "eval_mode_memory_snapshot" : "linear_run_context",
       repoRoot,
       home,
-      domainId,
+      teamRef,
       runStoreDir,
     });
     recordSpan(trace, "capture_project_snapshot", {
@@ -84,7 +84,7 @@ export function persistRunArtifact({
       runId: artifact.run_id,
       repoRoot,
       home,
-      domainId: artifact.domain_id,
+      teamRef: artifact.team_ref,
       runStoreDir,
       returnDurabilityResult,
       payloadValidator,
@@ -105,7 +105,7 @@ export function persistRunArtifact({
 export function terminalArtifact({
   runId,
   projectId,
-  domainTrace,
+  teamTrace,
   runResult,
   runtimeAssignments,
   runtimeEvidence,
@@ -127,9 +127,9 @@ export function terminalArtifact({
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
     kind,
     run_id: terminalRunId,
-    domain_id: domainTrace?.domain_id || null,
-    workspace_id: domainTrace?.workspace_id || null,
-    team_id: domainTrace?.team_id || null,
+    team_ref: teamTrace?.team_ref || null,
+    workspace_id: teamTrace?.workspace_id || null,
+    team_id: teamTrace?.team_id || null,
     linear_project_id: projectId || null,
     terminal_output: auditedTerminalOutput,
     evidence: terminalEvidence(runResult?.evidence),

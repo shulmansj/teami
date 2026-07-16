@@ -62,7 +62,7 @@ export function isHighRiskRunArtifact(artifact) {
 // file is skipped, never fatal for a status report.
 export function readLocalEvalInputs({ repoRoot = process.cwd(), home = resolveTeamiHome(), runStoreDir = null } = {}) {
   const receiptsDir = traceTelemetryPaths(repoRoot).runsDir;
-  const artifactsDirs = runStoreDir ? [runStoreDir] : domainRunStoreDirs(home);
+  const artifactsDirs = runStoreDir ? [runStoreDir] : teamRunStoreDirs(home);
   const artifactsDir = artifactsDirs[0] || null;
   const runs = new Map();
   const ensureRun = (runId) => {
@@ -147,13 +147,14 @@ export function readLocalEvalInputs({ repoRoot = process.cwd(), home = resolveTe
   };
 }
 
-function domainRunStoreDirs(home) {
-  const domainsDir = path.join(teamiHomePaths({ home }).home, "domains");
-  if (!fs.existsSync(domainsDir)) return [];
+function teamRunStoreDirs(home) {
+  const homeRoot = teamiHomePaths({ home }).home;
+  const teamsDir = path.join(homeRoot, "teams");
+  if (fs.existsSync(path.join(homeRoot, "teams.json.migration.lock")) || !fs.existsSync(teamsDir)) return [];
   try {
-    return fs.readdirSync(domainsDir, { withFileTypes: true })
+    return fs.readdirSync(teamsDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(domainsDir, entry.name, "runs"));
+      .map((entry) => path.join(teamsDir, entry.name, "runs"));
   } catch {
     return [];
   }

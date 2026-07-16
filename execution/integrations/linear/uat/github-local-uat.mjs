@@ -787,7 +787,7 @@ function buildGitHubLocalUatRunEvidence({
   return {
     kind: "commit",
     run_id: runId,
-    domain_id: "github-local-uat",
+    team_ref: "github-local-uat",
     workspace_id: "github-local-uat",
     team_id: "behavior-repo",
     function_version: "github-local-uat/v1",

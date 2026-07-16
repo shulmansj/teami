@@ -28,10 +28,10 @@ execution/integrations/linear/src/cli/linear-setup-command.mjs @shulmansj
 # Local repo and resource execution surfaces.
 execution/engine/** @shulmansj
 execution/integrations/git/** @shulmansj
-execution/integrations/linear/src/domain-*.mjs @shulmansj
+execution/integrations/linear/src/team-*.mjs @shulmansj
 execution/integrations/linear/src/runtime-adapters.mjs @shulmansj
 execution/integrations/linear/src/runtime-command.mjs @shulmansj
-execution/integrations/linear/src/cli/domain-command.mjs @shulmansj
+execution/integrations/linear/src/cli/team-command.mjs @shulmansj
 execution/integrations/linear/src/cli/doctor-command.mjs @shulmansj
 execution/integrations/linear/src/workflows/decomposition/artifact-apply.mjs @shulmansj
 execution/integrations/linear/src/workflows/decomposition/run-service.mjs @shulmansj

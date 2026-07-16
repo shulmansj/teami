@@ -53,7 +53,7 @@ test("local trigger store drives claim to running to mutation started to complet
   });
 
   const claim = await store.claimSyntheticWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-1",
@@ -64,7 +64,7 @@ test("local trigger store drives claim to running to mutation started to complet
   assert.deepEqual(claim.wake, {
     id: "wake-1",
     workspace_id: "workspace-1",
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     trigger_type: "linear.project.planned",
     workflow_type: "decomposition",
     object_type: "project",
@@ -90,7 +90,7 @@ test("local trigger store drives claim to running to mutation started to complet
   assert.deepEqual(claim.event, {
     id: "event-1",
     workspace_id: "workspace-1",
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     trigger_type: "linear.project.planned",
     workflow_type: "decomposition",
     object_type: "project",
@@ -104,7 +104,7 @@ test("local trigger store drives claim to running to mutation started to complet
     runnerId: "runner-1",
     leaseToken: claim.leaseToken,
     runId: "run-1",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
   assert.equal(running.ok, true);
   assert.equal(running.wake.status, "running");
@@ -122,7 +122,7 @@ test("local trigger store drives claim to running to mutation started to complet
   assert.equal(mutation.wake.mutation_started_at, "2026-06-24T10:02:00.000Z");
   assert.equal(mutation.wake.mutation_artifact_kind, "commit");
   assert.deepEqual(writes, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-1",
     artifactKind: "commit",
@@ -147,7 +147,7 @@ test("local trigger store drives claim to running to mutation started to complet
   assert.equal(completed.run.status, "completed");
   assert.deepEqual(completed.run.provider_update_ids, ["issue-1", "project-update-1"]);
   assert.deepEqual(clears, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-1",
     repoRoot,
@@ -182,16 +182,16 @@ test("local trigger store supports release, fresh claim, and dead-letter without
   });
 
   const synthetic = await store.claimSyntheticWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-release",
   });
   const released = await store.releaseWake({
     wakeId: synthetic.wake.id,
-    runnerId: "runner-foreign-domain",
+    runnerId: "runner-foreign-team",
     leaseToken: synthetic.leaseToken,
-    reason: "domain_not_served",
+    reason: "team_not_served",
   });
   assert.deepEqual({
     ok: released.ok,
@@ -219,7 +219,7 @@ test("local trigger store supports release, fresh claim, and dead-letter without
     runnerId: "runner-1",
     leaseToken: claimed.leaseToken,
     runId: "run-dead",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
   assert.equal(running.ok, true);
 
@@ -406,7 +406,7 @@ test("local trigger store records merge outcome on the merge run record", async 
   });
 
   const claim = await store.claimSyntheticIssueWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     objectId: "issue-merge",
@@ -418,7 +418,7 @@ test("local trigger store records merge outcome on the merge run record", async 
     runnerId: "runner-1",
     leaseToken: claim.leaseToken,
     runId: "run-merge-1",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
 
   const result = store.recordMergeOutcome({
@@ -453,7 +453,7 @@ test("local trigger store records merge outcome on the merge run record", async 
   assert.equal(Object.hasOwn(persisted, "merge_outcomes"), false);
 
   const executionClaim = await store.claimSyntheticIssueWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     objectId: "issue-merge",
@@ -465,7 +465,7 @@ test("local trigger store records merge outcome on the merge run record", async 
     runnerId: "runner-1",
     leaseToken: executionClaim.leaseToken,
     runId: "run-execution-1",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
   store.recordMergeOutcome({
     wakeId: executionClaim.wake.id,

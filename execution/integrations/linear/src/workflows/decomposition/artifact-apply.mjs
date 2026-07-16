@@ -18,8 +18,8 @@ import {
   findIssueByDecompositionKey,
 } from "./issue-commit.mjs";
 
-export const ARTIFACT_DOMAIN_MISMATCH_REASON = "artifact_domain_mismatch";
-export const ARTIFACT_DOMAIN_CONTEXT_REQUIRED_REASON = "artifact_domain_context_required";
+export const ARTIFACT_TEAM_MISMATCH_REASON = "artifact_team_mismatch";
+export const ARTIFACT_TEAM_CONTEXT_REQUIRED_REASON = "artifact_team_context_required";
 export const ARTIFACT_PROJECT_MISMATCH_REASON = "artifact_project_mismatch";
 export const LINEAR_ISSUES_EFFECT_ID = "linear_issues";
 
@@ -50,7 +50,7 @@ export async function applyPersistedArtifact({
   runStoreDir,
   cache = null,
   replayed = false,
-  domainContext = null,
+  teamContext = null,
   onBeforeLinearMutation = null,
   payload = artifact?.payload || null,
   runId = artifact?.run_id || null,
@@ -58,7 +58,7 @@ export async function applyPersistedArtifact({
   durable_record = null,
   commitEffects = DECOMPOSITION_COMMIT_EFFECTS,
 }) {
-  validateReplayArtifactDomain({ artifact, domainContext, replayed });
+  validateReplayArtifactTeam({ artifact, teamContext, replayed });
   if (artifact.kind === "checkpoint") {
     throw new Error("Persisted run checkpoint has no terminal Linear mutation artifact to replay.");
   }
@@ -184,14 +184,14 @@ async function applyCommitArtifactEffects({
   };
 }
 
-export function validateReplayArtifactDomain({ artifact, domainContext, replayed = false } = {}) {
+export function validateReplayArtifactTeam({ artifact, teamContext, replayed = false } = {}) {
   if (!replayed) return;
-  if (!domainContext?.domainId) {
-    throw new Error(`${ARTIFACT_DOMAIN_CONTEXT_REQUIRED_REASON}: replay requires a resolved DomainContext.`);
+  if (!teamContext?.teamRef) {
+    throw new Error(`${ARTIFACT_TEAM_CONTEXT_REQUIRED_REASON}: replay requires a resolved TeamContext.`);
   }
-  if (artifact?.domain_id !== domainContext.domainId) {
+  if (artifact?.team_ref !== teamContext.teamRef) {
     throw new Error(
-      `${ARTIFACT_DOMAIN_MISMATCH_REASON}: artifact domain_id ${artifact?.domain_id || "missing"} does not match resolved domain ${domainContext.domainId}.`,
+      `${ARTIFACT_TEAM_MISMATCH_REASON}: artifact team_ref ${artifact?.team_ref || "missing"} does not match resolved team ${teamContext.teamRef}.`,
     );
   }
 }

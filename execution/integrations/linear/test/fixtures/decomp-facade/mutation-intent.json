@@ -6,7 +6,7 @@
   "object_id": "project-webhook-inbox",
   "workflow_type": "decomposition",
   "trigger_type": "linear.project.planned",
-  "domain_id": "support-ops",
+  "team_ref": "support-ops",
   "wake_id": "wake-decomp-facade",
   "started_at": "2026-06-26T12:00:01.000Z",
   "linear_project_id": "project-webhook-inbox"

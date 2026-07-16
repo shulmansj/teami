@@ -164,16 +164,16 @@ export function normalizeFixtureProject(project, { config = null } = {}) {
   };
 }
 
-export function createLocalValidationDomainContext({ teamId = "eval-team-1" } = {}) {
+export function createLocalValidationTeamContext({ teamId = "eval-team-1" } = {}) {
   const workspaceId = "local-validation-workspace";
   return Object.freeze({
-    domainId: "local-validation",
+    teamRef: "local-validation",
     linear: Object.freeze({
       workspaceId,
       teamId,
     }),
     trace: Object.freeze({
-      domain_id: "local-validation",
+      team_ref: "local-validation",
       workspace_id: workspaceId,
       team_id: teamId,
       behavior_repo_id: "local-validation-behavior-repo",
@@ -195,7 +195,7 @@ export async function runDecompositionValidation({
   const resolvedConfig = config || await loadConfig({ repoRoot });
   const project = loadFrozenWebhookInboxProject({ fixturePath, config: resolvedConfig });
   const snapshot = createSnapshotEvalLinearClient({ config: resolvedConfig, project });
-  const domainContext = createLocalValidationDomainContext({ teamId: snapshot.cache.teamId });
+  const teamContext = createLocalValidationTeamContext({ teamId: snapshot.cache.teamId });
   const resolvedOperatorDir = path.resolve(operatorDir);
   const resolvedRunStoreDir = path.resolve(runStoreDir || path.join(resolvedOperatorDir, "runs"));
   fs.mkdirSync(resolvedOperatorDir, { recursive: true });
@@ -206,14 +206,14 @@ export async function runDecompositionValidation({
     config: resolvedConfig,
     cache: {
       ...snapshot.cache,
-      domainId: domainContext.domainId,
-      workspaceId: domainContext.linear.workspaceId,
+      teamRef: teamContext.teamRef,
+      workspaceId: teamContext.linear.workspaceId,
     },
     projectId: project.id,
     runId,
     repoRoot,
     runStoreDir: resolvedRunStoreDir,
-    domainContext,
+    teamContext,
   });
 
   const rawOutputPath = writeRawRunOutput({

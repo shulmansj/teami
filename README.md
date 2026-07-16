@@ -13,7 +13,7 @@ Claude Code plugin. Implemented behavior includes Linear OAuth setup,
 GraphQL-backed workspace provisioning, MCP project tools, local gateway polling
 for planned projects, local runner decomposition, local Phoenix traces/evals,
 the Teami workspace-repository proposal path through the adopter's own git/`gh` auth,
-deterministic tests, and local domain `git_repo` binding.
+deterministic tests, and local team `git_repo` binding.
 
 Primary trust boundary: Teami is local-first and zero-hosted. Live paths run
 from the adopter's machine; there is no hosted inbox, credential service,
@@ -95,7 +95,7 @@ After onboarding, Teami has three surfaces:
 
 - Setup/repair: `init_onboarding`,
   `npx @shulmansj/teami init`, and `npx @shulmansj/teami doctor`.
-- Planning: MCP tools `resolve_domain`, `project_create`,
+- Planning: MCP tools `resolve_team`, `project_create`,
   `project_write_body`, and `project_move_status`.
 - Running: `npx @shulmansj/teami gateway start` to poll Linear for Planned
   projects, with `npx @shulmansj/teami gateway status` as a
@@ -124,11 +124,11 @@ Every setup step is resumable:
   interrupted setup.
 - `npx @shulmansj/teami runtime-smoke` - re-verify your
   claude/codex runtime.
-- `npx @shulmansj/teami domain add --domain "<name>" --workspace
-  "<ws>"` - connect another Linear workspace as a domain.
+- `npx @shulmansj/teami team add --team "<name>" --workspace
+  "<ws>"` - connect another Linear workspace as a team.
 
 Granting a product repo
-(`npx @shulmansj/teami domain grant main --repo owner/product-app`)
+(`npx @shulmansj/teami team grant main --repo owner/product-app`)
 is separate from Teami workspace-repository setup and grants Teami no new GitHub secret. It
 records scope only; product-repo execution is not shipped.
 
@@ -208,10 +208,10 @@ Teami workspace repo
 Product repo access stays local:
 
 ```text
-domain.resources[]
+team.resources[]
   -> git_repo resource
-  -> one selected GitHub repo identity per domain
-  -> fresh per-run clone for domain-scoped work
+  -> one selected GitHub repo identity per team
+  -> fresh per-run clone for team-scoped work
 ```
 
 The local gateway and runner coordinate wake-ups and Linear mutations from the
@@ -244,7 +244,7 @@ both use the adopter's local ambient GitHub authority and stay explicit.
   review, but no license grants copying, modification, distribution, or reuse.
 - External PRs are not supported yet. Feedback through issues is welcome after
   launch, but maintainers may apply changes privately.
-- Product-repo binding supports one selected GitHub repo per domain.
+- Product-repo binding supports one selected GitHub repo per team.
 - There is no multi-repo selector, no cloud resource kind, and no greenfield
   checkout bootstrap.
 - There is no OS/container isolation boundary for local agent execution.

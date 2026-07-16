@@ -9,10 +9,10 @@ import { teamiHomePaths } from "../src/app-home.mjs";
 import { createCliOutput } from "../src/cli/cli-output.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 
 // homeStateProbe resolves config from the default repo-relative path; clear any inherited override.
 delete process.env.TEAMI_LINEAR_CONFIG;
@@ -29,10 +29,10 @@ function freshRepoWithConfig() {
 }
 
 function writeActiveRegistry(repoRoot) {
-  const registry = emptyDomainRegistry();
-  registry.domains.push(
-    makeDomainRecord({
-      domainId: "main",
+  const registry = emptyTeamRegistry();
+  registry.teams.push(
+    makeTeamRecord({
+      teamRef: "main",
       status: "active",
       workspaceId: "workspace-main",
       workspaceName: "Example Workspace",
@@ -42,7 +42,7 @@ function writeActiveRegistry(repoRoot) {
       teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ home: repoRoot }, registry);
+  writeTeamRegistry({ home: repoRoot }, registry);
 }
 
 function capture() {
@@ -76,7 +76,7 @@ test("adopter `gateway status` is read-only: no poll, replay, or Planned-candida
 
   const out = text();
   // Read-only render: a status line + humanized interval, no live-poll sections.
-  assert.match(out, /Stopped/); // active domain, no live gateway lock
+  assert.match(out, /Stopped/); // active team, no live gateway lock
   assert.match(out, /every 10 seconds/); // humanized from config.poll.interval_ms = 10000
   assert.doesNotMatch(out, /Planned projects/, "must not render the live Planned poll");
   assert.doesNotMatch(out, /pass completed/, "must not run the one-pass");
@@ -105,7 +105,7 @@ test("adopter `gateway status` reports Running when a live gateway lock is prese
 });
 
 test("`trigger-status` still runs the active one-pass (preserved operator path)", async () => {
-  const repoRoot = freshRepoWithConfig(); // no active registry -> one-pass fails closed with no_active_domains
+  const repoRoot = freshRepoWithConfig(); // no active registry -> one-pass fails closed with no_active_teams
   const config = loadLinearConfig({ repoRoot });
   const { output, text } = capture();
   await withSavedExitCode(() =>
@@ -113,6 +113,6 @@ test("`trigger-status` still runs the active one-pass (preserved operator path)"
   );
   fs.rmSync(repoRoot, { recursive: true, force: true });
 
-  // The one-pass path attempts a real selection/poll and fails closed without an active domain.
-  assert.match(text(), /Gateway status could not be read|no_active_domains/);
+  // The one-pass path attempts a real selection/poll and fails closed without an active team.
+  assert.match(text(), /Gateway status could not be read|no_active_teams/);
 });

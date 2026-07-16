@@ -6,14 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { materializeDomainResources } from "../../../engine/materialize.mjs";
+import { materializeTeamResources } from "../../../engine/materialize.mjs";
 import { branchNameForIssue } from "../../git/git-branch-names.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import {
-  DOMAIN_REGISTRY_SCHEMA_VERSION,
-  makeDomainRecord,
-} from "../src/domain-registry.mjs";
-import { buildDomainContext } from "../src/domain-resolver.mjs";
+  TEAM_REGISTRY_SCHEMA_VERSION,
+  makeTeamRecord,
+} from "../src/team-registry.mjs";
+import { buildTeamContext } from "../src/team-resolver.mjs";
 import { writeLinearCache } from "../src/cache.mjs";
 import {
   gatewayState,
@@ -186,8 +186,8 @@ test("Slice-1 row 3: missing or disallowed multi-repo targets fail closed before
         repoRoot: fixture.tempRoot,
         runStoreDir: fixture.runStoreDir,
         registry: fixture.registry,
-        domain: fixture.domain,
-        domainContext: fixture.domainContext,
+        team: fixture.team,
+        teamContext: fixture.teamContext,
         cache: fixture.cache,
         client: fixture.linearClient,
         candidate: { id: entry.issue.id },
@@ -273,8 +273,8 @@ test("Slice-1 row 7: deleting local run state still cold-reconstructs a revision
     repoRoot: fixture.tempRoot,
     runStoreDir: fixture.runStoreDir,
     registry: fixture.registry,
-    domain: fixture.domain,
-    domainContext: fixture.domainContext,
+    team: fixture.team,
+    teamContext: fixture.teamContext,
     issueId: issue.id,
     prNumber: firstIdentity.pull_request_number,
     head_sha: firstIdentity.head_sha,
@@ -603,8 +603,8 @@ test("Slice-1 row 12: routing observability records chosen resource and allowed 
     repoRoot: fixture.tempRoot,
     runStoreDir: fixture.runStoreDir,
     registry: fixture.registry,
-    domain: fixture.domain,
-    domainContext: fixture.domainContext,
+    team: fixture.team,
+    teamContext: fixture.teamContext,
     cache: fixture.cache,
     client: fixture.linearClient,
     candidate: { id: issue.id },
@@ -646,15 +646,15 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
     Object.entries(gitFixtures).map(([resourceId, fixture]) => [resourceId, fixture.remote]),
   );
   const config = acceptanceConfig();
-  const domain = domainFixture({ resources });
-  const registry = { schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION, domains: [domain] };
-  const domainContext = buildDomainContext({
-    domain,
+  const team = teamFixture({ resources });
+  const registry = { schema_version: TEAM_REGISTRY_SCHEMA_VERSION, teams: [team] };
+  const teamContext = buildTeamContext({
+    team,
     config,
     repoRoot: tempRoot,
     behaviorRepoId: "local:slice1-acceptance",
   });
-  const cache = writeAcceptanceLinearCache(domainContext.linear.cachePath);
+  const cache = writeAcceptanceLinearCache(teamContext.linear.cachePath);
   const runStoreDir = path.join(tempRoot, ".teami", "runs");
   const linearClient = createMutableLinearClient(issues);
   const prHub = createPrHub({ resources, gitFixtures });
@@ -664,9 +664,9 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
     tempRoot,
     runStoreDir,
     config,
-    domain,
+    team,
     registry,
-    domainContext,
+    teamContext,
     cache,
     linearClient,
     prHub,
@@ -682,7 +682,7 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
         createPrAdapter: prHub.createPrAdapter,
         executionProfilePreflight,
         gitRemoteUrlOverrides,
-        materialize: materialize || ((input) => materializeDomainResources({
+        materialize: materialize || ((input) => materializeTeamResources({
           ...input,
           gitRemoteUrlOverrides,
         })),
@@ -702,7 +702,7 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
         retry,
         store,
         runnerId: "runner-slice1",
-        workspaceId: domainContext.linear.workspaceId,
+        workspaceId: teamContext.linear.workspaceId,
         linearClient,
         config,
         cache,
@@ -710,7 +710,7 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
         runStoreDir,
         runtimeExecutor: createNoopRuntimeExecutor(),
         orchestratorTurnExecutor,
-        domainContext,
+        teamContext,
         registry,
         runDeps,
         gitRemoteUrlOverrides,
@@ -734,8 +734,8 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
           repoRoot: tempRoot,
           runStoreDir,
           registry,
-          domain,
-          domainContext,
+          team,
+          teamContext,
           createStore: () => store,
           createSetupGraphqlClient: createFakeSetupGraphqlClient(linearClient),
           createTraceSink: () => createCapturingTraceSink(traces),
@@ -769,8 +769,8 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
         home: tempRoot,
         runStoreDir,
         registry,
-        domain,
-        domainContext,
+        team,
+        teamContext,
         cache,
         client: linearClient,
         candidate: { id: issueId },
@@ -804,8 +804,8 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
           repoRoot: tempRoot,
           runStoreDir,
           registry,
-          domain,
-          domainContext,
+          team,
+          teamContext,
           issueId: input.issueId,
           reviewDecision: input.reviewDecision,
           createStore: () => store,
@@ -856,8 +856,8 @@ function createAcceptanceFixture({ resources, issues, materializeGit = true }) {
         home: tempRoot,
         runStoreDir,
         registry,
-        domain,
-        domainContext,
+        team,
+        teamContext,
         client: linearClient,
         candidate: { id: issueId },
         state,
@@ -1144,7 +1144,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
         .at(-1) || null;
     },
     async claimSyntheticIssueWake({
-      domainId,
+      teamRef,
       workspaceId,
       teamId,
       objectId,
@@ -1162,7 +1162,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
       const wake = {
         id: `wake-${workflowType}-${safeRunIdSegment(objectId)}-${sequence}`,
         workspace_id: workspaceId,
-        domain_id: domainId,
+        team_ref: teamRef,
         trigger_type: triggerType,
         workflow_type: workflowType,
         object_type: objectType,
@@ -1188,7 +1188,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
       wake.lease_expires_at = new Date(Date.now() + leaseDurationMs).toISOString();
       return { ok: true, wake: structuredClone(wake) };
     },
-    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, domainId }) {
+    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, teamRef }) {
       const wake = wakes.get(wakeId);
       if (!wake) return { ok: false, reason: "wake_missing" };
       Object.assign(wake, {
@@ -1196,7 +1196,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
         runner_id: runnerId,
         lease_token: leaseToken,
         run_id: runId,
-        domain_id: domainId,
+        team_ref: teamRef,
       });
       const run = {
         run_id: runId,
@@ -1219,7 +1219,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
       wake.lease_token = leaseToken;
       wake.mutation_started_at = new Date(Date.parse("2026-06-30T12:00:00.000Z") + mutationTick * 1000).toISOString();
       triggerIdempotency.writeMutationIntent({
-        domainId: wake.domain_id,
+        teamRef: wake.team_ref,
         objectType: "issue",
         objectId: wake.object_id,
         runId,
@@ -1547,9 +1547,9 @@ function writeExecutionFixtureChange(input, { suffix = "main" } = {}) {
   };
 }
 
-function domainFixture({ resources }) {
-  return makeDomainRecord({
-    domainId: "domain-1",
+function teamFixture({ resources }) {
+  return makeTeamRecord({
+    teamRef: "team-1",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",

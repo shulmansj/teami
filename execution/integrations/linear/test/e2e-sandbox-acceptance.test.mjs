@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   acceptanceRecordPasses,
   buildAcceptanceRecord,
-  requireExplicitDomainId,
+  requireExplicitTeamRef,
   runE2eSandbox,
   stepTeardown,
   verifyPollScopeApplied,
@@ -13,8 +13,8 @@ import {
 test("verifyPollScopeApplied passes when every processed project is the seeded project", () => {
   const result = verifyPollScopeApplied(
     pollResult([
-      { domainId: "domain-1", processed: [{ projectId: "project-1" }, { projectId: "project-1" }] },
-      { domainId: "domain-2", processed: [] },
+      { teamRef: "team-1", processed: [{ projectId: "project-1" }, { projectId: "project-1" }] },
+      { teamRef: "team-2", processed: [] },
     ]),
     "project-1",
   );
@@ -28,18 +28,18 @@ test("verifyPollScopeApplied passes when every processed project is the seeded p
 
 test("verifyPollScopeApplied fails and reports an offender for a different project id", () => {
   const result = verifyPollScopeApplied(
-    pollResult([{ domainId: "domain-1", processed: [{ projectId: "project-1" }, { projectId: "project-2" }] }]),
+    pollResult([{ teamRef: "team-1", processed: [{ projectId: "project-1" }, { projectId: "project-2" }] }]),
     "project-1",
   );
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.processedProjectIds, ["project-1", "project-2"]);
-  assert.deepEqual(result.offenders, [{ domainId: "domain-1", index: 1, projectId: "project-2" }]);
+  assert.deepEqual(result.offenders, [{ teamRef: "team-1", index: 1, projectId: "project-2" }]);
 });
 
 test("verifyPollScopeApplied ignores no-project bookkeeping entries but fails when the seeded project was never processed", () => {
   const result = verifyPollScopeApplied(
-    pollResult([{ domainId: "domain-1", processed: [{ action: "processed" }] }]),
+    pollResult([{ teamRef: "team-1", processed: [{ action: "processed" }] }]),
     "project-1",
   );
 
@@ -58,7 +58,7 @@ test("verifyPollScopeApplied passes when the seeded project is processed alongsi
   const result = verifyPollScopeApplied(
     pollResult([
       {
-        domainId: "domain-1",
+        teamRef: "team-1",
         processed: [
           { projectId: "project-1" },
           { action: "status-sweep" },
@@ -76,7 +76,7 @@ test("verifyPollScopeApplied passes when the seeded project is processed alongsi
 });
 
 test("verifyPollScopeApplied fails when nothing was processed", () => {
-  const result = verifyPollScopeApplied(pollResult([{ domainId: "domain-1", processed: [] }]), "project-1");
+  const result = verifyPollScopeApplied(pollResult([{ teamRef: "team-1", processed: [] }]), "project-1");
 
   assert.deepEqual(result, {
     ok: false,
@@ -87,7 +87,7 @@ test("verifyPollScopeApplied fails when nothing was processed", () => {
 
 test("buildAcceptanceRecord returns the exact acceptance shape", () => {
   const record = buildAcceptanceRecord({
-    domain: { id: "domain-1" },
+    team: { id: "team-1" },
     seededProjectId: "project-1",
     pollScopeResult: { ok: true },
     produceOk: true,
@@ -97,7 +97,7 @@ test("buildAcceptanceRecord returns the exact acceptance shape", () => {
   });
 
   assert.deepEqual(record, {
-    domain: "domain-1",
+    team: "team-1",
     seeded_project_id: "project-1",
     poll_scope_applied: true,
     loop: { produce: true, judge: true, label: true },
@@ -105,7 +105,7 @@ test("buildAcceptanceRecord returns the exact acceptance shape", () => {
     board_empty: true,
   });
   assert.deepEqual(Object.keys(record), [
-    "domain",
+    "team",
     "seeded_project_id",
     "poll_scope_applied",
     "loop",
@@ -117,7 +117,7 @@ test("buildAcceptanceRecord returns the exact acceptance shape", () => {
 
 test("acceptanceRecordPasses is true only when every required field passes", () => {
   const passing = {
-    domain: "domain-1",
+    team: "team-1",
     seeded_project_id: "project-1",
     poll_scope_applied: true,
     loop: { produce: true, judge: true, label: true },
@@ -133,7 +133,7 @@ test("acceptanceRecordPasses is true only when every required field passes", () 
   assert.equal(acceptanceRecordPasses({ ...passing, board_empty: false }), false);
   assert.equal(acceptanceRecordPasses({ ...passing, board_empty: null }), false);
   assert.equal(acceptanceRecordPasses({ ...passing, teardown_action: null }), false);
-  assert.equal(acceptanceRecordPasses({ ...passing, domain: null }), false);
+  assert.equal(acceptanceRecordPasses({ ...passing, team: null }), false);
   assert.equal(acceptanceRecordPasses({ ...passing, seeded_project_id: null }), false);
 });
 
@@ -175,19 +175,19 @@ test("stepTeardown fails when a test-prefixed Planned project remains active", a
   assert.deepEqual(archived, ["project-1"]);
 });
 
-test("runE2eSandbox fails closed when --domain is missing", async () => {
-  const message = /uat:e2e-sandbox requires --domain <id> \(integration smoke targets one explicit domain\)/;
+test("runE2eSandbox fails closed when --team is missing", async () => {
+  const message = /uat:e2e-sandbox requires --team <id> \(integration smoke targets one explicit team\)/;
 
-  assert.throws(() => requireExplicitDomainId({}), message);
-  assert.equal(requireExplicitDomainId({ domainId: "domain-1" }), "domain-1");
+  assert.throws(() => requireExplicitTeamRef({}), message);
+  assert.equal(requireExplicitTeamRef({ teamRef: "team-1" }), "team-1");
   await assert.rejects(
     () => runE2eSandbox({ repoRoot: process.cwd(), keep: false, label: "good", preflightOnly: true }),
     message,
   );
 });
 
-function pollResult(domains) {
-  return { poll: { domains } };
+function pollResult(teams) {
+  return { poll: { teams } };
 }
 
 function teardownContext({ pages, archiveProject }) {
@@ -211,7 +211,7 @@ function teardownContext({ pages, archiveProject }) {
   if (archiveProject) client.archiveProject = archiveProject;
   return {
     ctx: {
-      domain: { linear: { team_id: "team-1" } },
+      team: { linear: { team_id: "team-1" } },
       project: { id: "project-1" },
       shape: { projectStatuses: { backlog: { id: "status-backlog" } } },
       client,

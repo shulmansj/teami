@@ -2,11 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  removeDomainRegistryState,
-  readDomainRegistry,
-  writeDomainRegistry,
-} from "../domain-registry.mjs";
-import { buildDomainContext } from "../domain-resolver.mjs";
+  removeTeamRegistryState,
+  readTeamRegistry,
+  updateTeamRegistry,
+} from "../team-registry.mjs";
+import { buildTeamContext } from "../team-resolver.mjs";
+import { acquireGatewayLock } from "../gateway-loop.mjs";
+import { acquireTeamOperationLock } from "../team-operation-lock.mjs";
 import { githubConnectionStatePath } from "../github-setup.mjs";
 import {
   createLinearCredentialStore,
@@ -14,6 +16,7 @@ import {
 } from "../linear-credential-store.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
 import { removeSetupState } from "../local-state.mjs";
+import { createSetupStateStore, isSetupOwnerAlive } from "../setup-orchestrator.mjs";
 import { createCliOutput } from "./cli-output.mjs";
 import { flagValue } from "./flags.mjs";
 import { resolveTeamiHome } from "../app-home.mjs";
@@ -46,7 +49,7 @@ export async function runLocalSetupCleanupCommand({ context, command, args }) {
       config,
       repoRoot,
       home,
-      domainId: flagValue(args, "--domain"),
+      teamRef: flagValue(args, "--team"),
       fullReset: commandOptions.fullReset,
       log: createCleanupProgress(output),
     });
@@ -67,47 +70,108 @@ function removeLocalState(filePath, label, log = (line) => console.log(line)) {
   log(`already clean: ${label}`);
 }
 
-function createBootstrapLinearCredentialStore({ config, repoRoot }) {
+function createBootstrapLinearCredentialStore({ config, repoRoot, home }) {
   return createLinearCredentialStore({
     config,
     repoRoot,
+    home,
     target: legacyCredentialTargetForConfig(config),
   });
 }
 
-async function promoteSetupCredentialToDomain({
+async function promoteSetupCredentialToTeam({
   setupCredentialStore,
   config,
   repoRoot,
-  domainContext,
+  home,
+  teamContext,
 }) {
   const tokenSet = await setupCredentialStore.readTokenSet();
-  if (!tokenSet) return;
-  const domainCredentialStore = createLinearCredentialStore({
+  if (!tokenSet) {
+    throw new Error("The setup credential is missing. Reauthorize Linear before Teami marks this Team active.");
+  }
+  const teamCredentialStore = createLinearCredentialStore({
     config,
     repoRoot,
-    domainContext,
+    home,
+    teamContext,
   });
-  await domainCredentialStore.writeTokenSet(tokenSet);
-  await setupCredentialStore.deleteTokenSet();
+  const promotion = await teamCredentialStore.writeTokenSetIfAbsentOrEqual(tokenSet);
+  if (!promotion?.ok) {
+    throw new Error(
+      "A newer Team credential already exists. Teami preserved both credentials; retry authorization instead of overwriting it.",
+    );
+  }
+  const cleanup = await setupCredentialStore.deleteTokenSetIfEqual(tokenSet);
+  if (!cleanup?.ok) {
+    throw new Error(
+      "The setup credential changed during promotion. Teami preserved the newer credential; retry setup.",
+    );
+  }
 }
 
 async function removeLocalLinearSetup(
+  cachePath,
+  setupStatePath,
+  options = {},
+) {
+  const home = options.home || resolveTeamiHome();
+  const log = options.log || ((line) => console.log(line));
+  const setupStore = options.setupStateStore || createSetupStateStore({ home });
+  const operationLock = setupStore.acquire({ purpose: "local_setup_cleanup" });
+  if (!operationLock.ok) {
+    log("another setup or cleanup is active; wait for it to finish, then retry.");
+    return { ok: false, reason: "setup_lock_held" };
+  }
+  try {
+    const active = setupStore.findActive?.();
+    if (active && isSetupOwnerAlive(active) !== false) {
+      log(`setup ${active.setup_id} is still active; finish or expire it before removing local state.`);
+      return { ok: false, reason: "setup_session_active", setupId: active.setup_id };
+    }
+    const gatewayReservation = (options.acquireGatewayLock || acquireGatewayLock)({
+      home,
+      installHandlers: false,
+    });
+    if (!gatewayReservation.ok) {
+      log("the Teami gateway is still running; stop it before removing Team credentials and local state.");
+      return { ok: false, reason: "gateway_active" };
+    }
+    try {
+      const teamOperationReservation = (options.acquireTeamOperationLock || acquireTeamOperationLock)({ home });
+      if (!teamOperationReservation.ok) {
+        log("another Teami planning, review, or credential operation is active; wait for it to finish before removing Team credentials and local state.");
+        return { ok: false, reason: "team_operation_active" };
+      }
+      try {
+        return await removeLocalLinearSetupUnderLock(cachePath, setupStatePath, options);
+      } finally {
+        teamOperationReservation.release?.();
+      }
+    } finally {
+      gatewayReservation.release?.();
+    }
+  } finally {
+    operationLock.release();
+  }
+}
+
+async function removeLocalLinearSetupUnderLock(
   cachePath,
   setupStatePath,
   {
     config,
     repoRoot,
     home = resolveTeamiHome(),
-    domainId = null,
+    teamRef = null,
     fullReset = false,
-    removeDomainSetup = removeOneDomainSetup,
+    removeTeamSetup = removeOneTeamSetup,
     log = (line) => console.log(line),
   },
 ) {
-  const registry = readDomainRegistry({ home });
+  const registry = readTeamRegistry({ home });
   if (!registry) {
-    return removePreDomainLocalLinearSetup(cachePath, setupStatePath, {
+    return removePreTeamLocalLinearSetup(cachePath, setupStatePath, {
       config,
       repoRoot,
       home,
@@ -115,16 +179,39 @@ async function removeLocalLinearSetup(
     });
   }
 
-  const domains = registry?.domains || [];
-  const selectedDomains = fullReset
-    ? domains
-    : selectDomainsForCommand(domains, domainId);
-  if (!fullReset && selectedDomains.length !== 1) {
-    log("could not resolve a single domain to uninstall; pass --domain <domain_id>.");
+  const teams = registry?.teams || [];
+  let selectedTeams = fullReset
+    ? teams
+    : selectTeamsForCommand(teams, teamRef);
+  if (!fullReset && selectedTeams.length !== 1) {
+    log("could not resolve a single team to uninstall; pass --team <team_ref>.");
     return { ok: false };
   }
 
-  for (const store of legacyCredentialStores({ config, repoRoot })) {
+  if (!fullReset) {
+    const selectedTeam = selectedTeams[0];
+    try {
+      const outcome = updateTeamRegistry({ home }, (currentRegistry) => {
+        const currentTeam = currentRegistry.teams.find((candidate) => candidate.id === selectedTeam.id);
+        if (!currentTeam || JSON.stringify(currentTeam) !== JSON.stringify(selectedTeam)) {
+          const error = new Error("team_registry_team_conflict");
+          error.code = "team_registry_team_conflict";
+          throw error;
+        }
+        currentTeam.status = "removed";
+        delete currentTeam.setup_incomplete_cause;
+        return { registry: currentRegistry, team: currentTeam };
+      });
+      selectedTeams = [outcome.team];
+      log(`marked removed before local cleanup: team ${outcome.team.id}`);
+    } catch (error) {
+      if (error?.code !== "team_registry_team_conflict") throw error;
+      log(`team ${selectedTeam.id} changed before uninstall cleanup began; retry to use its latest state.`);
+      return { ok: false };
+    }
+  }
+
+  for (const store of legacyCredentialStores({ config, repoRoot, home })) {
     try {
       await store.remove();
       log(`removed: ${store.label}`);
@@ -135,22 +222,22 @@ async function removeLocalLinearSetup(
   }
 
   let ok = true;
-  for (const domain of selectedDomains) {
+  for (const team of selectedTeams) {
     const removed =
-      fullReset && domain.status === "removed"
-        ? await removeRemovedDomainSetup({
+      fullReset && team.status === "removed"
+        ? await removeRemovedTeamSetup({
             config,
             repoRoot,
             home,
-            domain,
-            removeDomainSetup,
+            team,
+            removeTeamSetup,
             log,
           })
-        : await removeDomainSetup({
+        : await removeTeamSetup({
           config,
           repoRoot,
           home,
-          domain,
+          team,
           log,
         });
     ok = ok && removed.ok;
@@ -158,29 +245,22 @@ async function removeLocalLinearSetup(
   if (!ok) {
     log(
       fullReset
-        ? "Reset aborted before deleting local domain state because one or more local credentials could not be removed."
-        : "Uninstall aborted before marking the domain removed because local cleanup did not complete.",
+        ? "Reset aborted before deleting local team state because one or more local credentials could not be removed."
+        : "The team is marked removed, but local cleanup did not complete. Rerun uninstall for this team to finish cleanup.",
     );
     return { ok: false };
   }
 
   if (!fullReset && registry) {
-    const nextRegistry = structuredClone(registry);
-    const domain = nextRegistry.domains.find((candidate) => candidate.id === selectedDomains[0].id);
-    if (domain) {
-      domain.status = "removed";
-      delete domain.setup_incomplete_cause;
-      writeDomainRegistry({ home }, nextRegistry);
-      log(`marked removed: domain ${domain.id}`);
-    }
+    log(`local cleanup complete: team ${selectedTeams[0].id}`);
     return { ok };
   }
 
   removeLocalState(cachePath, "legacy linear cache", log);
   removeRetiredEventPathLocalState({ config, repoRoot, log });
-  const domainState = removeDomainRegistryState({ home });
-  log(domainState.registryRemoved ? "removed: domain registry" : "already clean: domain registry");
-  log(domainState.domainsDirRemoved ? "removed: per-domain Linear caches" : "already clean: per-domain Linear caches");
+  const teamState = removeTeamRegistryState({ home });
+  log(teamState.registryRemoved ? "removed: team registry" : "already clean: team registry");
+  log(teamState.teamsDirRemoved ? "removed: per-team Linear caches" : "already clean: per-team Linear caches");
   removeSetupState(setupStatePath);
   const githubStatePath = githubConnectionStatePath(home);
   if (fs.existsSync(githubStatePath)) {
@@ -190,18 +270,18 @@ async function removeLocalLinearSetup(
   return { ok };
 }
 
-async function removePreDomainLocalLinearSetup(
+async function removePreTeamLocalLinearSetup(
   cachePath,
   setupStatePath,
   { config, repoRoot, home = resolveTeamiHome(), log = (line) => console.log(line) },
 ) {
-  const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
+  const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot, home });
 
   removeLocalState(cachePath, "linear cache", log);
   removeRetiredEventPathLocalState({ config, repoRoot, log });
-  const domainState = removeDomainRegistryState({ home });
-  log(domainState.registryRemoved ? "removed: domain registry" : "already clean: domain registry");
-  log(domainState.domainsDirRemoved ? "removed: per-domain Linear caches" : "already clean: per-domain Linear caches");
+  const teamState = removeTeamRegistryState({ home });
+  log(teamState.registryRemoved ? "removed: team registry" : "already clean: team registry");
+  log(teamState.teamsDirRemoved ? "removed: per-team Linear caches" : "already clean: per-team Linear caches");
   removeSetupState(setupStatePath);
   const githubStatePath = githubConnectionStatePath(home);
   if (fs.existsSync(githubStatePath)) {
@@ -218,94 +298,94 @@ async function removePreDomainLocalLinearSetup(
   return { ok: true };
 }
 
-async function removeOneDomainSetup({
+async function removeOneTeamSetup({
   config,
   repoRoot,
   home = resolveTeamiHome(),
-  domain,
+  team,
   createOAuthCredentialStore = createLinearCredentialStore,
   removeLocalFile = removeLocalState,
   log = (line) => console.log(line),
 }) {
-  const context = contextForRegistryDomain({ domain, config, repoRoot, home });
+  const context = contextForRegistryTeam({ team, config, repoRoot, home });
   if (!context) {
-    log(`skipped: domain ${domain.id} has incomplete identity; npm run reset will remove local files`);
+    log(`skipped: team ${team.id} has incomplete identity; npm run reset will remove local files`);
     return { ok: true };
   }
 
-  const credentialStore = createOAuthCredentialStore({ config, repoRoot, domainContext: context });
+  const credentialStore = createOAuthCredentialStore({ config, repoRoot, teamContext: context });
   let ok = true;
 
-  removeLocalFile(context.linear.cachePath, `domain ${domain.id} linear cache`, log);
-  removeRetiredEventPathLocalState({ config, repoRoot, domainId: domain.id, log });
+  removeLocalFile(context.linear.cachePath, `team ${team.id} linear cache`, log);
+  removeRetiredEventPathLocalState({ config, repoRoot, teamRef: team.id, log });
 
   try {
     await credentialStore.deleteTokenSet();
-    log(`removed: domain ${domain.id} Linear setup OAuth credential`);
+    log(`removed: team ${team.id} Linear setup OAuth credential`);
   } catch (error) {
-    log(`could not remove domain ${domain.id} Linear setup OAuth credential: ${redactOAuthSecrets(error.message)}`);
+    log(`could not remove team ${team.id} Linear setup OAuth credential: ${redactOAuthSecrets(error.message)}`);
     ok = false;
   }
 
   return { ok };
 }
 
-async function removeRemovedDomainSetup({
+async function removeRemovedTeamSetup({
   config,
   repoRoot,
   home = resolveTeamiHome(),
-  domain,
-  removeDomainSetup = removeOneDomainSetup,
+  team,
+  removeTeamSetup = removeOneTeamSetup,
   createOAuthCredentialStore = createLinearCredentialStore,
   log = (line) => console.log(line),
 }) {
-  const context = contextForRegistryDomain({ domain, config, repoRoot, home });
+  const context = contextForRegistryTeam({ team, config, repoRoot, home });
   if (!context) {
-    log(`already clean: removed domain ${domain.id} has no complete Linear identity`);
+    log(`already clean: removed team ${team.id} has no complete Linear identity`);
     return { ok: true, alreadyClean: true };
   }
 
-  const credentialStore = createOAuthCredentialStore({ config, repoRoot, domainContext: context });
+  const credentialStore = createOAuthCredentialStore({ config, repoRoot, teamContext: context });
   let tokenSet = null;
   try {
     tokenSet = await credentialStore.readTokenSet?.();
   } catch (error) {
-    log(`could not verify removed domain ${domain.id} credentials: ${redactOAuthSecrets(error.message)}`);
+    log(`could not verify removed team ${team.id} credentials: ${redactOAuthSecrets(error.message)}`);
     return { ok: false };
   }
 
   if (!tokenSet) {
-    removeRetiredEventPathLocalState({ config, repoRoot, domainId: domain.id, log });
-    log(`already clean: removed domain ${domain.id} local credentials`);
+    removeRetiredEventPathLocalState({ config, repoRoot, teamRef: team.id, log });
+    log(`already clean: removed team ${team.id} local credentials`);
     return { ok: true, alreadyClean: true };
   }
 
-  log(`removed domain ${domain.id} still has local credentials; removing local credential state before reset.`);
-  return removeDomainSetup({
+  log(`removed team ${team.id} still has local credentials; removing local credential state before reset.`);
+  return removeTeamSetup({
     config,
     repoRoot,
     home,
-    domain,
+    team,
     log,
   });
 }
 
-function selectDomainsForCommand(domains, domainId = null) {
-  if (domainId) return domains.filter((domain) => domain.id === domainId);
-  const activeDomains = domains.filter((domain) => domain.status === "active");
-  return activeDomains.length === 1 ? activeDomains : [];
+function selectTeamsForCommand(teams, teamRef = null) {
+  if (teamRef) return teams.filter((team) => team.id === teamRef);
+  const activeTeams = teams.filter((team) => team.status === "active");
+  return activeTeams.length === 1 ? activeTeams : [];
 }
 
-function contextForRegistryDomain({ domain, config, repoRoot, home }) {
-  if (!domain?.linear?.workspace_id || !domain?.id) return null;
+function contextForRegistryTeam({ team, config, repoRoot, home }) {
+  if (!team?.linear?.workspace_id || !team?.id) return null;
   try {
-    return buildDomainContext({ domain, config, repoRoot, home });
+    return buildTeamContext({ team, config, repoRoot, home });
   } catch {
     return null;
   }
 }
 
-function legacyCredentialStores({ config, repoRoot }) {
+function legacyCredentialStores({ config, repoRoot, home }) {
   return [
     {
       label: "legacy Linear setup OAuth credential",
@@ -313,6 +393,7 @@ function legacyCredentialStores({ config, repoRoot }) {
         createLinearCredentialStore({
           config,
           repoRoot,
+          home,
           target: legacyCredentialTargetForConfig(config),
         }).deleteTokenSet(),
     },
@@ -322,14 +403,14 @@ function legacyCredentialStores({ config, repoRoot }) {
 function removeRetiredEventPathLocalState({
   config,
   repoRoot,
-  domainId = null,
+  teamRef = null,
   log = (line) => console.log(line),
 } = {}) {
   const inbox = config?.inbox || {};
   const files = [
     path.resolve(repoRoot, inbox.setup_grant_file || path.join(".teami", "inbox-setup-grant.env")),
-    domainId
-      ? path.resolve(repoRoot, ".teami", "domains", domainId, "inbox-runner-credential.json")
+    teamRef
+      ? path.resolve(repoRoot, ".teami", "teams", teamRef, "inbox-runner-credential.json")
       : path.resolve(repoRoot, inbox.credential_file || path.join(".teami", "inbox-runner-credential.json")),
   ];
   for (const filePath of files) {
@@ -353,10 +434,10 @@ function createCleanupProgress(output) {
       output.detail(text);
       return;
     }
-    const markedRemoved = text.match(/^marked removed: domain (.+)$/);
+    const markedRemoved = text.match(/^marked removed: team (.+)$/);
     if (markedRemoved) {
-      output.success("Domain marked removed");
-      output.detail(`domain_id=${markedRemoved[1]}`);
+      output.success("Team marked removed");
+      output.detail(`team_ref=${markedRemoved[1]}`);
       return;
     }
     if (text.startsWith("could not ") || text.includes(" aborted ")) {
@@ -377,13 +458,13 @@ function capitalize(value) {
 }
 
 function cleanupLabel(label) {
-  return String(label || "").replace(/^domain [^\s]+ /, "domain ");
+  return String(label || "").replace(/^team [^\s]+ /, "team ");
 }
 
 export {
   createBootstrapLinearCredentialStore,
   legacyCredentialStores,
-  promoteSetupCredentialToDomain,
+  promoteSetupCredentialToTeam,
   removeLocalLinearSetup,
-  removeOneDomainSetup,
+  removeOneTeamSetup,
 };

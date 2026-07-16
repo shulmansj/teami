@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { writeLinearCache } from "../src/cache.mjs";
-import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION, makeTeamRecord } from "../src/team-registry.mjs";
 import {
   gatewayPollTargets,
   replaceGatewayPollTargetsForTest,
@@ -24,7 +24,7 @@ test("SCOPED run ignores a sibling test-prefixed Planned project", async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.poll.domains[0].processed, [{
+  assert.deepEqual(result.poll.teams[0].processed, [{
     action: "processed",
     inputStatus: "Planned",
     projectId: "test-e1-planned-in-scope",
@@ -63,7 +63,7 @@ test("SCOPED run ignores a sibling Ready issue in another project", async () => 
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.poll.domains[0].processed, [{
+  assert.deepEqual(result.poll.teams[0].processed, [{
     action: "processed",
     inputStatus: "Ready",
     issueId: "test-e1-ready-in-scope",
@@ -81,7 +81,7 @@ test("empty pollScope projectIds processes nothing", async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.poll.domains[0].processed, []);
+  assert.deepEqual(result.poll.teams[0].processed, []);
 });
 
 test("invalid pollScope projectIds throws a clear error", async () => {
@@ -102,7 +102,7 @@ async function runGatewayPoll({
   inReviewIssues = [],
 } = {}) {
   const repoRoot = tempRepo();
-  writeDomainCache(repoRoot);
+  writeTeamCache(repoRoot);
   const restore = replaceGatewayPollTargetsForTest(
     gatewayPollTargets().map((descriptor) => ({
       ...descriptor,
@@ -171,7 +171,7 @@ function processedCandidate(inputStatus, candidate) {
 }
 
 function processedProjectIds(result) {
-  return result.poll.domains[0].processed.map((entry) => entry.projectId);
+  return result.poll.teams[0].processed.map((entry) => entry.projectId);
 }
 
 function page(candidates) {
@@ -202,9 +202,9 @@ function issueCandidate({
   };
 }
 
-function writeDomainCache(repoRoot) {
+function writeTeamCache(repoRoot) {
   writeLinearCache(
-    path.join(repoRoot, "domains", "domain-1", "linear.json"),
+    path.join(repoRoot, "teams", "team-1", "linear.json"),
     {
       teamId: "team-1",
       issueStatuses: {
@@ -222,14 +222,14 @@ function writeDomainCache(repoRoot) {
 
 function registryFixture() {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [domainFixture()],
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [teamFixture()],
   };
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "domain-1",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "team-1",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",

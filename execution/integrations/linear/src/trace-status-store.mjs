@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
+import { normalizeLegacyTeamIdentityForRead } from "../../../engine/legacy-team-state-compat.mjs";
 import {
   TRACE_RECEIPT_SCHEMA_VERSION,
   findSecretContentKeys,
@@ -47,7 +48,7 @@ function hasTeamiHomeOverride(env) {
 export function recordTraceStatus({
   repoRoot = process.cwd(),
   runId,
-  domainId,
+  teamRef,
   workspaceId,
   teamId,
   wakeId = null,
@@ -66,7 +67,7 @@ export function recordTraceStatus({
   observedAt = new Date().toISOString(),
 } = {}) {
   if (!runId) throw new Error("runId is required for local trace status.");
-  if (!domainId) throw new Error("domainId is required for local trace status.");
+  if (!teamRef) throw new Error("teamRef is required for local trace status.");
   const receiptResource = normalizeReceiptResource(resource, resourceKind);
   const requiresLinearIdentity = requiresLinearReceiptIdentity(receiptResource?.kind);
   if (requiresLinearIdentity && !workspaceId) throw new Error("workspaceId is required for local trace status.");
@@ -77,7 +78,7 @@ export function recordTraceStatus({
   const receiptPayload = {
     schema_version: TRACE_RECEIPT_SCHEMA_VERSION,
     run_id: runId,
-    domain_id: domainId,
+    team_ref: teamRef,
     workspace_id: workspaceId,
     team_id: teamId,
     wake_id: wakeId,
@@ -112,7 +113,7 @@ export function readTraceReceipt({ repoRoot = process.cwd(), runId } = {}) {
   if (!fs.existsSync(file)) return null;
   let receipt;
   try {
-    receipt = JSON.parse(fs.readFileSync(file, "utf8"));
+    receipt = normalizeLegacyTeamIdentityForRead(JSON.parse(fs.readFileSync(file, "utf8")));
   } catch (error) {
     return {
       ok: false,
@@ -153,7 +154,7 @@ function traceReceiptValidationFailures(receipt) {
   if (!receipt || typeof receipt !== "object") failures.push("receipt_not_object");
   if (receipt?.schema_version !== TRACE_RECEIPT_SCHEMA_VERSION) failures.push("unsupported_trace_receipt_schema_version");
   if (!receipt?.run_id) failures.push("missing_run_id");
-  if (!receipt?.domain_id) failures.push("missing_domain_id");
+  if (!receipt?.team_ref) failures.push("missing_team_ref");
   if (requiresLinearReceiptIdentity(receipt?.resource?.kind)) {
     if (!receipt?.workspace_id) failures.push("missing_workspace_id");
     if (!receipt?.team_id) failures.push("missing_team_id");
@@ -165,7 +166,7 @@ function traceReceiptValidationFailures(receipt) {
 function legacyTraceReceiptFailures(receipt, failures) {
   const requiresLinearIdentity = requiresLinearReceiptIdentity(receipt?.resource?.kind);
   return receipt?.schema_version === 1
-    || failures.includes("missing_domain_id")
+    || failures.includes("missing_team_ref")
     || (requiresLinearIdentity && failures.includes("missing_workspace_id"))
     || (requiresLinearIdentity && failures.includes("missing_team_id"));
 }

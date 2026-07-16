@@ -7,17 +7,17 @@ import path from "node:path";
 import { runGatewayCommand } from "../src/cli/runner-command.mjs";
 import { createCliOutput } from "../src/cli/cli-output.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 
 function activeRepo() {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "af-gw-heartbeat-"));
-  const registry = emptyDomainRegistry();
-  registry.domains.push(
-    makeDomainRecord({
-      domainId: "main",
+  const registry = emptyTeamRegistry();
+  registry.teams.push(
+    makeTeamRecord({
+      teamRef: "main",
       status: "active",
       workspaceId: "workspace-main",
       workspaceName: "Example Workspace",
@@ -27,7 +27,7 @@ function activeRepo() {
       teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ repoRoot }, registry);
+  writeTeamRegistry({ repoRoot }, registry);
   return repoRoot;
 }
 
@@ -52,7 +52,7 @@ test("the gateway loop heartbeat emits durable, animation-free lines when non-TT
       ok: true,
       status: "stopped",
       statuses: [{ state: "working" }],
-      iterations: [{ domains: [] }, { domains: [] }],
+      iterations: [{ teams: [] }, { teams: [] }],
       retention: {
         statuses: { total: 7, retained: 1, dropped: 6, limit: 1 },
         iterations: { total: 2, retained: 2, dropped: 0, limit: null },

@@ -262,7 +262,7 @@ async function safelyResolveNeedsPrincipalTarget(ctx = {}) {
 function cacheFromContext(ctx = {}) {
   if (ctx.cache) return ctx.cache;
   if (ctx.linearCache) return ctx.linearCache;
-  const cachePath = ctx.domainContext?.linear?.cachePath || ctx.domainContext?.linear?.cache_path;
+  const cachePath = ctx.teamContext?.linear?.cachePath || ctx.teamContext?.linear?.cache_path;
   return cachePath ? readLinearCache(cachePath) : null;
 }
 

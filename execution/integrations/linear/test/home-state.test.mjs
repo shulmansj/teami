@@ -6,10 +6,10 @@ import path from "node:path";
 
 import { homeStateProbe, HOME_STATE } from "../src/cli/home-state.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 
 // All fixtures place the config at the default repo-relative path under a scratch repoRoot, so the
 // probe resolves it without an env override. Clear any inherited override for this process.
@@ -34,10 +34,10 @@ function writeValidConfig(repoRoot) {
 }
 
 function writeActiveRegistry(home) {
-  const registry = emptyDomainRegistry();
-  registry.domains.push(
-    makeDomainRecord({
-      domainId: "main",
+  const registry = emptyTeamRegistry();
+  registry.teams.push(
+    makeTeamRecord({
+      teamRef: "main",
       status: "active",
       workspaceId: "workspace-main",
       workspaceName: "Example Workspace",
@@ -47,7 +47,7 @@ function writeActiveRegistry(home) {
       teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ home }, registry);
+  writeTeamRegistry({ home }, registry);
 }
 
 function writeGatewayLock(home, lock) {
@@ -77,7 +77,7 @@ test("uninitialized: a fresh checkout with no config and no registry", () => {
   }
 });
 
-test("uninitialized: config present but the domain registry has not been written", () => {
+test("uninitialized: config present but the team registry has not been written", () => {
   const repoRoot = freshRepo();
   const home = freshHome();
   try {
@@ -91,15 +91,15 @@ test("uninitialized: config present but the domain registry has not been written
   }
 });
 
-test("uninitialized: registry exists but has no active domain", () => {
+test("uninitialized: registry exists but has no active team", () => {
   const repoRoot = freshRepo();
   const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    writeDomainRegistry({ home }, emptyDomainRegistry());
+    writeTeamRegistry({ home }, emptyTeamRegistry());
     const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.UNINITIALIZED);
-    assert.equal(result.evidence.activeDomainId, null);
+    assert.equal(result.evidence.activeTeamRef, null);
   } finally {
     cleanup(repoRoot);
     cleanup(home);
@@ -125,12 +125,12 @@ test("degraded: a present-but-unreadable config", () => {
   }
 });
 
-test("degraded: a present-but-corrupt domain registry", () => {
+test("degraded: a present-but-corrupt team registry", () => {
   const repoRoot = freshRepo();
   const home = freshHome();
   try {
     writeValidConfig(repoRoot);
-    const registryPath = path.join(home, "domains.json");
+    const registryPath = path.join(home, "teams.json");
     fs.mkdirSync(path.dirname(registryPath), { recursive: true });
     fs.writeFileSync(registryPath, "{ corrupt", "utf8");
     const result = homeStateProbe({ repoRoot, home, config: {} });
@@ -141,7 +141,7 @@ test("degraded: a present-but-corrupt domain registry", () => {
   }
 });
 
-test("idle: active domain, no gateway lock", () => {
+test("idle: active team, no gateway lock", () => {
   const repoRoot = freshRepo();
   const home = freshHome();
   try {
@@ -149,7 +149,7 @@ test("idle: active domain, no gateway lock", () => {
     writeActiveRegistry(home);
     const result = homeStateProbe({ repoRoot, home, config: {} });
     assert.equal(result.state, HOME_STATE.IDLE);
-    assert.equal(result.evidence.activeDomainId, "main");
+    assert.equal(result.evidence.activeTeamRef, "main");
     assert.equal(result.evidence.lockLive, false);
   } finally {
     cleanup(repoRoot);
@@ -157,7 +157,7 @@ test("idle: active domain, no gateway lock", () => {
   }
 });
 
-test("idle: active domain with a stale (invalid-pid) gateway lock", () => {
+test("idle: active team with a stale (invalid-pid) gateway lock", () => {
   const repoRoot = freshRepo();
   const home = freshHome();
   try {
@@ -172,7 +172,7 @@ test("idle: active domain with a stale (invalid-pid) gateway lock", () => {
   }
 });
 
-test("listening: active domain with a live gateway lock", () => {
+test("listening: active team with a live gateway lock", () => {
   const repoRoot = freshRepo();
   const home = freshHome();
   try {

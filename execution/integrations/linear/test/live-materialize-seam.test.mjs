@@ -14,16 +14,16 @@ import {
   registerGitRepoResourceKind,
 } from "../../git/git-repo-materializer.mjs";
 import {
-  makeDomainRecord,
-} from "../src/domain-registry.mjs";
+  makeTeamRecord,
+} from "../src/team-registry.mjs";
 import {
-  buildDomainContext,
-} from "../src/domain-resolver.mjs";
+  buildTeamContext,
+} from "../src/team-resolver.mjs";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
 const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
-test("materializeRunContext materializes resources preserved by buildDomainContext", async (t) => {
+test("materializeRunContext materializes resources preserved by buildTeamContext", async (t) => {
   resetResourceRegistry();
   registerGitRepoResourceKind();
   const tempSource = fs.mkdtempSync(path.join(os.tmpdir(), "teami-live-materialize-"));
@@ -37,18 +37,18 @@ test("materializeRunContext materializes resources preserved by buildDomainConte
   });
 
   const resource = gitRepoResource();
-  const domain = domainRecord({ resources: [resource] });
-  const domainContext = buildDomainContext({ domain, config: null, repoRoot: REPO_ROOT });
+  const team = teamRecord({ resources: [resource] });
+  const teamContext = buildTeamContext({ team, config: null, repoRoot: REPO_ROOT });
   const remoteUrl = "https://github.com/acme/app.git";
   const { runGit, calls } = fakeRunGit({ source: tempSource, remoteUrl });
 
-  assert.deepEqual(domainContext.resources, [resource]);
-  assert.notEqual(domainContext.resources, domain.resources);
-  assert.equal(Object.isFrozen(domainContext.resources), true);
+  assert.deepEqual(teamContext.resources, [resource]);
+  assert.notEqual(teamContext.resources, team.resources);
+  assert.equal(Object.isFrozen(teamContext.resources), true);
 
   try {
     const materialized = await materializeRunContext({
-      domainContext,
+      teamContext,
       runId: "execution-run-1",
       engineRepoRoot: REPO_ROOT,
       runGit,
@@ -114,16 +114,16 @@ test("materializeRunContext materializes resources preserved by buildDomainConte
   ]);
 });
 
-test("materializeRunContext skips empty-resource domains for decomposition-style runs", async () => {
-  const domain = domainRecord({ resources: [] });
-  const domainContext = buildDomainContext({ domain, config: null, repoRoot: REPO_ROOT });
+test("materializeRunContext skips empty-resource teams for decomposition-style runs", async () => {
+  const team = teamRecord({ resources: [] });
+  const teamContext = buildTeamContext({ team, config: null, repoRoot: REPO_ROOT });
   let called = false;
 
   const materialized = await materializeRunContext({
-    domainContext,
+    teamContext,
     runId: "decomposition-run-1",
     engineRepoRoot: REPO_ROOT,
-    materializeDomainResourcesFn: async () => {
+    materializeTeamResourcesFn: async () => {
       called = true;
       throw new Error("empty resources should not materialize");
     },
@@ -131,7 +131,7 @@ test("materializeRunContext skips empty-resource domains for decomposition-style
 
   assert.equal(called, false);
   assert.equal(materialized.materialized, false);
-  assert.deepEqual(domainContext.resources, []);
+  assert.deepEqual(teamContext.resources, []);
     assert.deepEqual(materialized.runContext, {
       runId: "decomposition-run-1",
       engineRepoRoot: REPO_ROOT,
@@ -213,9 +213,9 @@ function repoIdentity(handle) {
   };
 }
 
-function domainRecord({ resources }) {
-  return makeDomainRecord({
-    domainId: "support-ops",
+function teamRecord({ resources }) {
+  return makeTeamRecord({
+    teamRef: "support-ops",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",

@@ -30,12 +30,12 @@ import { recordTraceStatus } from "../src/trace-status-store.mjs";
 
 const TRACE_ID = "aaaabbbbccccddddeeeeffff00001111";
 const TRACE_IDENTITY = Object.freeze({
-  domainId: "support-ops",
+  teamRef: "support-ops",
   workspaceId: "workspace-1",
   teamId: "team-1",
 });
 const ARTIFACT_IDENTITY = Object.freeze({
-  domain_id: TRACE_IDENTITY.domainId,
+  team_ref: TRACE_IDENTITY.teamRef,
   workspace_id: TRACE_IDENTITY.workspaceId,
   team_id: TRACE_IDENTITY.teamId,
 });

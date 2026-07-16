@@ -3,7 +3,7 @@
   "workflow_version": "0.2.0",
   "kind": "checkpoint",
   "run_id": "run-legacy-v3-checkpoint",
-  "domain_id": "support-ops",
+  "team_ref": "support-ops",
   "workspace_id": "workspace-1",
   "team_id": "team-1",
   "runtime_assignments": {

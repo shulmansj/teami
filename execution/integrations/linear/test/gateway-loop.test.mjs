@@ -4,12 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION, makeTeamRecord } from "../src/team-registry.mjs";
 import {
   acquireGatewayLock,
   decidePlannedProject,
   gatewayLockPath,
-  pollGatewayDomain,
+  pollGatewayTeam,
   processPlannedProject,
   replayPendingMutation,
   runFreshSyntheticWake,
@@ -21,9 +21,9 @@ const FINGERPRINT = "fingerprint-1";
 test("planned-project decision checks replay before suppression and fresh", async () => {
   const replayCalls = [];
   const suppressionCalls = [];
-  const replay = { domainId: "support-ops", projectId: "project-1", runId: "run-1", artifactKind: "commit" };
+  const replay = { teamRef: "support-ops", projectId: "project-1", runId: "run-1", artifactKind: "commit" };
   const replayDecision = await decidePlannedProject({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     fingerprint: FINGERPRINT,
     idempotency: {
@@ -43,7 +43,7 @@ test("planned-project decision checks replay before suppression and fresh", asyn
 
   const suppression = { reason: "same_rejected_fingerprint" };
   const suppressedDecision = await decidePlannedProject({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     fingerprint: FINGERPRINT,
     idempotency: {
@@ -54,7 +54,7 @@ test("planned-project decision checks replay before suppression and fresh", asyn
   assert.deepEqual(suppressedDecision, { action: "suppress", suppression });
 
   const freshDecision = await decidePlannedProject({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     fingerprint: FINGERPRINT,
     idempotency: {
@@ -95,7 +95,7 @@ test("gateway startup drains replay before the first planned-project poll", asyn
       listReplayPending: async () => {
         calls.push("listReplay");
         return [{
-          domainId: "support-ops",
+          teamRef: "support-ops",
           projectId: "project-1",
           runId: "run-1",
           artifactKind: "commit",
@@ -122,12 +122,12 @@ test("replay clears intent only after verified completed or paused results", asy
     home,
     projectId: "project-1",
     pending: {
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
       runId: "run-1",
       artifactKind: "commit",
     },
-    domainContext: domainContextFixture(),
+    teamContext: teamContextFixture(),
     runDecompositionFn: async () => ({ status: "completed" }),
     clearMutationIntent: async (input) => {
       cleared.push(input);
@@ -136,7 +136,7 @@ test("replay clears intent only after verified completed or paused results", asy
   assert.equal(completed.status, "verified");
   assert.equal(completed.cleared, true);
   assert.deepEqual(cleared, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-1",
     repoRoot: process.cwd(),
@@ -152,12 +152,12 @@ test("replay clears intent only after verified completed or paused results", asy
     home,
     projectId: "project-1",
     pending: {
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
       runId: "run-1",
       artifactKind: "commit",
     },
-    domainContext: domainContextFixture(),
+    teamContext: teamContextFixture(),
     runDecompositionFn: async () => ({ status: "pending", reason: "linear_issues_verify_failed" }),
     clearMutationIntent: async (input) => {
       cleared.push(input);
@@ -176,12 +176,12 @@ test("replay scope mismatch is dead-letter disposition and does not clear intent
     cache: {},
     projectId: "project-1",
     pending: {
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
       runId: "run-1",
       artifactKind: "commit",
     },
-    domainContext: domainContextFixture(),
+    teamContext: teamContextFixture(),
     runDecompositionFn: async () => {
       throw new Error("artifact_project_mismatch: wrong project");
     },
@@ -203,12 +203,12 @@ test("transient replay errors degrade and keep the mutation intent", async () =>
     cache: {},
     projectId: "project-1",
     pending: {
-      domainId: "support-ops",
+      teamRef: "support-ops",
       projectId: "project-1",
       runId: "run-1",
       artifactKind: "commit",
     },
-    domainContext: domainContextFixture(),
+    teamContext: teamContextFixture(),
     runDecompositionFn: async () => {
       throw new Error("temporary Linear read failure");
     },
@@ -229,8 +229,8 @@ test("suppressed decision emits repair state and does not run fresh decompositio
   const result = await processPlannedProject({
     repoRoot: tempRepo(),
     config: configFixture(),
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     client: snapshotClient(projectFixture()),
     candidate: { id: "project-1" },
     runTimeoutMs: 0,
@@ -263,8 +263,8 @@ test("fresh rejected result writes suppression only when the project remains pla
     home,
     config: configFixture(),
     cache: cacheFixture(),
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     client,
     candidate: { id: "project-1" },
     runTimeoutMs: 0,
@@ -289,7 +289,7 @@ test("fresh rejected result writes suppression only when the project remains pla
   assert.equal(result.action, "fresh");
   assert.deepEqual(events.map((event) => event.state), ["working"]);
   assert.deepEqual(writes, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     fingerprint: FINGERPRINT,
     runId: "run-rejected",
@@ -317,8 +317,8 @@ test("fresh rejected result writes no suppression when the project is in a same-
     repoRoot,
     config: configFixture(),
     cache: cacheFixture(),
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     client,
     candidate: { id: "project-1" },
     runTimeoutMs: 0,
@@ -365,8 +365,8 @@ test("paused project result writes no suppression so moving back to Planned fire
     repoRoot,
     config: configFixture(),
     cache: cacheFixture(),
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     client,
     candidate: { id: "project-1" },
     runTimeoutMs: 0,
@@ -410,8 +410,8 @@ test("app-actor Planned move is accepted as actorless candidate and does not ref
     repoRoot,
     config: configFixture(),
     cache: cacheFixture(),
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     client: snapshotClient(projectFixture()),
     candidate,
     runTimeoutMs: 0,
@@ -435,12 +435,12 @@ test("app-actor Planned move is accepted as actorless candidate and does not ref
   assert.deepEqual(events.map((event) => event.state), ["working", "suppressed"]);
 });
 
-test("Linear rate limits back off the domain without reporting an empty poll", async () => {
+test("Linear rate limits back off the team without reporting an empty poll", async () => {
   const resetAt = Date.parse("2026-06-24T12:05:00.000Z");
   const events = [];
   const state = {
     inFlight: new Set(),
-    domainBackoff: new Map(),
+    teamBackoff: new Map(),
   };
   let clientCreates = 0;
   const rateLimit = new Error("rate limited");
@@ -448,11 +448,11 @@ test("Linear rate limits back off the domain without reporting an empty poll", a
   rateLimit.errors = [{ extensions: { code: "RATELIMITED" } }];
   rateLimit.rateLimit = { scope: "complexity", resetAt, remaining: 0 };
 
-  const first = await pollGatewayDomain({
+  const first = await pollGatewayTeam({
     repoRoot: tempRepo(),
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     state,
     now: () => new Date("2026-06-24T12:00:00.000Z"),
     emitStatus: (event) => events.push(event),
@@ -467,14 +467,14 @@ test("Linear rate limits back off the domain without reporting an empty poll", a
   });
   assert.equal(first.status, "rate_limited");
   assert.equal(first.nextAttemptAt, resetAt);
-  assert.equal(state.domainBackoff.get("support-ops"), resetAt);
+  assert.equal(state.teamBackoff.get("support-ops"), resetAt);
   assert.deepEqual(events.map((event) => event.state), ["rate_limited"]);
 
-  const second = await pollGatewayDomain({
+  const second = await pollGatewayTeam({
     repoRoot: tempRepo(),
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     state,
     now: () => new Date("2026-06-24T12:01:00.000Z"),
     createLinearClient: async () => {
@@ -486,11 +486,11 @@ test("Linear rate limits back off the domain without reporting an empty poll", a
   assert.equal(clientCreates, 1);
 });
 
-test("project-context rate limits stop the current domain poll immediately", async () => {
+test("project-context rate limits stop the current team poll immediately", async () => {
   const resetAt = Date.parse("2026-06-24T12:10:00.000Z");
   const state = {
     inFlight: new Set(),
-    domainBackoff: new Map(),
+    teamBackoff: new Map(),
   };
   const rateLimit = new Error("context rate limited");
   rateLimit.httpStatus = 400;
@@ -498,11 +498,11 @@ test("project-context rate limits stop the current domain poll immediately", asy
   rateLimit.rateLimit = { scope: "requests", resetAt, remaining: 0 };
   let snapshotReads = 0;
 
-  const result = await pollGatewayDomain({
+  const result = await pollGatewayTeam({
     repoRoot: tempRepo(),
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     state,
     now: () => new Date("2026-06-24T12:00:00.000Z"),
     createLinearClient: async () => ({
@@ -528,13 +528,13 @@ test("project-context rate limits stop the current domain poll immediately", asy
 test("fresh synthetic wake adapter claims a local wake and passes the claim into the runner", async () => {
   const repoRoot = tempRepo();
   const registry = registryFixture();
-  const domain = domainFixture();
+  const team = teamFixture();
   const claim = {
     ok: true,
     wake: {
       id: "wake-1",
       workspace_id: "workspace-1",
-      domain_id: "support-ops",
+      team_ref: "support-ops",
       object_id: "project-1",
       team_ids: ["team-1"],
     },
@@ -554,7 +554,7 @@ test("fresh synthetic wake adapter claims a local wake and passes the claim into
     repoRoot,
     config: configFixture(),
     registry,
-    domain,
+    team,
     projectId: "project-1",
     createStore: () => store,
     createTraceSink: () => ({ shutdown: async () => {} }),
@@ -567,14 +567,14 @@ test("fresh synthetic wake adapter claims a local wake and passes the claim into
 
   assert.equal(result.status, "completed");
   assert.deepEqual(claimInput, {
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-1",
   });
   assert.equal(runnerInput.store, store);
   assert.equal(runnerInput.claim, claim);
-  assert.equal(runnerInput.domainContext.domainId, "support-ops");
+  assert.equal(runnerInput.teamContext.teamRef, "support-ops");
 });
 
 test("gateway lock refuses a second live gateway in the same checkout", () => {
@@ -600,6 +600,76 @@ test("gateway lock refuses a second live gateway in the same checkout", () => {
   assert.ok(!fs.existsSync(path.join(repoRoot, ".teami", "gateway.lock")));
   first.release();
 });
+
+test("gateway lock publishes only a complete owner record", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-gateway-atomic-publish-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const lockPath = gatewayLockPath(home);
+  const fsApi = Object.create(fs);
+  fsApi.renameSync = (source, destination) => {
+    if (destination !== lockPath) return fs.renameSync(source, destination);
+    const error = new Error("simulated gateway crash before atomic publish");
+    error.code = "EIO";
+    throw error;
+  };
+
+  assert.throws(
+    () => acquireGatewayLock({ home, installHandlers: false, fsApi }),
+    /simulated gateway crash before atomic publish/,
+  );
+  assert.equal(fs.existsSync(lockPath), false);
+  assert.deepEqual(
+    fs.readdirSync(home).filter((name) => name.includes(".tmp")),
+    [],
+  );
+  const recovered = acquireGatewayLock({ home, installHandlers: false });
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.release(), true);
+});
+
+for (const collisionCode of ["ENOTEMPTY", "EACCES"]) {
+  test(`a delayed stale gateway reclaimer cannot move a fresh owner (${collisionCode})`, (t) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-gateway-stale-race-"));
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+    const lockPath = gatewayLockPath(home);
+    const crashed = acquireGatewayLock({
+      home,
+      installHandlers: false,
+      pid: 7777,
+      isProcessAlive: () => true,
+    });
+    assert.equal(crashed.ok, true);
+    let freshOwner = null;
+    const fsApi = Object.create(fs);
+    fsApi.renameSync = (source, destination) => {
+      if (source === lockPath && destination.includes(".stale-")) {
+        freshOwner = acquireGatewayLock({
+          home,
+          installHandlers: false,
+          pid: 8888,
+          isProcessAlive: (candidatePid) => candidatePid !== 7777,
+        });
+        assert.equal(freshOwner.ok, true);
+        const collision = new Error("simulated delayed gateway reclaimer collision");
+        collision.code = collisionCode;
+        throw collision;
+      }
+      return fs.renameSync(source, destination);
+    };
+
+    const delayed = acquireGatewayLock({
+      home,
+      installHandlers: false,
+      pid: 9999,
+      isProcessAlive: (candidatePid) => candidatePid !== 7777,
+      fsApi,
+    });
+    assert.equal(delayed.ok, false);
+    assert.equal(delayed.reason, "gateway_already_running");
+    assert.equal(crashed.release(), false);
+    assert.equal(freshOwner.release(), true);
+  });
+}
 
 function snapshotClient(projectOrProjects) {
   const projects = Array.isArray(projectOrProjects) ? projectOrProjects : [projectOrProjects];
@@ -629,14 +699,14 @@ function projectFixture(overrides = {}) {
 
 function registryFixture() {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [domainFixture()],
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [teamFixture()],
   };
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "support-ops",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "support-ops",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",
@@ -647,9 +717,9 @@ function domainFixture() {
   });
 }
 
-function domainContextFixture() {
+function teamContextFixture() {
   return {
-    domainId: "support-ops",
+    teamRef: "support-ops",
     status: "active",
     linear: {
       workspaceId: "workspace-1",
@@ -660,7 +730,7 @@ function domainContextFixture() {
       cachePath: "unused",
     },
     trace: {
-      domain_id: "support-ops",
+      team_ref: "support-ops",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test",

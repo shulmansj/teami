@@ -141,7 +141,7 @@ test("human-review issue label is required for the review gate", () => {
   );
 });
 
-test("public config separates behavior-repo GitHub setup from domain git repo binding", () => {
+test("public config separates behavior-repo GitHub setup from team git repo binding", () => {
   const config = loadLinearConfig({ repoRoot });
 
   assert.equal(Object.hasOwn(config.github, "behavior_repo"), true);

@@ -37,5 +37,5 @@ left enough evidence for a human to decide whether the process should improve.
 
 This demo shows that reading path. It does not prove live queue handoff, live
 Linear mutation, local Phoenix delivery, or behavior-repo proposal creation.
-Local domain `git_repo` binding behavior is proved separately in
+Local team `git_repo` binding behavior is proved separately in
 [resource-binding-proof.md](resource-binding-proof.md).

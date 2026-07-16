@@ -11,10 +11,10 @@ import { runGatewayCommand } from "../src/cli/runner-command.mjs";
 import { runFinalGate } from "../src/cli/linear-setup-command.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 
 // All surfaces resolve config from the default repo-relative path; clear any inherited override.
 delete process.env.TEAMI_LINEAR_CONFIG;
@@ -29,10 +29,10 @@ function makeActiveRepo() {
   const target = path.join(repoRoot, "execution", "integrations", "linear", "config.example.json");
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(exampleConfigPath, target);
-  const registry = emptyDomainRegistry();
-  registry.domains.push(
-    makeDomainRecord({
-      domainId: "main",
+  const registry = emptyTeamRegistry();
+  registry.teams.push(
+    makeTeamRecord({
+      teamRef: "main",
       status: "active",
       workspaceId: "workspace-main",
       workspaceName: "Example Workspace",
@@ -42,7 +42,7 @@ function makeActiveRepo() {
       teamNameLastSeenAt: "2026-06-11T00:00:00.000Z",
     }),
   );
-  writeDomainRegistry({ home }, registry);
+  writeTeamRegistry({ home }, registry);
   return { repoRoot, home, configPath: target };
 }
 
@@ -86,10 +86,10 @@ async function renderAllAdopterSurfaces({ color, unicode }) {
     repoRoot: process.cwd(),
     home: fs.mkdtempSync(path.join(os.tmpdir(), "af-conf-final-home-")),
     cachePath: "linear-cache.json",
-    domainId: "domain-one",
+    teamRef: "team-one",
     output,
     runSmoke: async () => ({ ok: true, results: [] }),
-    runDoctor: async () => [{ name: "domain registry", ok: true }],
+    runDoctor: async () => [{ name: "team registry", ok: true }],
   });
   process.exitCode = savedExit2;
 

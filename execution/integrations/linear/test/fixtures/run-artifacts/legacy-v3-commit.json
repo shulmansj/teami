@@ -3,7 +3,7 @@
   "workflow_version": "0.2.0",
   "kind": "commit",
   "run_id": "run-legacy-v3-replay",
-  "domain_id": "support-ops",
+  "team_ref": "support-ops",
   "workspace_id": "workspace-1",
   "team_id": "team-1",
   "linear_project_id": "project-1",

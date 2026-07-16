@@ -12,9 +12,9 @@ import {
 
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import {
-  readDomainRegistry,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  readTeamRegistry,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import { TEAMI_PROJECT_MCP_TOOL_NAMES } from "../src/project-mcp-tools.mjs";
 import {
   assertNoCheckoutDirectory,
@@ -106,9 +106,9 @@ test(
 
 function bindFixtureGitRepoResource(fixture) {
   registerGitRepoResourceKind();
-  const registry = readDomainRegistry({ home: fixture.home });
-  const domain = registry.domains.find((candidate) => candidate.id === fixture.domain.domainId);
-  assert.ok(domain, "fixture domain must exist before binding git_repo");
+  const registry = readTeamRegistry({ home: fixture.home });
+  const team = registry.teams.find((candidate) => candidate.id === fixture.team.teamRef);
+  assert.ok(team, "fixture team must exist before binding git_repo");
   const resource = {
     id: "git_repo:acme/product",
     kind: "git_repo",
@@ -119,8 +119,8 @@ function bindFixtureGitRepoResource(fixture) {
       default_branch: "main",
     },
   };
-  domain.resources = [resource];
-  writeDomainRegistry({ home: fixture.home }, registry);
+  team.resources = [resource];
+  writeTeamRegistry({ home: fixture.home }, registry);
   return resource;
 }
 
@@ -236,30 +236,30 @@ async function assertAllMcpToolsWork({ mcp, fixture, gitRepoResource }) {
   assert.equal(onboarding.structuredContent.ok, false);
   assert.deepEqual(onboarding.structuredContent.needs.map((need) => need.field), ["confirm"]);
   assert.deepEqual(onboarding.structuredContent.defaults, {
-    team: fixture.domain.domainId,
+    team: fixture.team.teamRef,
     product_repositories: "none",
   });
   assert.equal(Object.hasOwn(onboarding.structuredContent, "authorization_url"), false);
 
   const resolved = await mcp.client.callTool({
-    name: "resolve_domain",
-    arguments: { domain: fixture.domain.domainId },
+    name: "resolve_team",
+    arguments: { team: fixture.team.teamRef },
   });
   assert.equal(resolved.isError, undefined, JSON.stringify(resolved.structuredContent));
   assert.doesNotMatch(JSON.stringify(resolved), /unknown_resource_kind:git_repo/);
-  assert.equal(resolved.structuredContent.domain.domain_id, fixture.domain.domainId);
+  assert.equal(resolved.structuredContent.team.team_ref, fixture.team.teamRef);
   assert.equal(resolved.structuredContent.cache.present, true);
 
   const created = await mcp.client.callTool({
     name: "project_create",
     arguments: {
-      domain: fixture.domain.domainId,
+      team: fixture.team.teamRef,
       name: "Packaged plugin planning project",
       description: "Created by a repo-less packaged-launch regression harness.",
     },
   });
   assert.equal(created.isError, undefined, JSON.stringify(created.structuredContent));
-  assert.equal(created.structuredContent.domain.domain_id, fixture.domain.domainId);
+  assert.equal(created.structuredContent.team.team_ref, fixture.team.teamRef);
   assert.equal(created.structuredContent.status.id, "status-backlog");
 
   const projectId = created.structuredContent.project.id;
@@ -267,7 +267,7 @@ async function assertAllMcpToolsWork({ mcp, fixture, gitRepoResource }) {
   const written = await mcp.client.callTool({
     name: "project_write_body",
     arguments: {
-      domain: fixture.domain.domainId,
+      team: fixture.team.teamRef,
       project_id: projectId,
       content: body,
     },
@@ -278,7 +278,7 @@ async function assertAllMcpToolsWork({ mcp, fixture, gitRepoResource }) {
   const moved = await mcp.client.callTool({
     name: "project_move_status",
     arguments: {
-      domain: fixture.domain.domainId,
+      team: fixture.team.teamRef,
       project_id: projectId,
       confirm: true,
     },

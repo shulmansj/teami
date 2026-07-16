@@ -40,12 +40,12 @@ import {
 
 const TRACE_ID = "0af7651916cd43dd8448eb211c80319c";
 const TRACE_IDENTITY = Object.freeze({
-  domainId: "support-ops",
+  teamRef: "support-ops",
   workspaceId: "workspace-1",
   teamId: "team-1",
 });
 const ARTIFACT_IDENTITY = Object.freeze({
-  domain_id: TRACE_IDENTITY.domainId,
+  team_ref: TRACE_IDENTITY.teamRef,
   workspace_id: TRACE_IDENTITY.workspaceId,
   team_id: TRACE_IDENTITY.teamId,
 });
@@ -53,7 +53,7 @@ const TERMINAL_AUDIT_FIELDS = Object.freeze({
   context_digest: "digest-of-loaded-context",
   source_refs: ["linear:project:proj-1"],
   assumptions: ["existing provider stays"],
-  constraints: ["no new tracking domains"],
+  constraints: ["no new tracking teams"],
   risks: ["copy approval may slip"],
 });
 
@@ -187,7 +187,7 @@ function setUpPromotableRun({ repoRoot, runId, artifact = null, project = sample
   writeRunArtifact({ runId, repoRoot }, runArtifact);
   captureProjectSnapshot({
     runId,
-    domainId: runArtifact.domain_id,
+    teamRef: runArtifact.team_ref,
     project,
     semanticStatus: "Planned",
     capturedAt: "2026-06-10T00:00:01.000Z",
@@ -641,7 +641,7 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
     reason: "synthesis_complete",
     context_digest: "digest-of-loaded-context",
     assumptions: ["existing provider stays"],
-    constraints: ["no new tracking domains"],
+    constraints: ["no new tracking teams"],
     risks: ["copy approval may slip"],
     project_update_markdown: `run_id: ${runId}\nDecomposed the refresh into two sequenced issues.`,
   });
@@ -698,7 +698,7 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
         context_digest: "digest-of-loaded-context",
         source_refs: ["linear:project:proj-1"],
         assumptions: ["existing provider stays"],
-        constraints: ["no new tracking domains"],
+        constraints: ["no new tracking teams"],
         risks: ["copy approval may slip"],
         perspectives_run: [
           { role: "pm", outcome: "synthesis_complete" },
@@ -791,7 +791,7 @@ test("rich promotion assembles a schema-valid example field-for-field, uploads w
   }
 
   // Local promotion receipt: dataset + version + split + content hash + report.
-  const receiptFile = promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId });
+  const receiptFile = promotionReceiptPath({ runId, repoRoot, teamRef: TRACE_IDENTITY.teamRef });
   assert.equal(result.receipt_path, receiptFile);
   const promotionReceipt = JSON.parse(fs.readFileSync(receiptFile, "utf8"));
   assert.equal(promotionReceipt.schema_version, "linear-decomposition-promotion-receipt/v1");
@@ -868,7 +868,7 @@ test("re-promotion with identical content is idempotent and never re-uploads", a
 
   // The receipt still records exactly one promotion event.
   const promotionReceipt = JSON.parse(fs.readFileSync(
-    promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId }),
+    promotionReceiptPath({ runId, repoRoot, teamRef: TRACE_IDENTITY.teamRef }),
     "utf8",
   ));
   assert.equal(promotionReceipt.datasets[0].promotions.length, 1);
@@ -919,7 +919,7 @@ test("changed content without --force-new-version is an explicit duplicate repor
   assert.equal(forced.action, "append");
   assert.notEqual(forced.example_content_hash, first.example_content_hash);
   const promotionReceipt = JSON.parse(fs.readFileSync(
-    promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId }),
+    promotionReceiptPath({ runId, repoRoot, teamRef: TRACE_IDENTITY.teamRef }),
     "utf8",
   ));
   assert.equal(promotionReceipt.datasets[0].promotions.length, 2, "promotion events are append-only");
@@ -953,7 +953,7 @@ test("native split write failure falls back to metadata.dataset_split and disclo
   assert.ok(uploads[1].body.metadata[0].dataset_split, "metadata mirror still carries the split");
 
   const promotionReceipt = JSON.parse(fs.readFileSync(
-    promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId }),
+    promotionReceiptPath({ runId, repoRoot, teamRef: TRACE_IDENTITY.teamRef }),
     "utf8",
   ));
   const event = promotionReceipt.datasets[0].promotions[0];
@@ -988,7 +988,7 @@ test("token-shaped content in run output fails rich promotion closed before any 
   assert.equal(result.reason, "token_or_secret_like");
   assert.ok(result.secret_paths.some((entry) => entry.includes("project_update_markdown")));
   assert.equal(
-    fs.existsSync(promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId })),
+    fs.existsSync(promotionReceiptPath({ runId, repoRoot, teamRef: TRACE_IDENTITY.teamRef })),
     false,
   );
 });
@@ -1016,7 +1016,7 @@ test("unclassifiable rich content rejects into needs_sanitization before any upl
   assert.ok(result.unclassified_paths.some((entry) =>
     entry.includes("$.output.final_issues[0].vendor_payload")));
   assert.equal(
-    fs.existsSync(promotionReceiptPath({ runId, repoRoot, domainId: TRACE_IDENTITY.domainId })),
+    fs.existsSync(promotionReceiptPath({ runId, repoRoot, teamRef: TRACE_IDENTITY.teamRef })),
     false,
   );
 });

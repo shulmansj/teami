@@ -45,7 +45,7 @@ returns, and decide again. There are two sources of subagents.
 - `prompt/decomposition/sr_eng_blocker_check` — **Sr Eng, blocker check.** A last technical pass for blockers before
   you commit.
 
-**One-off** — when no library persona fits a genuinely novel need (a specialized research pass, a domain lens, a
+**One-off** — when no library persona fits a genuinely novel need (a specialized research pass, a team lens, a
 targeted question), you may **write a subagent inline**: give it a `role_label` (a short accountability label), a
 `task`, a `prompt`, and a `runtime_role` (which already-configured runtime it runs on — one of `pm`, `sr_eng`, `judge`,
 `drafter`). A one-off mints no new capability: it runs in the same contained environment with the same default tools as

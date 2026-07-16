@@ -126,6 +126,7 @@ export function createLinearOAuthTokenProvider({
   let cachedTokenSet = null;
   let inFlightToken = null;
   let pendingTokenSet = null;
+  let observedStoredTokenSet = null;
 
   const provider = async () => {
     if (tokenSetHasUsableAccessToken(cachedTokenSet, now())) return cachedTokenSet.accessToken;
@@ -141,6 +142,7 @@ export function createLinearOAuthTokenProvider({
     if (tokenSetHasUsableAccessToken(cachedTokenSet, now())) return cachedTokenSet.accessToken;
 
     const storedTokenSet = await credentialStore.readTokenSet();
+    observedStoredTokenSet = storedTokenSet;
     if (tokenSetHasUsableAccessToken(storedTokenSet, now())) {
       cachedTokenSet = storedTokenSet;
       provider.lastTokenSource = "stored";
@@ -188,7 +190,25 @@ export function createLinearOAuthTokenProvider({
       provider.hasPendingTokenSet = true;
       return;
     }
-    await credentialStore.writeTokenSet(tokenSet);
+    await commitResolvedTokenSet(tokenSet);
+  }
+
+  async function commitResolvedTokenSet(tokenSet) {
+    let result = null;
+    if (observedStoredTokenSet && typeof credentialStore.replaceTokenSetIfEqual === "function") {
+      result = await credentialStore.replaceTokenSetIfEqual(observedStoredTokenSet, tokenSet);
+    } else if (!observedStoredTokenSet && typeof credentialStore.writeTokenSetIfAbsentOrEqual === "function") {
+      result = await credentialStore.writeTokenSetIfAbsentOrEqual(tokenSet);
+    } else {
+      await credentialStore.writeTokenSet(tokenSet);
+    }
+    if (result?.ok === false) {
+      cachedTokenSet = null;
+      pendingTokenSet = null;
+      provider.hasPendingTokenSet = false;
+      throw new Error("Linear OAuth credential changed while authorization was in progress; retry with current Team state.");
+    }
+    observedStoredTokenSet = tokenSet;
     provider.hasPendingTokenSet = false;
   }
 
@@ -198,14 +218,19 @@ export function createLinearOAuthTokenProvider({
     pendingTokenSet = null;
     provider.hasPendingTokenSet = false;
     provider.lastTokenSource = null;
-    await credentialStore.deleteTokenSet();
+    if (observedStoredTokenSet && typeof credentialStore.deleteTokenSetIfEqual === "function") {
+      await credentialStore.deleteTokenSetIfEqual(observedStoredTokenSet);
+    } else if (observedStoredTokenSet) {
+      await credentialStore.deleteTokenSet();
+    }
+    observedStoredTokenSet = null;
   };
 
   provider.persistPendingTokenSet = async () => {
     if (!pendingTokenSet) return false;
-    await credentialStore.writeTokenSet(pendingTokenSet);
+    const tokenSet = pendingTokenSet;
+    await commitResolvedTokenSet(tokenSet);
     pendingTokenSet = null;
-    provider.hasPendingTokenSet = false;
     return true;
   };
 

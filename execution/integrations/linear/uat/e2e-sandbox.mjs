@@ -1,7 +1,7 @@
 // Disposable end-to-end harness for the self-improvement loop.
 //
 // One command that runs the loop unattended against a DISPOSABLE test
-// environment: a throwaway Linear test team (the bound domain), local Phoenix,
+// environment: a throwaway Linear test team (the bound team), local Phoenix,
 // the claude/codex CLIs, and the bound behavior repo. It creates only
 // test-prefixed Linear artifacts and is intended for a disposable workspace
 // where real model runs and self-fabricated labels are acceptable. It does not
@@ -15,17 +15,17 @@
 //   reset -> produce (gateway, real decomposition) -> judge -> fabricated label
 //   -> improvement proposal (PR on the bound behavior repo).
 //
-// Usage:  npm run uat:e2e-sandbox -- --domain <id> [--keep] [--label good|bad]
-//         npm run uat:e2e-sandbox -- --domain <id> --preflight-only   (check env readiness only)
+// Usage:  npm run uat:e2e-sandbox -- --team <id> [--keep] [--label good|bad]
+//         npm run uat:e2e-sandbox -- --team <id> --preflight-only   (check env readiness only)
 
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { readLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
-import { readDomainRegistry } from "../src/domain-registry.mjs";
-import { buildDomainContext } from "../src/domain-resolver.mjs";
-import { selectGatewayDomains, runGatewayOnce } from "../src/gateway-loop.mjs";
+import { readTeamRegistry } from "../src/team-registry.mjs";
+import { buildTeamContext } from "../src/team-resolver.mjs";
+import { selectGatewayTeams, runGatewayOnce } from "../src/gateway-loop.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import { createLinearCredentialStore } from "../src/linear-credential-store.mjs";
 import { createLinearSetupGraphqlClient } from "../src/linear-setup-auth.mjs";
@@ -45,13 +45,13 @@ const TEST_PREFIX = "AF-E2E";
 const TEST_PREFIXES = ["AF-E2E", "AF-UAT", "AF-DIAG"];
 
 function parseArgs(argv = process.argv.slice(2)) {
-  const opts = { domainId: null, keep: false, label: "good", repoRoot: REPO_ROOT, preflightOnly: false };
+  const opts = { teamRef: null, keep: false, label: "good", repoRoot: REPO_ROOT, preflightOnly: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === "--domain") {
-      const domainId = argv[++i];
-      if (!domainId || domainId.startsWith("--")) throw new Error("uat:e2e-sandbox requires --domain <id> (integration smoke targets one explicit domain)");
-      opts.domainId = domainId;
+    if (a === "--team") {
+      const teamRef = argv[++i];
+      if (!teamRef || teamRef.startsWith("--")) throw new Error("uat:e2e-sandbox requires --team <id> (integration smoke targets one explicit team)");
+      opts.teamRef = teamRef;
     }
     else if (a === "--keep") opts.keep = true;
     else if (a === "--label") opts.label = argv[++i];
@@ -65,11 +65,11 @@ function parseArgs(argv = process.argv.slice(2)) {
 
 const stamp = () => new Date().toISOString().replace(/[^0-9A-Za-z]+/g, "").slice(0, 15);
 
-export function requireExplicitDomainId(opts = {}) {
-  if (!opts?.domainId) {
-    throw new Error("uat:e2e-sandbox requires --domain <id> (integration smoke targets one explicit domain)");
+export function requireExplicitTeamRef(opts = {}) {
+  if (!opts?.teamRef) {
+    throw new Error("uat:e2e-sandbox requires --team <id> (integration smoke targets one explicit team)");
   }
-  return opts.domainId;
+  return opts.teamRef;
 }
 
 export function verifyPollScopeApplied(pollResult, seededProjectId) {
@@ -77,10 +77,10 @@ export function verifyPollScopeApplied(pollResult, seededProjectId) {
   const processedProjectIds = [];
   const offenders = [];
   let seededProcessed = false;
-  for (const domain of pollResult?.poll?.domains || []) {
-    const domainId = domain?.domainId ?? null;
+  for (const team of pollResult?.poll?.teams || []) {
+    const teamRef = team?.teamRef ?? null;
     let index = 0;
-    for (const entry of domain?.processed || []) {
+    for (const entry of team?.processed || []) {
       const projectId = entry?.projectId;
       processedProjectIds.push(projectId);
       if (expectedProjectId !== null && projectId === expectedProjectId) {
@@ -91,7 +91,7 @@ export function verifyPollScopeApplied(pollResult, seededProjectId) {
         // and other bookkeeping targets that legitimately run under any scope) — the
         // scope is proven by the seeded project being processed and no OTHER project
         // appearing, not by every poll entry naming the seeded project.
-        offenders.push({ domainId, index, projectId });
+        offenders.push({ teamRef, index, projectId });
       }
       index += 1;
     }
@@ -104,7 +104,7 @@ export function verifyPollScopeApplied(pollResult, seededProjectId) {
 }
 
 export function buildAcceptanceRecord({
-  domain,
+  team,
   seededProjectId,
   pollScopeResult,
   produceOk,
@@ -114,7 +114,7 @@ export function buildAcceptanceRecord({
 } = {}) {
   const teardownData = teardown?.data || teardown || {};
   return {
-    domain: typeof domain === "string" ? domain : domain?.id ?? null,
+    team: typeof team === "string" ? team : team?.id ?? null,
     seeded_project_id: seededProjectId ?? null,
     poll_scope_applied: Boolean(pollScopeResult?.ok),
     loop: {
@@ -129,8 +129,8 @@ export function buildAcceptanceRecord({
 
 export function acceptanceRecordPasses(record) {
   return Boolean(
-    typeof record?.domain === "string"
-      && record.domain.length > 0
+    typeof record?.team === "string"
+      && record.team.length > 0
       && typeof record.seeded_project_id === "string"
       && record.seeded_project_id.length > 0
       && record.poll_scope_applied === true
@@ -143,32 +143,32 @@ export function acceptanceRecordPasses(record) {
 }
 
 async function buildContext(opts) {
-  requireExplicitDomainId(opts);
-  // The domain registry can bind git_repo resources (since #90); register that resource kind
-  // before reading the registry, or readDomainRegistry throws unknown_resource_kind:git_repo.
+  requireExplicitTeamRef(opts);
+  // The team registry can bind git_repo resources (since #90); register that resource kind
+  // before reading the registry, or readTeamRegistry throws unknown_resource_kind:git_repo.
   registerGitRepoResourceKind();
   const repoRoot = opts.repoRoot;
   const config = loadLinearConfig({ repoRoot });
-  const registry = readDomainRegistry({ repoRoot });
-  const domains = selectGatewayDomains({ registry, domainId: opts.domainId });
-  const domain = domains.find((d) => d.id === opts.domainId);
-  if (!domain) throw new Error("no active Linear domain — run npm run init against the disposable test team");
-  const domainContext = buildDomainContext({ domain, config, repoRoot });
-  const credentialStore = createLinearCredentialStore({ config, repoRoot, domainContext });
+  const registry = readTeamRegistry({ repoRoot });
+  const teams = selectGatewayTeams({ registry, teamRef: opts.teamRef });
+  const team = teams.find((d) => d.id === opts.teamRef);
+  if (!team) throw new Error("no active Linear team — run npm run init against the disposable test team");
+  const teamContext = buildTeamContext({ team, config, repoRoot });
+  const credentialStore = createLinearCredentialStore({ config, repoRoot, teamContext });
   const client = createLinearSetupGraphqlClient({
     config, repoRoot, credentialStore, allowBrowserAuth: false, allowRefresh: true,
   }).client;
   await client.verifyAuth();
-  const cache = readLinearCache(domainContext.linear.cachePath);
+  const cache = readLinearCache(teamContext.linear.cachePath);
   const shape = await resolveLinearShape({ client, config, cache });
-  return { repoRoot, config, registry, domain, domainContext, client, shape };
+  return { repoRoot, config, registry, team, teamContext, client, shape };
 }
 
 // --- Steps. Each returns { ok, status, detail, data? } and never throws. ---
 
 async function stepPreflight(ctx) {
   const checks = [];
-  checks.push({ name: "linear domain", ok: ctx.domain?.status === "active", detail: `${ctx.domain?.id} (${ctx.shape?.team?.id})` });
+  checks.push({ name: "linear team", ok: ctx.team?.status === "active", detail: `${ctx.team?.id} (${ctx.shape?.team?.id})` });
   const smoke = readRuntimeSmokeCache(runtimeSmokeCachePath(ctx.config, ctx.repoRoot));
   const versions = runtimeVersionsFromRuntimeSmokeCache(smoke) || {};
   const haveRuntimes = Boolean(versions.claude && versions.codex);
@@ -200,7 +200,7 @@ async function stepReset(ctx) {
 }
 
 async function listTestPrefixedPlannedProjects(ctx) {
-  const teamId = ctx.domain.linear.team_id;
+  const teamId = ctx.team.linear.team_id;
   const projects = [];
   let after = null;
   do {
@@ -223,7 +223,7 @@ async function stepProduce(ctx) {
     desired_outcome: "Produce a real decomposition trace through the gateway and local Phoenix.",
     acceptance: "The gateway observes the Planned project, runs decomposition, and records trace evidence.",
     scope: "Disposable e2e only; do not use production Linear artifacts or product repositories.",
-    constraints: "Use the bound domain, local credentials, and configured gateway path.",
+    constraints: "Use the bound team, local credentials, and configured gateway path.",
     sources: "Generated by the e2e sandbox harness for live UAT coverage.",
     human_decisions: "None for this disposable verification run.",
   });
@@ -243,7 +243,7 @@ async function stepProduce(ctx) {
     repoRoot: ctx.repoRoot,
     config: ctx.config,
     registry: ctx.registry,
-    domains: [ctx.domain],
+    teams: [ctx.team],
     pollScope: { projectIds: [ctx.project.id] },
   });
   ctx.pollResult = result;
@@ -418,7 +418,7 @@ export async function runE2eSandbox(opts = parseArgs()) {
 
   const pollScopeResult = verifyPollScopeApplied(ctx.pollResult, ctx.project?.id);
   const acceptance = buildAcceptanceRecord({
-    domain: ctx.domain,
+    team: ctx.team,
     seededProjectId: ctx.project?.id,
     pollScopeResult,
     produceOk: produced.ok,

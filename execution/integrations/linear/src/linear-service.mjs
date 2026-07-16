@@ -5,19 +5,19 @@ export {
 } from "./linear/matching-utils.mjs";
 export {
   classifyTeamCreateError,
-  declaredWorkspaceFromResumeDomain,
+  declaredWorkspaceFromResumeTeam,
   initLinear,
   isWorkspaceMismatchError,
   repairPathForSetupIncompleteCause,
   resolveLinearSetupWorkspace,
-  setupCompleteDomainForName,
-  setupIncompleteDomainForName,
-  setupLinearDomain,
+  setupCompleteTeamForName,
+  setupIncompleteTeamForName,
+  setupLinearTeam,
   verifyDeclaredWorkspace,
 } from "./linear/setup-service.mjs";
 export {
-  doctorDomainRegistry,
-  doctorDomainRegistryFromDisk,
+  doctorTeamRegistry,
+  doctorTeamRegistryFromDisk,
   doctorLinear,
   doctorMergePathGitHubCheck,
 } from "./linear/doctor-service.mjs";
@@ -34,8 +34,8 @@ export {
   runDecomposition,
 } from "./workflows/decomposition/run-service.mjs";
 export {
-  ARTIFACT_DOMAIN_CONTEXT_REQUIRED_REASON,
-  ARTIFACT_DOMAIN_MISMATCH_REASON,
+  ARTIFACT_TEAM_CONTEXT_REQUIRED_REASON,
+  ARTIFACT_TEAM_MISMATCH_REASON,
   ARTIFACT_PROJECT_MISMATCH_REASON,
 } from "./workflows/decomposition/artifact-apply.mjs";
 export {

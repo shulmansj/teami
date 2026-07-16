@@ -52,12 +52,12 @@ import { recordTraceStatus } from "../src/trace-status-store.mjs";
 const TRACE_ID = "bbbbccccddddeeeeffff000011112222";
 const JUDGE_MODEL = "judge-model-x";
 const TRACE_IDENTITY = Object.freeze({
-  domainId: "support-ops",
+  teamRef: "support-ops",
   workspaceId: "workspace-1",
   teamId: "team-1",
 });
 const ARTIFACT_IDENTITY = Object.freeze({
-  domain_id: TRACE_IDENTITY.domainId,
+  team_ref: TRACE_IDENTITY.teamRef,
   workspace_id: TRACE_IDENTITY.workspaceId,
   team_id: TRACE_IDENTITY.teamId,
 });
@@ -179,7 +179,7 @@ function seedRun(repoRoot, runId, { withSnapshot = true, withReceipt = true } = 
   if (withSnapshot) {
     captureProjectSnapshot({
       runId,
-      domainId: TRACE_IDENTITY.domainId,
+      teamRef: TRACE_IDENTITY.teamRef,
       project: snapshotProject(),
       semanticStatus: "planned",
       repoRoot,
@@ -771,7 +771,7 @@ test("judge fails closed before model invocation on missing snapshot, missing ar
   });
   captureProjectSnapshot({
     runId: checkpointId,
-    domainId: TRACE_IDENTITY.domainId,
+    teamRef: TRACE_IDENTITY.teamRef,
     project: snapshotProject(),
     semanticStatus: "planned",
     repoRoot,

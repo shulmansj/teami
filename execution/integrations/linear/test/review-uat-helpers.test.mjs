@@ -13,8 +13,8 @@ test("parseReviewUatArgs mirrors the live UAT env/flag shape", () => {
   const options = parseReviewUatArgs([
     "--repo-root",
     "C:/Users/example/bound-checkout",
-    "--domain",
-    "domain-1",
+    "--team",
+    "team-1",
     "--resource-id",
     "repo-resource-1",
     "--prefix",
@@ -35,7 +35,7 @@ test("parseReviewUatArgs mirrors the live UAT env/flag shape", () => {
   ], {});
 
   assert.equal(options.repoRoot, path.resolve("C:/Users/example/bound-checkout"));
-  assert.equal(options.domainId, "domain-1");
+  assert.equal(options.teamRef, "team-1");
   assert.equal(options.resourceId, "repo-resource-1");
   assert.equal(options.prefix, "AF-EXEC-UAT");
   assert.deepEqual(options.issueIds, ["issue-1", "issue-2"]);
@@ -49,13 +49,13 @@ test("parseReviewUatArgs mirrors the live UAT env/flag shape", () => {
 test("parseReviewUatArgs supports shared env defaults and comma-separated issue ids", () => {
   const options = parseReviewUatArgs([], {
     TEAMI_UAT_REPO_ROOT: "C:/Users/example/shared-root",
-    TEAMI_REVIEW_UAT_DOMAIN: "domain-env",
+    TEAMI_REVIEW_UAT_TEAM: "team-env",
     TEAMI_REVIEW_UAT_ISSUE_IDS: "issue-a, issue-b",
     TEAMI_REVIEW_UAT_KEEP_ARTIFACTS: "yes",
   });
 
   assert.equal(options.repoRoot, path.resolve("C:/Users/example/shared-root"));
-  assert.equal(options.domainId, "domain-env");
+  assert.equal(options.teamRef, "team-env");
   assert.deepEqual(options.issueIds, ["issue-a", "issue-b"]);
   assert.equal(options.keepArtifacts, true);
   assert.equal(options.prefix, DEFAULT_REVIEW_UAT_PREFIX);
@@ -95,6 +95,6 @@ test("review UAT usage documents live prerequisites and the scripted-disposition
   const usage = buildReviewUatUsage();
   assert.match(usage, /uat:execution/);
   assert.match(usage, /path-to-your-bound-checkout/);
-  assert.match(usage, /bound to your domain's git_repo resource/);
+  assert.match(usage, /bound to your team's git_repo resource/);
   assert.match(usage, /scripted by the harness/);
 });

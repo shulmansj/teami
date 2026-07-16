@@ -281,14 +281,14 @@ const FIXTURES = [
     surfaceIncludes: ["local_trigger_store_authority"],
   },
   {
-    id: "domain_credential_routing_surface",
+    id: "team_credential_routing_surface",
     changes: [edit(
-      "execution/integrations/linear/src/domain-resolver.mjs",
-      "credentialTargets.linearOAuth = credentialTargetForConfig(config, repoRoot, { domainContext: fallbackContext });",
+      "execution/integrations/linear/src/team-resolver.mjs",
+      "credentialTargets.linearOAuth = credentialTargetForConfig(config, repoRoot, { teamContext: fallbackContext });",
     )],
     expectedClass: "authority_change",
-    protectedIncludes: ["execution/integrations/linear/src/domain-resolver.mjs"],
-    surfaceIncludes: ["domain_credential_routing"],
+    protectedIncludes: ["execution/integrations/linear/src/team-resolver.mjs"],
+    surfaceIncludes: ["team_credential_routing"],
   },
   {
     id: "existing_integration_source_defaults_meta",

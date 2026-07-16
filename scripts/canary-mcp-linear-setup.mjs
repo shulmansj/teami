@@ -9,8 +9,8 @@ import {
   runBoundedSubprocess,
 } from "../execution/integrations/git/bounded-subprocess.mjs";
 import { loadLinearConfig } from "../execution/integrations/linear/src/config.mjs";
-import { buildDomainContext } from "../execution/integrations/linear/src/domain-resolver.mjs";
-import { readDomainRegistry } from "../execution/integrations/linear/src/domain-registry.mjs";
+import { buildTeamContext } from "../execution/integrations/linear/src/team-resolver.mjs";
+import { readTeamRegistry } from "../execution/integrations/linear/src/team-registry.mjs";
 import {
   createLinearCredentialStore,
   legacyCredentialTargetForConfig,
@@ -42,7 +42,7 @@ if (!options.setupId && fs.readdirSync(options.home).length > 0) {
 }
 writeCanaryCleanupReceipt({
   home: options.home,
-  domainName: options.domain,
+  teamName: options.team,
   githubRepo: `${options.githubOwner}/${options.githubRepo}`,
 });
 assertResumableSession(options);
@@ -88,7 +88,7 @@ try {
     });
 
     const setupArgs = {
-      domain: options.domain,
+      team: options.team,
       repo_intent: { mode: "non_code" },
       confirm: true,
       disclosure_version: disclosure.version,
@@ -224,7 +224,7 @@ function withTimeout(promise, timeoutMs, reason) {
 
 function parseArgs(argv) {
   const parsed = {
-    domain: null,
+    team: null,
     workspace: null,
     githubOwner: null,
     githubRepo: null,
@@ -238,7 +238,7 @@ function parseArgs(argv) {
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--domain") parsed.domain = requireValue(argv, ++index, arg);
+    if (arg === "--team") parsed.team = requireValue(argv, ++index, arg);
     else if (arg === "--workspace") parsed.workspace = requireValue(argv, ++index, arg);
     else if (arg === "--github-owner") parsed.githubOwner = requireValue(argv, ++index, arg);
     else if (arg === "--github-repo") parsed.githubRepo = requireValue(argv, ++index, arg);
@@ -255,7 +255,7 @@ function parseArgs(argv) {
     return parsed;
   }
   for (const [name, value] of [
-    ["domain", parsed.domain],
+    ["team", parsed.team],
     ["github-owner", parsed.githubOwner],
     ["github-repo", parsed.githubRepo],
     ["home", parsed.home],
@@ -266,19 +266,19 @@ function parseArgs(argv) {
 }
 
 function recordCleanupRequired({ options, setupId } = {}) {
-  const registry = readDomainRegistry({ home: options.home });
-  const domain = registry?.domains?.find((candidate) =>
-    candidate.id === options.domain || candidate.adopter_provided_name === options.domain);
-  if (!domain?.linear?.team_id || !setupId) return null;
+  const registry = readTeamRegistry({ home: options.home });
+  const team = registry?.teams?.find((candidate) =>
+    candidate.id === options.team || candidate.adopter_provided_name === options.team);
+  if (!team?.linear?.team_id || !setupId) return null;
   return writeCanaryCleanupReceipt({
     home: options.home,
     setupId,
-    domainId: domain.id,
-    domainName: options.domain,
+    teamRef: team.id,
+    teamName: options.team,
     linearTeam: {
-      id: domain.linear.team_id,
-      key: domain.linear.team_key,
-      name: domain.linear.team_name,
+      id: team.linear.team_id,
+      key: team.linear.team_key,
+      name: team.linear.team_name,
     },
     githubRepo: `${options.githubOwner}/${options.githubRepo}`,
   });
@@ -287,28 +287,28 @@ function recordCleanupRequired({ options, setupId } = {}) {
 async function runCleanupVerification({ home } = {}) {
   let receipt = readCanaryCleanupReceipt(home);
   const config = loadLinearConfig({ repoRoot });
-  const registry = readDomainRegistry({ home });
-  const domain = registry?.domains?.find((candidate) =>
-    candidate.id === receipt.domain_id || candidate.adopter_provided_name === receipt.domain_name);
-  if (domain?.linear?.team_id && !receipt.linear_team?.id) {
+  const registry = readTeamRegistry({ home });
+  const team = registry?.teams?.find((candidate) =>
+    candidate.id === receipt.team_ref || candidate.adopter_provided_name === receipt.team_name);
+  if (team?.linear?.team_id && !receipt.linear_team?.id) {
     receipt = writeCanaryCleanupReceipt({
       home,
       setupId: receipt.setup_id,
-      domainId: domain.id,
-      domainName: receipt.domain_name,
+      teamRef: team.id,
+      teamName: receipt.team_name,
       linearTeam: {
-        id: domain.linear.team_id,
-        key: domain.linear.team_key,
-        name: domain.linear.team_name,
+        id: team.linear.team_id,
+        key: team.linear.team_key,
+        name: team.linear.team_name,
       },
       githubRepo: receipt.github_repo,
     });
   }
-  const credentialStore = domain
+  const credentialStore = team
     ? createLinearCredentialStore({
         config,
         repoRoot,
-        domainContext: buildDomainContext({ domain, config, repoRoot, home }),
+        teamContext: buildTeamContext({ team, config, repoRoot, home }),
       })
     : createLinearCredentialStore({
         config,
@@ -358,8 +358,8 @@ async function runCleanupVerification({ home } = {}) {
       receipt = writeCanaryCleanupReceipt({
         home,
         setupId: receipt.setup_id,
-        domainId: receipt.domain_id,
-        domainName: receipt.domain_name,
+        teamRef: receipt.team_ref,
+        teamName: receipt.team_name,
         linearTeam: receipt.linear_team,
         githubRepo: receipt.github_repo,
         linearAbsenceVerifiedAt: linearAbsent ? verifiedAt : null,
@@ -370,8 +370,8 @@ async function runCleanupVerification({ home } = {}) {
       receipt = writeCanaryCleanupReceipt({
         home,
         setupId: receipt.setup_id,
-        domainId: receipt.domain_id,
-        domainName: receipt.domain_name,
+        teamRef: receipt.team_ref,
+        teamName: receipt.team_name,
         linearTeam: receipt.linear_team,
         githubRepo: receipt.github_repo,
         oauthRevocationVerifiedAt: new Date().toISOString(),

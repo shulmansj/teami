@@ -15,11 +15,11 @@ import {
 import {
   collectDisagreementReport,
 } from "../disagreement-report.mjs";
-import { resolveForegroundDomainCache } from "../domain-command-context.mjs";
+import { resolveForegroundTeamCache } from "../team-command-context.mjs";
 import {
-  emptyDomainRegistry,
-  readDomainRegistry,
-} from "../domain-registry.mjs";
+  emptyTeamRegistry,
+  readTeamRegistry,
+} from "../team-registry.mjs";
 import {
   collectEvalStatuses,
   rankEvalWorklist,
@@ -31,6 +31,7 @@ import { createLinearCredentialStore } from "../linear-credential-store.mjs";
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
 import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
 import { setupStatePathForCache } from "../local-state.mjs";
+import { acquireTeamOperationLock } from "../team-operation-lock.mjs";
 import {
   ensurePhoenixReady,
   phoenixStatus,
@@ -90,8 +91,8 @@ import {
   REVIEW_REQUIRED_CAPABILITIES,
 } from "../workflows/review/definition.mjs";
 import {
-  runDomainCommand,
-} from "./domain-command.mjs";
+  runTeamCommand,
+} from "./team-command.mjs";
 import {
   runDoctorCommand,
   runDoctorLinearCommand,
@@ -159,7 +160,7 @@ const ADOPTER_COMMANDS = Object.freeze([
     handler: runLinearSetupCommand,
     tier: "adopter",
     summary: "connect Linear and prepare Teami on this computer",
-    usageTail: "[--domain <name>] [--workspace <name-or-id>] [--verbose]",
+    usageTail: "[--team <name>] [--workspace <name-or-id>] [--verbose]",
     helpGroup: "Setup",
     helpOrder: 1,
     aliases: [],
@@ -173,7 +174,7 @@ const ADOPTER_COMMANDS = Object.freeze([
     handler: runDoctorCommand,
     tier: "adopter",
     summary: "check everything is healthy and get exact fixes",
-    usageTail: "[--domain <id>] [--verbose]",
+    usageTail: "[--team <id>] [--verbose]",
     helpGroup: "Setup",
     helpOrder: 2,
     aliases: [],
@@ -188,7 +189,7 @@ const ADOPTER_COMMANDS = Object.freeze([
     handler: runGatewayCommand,
     tier: "adopter",
     summary: "turn the factory on (watch Linear for Planned projects)",
-    usageTail: "[status] [--domain <id>] [--verbose]",
+    usageTail: "[status] [--team <id>] [--verbose]",
     helpGroup: "Run",
     helpOrder: 1,
     aliases: [],
@@ -203,7 +204,7 @@ const ADOPTER_COMMANDS = Object.freeze([
     handler: runGatewayCommand,
     tier: "adopter",
     summary: "check whether the factory is running (read-only)",
-    usageTail: "[--domain <id>] [--verbose]",
+    usageTail: "[--team <id>] [--verbose]",
     helpGroup: "Run",
     helpOrder: 2,
     aliases: [],
@@ -239,60 +240,60 @@ const ADOPTER_COMMANDS = Object.freeze([
     aliases: [],
   },
   {
-    noun: "domain",
+    noun: "team",
     verb: "add",
     acceptNounVerb: true,
     defaultForBareNoun: false,
     consumeVerb: true,
-    invokeCommand: "domain:add",
+    invokeCommand: "team:add",
     handler: runLinearSetupCommand,
     tier: "adopter",
     summary: "add another Linear workspace/team to this factory",
-    usageTail: "--domain <name> [--workspace <name-or-id>] [--verbose]",
+    usageTail: "--team <name> [--workspace <name-or-id>] [--verbose]",
     helpGroup: "Manage",
     helpOrder: 1,
     aliases: [],
   },
   {
-    noun: "domain",
+    noun: "team",
     verb: "show",
     acceptNounVerb: true,
     defaultForBareNoun: false,
     consumeVerb: true,
-    invokeCommand: "domain:show",
-    handler: runDomainCommand,
+    invokeCommand: "team:show",
+    handler: runTeamCommand,
     tier: "adopter",
-    summary: "show which GitHub repos a domain can work in",
+    summary: "show which GitHub repos a team can work in",
     usageTail: "<id>",
     helpGroup: "Manage",
     helpOrder: 2,
     aliases: [],
   },
   {
-    noun: "domain",
+    noun: "team",
     verb: "grant",
     acceptNounVerb: true,
     defaultForBareNoun: false,
     consumeVerb: true,
-    invokeCommand: "domain:grant",
-    handler: runDomainCommand,
+    invokeCommand: "team:grant",
+    handler: runTeamCommand,
     tier: "adopter",
-    summary: "allow a domain to work in a GitHub repo",
+    summary: "allow a team to work in a GitHub repo",
     usageTail: "<id> --repo <owner/name>",
     helpGroup: "Manage",
     helpOrder: 3,
     aliases: [],
   },
   {
-    noun: "domain",
+    noun: "team",
     verb: "revoke",
     acceptNounVerb: true,
     defaultForBareNoun: false,
     consumeVerb: true,
-    invokeCommand: "domain:revoke",
-    handler: runDomainCommand,
+    invokeCommand: "team:revoke",
+    handler: runTeamCommand,
     tier: "adopter",
-    summary: "remove a GitHub repo from a domain",
+    summary: "remove a GitHub repo from a team",
     usageTail: "<id> --repo <owner/name>",
     helpGroup: "Manage",
     helpOrder: 4,
@@ -307,7 +308,7 @@ const ADOPTER_COMMANDS = Object.freeze([
     handler: runLocalSetupCleanupCommand,
     tier: "adopter",
     summary: "remove this factory's local setup",
-    usageTail: "--domain <id> [--verbose]",
+    usageTail: "--team <id> [--verbose]",
     helpGroup: "Manage",
     helpOrder: 5,
     aliases: [],
@@ -324,7 +325,7 @@ const OPERATOR_COMMANDS = Object.freeze([
     handler: runLocalSetupCleanupCommand,
     tier: "operator",
     summary: "",
-    usageTail: "[--domain <id>] [--verbose]",
+    usageTail: "[--team <id>] [--verbose]",
     aliases: [],
   },
   {
@@ -337,7 +338,7 @@ const OPERATOR_COMMANDS = Object.freeze([
     handler: runReviewRunCommand,
     tier: "operator",
     summary: "run one In Review issue directly through the review entry",
-    usageTail: "--issue <issue_id> [--domain <id>] [--verbose]",
+    usageTail: "--issue <issue_id> [--team <id>] [--verbose]",
     aliases: [],
   },
   {
@@ -363,7 +364,7 @@ const OPERATOR_COMMANDS = Object.freeze([
     handler: runDoctorLinearCommand,
     tier: "operator",
     summary: "",
-    usageTail: "[--domain <id>] [--verbose]",
+    usageTail: "[--team <id>] [--verbose]",
     aliases: [],
   },
   {
@@ -644,7 +645,7 @@ const OPERATOR_COMMANDS = Object.freeze([
     handler: runRuntimeSmokeCommand,
     tier: "operator",
     summary: "",
-    usageTail: "[--domain <id>] [--verbose]",
+    usageTail: "[--team <id>] [--verbose]",
     aliases: [],
   },
   {
@@ -682,7 +683,7 @@ async function createCliContext({ repoRoot, home = resolveTeamiHome(), output = 
   const config = await loadLinearConfigAsync({ repoRoot, home });
   const cachePath = cachePathForConfig(config, home);
   const setupStatePath = setupStatePathForCache(cachePath);
-  const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot });
+  const credentialStore = createBootstrapLinearCredentialStore({ config, repoRoot, home });
   return {
     cachePath,
     config,
@@ -815,7 +816,7 @@ function printCliHelp(output = createCliOutput(), command = null) {
 const HOME_SCREEN = {
   uninitialized: {
     headline: "not set up yet",
-    steps: () => [{ text: formatCommand("init"), hint: "set up your factory (Linear, first domain, GitHub)" }],
+    steps: () => [{ text: formatCommand("init"), hint: "set up your factory (Linear, first team, GitHub)" }],
   },
   idle: {
     headline: "ready",
@@ -934,7 +935,7 @@ export async function runGithubInitCommand({ context, command, args }) {
     output.detail(`connection_mode=${result.connection.connection_mode}`);
     process.exitCode = 0;
 }
-export async function runReviewRunCommand({ context, command, args }) {
+export async function runReviewRunCommand({ context, command, args, acquireTeamAuthority = acquireTeamOperationLock }) {
   const { config, repoRoot, home, output } = context;
     void command;
     const { flags } = parseCliFlags(args);
@@ -942,7 +943,7 @@ export async function runReviewRunCommand({ context, command, args }) {
     agenticFactoryHeading(output, "review run");
     if (!issueId) {
       output.error({
-        what: `Usage: ${formatCommand("review run --issue <issue_id> [--domain <id>]")}`,
+        what: `Usage: ${formatCommand("review run --issue <issue_id> [--team <id>]")}`,
       });
       process.exitCode = 2;
       return;
@@ -950,19 +951,25 @@ export async function runReviewRunCommand({ context, command, args }) {
 
     let result;
     let traceSink = null;
+    let teamAuthority = null;
     try {
-      const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
-      const foreground = resolveForegroundDomainCache({
+      teamAuthority = acquireTeamAuthority({ home, installHandlers: false });
+      if (!teamAuthority.ok) {
+        throw new Error("team_authority_busy: stop the running gateway or wait for the current Team operation, then retry.");
+      }
+      const registry = readTeamRegistry({ home }) || emptyTeamRegistry();
+      const foreground = resolveForegroundTeamCache({
         config,
         repoRoot,
         home,
         registry,
-        domainId: flags.domain || null,
+        teamRef: flags.team || null,
       });
       const credentialStore = createLinearCredentialStore({
         config,
         repoRoot,
-        domainContext: foreground.context,
+        home,
+        teamContext: foreground.context,
       });
       const store = createLocalTriggerStore({ repoRoot, home });
       const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(foreground.config, home));
@@ -974,7 +981,7 @@ export async function runReviewRunCommand({ context, command, args }) {
       result = await runTriggeredReview({
         issueId,
         store,
-        runnerId: `local-runner:${foreground.context.domainId}`,
+        runnerId: `local-runner:${foreground.context.teamRef}`,
         workspaceId: foreground.context.linear.workspaceId,
         linearClientFactory: async () => createLinearSetupGraphqlClient({
           config: foreground.config,
@@ -992,7 +999,7 @@ export async function runReviewRunCommand({ context, command, args }) {
         runnerVersion: process.version,
         capabilities: config?.runner?.required_capabilities || REVIEW_REQUIRED_CAPABILITIES,
         traceSink,
-        domainContext: foreground.context,
+        teamContext: foreground.context,
         registry,
         runDeps: {
           store,
@@ -1002,12 +1009,13 @@ export async function runReviewRunCommand({ context, command, args }) {
       output.error({
         what: "Review run could not start",
         why: redactOAuthSecrets(error.message),
-        fix: "check --issue, --domain, domain resources, and local Linear/GitHub setup, then retry.",
+        fix: "check --issue, --team, team resources, and local Linear/GitHub setup, then retry.",
       });
       process.exitCode = 1;
       return;
     } finally {
       await traceSink?.shutdown?.();
+      teamAuthority?.release?.();
     }
 
     renderReviewRunReport(result, output);
@@ -1144,21 +1152,21 @@ export async function runPhoenixPreflightCommand({ context, command, args }) {
     phoenixHeading(output, "phoenix preflight");
     let preflight;
     try {
-      const foreground = resolveForegroundDomainCache({
+      const foreground = resolveForegroundTeamCache({
         config,
         repoRoot,
-        domainId: flagValue(args, "--domain"),
+        teamRef: flagValue(args, "--team"),
       });
       preflight = await runLocalPhoenixTracePreflight({
         repoRoot,
         onProgress: (line) => output.detail(line),
-        domainContext: foreground.context,
+        teamContext: foreground.context,
       });
     } catch (error) {
       output.error({
         what: "Local Phoenix preflight could not run",
         why: redactOAuthSecrets(error.message),
-        fix: phoenixRepairHintForError(error) || `run ${formatCommand("init")} or pass --domain after setup, then retry.`,
+        fix: phoenixRepairHintForError(error) || `run ${formatCommand("init")} or pass --team after setup, then retry.`,
       });
       process.exitCode = 1;
       return;
@@ -1491,20 +1499,20 @@ export async function runEvalDecompositionCommand({ context, command, args }) {
       rawArgs.filter((arg) => arg !== "--emit-checks" && arg !== "--judge"),
     );
     const usage =
-      "Usage: npm run eval:decomposition -- (--run <run_id> | --example <path-to-example.json> | --dataset <name> --example-id <id>) [--domain <domain_id>] [--variant <variant_id>] [--emit-checks] [--judge]";
+      "Usage: npm run eval:decomposition -- (--run <run_id> | --example <path-to-example.json> | --dataset <name> --example-id <id>) [--team <team_ref>] [--variant <variant_id>] [--emit-checks] [--judge]";
     let result;
     try {
-      const foreground = resolveForegroundDomainCache({
+      const foreground = resolveForegroundTeamCache({
         config,
         repoRoot,
         home,
-        domainId: flags.domain || null,
+        teamRef: flags.team || null,
       });
       result = await runDecompositionEvalTask({
         repoRoot,
         home,
         config: foreground.config,
-        domainContext: foreground.context,
+        teamContext: foreground.context,
         runId: flags.run || null,
         examplePath: flags.example || null,
         datasetName: flags.dataset || null,
@@ -1518,7 +1526,7 @@ export async function runEvalDecompositionCommand({ context, command, args }) {
       output.error({
         what: "Eval decomposition could not run",
         why: redactOAuthSecrets(error.message),
-        fix: phoenixRepairHintForError(error) || `run ${formatCommand("init")} or pass --domain after setup, then retry.`,
+        fix: phoenixRepairHintForError(error) || `run ${formatCommand("init")} or pass --team after setup, then retry.`,
       });
       process.exitCode = 1;
       return;

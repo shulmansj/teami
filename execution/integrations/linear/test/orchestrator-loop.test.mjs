@@ -2110,10 +2110,10 @@ test("orchestrator loop: eval-mode is read-only over the orchestrator loop", asy
     };
   };
 
-  const domainContext = Object.freeze({
-    domainId: "support-ops",
+  const teamContext = Object.freeze({
+    teamRef: "support-ops",
     linear: Object.freeze({ workspaceId: "ws-1", teamId: "team-1" }),
-    trace: Object.freeze({ domain_id: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
+    trace: Object.freeze({ team_ref: "support-ops", workspace_id: "ws-1", team_id: "team-1", behavior_repo_id: "local:test" }),
   });
 
   // The eval-mode guard wraps even a live client read-only: a mutation method
@@ -2136,7 +2136,7 @@ test("orchestrator loop: eval-mode is read-only over the orchestrator loop", asy
       "teami-eval-runs-test-readonly",
       `${runId}-${process.pid}-${Date.now()}`,
     ),
-    domainContext,
+    teamContext,
   });
 
   // The run produced an orchestrator commit output over the snapshot client; no
@@ -2529,7 +2529,7 @@ test("orchestrator loop: invoking the same role (pm) twice assembles a terminal 
     artifact = terminalArtifact({
       runId,
       projectId: "project-1",
-      domainTrace: { domain_id: "support-ops", workspace_id: "ws-1", team_id: "team-1" },
+      teamTrace: { team_ref: "support-ops", workspace_id: "ws-1", team_id: "team-1" },
       runResult: result.output,
       runtimeAssignments,
       runtimeEvidence: result.runtimeEvidence,
