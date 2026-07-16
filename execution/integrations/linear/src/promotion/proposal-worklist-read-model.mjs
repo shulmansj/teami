@@ -131,7 +131,7 @@ export async function collectPhase2ProposalWorklist({
 } = {}) {
   const resolvedRegistryDir = registryDir || defaultPromotionRegistryDir(home);
   const resolvedLedgerDir = ledgerDir || defaultPromotionCandidateLedgerDir(home);
-  const resolvedRunStoreDirs = runStoreDir ? [runStoreDir] : domainRunStoreDirs(home);
+  const resolvedRunStoreDirs = runStoreDir ? [runStoreDir] : teamRunStoreDirs(home);
   const report = emptyProposalWorklist({
     now,
     registryDir: resolvedRegistryDir,
@@ -875,13 +875,14 @@ function computeConsumedDownstream({ marker, runVersionRecords }) {
 // holds mixed kinds (checkpoint/pause/commit/resume); only terminal runs are a
 // completed decomposition that could have consumed an accepted version, and a
 // malformed artifact is skipped rather than trusted.
-function domainRunStoreDirs(home) {
-  const domainsDir = path.join(teamiHomePaths({ home }).home, "domains");
-  if (!fs.existsSync(domainsDir)) return [];
+function teamRunStoreDirs(home) {
+  const homeRoot = teamiHomePaths({ home }).home;
+  const teamsDir = path.join(homeRoot, "teams");
+  if (fs.existsSync(path.join(homeRoot, "teams.json.migration.lock")) || !fs.existsSync(teamsDir)) return [];
   try {
-    return fs.readdirSync(domainsDir, { withFileTypes: true })
+    return fs.readdirSync(teamsDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(domainsDir, entry.name, "runs"));
+      .map((entry) => path.join(teamsDir, entry.name, "runs"));
   } catch {
     return [];
   }

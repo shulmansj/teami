@@ -16,10 +16,10 @@ export const REVIEW_PR_DISCOVERY_STATUSES = Object.freeze([
 
 const adaptersByLocatedPr = new WeakMap();
 
-export function resourcesToRepoIdentity(domainContext = {}, options = {}) {
-  const resources = Array.isArray(domainContext)
-    ? domainContext
-    : domainContext?.resources;
+export function resourcesToRepoIdentity(teamContext = {}, options = {}) {
+  const resources = Array.isArray(teamContext)
+    ? teamContext
+    : teamContext?.resources;
   if (!Array.isArray(resources)) {
     throw new Error("review_git_repo_resources_missing");
   }

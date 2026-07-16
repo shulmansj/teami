@@ -9,7 +9,7 @@ The intended public setup entrypoint is:
 
 ```text
 npm run init
-teami domain grant main --repo owner/product-app
+teami team grant main --repo owner/product-app
 ```
 
 The grant records scope only; product-repo execution is not shipped.
@@ -47,9 +47,9 @@ adopter machine, and exports trace/eval evidence to local Phoenix.
 
 The behavior-repo GitHub path uses the adopter's own git/`gh` auth for setup
 transport and reviewable process-change proposal branches. It is distinct from
-product-repo binding. Product-repo binding is a local domain `git_repo`
-selection included by the landed domain resource-binding work. It binds one
-selected GitHub repo identity per domain. Product-repo write-capable execution
+product-repo binding. Product-repo binding is a local team `git_repo`
+selection included by the landed team resource-binding work. It binds one
+selected GitHub repo identity per team. Product-repo write-capable execution
 is not shipped; source-visible execution or workflow modules must not be treated as
 permission to edit, commit, push, or open product-repo PRs, and behavior-repo PR
 access proves none of those effects.
@@ -95,9 +95,9 @@ npm run phoenix:stop
 npm run preflight:phoenix
 npm run phoenix:annotate-trace -- <trace_id> <label> <score> <explanation> [--name <dimension>] [--kind HUMAN|LLM|CODE] [--identifier <id>] [--maturity new|calibrating|stable]
 npm run phoenix:promote-run -- <run_id> [dataset_name]
-teami domain show main
-teami domain grant main --repo owner/product-app
-teami domain revoke main --repo owner/product-app
+teami team show main
+teami team grant main --repo owner/product-app
+teami team revoke main --repo owner/product-app
 npm run worklist
 npm run uninstall
 npm run doctor:linear
@@ -108,11 +108,11 @@ Teami workspace repository: create or verify the dedicated repository, preserve
 starter/upstream remotes only as template state, verify local git/`gh` access
 to the configured repo, and check PR-generation readiness. Init does not grant
 product repos through that workspace-repository connection.
-Product repos are granted per domain as GitHub coordinates: `owner/repo` and
+Product repos are granted per team as GitHub coordinates: `owner/repo` and
 default branch, with no local checkout path. Setup never discovers or records
 an initial product-repository allowlist. Product repositories can be connected
-later through the separate explicit `teami domain grant <id>
---repo <owner/name>` or `teami domain revoke <id> --repo <owner/name>`.
+later through the separate explicit `teami team grant <id>
+--repo <owner/name>` or `teami team revoke <id> --repo <owner/name>`.
 That product-repo grant set is distinct from the Teami workspace-repository setup under
 `config.github`. Workspace-repository proposal writing is not product-repo access and
 does not prove local `git_repo` resource access.
@@ -132,7 +132,7 @@ the terminal artifact.
 
 `npm run doctor:linear` checks the same Linear substrate without mutating
 workspace state. `npm run doctor` adds local gateway readiness, runtime smoke,
-each domain's product-repo binding status, and read-only local Phoenix health.
+each team's product-repo binding status, and read-only local Phoenix health.
 `npm run phoenix:doctor` is also read-only; use `npm run phoenix:start` or
 `npm run init` to install or start Phoenix.
 
@@ -248,8 +248,8 @@ Wake statuses are:
 
 `routing_error` is an active, non-terminal quarantine state. It appears in
 `npm run trigger-status` when a runner claimed the wake but could not resolve a
-safe domain/project/team identity, such as a missing active domain, ambiguous
-team/project match, or cross-domain team conflict. Fix the domain registry or
+safe team/project/team identity, such as a missing active team, ambiguous
+team/project match, or cross-team conflict. Fix the team registry or
 Linear project/team identity first, then requeue the wake so it can be claimed
 again; do not dead-letter it as ordinary runner failure.
 
@@ -385,7 +385,7 @@ npm run canary:mcp-linear-setup -- \
   --confirm-disposable-linear \
   --confirm-one-shot-admin \
   --home /absolute/temp/teami-linear-canary-<id> \
-  --domain "Teami Canary" \
+  --team "Teami Canary" \
   --workspace "Disposable workspace" \
   --github-owner <owner> \
   --github-repo teami-contract-canary-<id>
@@ -411,13 +411,13 @@ npm run canary:mcp-linear-setup -- \
 
 That resumable terminal phase uses the still-local ordinary OAuth credential
 and ambient `gh` auth to verify both remote identities are absent, then removes
-the domain credential and the exact prefixed canary home. It reports success
+the team credential and the exact prefixed canary home. It reports success
 only after all four cleanup facts are true. The canary never runs inside
 `npm test` or `npm run verify`.
 
-After setup, run `npm run canary:linear-graphql -- --domain <canary-domain>`
+After setup, run `npm run canary:linear-graphql -- --team <canary-team>`
 for live GraphQL auth, setup-shape, status-transition, and cleanup proof. Run
-`npm run uat:gateway -- --domain <canary-domain>` separately for live project
+`npm run uat:gateway -- --team <canary-team>` separately for live project
 update/comment shapes, foreground pickup, and replay. Neither command is part
 of the credential-free deterministic lane.
 

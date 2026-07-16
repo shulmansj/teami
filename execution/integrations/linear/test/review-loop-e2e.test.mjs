@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { branchNameForIssue } from "../../git/git-branch-names.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
-import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION, makeTeamRecord } from "../src/team-registry.mjs";
 import {
   AF_REVIEW_STATUS_CONTEXT,
   formatAfReviewCommentBody,
@@ -43,9 +43,9 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
 
   const runStoreDir = path.join(tempRoot, ".teami", "runs");
   const config = reviewLoopConfig();
-  const domain = domainFixture();
-  const registry = { schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION, domains: [domain] };
-  const domainContext = domainContextFixture();
+  const team = teamFixture();
+  const registry = { schema_version: TEAM_REGISTRY_SCHEMA_VERSION, teams: [team] };
+  const teamContext = teamContextFixture();
   const linearClient = createMutableLinearClient();
   const store = createMutableTriggerStore({
     seedExecutionRun: executionRunRecord({
@@ -70,8 +70,8 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
       repoRoot: tempRoot,
       runStoreDir,
       registry,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       issueId: input.issueId,
       reviewDecision: input.reviewDecision,
       createStore: () => store,
@@ -120,8 +120,8 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
       repoRoot: tempRoot,
       runStoreDir,
       registry,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       createStore: () => store,
       createSetupGraphqlClient: createFakeSetupGraphqlClient(linearClient),
       createTraceSink: createNoopTraceSink,
@@ -179,8 +179,8 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
       repoRoot: tempRoot,
       runStoreDir,
       registry,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       client: linearClient,
       candidate: { id: ISSUE_ID },
       state,
@@ -212,8 +212,8 @@ test("review loop composes request-changes, warm resume fix, approval, and fixed
     repoRoot: tempRoot,
     runStoreDir,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     client: linearClient,
     candidate: { id: ISSUE_ID },
     state,
@@ -505,7 +505,7 @@ function createMutableTriggerStore({ seedExecutionRun } = {}) {
       return executionRuns.at(-1) || null;
     },
     async claimSyntheticIssueWake({
-      domainId,
+      teamRef,
       workspaceId,
       teamId,
       objectId,
@@ -523,7 +523,7 @@ function createMutableTriggerStore({ seedExecutionRun } = {}) {
       const wake = {
         id: `wake-${workflowType}-${wakeSequence}`,
         workspace_id: workspaceId,
-        domain_id: domainId,
+        team_ref: teamRef,
         trigger_type: triggerType,
         workflow_type: workflowType,
         object_type: objectType,
@@ -545,7 +545,7 @@ function createMutableTriggerStore({ seedExecutionRun } = {}) {
     async renewLease({ wakeId }) {
       return { ok: true, wake: structuredClone(wakes.get(wakeId) || null) };
     },
-    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, domainId }) {
+    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, teamRef }) {
       const wake = wakes.get(wakeId);
       if (!wake) return { ok: false, reason: "wake_missing" };
       Object.assign(wake, {
@@ -553,7 +553,7 @@ function createMutableTriggerStore({ seedExecutionRun } = {}) {
         runner_id: runnerId,
         lease_token: leaseToken,
         run_id: runId,
-        domain_id: domainId,
+        team_ref: teamRef,
       });
       runs.set(runId, {
         run_id: runId,
@@ -830,9 +830,9 @@ function reviewLoopConfig() {
   };
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "domain-1",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "team-1",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",
@@ -854,9 +854,9 @@ function domainFixture() {
   });
 }
 
-function domainContextFixture() {
+function teamContextFixture() {
   return {
-    domainId: "domain-1",
+    teamRef: "team-1",
     status: "active",
     linear: {
       workspaceId: "workspace-1",
@@ -867,7 +867,7 @@ function domainContextFixture() {
       cachePath: "unused-cache.json",
     },
     trace: {
-      domain_id: "domain-1",
+      team_ref: "team-1",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:review-loop-e2e",

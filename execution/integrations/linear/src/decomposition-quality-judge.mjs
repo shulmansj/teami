@@ -332,7 +332,7 @@ function genericRunJudgeInput({ artifact, snapshot, workflowType, runId }) {
   const project = isRecord(snapshot?.project) ? snapshot.project : {};
   const resource = artifact?.resource || snapshot?.resource || {
     kind: `${workflowType}_resource`,
-    id: project.id || artifact?.domain_id || runId,
+    id: project.id || artifact?.team_ref || runId,
     ...(project.name ? { label: project.name } : {}),
   };
   return {
@@ -678,24 +678,24 @@ export function judgeReceiptPath({
   runId,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir = null,
 } = {}) {
   void repoRoot;
   if (!runId || typeof runId !== "string" || !SAFE_RUN_ID_PATTERN.test(runId)) {
     throw new Error(`Invalid run_id for local judge receipt store: ${runId}`);
   }
-  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.judge.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, teamRef }), `${runId}.judge.json`);
 }
 
 export function readJudgeReceipt({
   runId,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir = null,
 } = {}) {
-  const filePath = resolveReadableJudgeReceiptPath({ runId, repoRoot, home, domainId, runStoreDir });
+  const filePath = resolveReadableJudgeReceiptPath({ runId, repoRoot, home, teamRef, runStoreDir });
   if (!fs.existsSync(filePath)) return { ok: true, exists: false, path: filePath, receipt: null };
   try {
     return { ok: true, exists: true, path: filePath, receipt: JSON.parse(fs.readFileSync(filePath, "utf8")) };
@@ -704,9 +704,9 @@ export function readJudgeReceipt({
   }
 }
 
-function appendJudgeAttempt({ runId, repoRoot, home, domainId, runStoreDir, attempt }) {
-  const filePath = judgeReceiptPath({ runId, repoRoot, home, domainId, runStoreDir });
-  const existing = readJudgeReceipt({ runId, repoRoot, home, domainId, runStoreDir });
+function appendJudgeAttempt({ runId, repoRoot, home, teamRef, runStoreDir, attempt }) {
+  const filePath = judgeReceiptPath({ runId, repoRoot, home, teamRef, runStoreDir });
+  const existing = readJudgeReceipt({ runId, repoRoot, home, teamRef, runStoreDir });
   const attempts = Array.isArray(existing.receipt?.attempts)
     ? [...existing.receipt.attempts, attempt]
     : [attempt];
@@ -727,14 +727,14 @@ function appendJudgeAttempt({ runId, repoRoot, home, domainId, runStoreDir, atte
 }
 
 function resolveReadableJudgeReceiptPath(options = {}) {
-  if (options.runStoreDir || options.domainId) return judgeReceiptPath(options);
+  if (options.runStoreDir || options.teamRef) return judgeReceiptPath(options);
   const home = teamiHomePaths({ home: options.home || resolveTeamiHome() }).home;
   const direct = path.join(home, "runs", `${options.runId}.judge.json`);
   if (fs.existsSync(direct)) return direct;
-  const domainsDir = path.join(home, "domains");
-  if (!fs.existsSync(domainsDir)) return direct;
-  for (const domainId of fs.readdirSync(domainsDir)) {
-    const candidate = judgeReceiptPath({ ...options, home, domainId });
+  const teamsDir = path.join(home, "teams");
+  if (fs.existsSync(path.join(home, "teams.json.migration.lock")) || !fs.existsSync(teamsDir)) return direct;
+  for (const teamRef of fs.readdirSync(teamsDir)) {
+    const candidate = judgeReceiptPath({ ...options, home, teamRef });
     if (fs.existsSync(candidate)) return candidate;
   }
   return direct;
@@ -843,7 +843,7 @@ export async function runDecompositionQualityJudge({
 
   const allowedFailureModes = activeEvalContract.allowed_failure_modes;
   let effectiveRunId = runId || artifact?.run_id || null;
-  let effectiveDomainId = artifact?.domain_id || null;
+  let effectiveTeamRef = artifact?.team_ref || null;
   let built = null;
   if (judgeInputs) {
     const failures = judgeInputCompletenessFailuresForDefinition({
@@ -867,7 +867,7 @@ export async function runDecompositionQualityJudge({
   }
   if (!resolvedArtifact) return notRun("missing_run_artifact");
   effectiveRunId = resolvedArtifact.run_id || runId;
-  effectiveDomainId = resolvedArtifact.domain_id || null;
+  effectiveTeamRef = resolvedArtifact.team_ref || null;
 
   // 3. Resolve the captured project snapshot (Model Judge Policy: project
   // intent comes from the captured snapshot; fail closed when missing).
@@ -876,7 +876,7 @@ export async function runDecompositionQualityJudge({
     const loaded = loadCapturedProjectSnapshot(effectiveRunId, {
       repoRoot,
       home,
-      domainId: effectiveDomainId,
+      teamRef: effectiveTeamRef,
       runStoreDir,
     });
     if (!loaded.ok) {
@@ -914,7 +914,7 @@ export async function runDecompositionQualityJudge({
   if (isInvalidTraceReceiptResult(resolvedReceipt)) {
     return notRun(resolvedReceipt.reason, {
       run_id: effectiveRunId,
-      detail: `${resolvedReceipt.detail}; re-run the source workflow to write a current domain-identity trace receipt.`,
+      detail: `${resolvedReceipt.detail}; re-run the source workflow to write a current team-identity trace receipt.`,
       trace_receipt_path: resolvedReceipt.path,
       repairable: true,
     });
@@ -976,7 +976,7 @@ export async function runDecompositionQualityJudge({
         runId: effectiveRunId,
         repoRoot,
         home,
-        domainId: effectiveDomainId,
+        teamRef: effectiveTeamRef,
         runStoreDir,
         attempt: {
           attempted_at: now(),

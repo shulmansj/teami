@@ -6,6 +6,11 @@ import { writeAtomicJson } from "../../../engine/atomic-file.mjs";
 import { readRunArtifact } from "../../../engine/run-store.mjs";
 import { resolveTeamiHome, teamiHomePaths } from "./app-home.mjs";
 import {
+  isLegacyTeamIdentityForRead,
+  legacyMutationIntentDigest,
+  normalizeLegacyTeamIdentityForRead,
+} from "../../../engine/legacy-team-state-compat.mjs";
+import {
   findMutationReconciliation,
   planMutationRecovery,
   readMutationReconciliationJournal,
@@ -26,20 +31,20 @@ const LINEAR_PROJECT_PLANNED_TRIGGER = "linear.project.planned";
 const PROJECT_OBJECT_TYPE = "project";
 const TERMINAL_WAKE_STATUSES = new Set(["completed", "paused", "rejected", "dead_letter"]);
 const ROUTING_ERROR_REASONS = new Set([
-  "domain_context_required",
-  "domain_registry_required",
-  "domain_not_found",
-  "domain_not_active",
-  "domain_required",
+  "team_context_required",
+  "team_registry_required",
+  "team_not_found",
+  "team_not_active",
+  "team_required",
   "missing_workspace_id",
-  "no_active_domains",
-  "no_active_domain_for_workspace",
+  "no_active_teams",
+  "no_active_team_for_workspace",
   "ambiguous_webhook_id",
   "webhook_id_mismatch",
   "ambiguous_team_id",
-  "no_domain_project_team_intersection",
-  "ambiguous_domain_project_team_intersection",
-  "cross_domain_team_conflict",
+  "no_team_project_team_intersection",
+  "ambiguous_team_project_team_intersection",
+  "cross_team_conflict",
   "insufficient_wake_identity",
   "team_id_mismatch",
   "workspace_id_mismatch",
@@ -143,8 +148,8 @@ export function createLocalTriggerStore({
       };
     },
 
-    async claimSyntheticWake({ domainId, workspaceId, teamId, projectId } = {}) {
-      requireString(domainId, "domainId");
+    async claimSyntheticWake({ teamRef, workspaceId, teamId, projectId } = {}) {
+      requireString(teamRef, "teamRef");
       requireString(workspaceId, "workspaceId");
       requireString(teamId, "teamId");
       requireString(projectId, "projectId");
@@ -152,7 +157,7 @@ export function createLocalTriggerStore({
       const event = {
         id: idGenerator("event"),
         workspace_id: workspaceId,
-        domain_id: domainId,
+        team_ref: teamRef,
         trigger_type: LINEAR_PROJECT_PLANNED_TRIGGER,
         workflow_type: DECOMPOSITION_WORKFLOW_TYPE,
         object_type: PROJECT_OBJECT_TYPE,
@@ -164,7 +169,7 @@ export function createLocalTriggerStore({
       const wake = {
         id: idGenerator("wake"),
         workspace_id: workspaceId,
-        domain_id: domainId,
+        team_ref: teamRef,
         trigger_type: LINEAR_PROJECT_PLANNED_TRIGGER,
         workflow_type: DECOMPOSITION_WORKFLOW_TYPE,
         object_type: PROJECT_OBJECT_TYPE,
@@ -194,7 +199,7 @@ export function createLocalTriggerStore({
     },
 
     async claimSyntheticIssueWake({
-      domainId,
+      teamRef,
       workspaceId,
       teamId,
       objectId,
@@ -202,7 +207,7 @@ export function createLocalTriggerStore({
       triggerType,
       objectType = "issue",
     } = {}) {
-      requireString(domainId, "domainId");
+      requireString(teamRef, "teamRef");
       requireString(workspaceId, "workspaceId");
       requireString(teamId, "teamId");
       requireString(objectId, "objectId");
@@ -212,7 +217,7 @@ export function createLocalTriggerStore({
       const event = {
         id: idGenerator("event"),
         workspace_id: workspaceId,
-        domain_id: domainId,
+        team_ref: teamRef,
         trigger_type: triggerType,
         workflow_type: workflowType,
         object_type: objectType,
@@ -224,7 +229,7 @@ export function createLocalTriggerStore({
       const wake = {
         id: idGenerator("wake"),
         workspace_id: workspaceId,
-        domain_id: domainId,
+        team_ref: teamRef,
         trigger_type: triggerType,
         workflow_type: workflowType,
         object_type: objectType,
@@ -337,7 +342,7 @@ export function createLocalTriggerStore({
         runnerId,
         leaseToken,
         runId,
-        domainId,
+        teamRef,
         at = isoNow(),
         artifactPointer = null,
         runtimeMetadata = null,
@@ -350,18 +355,18 @@ export function createLocalTriggerStore({
       const token = assertLeaseToken(wake, runnerId, leaseToken);
       if (!token.ok) return token;
       if (wake.status !== "leased") return { ok: false, reason: `wake_not_leased:${wake.status}`, wake: clone(wake) };
-      if (!isNonEmptyString(domainId)) return { ok: false, reason: "missing_domain_id", wake: clone(wake) };
+      if (!isNonEmptyString(teamRef)) return { ok: false, reason: "missing_team_ref", wake: clone(wake) };
       wake.status = "running";
       wake.started_at = at;
       wake.runner_id = runnerId;
       wake.run_id = runId;
-      wake.domain_id = domainId;
+      wake.team_ref = teamRef;
       const metadataForPointer = runtimeMetadata ?? runtime_metadata;
       const explicitSessionHandlePointer = sessionHandlePointer ?? session_handle_pointer;
       const runRecord = {
         run_id: runId,
         workspace_id: wake.workspace_id,
-        domain_id: domainId,
+        team_ref: teamRef,
         workflow_type: wake.workflow_type,
         wake_id: wake.id,
         object_id: wake.object_id,
@@ -396,7 +401,7 @@ export function createLocalTriggerStore({
       const wake = getRawWake(wakeId);
       const token = assertLeaseToken(wake, runnerId, leaseToken);
       if (!token.ok) return token;
-      if (!isNonEmptyString(wake.domain_id)) return { ok: false, reason: "missing_domain_id", wake: clone(wake) };
+      if (!isNonEmptyString(wake.team_ref)) return { ok: false, reason: "missing_team_ref", wake: clone(wake) };
       const write = await resolveWriteMutationIntent();
       const objectType = wake.object_type || PROJECT_OBJECT_TYPE;
       if (objectType === "issue") {
@@ -404,7 +409,7 @@ export function createLocalTriggerStore({
           throw new Error("git_identity_required_for_issue_mutation");
         }
         await write({
-          domainId: wake.domain_id,
+          teamRef: wake.team_ref,
           objectType: "issue",
           objectId: wake.object_id,
           runId,
@@ -420,7 +425,7 @@ export function createLocalTriggerStore({
         });
       } else {
         const intentInput = {
-          domainId: wake.domain_id,
+          teamRef: wake.team_ref,
           projectId: wake.object_id,
           runId,
           artifactKind,
@@ -472,7 +477,7 @@ export function createLocalTriggerStore({
         isSha256(wake.mutation_intent_digest) &&
         isSha256(reconciliationEvidenceDigest) &&
         Array.isArray(providerUpdateIds) && providerUpdateIds.length > 0 &&
-        isNonEmptyString(wake.domain_id) &&
+        isNonEmptyString(wake.team_ref) &&
         isNonEmptyString(wake.object_id) &&
         isNonEmptyString(runId);
       let reconciliation = null;
@@ -480,7 +485,7 @@ export function createLocalTriggerStore({
         const writeReceipt = await resolveWriteReconciliationReceipt();
         reconciliation = await writeReceipt({
           home,
-          domainId: wake.domain_id,
+          teamRef: wake.team_ref,
           objectType,
           objectId: wake.object_id,
           runId,
@@ -532,7 +537,7 @@ export function createLocalTriggerStore({
         try {
           const clear = await resolveClearMutationIntent();
           await clear({
-            domainId: wake.domain_id,
+            teamRef: wake.team_ref,
             projectId: wake.object_id,
             runId,
             repoRoot,
@@ -584,13 +589,13 @@ export function createLocalTriggerStore({
         wakeId,
         runnerId,
         leaseToken,
-        reason = "domain_not_served",
+        reason = "team_not_served",
       } = input;
       const wake = getRawWake(wakeId);
       const token = assertLeaseToken(wake, runnerId, leaseToken);
       if (!token.ok) return token;
       if (wake.status !== "leased") return { ok: false, reason: `wake_not_leased:${wake.status}`, wake: clone(wake) };
-      if (reason !== "domain_not_served") return { ok: false, reason: `invalid_release_reason:${reason}`, wake: clone(wake) };
+      if (reason !== "team_not_served") return { ok: false, reason: `invalid_release_reason:${reason}`, wake: clone(wake) };
       Object.assign(wake, {
         status: "queued",
         claimed_at: null,
@@ -815,13 +820,13 @@ export function recoverLocalMutationReconciliation({
   for (const wake of state.wakes) {
     if (
       (wake.object_type || PROJECT_OBJECT_TYPE) !== PROJECT_OBJECT_TYPE ||
-      !isNonEmptyString(wake.domain_id) ||
+      !isNonEmptyString(wake.team_ref) ||
       !isNonEmptyString(wake.object_id) ||
       !isNonEmptyString(wake.run_id)
     ) continue;
 
     const intent = readIntent({
-      domainId: wake.domain_id,
+      teamRef: wake.team_ref,
       runId: wake.run_id,
       repoRoot,
       home,
@@ -829,14 +834,20 @@ export function recoverLocalMutationReconciliation({
     });
     const candidateReceipt = findMutationReconciliation({
       records,
-      domainId: wake.domain_id,
+      teamRef: wake.team_ref,
       objectType: PROJECT_OBJECT_TYPE,
       objectId: wake.object_id,
       runId: wake.run_id,
     });
     const receipt = candidateReceipt?.wake_id === wake.id ? candidateReceipt : null;
 
-    if (intent && receipt && mutationIntentDigest(intent) !== receipt.intent_digest) {
+    const acceptedIntentDigests = intent
+      ? [
+          mutationIntentDigest(intent),
+          ...(isLegacyTeamIdentityForRead(intent) ? [legacyMutationIntentDigest(intent)] : []),
+        ].filter(Boolean)
+      : [];
+    if (intent && receipt && !acceptedIntentDigests.includes(receipt.intent_digest)) {
       wake.mutation_reconciliation_required = true;
       wake.mutation_reconciliation_reason = "intent_receipt_digest_mismatch";
       persist();
@@ -880,7 +891,7 @@ export function recoverLocalMutationReconciliation({
     if (plan.action === "clear_redundant_intent" || plan.action === "persist_terminal_then_clear_intent") {
       try {
         clearIntent({
-          domainId: wake.domain_id,
+          teamRef: wake.team_ref,
           projectId: wake.object_id,
           runId: wake.run_id,
           repoRoot,
@@ -950,7 +961,9 @@ function isSha256(value) {
 
 export function readLocalTriggerState(statePath = localTriggerStorePath()) {
   if (!statePath || !fs.existsSync(statePath)) return emptyLocalTriggerState();
-  const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  const parsed = normalizeLegacyTeamIdentityForRead(
+    JSON.parse(fs.readFileSync(statePath, "utf8")),
+  );
   return normalizeLocalTriggerState(parsed);
 }
 
@@ -1150,7 +1163,7 @@ function normalizeDriverSessionHandle(handle) {
 }
 
 function readRunArtifactForRecord(runRecord, { repoRoot, runStoreDir } = {}) {
-  const options = { runId: runRecord.run_id, repoRoot, domainId: runRecord.domain_id || null };
+  const options = { runId: runRecord.run_id, repoRoot, teamRef: runRecord.team_ref || null };
   if (runStoreDir) options.runStoreDir = runStoreDir;
   try {
     const artifact = readRunArtifact(options);

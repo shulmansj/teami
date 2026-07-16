@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  materializeDomainResources,
+  materializeTeamResources,
 } from "../../../engine/materialize.mjs";
 import {
   registerResourceKind,
   resetResourceRegistry,
 } from "../../../engine/resource-registry.mjs";
 
-test("materializeDomainResources builds a lean run-context for selected resources only", async () => {
+test("materializeTeamResources builds a lean run-context for selected resources only", async () => {
   resetResourceRegistry();
   try {
     const handle = { label: "Fake Resource", read() {} };
@@ -17,8 +17,8 @@ test("materializeDomainResources builds a lean run-context for selected resource
     registerFakeKind({ kind: "fake", handle });
     registerFakeKind({ kind: "unused", handle: { label: "Unused Resource" } });
 
-    const { runContext, teardownAll } = await materializeDomainResources({
-      domainResources: [fakeResource({ kind: "fake", id: "resource-1", role: "primary" })],
+    const { runContext, teardownAll } = await materializeTeamResources({
+      teamResources: [fakeResource({ kind: "fake", id: "resource-1", role: "primary" })],
       runId: "run-1",
       engineRepoRoot: "C:/teami",
       runGit,
@@ -79,8 +79,8 @@ test("teardownAll is async, idempotent, and tears down resources in reverse orde
       },
     });
 
-    const { teardownAll } = await materializeDomainResources({
-      domainResources: [
+    const { teardownAll } = await materializeTeamResources({
+      teamResources: [
         fakeResource({ kind: "first" }),
         fakeResource({ kind: "second" }),
       ],
@@ -116,8 +116,8 @@ test("teardownAll attempts all teardowns and throws an aggregate when one fails"
       },
     });
 
-    const { teardownAll } = await materializeDomainResources({
-      domainResources: [
+    const { teardownAll } = await materializeTeamResources({
+      teamResources: [
         fakeResource({ kind: "ok" }),
         fakeResource({ kind: "bad" }),
       ],
@@ -141,7 +141,7 @@ test("teardownAll attempts all teardowns and throws an aggregate when one fails"
   }
 });
 
-test("materializeDomainResources tears down built resources and propagates the original mid-materialize error", async () => {
+test("materializeTeamResources tears down built resources and propagates the original mid-materialize error", async () => {
   resetResourceRegistry();
   try {
     const teardownLog = [];
@@ -158,8 +158,8 @@ test("materializeDomainResources tears down built resources and propagates the o
     });
 
     await assert.rejects(
-      () => materializeDomainResources({
-        domainResources: [
+      () => materializeTeamResources({
+        teamResources: [
           fakeResource({ kind: "built" }),
           fakeResource({ kind: "broken" }),
         ],

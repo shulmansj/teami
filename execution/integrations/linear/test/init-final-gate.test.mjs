@@ -30,12 +30,12 @@ test("runFinalGate passes when runtime smoke and doctor are green", async () => 
     config: {},
     repoRoot: process.cwd(),
     cachePath: "linear-cache.json",
-    domainId: "domain-one",
+    teamRef: "team-one",
     output,
     phoenixOk: true,
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
-      { name: "domain registry", ok: true },
+      { name: "team registry", ok: true },
       { name: "Linear OAuth", ok: true },
     ],
   });
@@ -53,12 +53,12 @@ test("runFinalGate blocks completion when runtime smoke fails even if doctor is 
     config: {},
     repoRoot: process.cwd(),
     cachePath: "linear-cache.json",
-    domainId: "domain-one",
+    teamRef: "team-one",
     output,
     phoenixOk: true,
     runSmoke: async () => ({ ok: false, results: [] }),
     runDoctor: async () => [
-      { name: "domain registry", ok: true },
+      { name: "team registry", ok: true },
     ],
   });
 
@@ -76,12 +76,12 @@ test("runFinalGate fails when doctor has a red check", async () => {
     config: {},
     repoRoot: process.cwd(),
     cachePath: "linear-cache.json",
-    domainId: "domain-one",
+    teamRef: "team-one",
     output,
     phoenixOk: true,
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
-      { name: "domain registry", ok: true },
+      { name: "team registry", ok: true },
       { name: "GitHub connection", ok: false, message: "not connected" },
     ],
   });
@@ -106,11 +106,11 @@ test("runFinalGate reports degraded when required Phoenix is only a warning", as
     config: {},
     repoRoot: process.cwd(),
     cachePath: "linear-cache.json",
-    domainId: "domain-one",
+    teamRef: "team-one",
     output,
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
-      { name: "domain registry", ok: true },
+      { name: "team registry", ok: true },
       { name: "local Phoenix", state: "warn", message: "not running" },
     ],
   });
@@ -129,7 +129,7 @@ test("finishSetupOutput prints closeout on green gate and resumable warning on r
     process.exitCode = 99;
     await finishSetupOutput({
       output: greenOutput,
-      commandOptions: { runGithubPhase: true, readyLabel: "First domain" },
+      commandOptions: { runGithubPhase: true, readyLabel: "First team" },
       phoenixAppUrl: "http://127.0.0.1:6006",
       finalGate: async () => ({ ok: true, smokeOk: true, doctorOk: true }),
     });
@@ -146,7 +146,7 @@ test("finishSetupOutput prints closeout on green gate and resumable warning on r
     process.exitCode = 99;
     await finishSetupOutput({
       output: redOutput,
-      commandOptions: { runGithubPhase: true, readyLabel: "First domain" },
+      commandOptions: { runGithubPhase: true, readyLabel: "First team" },
       finalGate: async () => ({ ok: false, smokeOk: true, doctorOk: false }),
     });
 
@@ -163,12 +163,12 @@ test("runFinalGate is idempotent with injected fakes", async () => {
     config: {},
     repoRoot: process.cwd(),
     cachePath: "linear-cache.json",
-    domainId: "domain-one",
+    teamRef: "team-one",
     output: createRecordingOutput(),
     phoenixOk: true,
     runSmoke: async () => ({ ok: true, results: [] }),
     runDoctor: async () => [
-      { name: "domain registry", ok: true },
+      { name: "team registry", ok: true },
     ],
   });
 
@@ -235,7 +235,7 @@ test("CLI setup refuses to interleave with a pending conversational setup", asyn
   try {
     const store = createSetupStateStore({ home });
     const active = store.start({
-      input: { domain: "Pending MCP", repo_intent: { mode: "non_code" } },
+      input: { team: "Pending MCP", repo_intent: { mode: "non_code" } },
       consent: {
         confirmed: true,
         version: SETUP_DISCLOSURE_VERSION,
@@ -285,7 +285,7 @@ test("CLI init surfaces installed-app recovery while Linear authorization is sti
         output,
         confirmSetupEffects: async () => true,
         isTTY: true,
-        promptDomainName: async () => "",
+        promptTeamName: async () => "",
         authorizationPollTimeoutMs: 50,
         installedAppRecoveryDelayMs: 0,
         startLinearBrowserAuthorization: async () => ({
@@ -322,9 +322,9 @@ test("CLI init surfaces installed-app recovery while Linear authorization is sti
   }
 });
 
-test("CLI init and domain add are renderers over the same resumable onboarding action as MCP", () => {
+test("CLI init and team add are renderers over the same resumable onboarding action as MCP", () => {
   const source = fs.readFileSync(sourcePath, "utf8");
-  assert.match(source, /if \(\["init", "domain:add"\]\.includes\(command\)\) \{\s*return runCliSharedOnboarding\(/);
+  assert.match(source, /if \(\["init", "team:add"\]\.includes\(command\)\) \{\s*return runCliSharedOnboarding\(/);
   assert.match(source, /runCliSharedOnboarding\(\{\s*context:[\s\S]*?command,\s*args,/);
   assert.match(source, /createProjectMcpToolActions/);
   assert.match(source, /actions\.init_onboarding\(input\)/);

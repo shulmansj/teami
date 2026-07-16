@@ -6,19 +6,19 @@ import test from "node:test";
 
 import { cachePathForConfig, loadLinearConfig } from "../src/config.mjs";
 import {
-  resolveClaudePluginPhaseResumeDomain,
-  resolveInitDomainName,
+  resolveClaudePluginPhaseResumeTeam,
+  resolveInitTeamName,
   runLinearSetupCommand,
   runClaudePluginRegistrationStep,
 } from "../src/cli/linear-setup-command.mjs";
 import {
-  DOMAIN_REGISTRY_SCHEMA_VERSION,
-  emptyDomainRegistry,
-  makeDomainRecord,
-  readDomainRegistry,
-  upsertDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  TEAM_REGISTRY_SCHEMA_VERSION,
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  upsertTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import {
   GITHUB_CONNECTION_SCHEMA_VERSION,
   githubConnectionStatePath,
@@ -156,8 +156,8 @@ test("Claude plugin registration rejects a marketplace-name collision before upd
 
 test("bare init can resume only the Claude plugin phase after Linear and GitHub are complete", () => {
   const registry = {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [
       {
         id: "turnip",
         status: "active",
@@ -181,7 +181,7 @@ test("bare init can resume only the Claude plugin phase after Linear and GitHub 
   });
 
   assert.equal(
-    resolveClaudePluginPhaseResumeDomain({
+    resolveClaudePluginPhaseResumeTeam({
       args: [],
       registry,
       readConnectionState: readVerifiedConnection,
@@ -189,15 +189,15 @@ test("bare init can resume only the Claude plugin phase after Linear and GitHub 
     "turnip",
   );
   assert.equal(
-    resolveClaudePluginPhaseResumeDomain({
-      args: ["--domain", "turnip"],
+    resolveClaudePluginPhaseResumeTeam({
+      args: ["--team", "turnip"],
       registry,
       readConnectionState: readVerifiedConnection,
     }),
     null,
   );
   assert.equal(
-    resolveClaudePluginPhaseResumeDomain({
+    resolveClaudePluginPhaseResumeTeam({
       args: [],
       registry,
       readConnectionState: () => ({ ok: false, reason: "missing_github_connection_state" }),
@@ -207,11 +207,11 @@ test("bare init can resume only the Claude plugin phase after Linear and GitHub 
 });
 
 test("bare CLI repair preserves a single existing team without asking the adopter to retype it", async () => {
-  const result = await resolveInitDomainName([], {
+  const result = await resolveInitTeamName([], {
     command: "init",
     registry: {
-      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-      domains: [{
+      schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+      teams: [{
         id: "support-ops",
         status: "active",
         adopter_provided_name: "Support Ops",
@@ -228,11 +228,11 @@ test("bare CLI repair preserves a single existing team without asking the adopte
 
 test("bare CLI asks for a team name only when multiple existing teams are ambiguous", async () => {
   const prompts = [];
-  const result = await resolveInitDomainName([], {
+  const result = await resolveInitTeamName([], {
     command: "init",
     registry: {
-      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-      domains: [
+      schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+      teams: [
         { id: "support-ops", status: "active", adopter_provided_name: "Support Ops" },
         { id: "growth", status: "active", adopter_provided_name: "Growth" },
       ],
@@ -248,13 +248,13 @@ test("bare CLI asks for a team name only when multiple existing teams are ambigu
   assert.deepEqual(prompts, ["Linear team name: "]);
 });
 
-test("bare domain add asks for the new team even when one existing team is known", async () => {
+test("bare team add asks for the new team even when one existing team is known", async () => {
   const prompts = [];
-  const result = await resolveInitDomainName([], {
-    command: "domain:add",
+  const result = await resolveInitTeamName([], {
+    command: "team:add",
     registry: {
-      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-      domains: [{ id: "support-ops", status: "active", adopter_provided_name: "Support Ops" }],
+      schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+      teams: [{ id: "support-ops", status: "active", adopter_provided_name: "Support Ops" }],
     },
     isTTY: true,
     prompt: async (message) => {
@@ -302,17 +302,17 @@ test("bare teami init defaults the visible team name, skips product-repo discove
         output,
         confirmSetupEffects: async () => true,
         isTTY: true,
-        promptDomainName: async () => {
+        promptTeamName: async () => {
           throw new Error("fresh bare init must use the safe default without prompting");
         },
         // Auto-continue the "Authorized workspace … Press Enter to continue" confirmation so the
         // TTY init flow does not block on real stdin in the test.
         promptReauthorize: async () => "",
         startLinearBrowserAuthorization: instantBrowserAuthorization(),
-        createLinearSetupAuth: ({ allowBrowserAuth, deferTokenPersistence }) => {
+        createLinearSetupAuth: ({ allowBrowserAuth, deferTokenPersistence, credentialStore }) => {
           assert.equal(allowBrowserAuth, true);
           assert.equal(deferTokenPersistence, true);
-          return fakeSetupAuth(client, { tokenSource: "browser" });
+          return fakeSetupAuth(client, { tokenSource: "browser", credentialStore });
         },
         githubDiscoveryRunCommand: () => {
           throw new Error("fresh onboarding must not inspect product repositories");
@@ -333,10 +333,10 @@ test("bare teami init defaults the visible team name, skips product-repo discove
     assert.deepEqual(phaseCalls, ["github"]);
     assert.match(output.text(), /Product repositories: none/);
 
-    let registry = readDomainRegistry({ home });
-    let domain = registry.domains.find((candidate) => candidate.id === "teami");
-    assert.equal(domain.status, "active");
-    assert.deepEqual(domain.resources, []);
+    let registry = readTeamRegistry({ home });
+    let team = registry.teams.find((candidate) => candidate.id === "teami");
+    assert.equal(team.status, "active");
+    assert.deepEqual(team.resources, []);
 
     process.exitCode = undefined;
     await runLinearSetupCommand({
@@ -350,7 +350,7 @@ test("bare teami init defaults the visible team name, skips product-repo discove
         output,
         confirmSetupEffects: async () => true,
         isTTY: false,
-        promptDomainName: async () => {
+        promptTeamName: async () => {
           throw new Error("plugin-phase resume must not ask for the team name again");
         },
         startLinearBrowserAuthorization: instantBrowserAuthorization(),
@@ -371,9 +371,9 @@ test("bare teami init defaults the visible team name, skips product-repo discove
 
     assert.equal(process.exitCode, 0, output.text());
     assert.deepEqual(phaseCalls, ["github", "github"]);
-    registry = readDomainRegistry({ home });
-    domain = registry.domains.find((candidate) => candidate.id === "teami");
-    assert.deepEqual(domain.resources, []);
+    registry = readTeamRegistry({ home });
+    team = registry.teams.find((candidate) => candidate.id === "teami");
+    assert.deepEqual(team.resources, []);
     assert.deepEqual(
       fakeClaude.calls
         .filter((call) => call.args[0] === "plugin" && call.args[1] === "marketplace" && call.args[2] === "add")
@@ -397,14 +397,14 @@ test("bare teami init defaults the visible team name, skips product-repo discove
   }
 });
 
-test("domain add uses shared onboarding and never discovers or expands product-repository access", async (t) => {
-  const home = tempHome(t, "teami-domain-add-shared-onboarding-");
+test("team add uses shared onboarding and never discovers or expands product-repository access", async (t) => {
+  const home = tempHome(t, "teami-team-add-shared-onboarding-");
   const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
   const output = captureOutput();
-  writeDomainRegistry({ home }, upsertDomainRecord(
-    emptyDomainRegistry(),
-    makeDomainRecord({
-      domainId: "support-ops",
+  writeTeamRegistry({ home }, upsertTeamRecord(
+    emptyTeamRegistry(),
+    makeTeamRecord({
+      teamRef: "support-ops",
       status: "active",
       adopterProvidedName: "Support Ops",
       workspaceId: "workspace-1",
@@ -421,8 +421,8 @@ test("domain add uses shared onboarding and never discovers or expands product-r
   process.exitCode = undefined;
   try {
     const result = await runLinearSetupCommand({
-      command: "domain:add",
-      args: ["--domain", "Sales Ops"],
+      command: "team:add",
+      args: ["--team", "Sales Ops"],
       context: {
         config,
         repoRoot: home,
@@ -451,7 +451,7 @@ test("domain add uses shared onboarding and never discovers or expands product-r
         }),
         githubDiscoveryRunCommand: () => {
           discoveryCalls += 1;
-          throw new Error("domain add must not inspect product repositories");
+          throw new Error("team add must not inspect product repositories");
         },
       },
     });
@@ -460,15 +460,67 @@ test("domain add uses shared onboarding and never discovers or expands product-r
     assert.equal(process.exitCode, 0, output.text());
     assert.equal(discoveryCalls, 0);
     assert.equal(onboardingCalls.length, 1);
-    assert.equal(onboardingCalls[0].domain, "Sales Ops");
+    assert.equal(onboardingCalls[0].team, "Sales Ops");
     assert.deepEqual(onboardingCalls[0].repo_intent, { mode: "non_code" });
-    const registry = readDomainRegistry({ home });
-    const existing = registry.domains.find((domain) => domain.id === "support-ops");
+    const registry = readTeamRegistry({ home });
+    const existing = registry.teams.find((team) => team.id === "support-ops");
     assert.deepEqual(existing.resources, []);
     assert.match(output.text(), /Product repositories: none/);
   } finally {
     process.exitCode = previousExitCode;
   }
+});
+
+test("prompted setup refuses to guess between same-name Teams in different workspaces", async (t) => {
+  const home = tempHome(t, "teami-prompted-team-ambiguity-");
+  const config = fileCredentialConfig(loadLinearConfig({ repoRoot }));
+  const output = captureOutput();
+  const east = makeTeamRecord({
+    teamRef: "operations-east",
+    status: "active",
+    adopterProvidedName: "Operations",
+    workspaceId: "workspace-east",
+    workspaceName: "East Workspace",
+    teamId: "team-east",
+    teamKey: "OPS",
+    teamName: "Operations",
+  });
+  const west = makeTeamRecord({
+    teamRef: "operations-west",
+    status: "active",
+    adopterProvidedName: "Operations",
+    workspaceId: "workspace-west",
+    workspaceName: "West Workspace",
+    teamId: "team-west",
+    teamKey: "OPS",
+    teamName: "Operations",
+  });
+  writeTeamRegistry({ home }, upsertTeamRecord(upsertTeamRecord(emptyTeamRegistry(), west), east));
+  let onboardingCalls = 0;
+
+  await assert.rejects(
+    () => runLinearSetupCommand({
+      command: "team:add",
+      args: [],
+      context: {
+        config,
+        repoRoot: home,
+        home,
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        promptTeamName: async () => "Operations",
+        createProjectMcpToolActions: () => ({
+          init_onboarding: async () => {
+            onboardingCalls += 1;
+            throw new Error("ambiguous setup must not start onboarding");
+          },
+        }),
+      },
+    }),
+    (error) => error?.code === "team_name_ambiguous" && error?.candidates?.length === 2,
+  );
+  assert.equal(onboardingCalls, 0);
 });
 
 test("bare CLI renders the shared existing-team chooser and resumes with explicit selection", async (t) => {
@@ -674,13 +726,21 @@ function fileCredentialConfig(config) {
   return next;
 }
 
-function fakeSetupAuth(client, { tokenSource = null } = {}) {
+function fakeSetupAuth(client, { tokenSource = null, credentialStore = null } = {}) {
   return {
     client,
     tokenProvider: {
       lastTokenSource: tokenSource,
       clear: async () => {},
-      persistPendingTokenSet: async () => true,
+      persistPendingTokenSet: async () => {
+        await credentialStore?.writeTokenSet?.({
+          accessToken: "test-access-token",
+          refreshToken: "test-refresh-token",
+          tokenType: "Bearer",
+          scope: "read write",
+        });
+        return true;
+      },
       discardPendingTokenSet: async () => {},
     },
   };

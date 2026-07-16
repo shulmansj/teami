@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { applyCommitEffects } from "../../../engine/commit-effects.mjs";
 import {
-  materializeDomainResources,
+  materializeTeamResources,
 } from "../../../engine/materialize.mjs";
 import {
   resetResourceRegistry,
@@ -19,10 +19,10 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
 const RESOURCE_A_ID = "resource-a";
 const RESOURCE_B_ID = "resource-b";
 
-test("materialized run contexts expose only the selected domain resource by id", async () => {
-  await withMaterializedDummyDomains(async ({ domainA, domainB, runContextA, runContextB }) => {
-    const resourceA = domainA.resources[0];
-    const resourceB = domainB.resources[0];
+test("materialized run contexts expose only the selected team resource by id", async () => {
+  await withMaterializedDummyTeams(async ({ teamA, teamB, runContextA, runContextB }) => {
+    const resourceA = teamA.resources[0];
+    const resourceB = teamB.resources[0];
 
     assertRunContextContainsOnly({
       runContext: runContextA,
@@ -41,7 +41,7 @@ test("materialized run contexts expose only the selected domain resource by id",
 });
 
 test("commit effects derive write targets from the bound resource record, not agent-authored output", async () => {
-  await withMaterializedDummyDomains(async ({ runContextA }) => {
+  await withMaterializedDummyTeams(async ({ runContextA }) => {
     const recordedTargets = [];
     const ctx = {
       runContext: runContextA,
@@ -90,33 +90,33 @@ test("commit effects derive write targets from the bound resource record, not ag
   });
 });
 
-async function withMaterializedDummyDomains(assertions) {
+async function withMaterializedDummyTeams(assertions) {
   resetResourceRegistry();
   let teardownAllA = async () => {};
   let teardownAllB = async () => {};
 
   try {
     registerDummyResourceKind();
-    const domainA = dummyDomain("domain-a", RESOURCE_A_ID);
-    const domainB = dummyDomain("domain-b", RESOURCE_B_ID);
+    const teamA = dummyTeam("team-a", RESOURCE_A_ID);
+    const teamB = dummyTeam("team-b", RESOURCE_B_ID);
 
-    const materializedA = await materializeDomainResources({
-      domainResources: domainA.resources,
+    const materializedA = await materializeTeamResources({
+      teamResources: teamA.resources,
       runId: "run-a",
       engineRepoRoot: REPO_ROOT,
     });
     teardownAllA = materializedA.teardownAll;
 
-    const materializedB = await materializeDomainResources({
-      domainResources: domainB.resources,
+    const materializedB = await materializeTeamResources({
+      teamResources: teamB.resources,
       runId: "run-b",
       engineRepoRoot: REPO_ROOT,
     });
     teardownAllB = materializedB.teardownAll;
 
     await assertions({
-      domainA,
-      domainB,
+      teamA,
+      teamB,
       runContextA: materializedA.runContext,
       runContextB: materializedB.runContext,
     });
@@ -126,9 +126,9 @@ async function withMaterializedDummyDomains(assertions) {
   }
 }
 
-function dummyDomain(domainId, resourceId) {
+function dummyTeam(teamRef, resourceId) {
   return {
-    domainId,
+    teamRef,
     resources: [{
       id: resourceId,
       kind: dummyResourceKind.kind,

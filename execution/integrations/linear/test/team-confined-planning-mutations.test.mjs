@@ -3,17 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { createDomainConfinedPlanningMutations } from "../src/domain-confined-planning-mutations.mjs";
+import { createTeamConfinedPlanningMutations } from "../src/team-confined-planning-mutations.mjs";
 import { formatCommand } from "../src/cli/operator-output.mjs";
 
 const createError = (code, message, repair) => Object.assign(new Error(message), { code, repair });
 
 test("planning mutation repair uses the runnable launcher for its package context", () => {
   assert.throws(
-    () => createDomainConfinedPlanningMutations({ client: {}, context: {}, createError }),
+    () => createTeamConfinedPlanningMutations({ client: {}, context: {}, createError }),
     (error) => {
-      assert.equal(error.code, "project_domain_unresolved");
-      assert.equal(error.repair, `Run ${formatCommand("doctor")}, resolve the intended domain, then retry.`);
+      assert.equal(error.code, "project_team_unresolved");
+      assert.equal(error.repair, `Run ${formatCommand("doctor")}, resolve the intended team, then retry.`);
       assert.doesNotMatch(error.repair, /Run teami doctor/);
       return true;
     },
@@ -36,7 +36,7 @@ test("planning mutation adapter injects the resolved team and validates every up
       return { id, ...patch };
     },
   };
-  const mutations = createDomainConfinedPlanningMutations({
+  const mutations = createTeamConfinedPlanningMutations({
     client,
     context: { linear: { teamId: "team-1" } },
     createError,
@@ -50,9 +50,9 @@ test("planning mutation adapter injects the resolved team and validates every up
   ]);
 });
 
-test("planning mutation adapter fails outside-domain updates before the mutation call", async () => {
+test("planning mutation adapter fails outside-team updates before the mutation call", async () => {
   let updated = false;
-  const mutations = createDomainConfinedPlanningMutations({
+  const mutations = createTeamConfinedPlanningMutations({
     client: {
       getProject: async (id) => ({ id, teamIds: ["team-2"] }),
       updateProject: async () => { updated = true; },
@@ -61,7 +61,7 @@ test("planning mutation adapter fails outside-domain updates before the mutation
     context: { linear: { teamId: "team-1" } },
     createError,
   });
-  await assert.rejects(() => mutations.updateProject("project-1", {}), (error) => error.code === "project_outside_domain");
+  await assert.rejects(() => mutations.updateProject("project-1", {}), (error) => error.code === "project_outside_team");
   assert.equal(updated, false);
 });
 

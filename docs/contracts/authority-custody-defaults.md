@@ -12,13 +12,13 @@ where resulting data may live. It refines the
 
 | Surface | Authority | Allowed effect | Custody | Revoke or stop |
 | --- | --- | --- | --- | --- |
-| Linear ordinary operation | Adopter's browser-approved OAuth grant | Read the selected workspace and perform policy-bound writes in the resolved Teami domain | OS credential storage on the adopter machine | Revoke the Linear app grant and re-run setup when wanted |
+| Linear ordinary operation | Adopter's browser-approved OAuth grant | Read the selected workspace and perform policy-bound writes in the resolved Teami team | OS credential storage on the adopter machine | Revoke the Linear app grant and re-run setup when wanted |
 | Linear status repair | Separate adopter/admin browser approval | Create the single missing `Principal Escalation` project status | In memory only; never persisted as runtime authority | Teami discards the grant after the attempt and best-effort revokes it |
-| Product repositories during setup | No product-repository authority requested | Fresh setup records no product-repository access. Repair may preserve connections the adopter approved previously, but setup neither uses nor expands them. | Local domain registry | Connect or disconnect a product repository later through a separate explicit domain action |
-| Product-repository grant after setup | Adopter's separate explicit domain action | Record the selected `owner/repo` and default-branch identity; this does not activate write-capable execution | Local domain registry | Remove it through the separate domain-revoke action |
+| Product repositories during setup | No product-repository authority requested | Fresh setup records no product-repository access. Repair may preserve connections the adopter approved previously, but setup neither uses nor expands them. | Local team registry | Connect or disconnect a product repository later through a separate explicit team action |
+| Product-repository grant after setup | Adopter's separate explicit team action | Record the selected `owner/repo` and default-branch identity; this does not activate write-capable execution | Local team registry | Remove it through the separate team-revoke action |
 | Private Teami workspace repository | Adopter's ambient local git/`gh` session | Create or reconnect the private repository Teami uses for configuration and reviewable improvement proposals | Git credential custody remains outside Teami | Revoke or repair local git/`gh` access |
 | Claude plugin | Adopter's explicit setup confirmation | Register/update the Teami marketplace and install the Teami plugin in user scope | Claude's local plugin configuration | Claude plugin uninstall/marketplace removal |
-| Gateway and runner | Adopter starts the foreground command | Poll Linear, record/claim local wakes, and apply gated domain-confined Linear effects | Local Teami state | Stop the command |
+| Gateway and runner | Adopter starts the foreground command | Poll Linear, record/claim local wakes, and apply gated team-confined Linear effects | Local Teami state | Stop the command |
 | Phoenix | Adopter's local Teami process | Store local trace/eval evidence and health receipts | Local Phoenix and Teami state | Stop/delete only through an explicit local cleanup path |
 
 Teami has no hosted inbox, GitHub App, token broker, always-on supervisor,
@@ -29,7 +29,7 @@ maintainer-operated adopter authority, or hidden machine-off execution path.
 The MCP and CLI renderers may phrase progress differently, but both must use one
 setup contract. Before the first mutation they must disclose the complete
 effect set in plain language and require explicit confirmation. Consent must
-not be inferred from merely supplying a domain name, repo name, or workspace.
+not be inferred from merely supplying a team name, repo name, or workspace.
 
 The disclosure must say:
 
@@ -46,24 +46,24 @@ The browser is the human authority gate for Linear. Setup must surface its URL
 and useful recovery while waiting. An agent conducts the flow but cannot
 approve it, capture credentials, or substitute narration for consent.
 
-## Domain And Mutation Boundary
+## Team And Mutation Boundary
 
-Every planning write binds the target object to a resolved active domain:
+Every planning write binds the target object to a resolved active team:
 
-1. resolve the requested or sole active domain;
+1. resolve the requested or sole active team;
 2. read the live Linear object before mutation;
-3. prove its team membership is confined to that domain's configured team;
+3. prove its team membership is confined to that team's configured team;
 4. reject foreign-team, missing-team, and ambiguous multi-team targets; and
 5. mutate only after the proof succeeds.
 
-A target spanning teams from two active domains fails closed regardless of
-which trigger produced the wake. No wake may run while domain identity is
-unresolved: exactly one active domain and live team membership must be proven
+A target spanning teams from two active teams fails closed regardless of
+which trigger produced the wake. No wake may run while team identity is
+unresolved: exactly one active team and live team membership must be proven
 before any external mutation.
 
 A rejected target performs no GraphQL mutation and returns a product-readable
 repair or selection request. Cached IDs or a caller-supplied project ID are not
-domain proof.
+team proof.
 
 ## Credential And Content Custody
 
@@ -95,7 +95,7 @@ report status and recover unrelated leases after a Git failure.
 Product-repo write-capable execution stays fail-closed and unshipped. Before
 any activation, enforceable evidence must cover runtime-credential containment,
 agent/tool environment isolation, OS/process isolation, bounded and recoverable
-Git effects, domain confinement, a staged secret/content scanner, and no push
+Git effects, team confinement, a staged secret/content scanner, and no push
 after a safety failure. A scanner alone is defense in depth, not proof of
 isolation.
 

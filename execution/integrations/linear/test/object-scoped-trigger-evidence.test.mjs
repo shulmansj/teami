@@ -22,12 +22,12 @@ const LEGACY_MUTATION_INTENT_SCHEMA_VERSION =
 
 test("legacy project v1 mutation intents replay through the project projection", () => {
   const runStoreDir = tempRunStore();
-  const domainId = "support-ops";
+  const teamRef = "support-ops";
   const projectId = "project-legacy";
   const runId = "run-legacy";
   writeRunArtifact(
     { runId, runStoreDir },
-    runArtifact({ runId, kind: "commit", domainId, projectId }),
+    runArtifact({ runId, kind: "commit", teamRef, projectId }),
   );
 
   const intentDir = path.join(runStoreDir, "unconfirmed-linear-mutation-intents");
@@ -39,7 +39,7 @@ test("legacy project v1 mutation intents replay through the project projection",
       run_id: runId,
       artifact_kind: "commit",
       linear_project_id: projectId,
-      domain_id: domainId,
+      team_ref: teamRef,
       wake_id: "wake-legacy",
       started_at: "2026-06-24T12:00:00.000Z",
     }, null, 2)}\n`,
@@ -47,13 +47,13 @@ test("legacy project v1 mutation intents replay through the project projection",
   );
 
   const expected = [{
-    domainId,
+    teamRef,
     projectId,
     runId,
     artifactKind: "commit",
   }];
-  assert.deepEqual(listReplayPending({ domainId, runStoreDir }), expected);
-  assert.deepEqual(readReplayPending({ domainId, projectId, runStoreDir }), expected[0]);
+  assert.deepEqual(listReplayPending({ teamRef, runStoreDir }), expected);
+  assert.deepEqual(readReplayPending({ teamRef, projectId, runStoreDir }), expected[0]);
 });
 
 test("issue git mutation intents write v2 records and round-trip through git replay reads", () => {
@@ -61,7 +61,7 @@ test("issue git mutation intents write v2 records and round-trip through git rep
   const git = gitIdentity();
 
   const record = writeMutationIntent({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     objectType: "issue",
     objectId: "issue-123",
     runId: "run-issue",
@@ -80,17 +80,17 @@ test("issue git mutation intents write v2 records and round-trip through git rep
   assert.equal(Object.hasOwn(record, "linear_project_id"), false);
   assert.deepEqual(record.git, git);
   assert.deepEqual(readGitReplayPending({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     objectId: "issue-123",
     runStoreDir,
   }), {
-    domainId: "support-ops",
+    teamRef: "support-ops",
     objectId: "issue-123",
     runId: "run-issue",
     artifactKind: "commit",
     git,
   });
-  assert.deepEqual(listReplayPending({ domainId: "support-ops", runStoreDir }), []);
+  assert.deepEqual(listReplayPending({ teamRef: "support-ops", runStoreDir }), []);
 });
 
 test("issue git mutation intents allow the pre-push shape before observed head and tree", () => {
@@ -103,7 +103,7 @@ test("issue git mutation intents allow the pre-push shape before observed head a
   };
 
   const record = writeMutationIntent({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     objectType: "issue",
     objectId: "issue-123",
     runId: "run-pre-push",
@@ -118,7 +118,7 @@ test("issue git mutation intents allow the pre-push shape before observed head a
 
   assert.deepEqual(record.git, git);
   assert.deepEqual(readGitReplayPending({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     objectId: "issue-123",
     runStoreDir,
   }).git, git);
@@ -152,7 +152,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
   });
 
   const projectClaim = await store.claimSyntheticWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-1",
@@ -162,7 +162,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
     runnerId: "runner-1",
     leaseToken: projectClaim.leaseToken,
     runId: "run-project",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
   await store.markMutationStarted({
     wakeId: projectClaim.wake.id,
@@ -172,7 +172,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
     artifactKind: "commit",
   });
   assert.deepEqual(writes, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-project",
     artifactKind: "commit",
@@ -195,7 +195,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
     reconciliationEvidenceDigest: "b".repeat(64),
   });
   assert.deepEqual(clears, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-project",
     repoRoot,
@@ -204,7 +204,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
   }]);
 
   const issueClaim = await store.claimSyntheticIssueWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     objectId: "issue-1",
@@ -216,7 +216,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
     runnerId: "runner-1",
     leaseToken: issueClaim.leaseToken,
     runId: "run-issue",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
   await store.markMutationStarted({
     wakeId: issueClaim.wake.id,
@@ -227,7 +227,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
     git,
   });
   assert.deepEqual(writes, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-project",
     artifactKind: "commit",
@@ -237,7 +237,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
     home: repoRoot,
     runStoreDir: null,
   }, {
-    domainId: "support-ops",
+    teamRef: "support-ops",
     objectType: "issue",
     objectId: "issue-1",
     runId: "run-issue",
@@ -259,7 +259,7 @@ test("terminal completion clears project mutation intents but skips issue mutati
   });
 
   assert.deepEqual(clears, [{
-    domainId: "support-ops",
+    teamRef: "support-ops",
     projectId: "project-1",
     runId: "run-project",
     repoRoot,
@@ -280,7 +280,7 @@ test("claimSyntheticIssueWake returns a leased issue wake and matching event ide
   });
 
   const claim = await store.claimSyntheticIssueWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     objectId: "issue-1",
@@ -301,14 +301,14 @@ test("claimSyntheticIssueWake returns a leased issue wake and matching event ide
   assert.equal(claim.event.trigger_type, "linear.issue.todo");
 });
 
-function runArtifact({ runId, kind, domainId, projectId }) {
+function runArtifact({ runId, kind, teamRef, projectId }) {
   return {
     schema_version: RUN_ARTIFACT_SCHEMA_VERSION,
     engine_version: ENGINE_VERSION,
     function_version: "0.0.1",
     workflow_version: "0.0.1",
     run_id: runId,
-    domain_id: domainId,
+    team_ref: teamRef,
     workspace_id: "workspace-1",
     team_id: "team-1",
     kind,

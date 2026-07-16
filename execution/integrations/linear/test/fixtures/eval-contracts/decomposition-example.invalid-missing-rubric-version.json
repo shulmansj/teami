@@ -6,7 +6,7 @@
     "project": {
       "id": "fixture-project-onboarding-email-refresh",
       "name": "Onboarding email sequence refresh",
-      "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking domains.",
+      "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking teams.",
       "status": "Planned",
       "labels": [],
       "existing_issues": []

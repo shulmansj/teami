@@ -4,8 +4,8 @@ import { readLinearCache } from "../cache.mjs";
 import { readClaudePluginHealth } from "../claude-plugin-health.mjs";
 import { formatRuntimeRoleAssignmentsSection } from "../config.mjs";
 import { doctorCheck, normalizeDoctorChecks } from "../doctor-check.mjs";
-import { resolveForegroundDomainCache } from "../domain-command-context.mjs";
-import { readDomainRegistry } from "../domain-registry.mjs";
+import { resolveForegroundTeamCache } from "../team-command-context.mjs";
+import { readTeamRegistry } from "../team-registry.mjs";
 import { defaultRunCommand, githubConnectionDoctorChecks } from "../github-setup.mjs";
 import {
   createLinearCredentialStore,
@@ -14,7 +14,7 @@ import {
 import { redactOAuthSecrets } from "../linear-oauth.mjs";
 import { createLinearSetupGraphqlClient } from "../linear-setup-auth.mjs";
 import {
-  doctorDomainRegistryFromDisk,
+  doctorTeamRegistryFromDisk,
   doctorLinear,
   doctorMergePathGitHubCheck,
 } from "../linear-service.mjs";
@@ -31,12 +31,13 @@ import {
 import { createCliOutput } from "./cli-output.mjs";
 import { doctorExitCode, renderDoctorReport } from "./doctor-report.mjs";
 import {
-  completeDomainTeamMissingRecoveryForDomain,
+  completeTeamTeamMissingRecoveryForTeam,
   formatCommand,
 } from "./operator-output.mjs";
 import { flagValue } from "./flags.mjs";
 import { githubDoctorTransportFromConnection } from "./github-command-options.mjs";
 import { resolveTeamiHome } from "../app-home.mjs";
+import { acquireTeamOperationLock } from "../team-operation-lock.mjs";
 import { createSetupStateStore } from "../setup-orchestrator.mjs";
 const PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE = "https://github.com/shulmansj/teami";
 export async function runDoctorCommand({ context, command, args }) {
@@ -46,7 +47,7 @@ export async function runDoctorCommand({ context, command, args }) {
     repoRoot,
     home,
     cachePath,
-    domainId: flagValue(args, "--domain"),
+    teamRef: flagValue(args, "--team"),
   });
   output.heading(`Teami ${output.symbols.separator} doctor`);
   renderDoctorReport(checks, output);
@@ -60,7 +61,7 @@ export async function runDoctorLinearCommand({ context, command, args }) {
     repoRoot,
     home,
     cachePath,
-    domainId: flagValue(args, "--domain"),
+    teamRef: flagValue(args, "--team"),
     includeRuntimeSmoke: false,
     includePhoenix: false,
     includeGitHub: false,
@@ -76,13 +77,14 @@ async function doctorGraphqlLinear({
   repoRoot,
   home = resolveTeamiHome(),
   cachePath,
-  domainId = null,
+  teamRef = null,
   includeRuntimeSmoke = true,
   includePhoenix = true,
   includeGitHub = true,
   includeClaudePlugin = true,
   claudePluginRunCommand = defaultRunCommand,
   claudePluginMarketplaceSource = PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE,
+  acquireTeamAuthority = acquireTeamOperationLock,
 }) {
   const adminRevocationCheck = doctorAdminRevocationRequirement({ home });
   const claudePluginCheck = includeClaudePlugin
@@ -93,44 +95,44 @@ async function doctorGraphqlLinear({
       })
     : null;
   const crossSurfaceChecks = [adminRevocationCheck, ...(claudePluginCheck ? [claudePluginCheck] : [])];
-  const domainDoctor = doctorDomainRegistryFromDisk({
+  const teamDoctor = doctorTeamRegistryFromDisk({
     repoRoot,
     home,
-    orphanHints: likelyDomainOrphans({ cachePath }),
+    orphanHints: likelyTeamOrphans({ cachePath }),
   });
-  if (!domainDoctor.registryAvailable) {
-    return normalizeDoctorChecks([...domainDoctor.checks, ...crossSurfaceChecks]);
+  if (!teamDoctor.registryAvailable) {
+    return normalizeDoctorChecks([...teamDoctor.checks, ...crossSurfaceChecks]);
   }
 
-  const registry = readDomainRegistry({ home });
-  const selectedDomains = domainId
-    ? registry.domains.filter((domain) => domain.id === domainId)
-    : registry.domains.filter((domain) => domain.status === "active");
+  const registry = readTeamRegistry({ home });
+  const selectedTeams = teamRef
+    ? registry.teams.filter((team) => team.id === teamRef)
+    : registry.teams.filter((team) => team.status === "active");
   const checks = [{
-    name: "domain registry",
-    ok: domainDoctor.healthy,
-    message: `${domainDoctor.checks.length} domain${domainDoctor.checks.length === 1 ? "" : "s"} configured`,
-  }, ...domainDoctor.checks, ...crossSurfaceChecks, ...doctorProductRepoBindingChecksForDomains(
-    domainId ? registry.domains.filter((domain) => domain.id === domainId) : registry.domains,
+    name: "team registry",
+    ok: teamDoctor.healthy,
+    message: `${teamDoctor.checks.length} team${teamDoctor.checks.length === 1 ? "" : "s"} configured`,
+  }, ...teamDoctor.checks, ...crossSurfaceChecks, ...doctorProductRepoBindingChecksForTeams(
+    teamRef ? registry.teams.filter((team) => team.id === teamRef) : registry.teams,
   )];
 
-  if (domainId && selectedDomains.length === 0) {
+  if (teamRef && selectedTeams.length === 0) {
     checks.push({
-      name: "domain selection",
+      name: "team selection",
       ok: false,
-      message: `domain_not_found: ${domainId}`,
+      message: `team_not_found: ${teamRef}`,
     });
     return normalizeDoctorChecks(checks);
   }
 
-  for (const domain of selectedDomains) {
-    if (domain.status !== "active") continue;
+  for (const team of selectedTeams) {
+    if (team.status !== "active") continue;
     let foreground;
     try {
-      foreground = resolveForegroundDomainCache({ config, repoRoot, home, registry, domainId: domain.id });
+      foreground = resolveForegroundTeamCache({ config, repoRoot, home, registry, teamRef: team.id });
     } catch (error) {
       checks.push({
-        name: `domain ${domain.id} selection`,
+        name: `team ${team.id} selection`,
         ok: false,
         message: redactOAuthSecrets(error.message),
       });
@@ -140,53 +142,62 @@ async function doctorGraphqlLinear({
     checks.push(...(await doctorLegacyCredentialTargets({
       config,
       repoRoot,
+      home,
       context: foreground.context,
     })));
 
-    const credentialStore = createLinearCredentialStore({
-      config,
-      repoRoot,
-      domainContext: foreground.context,
-    });
+    let teamAuthority = null;
     try {
+      teamAuthority = acquireTeamAuthority({ home, installHandlers: false });
+      const credentialStore = createLinearCredentialStore({
+        config,
+        repoRoot,
+        home,
+        teamContext: foreground.context,
+        promoteLegacyOnRead: teamAuthority.ok === true,
+      });
       const setupAuth = createLinearSetupGraphqlClient({
         config,
         repoRoot,
         credentialStore,
         allowBrowserAuth: false,
-        allowRefresh: true,
+        // Doctor remains read-only when a gateway, review, setup cleanup, or
+        // another Team lifecycle operation owns authority.
+        allowRefresh: teamAuthority.ok === true,
       });
       const authResult = await setupAuth.client.verifyAuth();
       const doctor = await doctorLinear({ client: setupAuth.client, config: foreground.config, cache: foreground.cache });
       const mergePathGitHubCheck = await doctorMergePathGitHubCheck({
-        ...mergePathRepoIdentityForDomain(foreground.context),
+        ...mergePathRepoIdentityForTeam(foreground.context),
         createPrAdapter: ({ repoIdentity }) => createDefaultExecutionPullRequestAdapter({ repoIdentity }),
       });
       const teamCheck = doctor.checks.find((check) => check.name === "team");
       const savedTeamCheck = doctor.checks.find((check) => check.name === "cache teamId" && check.ok === false);
-      const teamVisibilityCheck = domainTeamVisibilityCheck({
-        domain,
+      const teamVisibilityCheck = teamTeamVisibilityCheck({
+        team,
         teamCheck,
         savedTeamCheck,
         teamKey: foreground.config.linear.team.key,
       });
       checks.push({
-        name: `domain ${domain.id} Linear setup OAuth`,
+        name: `team ${team.id} Linear setup OAuth`,
         ok: true,
         message: `GraphQL auth verified for viewer ${authResult.viewerId}`,
       }, teamVisibilityCheck, {
         ...mergePathGitHubCheck,
-        name: `domain ${domain.id} ${mergePathGitHubCheck.name}`,
+        name: `team ${team.id} ${mergePathGitHubCheck.name}`,
       }, ...doctor.checks.map((check) => ({
         ...check,
-        name: `domain ${domain.id} ${check.name}`,
+        name: `team ${team.id} ${check.name}`,
       })));
     } catch (error) {
       checks.push({
-        name: `domain ${domain.id} Linear setup OAuth`,
+        name: `team ${team.id} Linear setup OAuth`,
         ok: false,
         message: redactOAuthSecrets(error.message),
       });
+    } finally {
+      teamAuthority?.release?.();
     }
   }
 
@@ -257,11 +268,11 @@ function doctorAdminRevocationRequirement({ home } = {}) {
   }
 }
 
-function domainTeamVisibilityCheck({ domain, teamCheck = null, savedTeamCheck = null, teamKey = null } = {}) {
-  if (savedTeamCheck?.ok === false && domain?.linear?.team_id) {
-    const recovery = completeDomainTeamMissingRecoveryForDomain(domain);
+function teamTeamVisibilityCheck({ team, teamCheck = null, savedTeamCheck = null, teamKey = null } = {}) {
+  if (savedTeamCheck?.ok === false && team?.linear?.team_id) {
+    const recovery = completeTeamTeamMissingRecoveryForTeam(team);
     return {
-      name: `domain ${domain.id} Linear team visibility`,
+      name: `team ${team.id} Linear team visibility`,
       ok: false,
       message: `${recovery.what} ${recovery.why}`,
       fix: recovery.fix,
@@ -269,64 +280,64 @@ function domainTeamVisibilityCheck({ domain, teamCheck = null, savedTeamCheck = 
     };
   }
   return {
-    name: `domain ${domain.id} Linear team visibility`,
+    name: `team ${team.id} Linear team visibility`,
     ok: teamCheck?.ok === true,
     message: teamCheck?.ok === true
-      ? `can see team ${teamKey || domain?.linear?.team_key || "unknown"}`
-      : teamCheck?.message || `team ${teamKey || domain?.linear?.team_key || "unknown"} not visible`,
+      ? `can see team ${teamKey || team?.linear?.team_key || "unknown"}`
+      : teamCheck?.message || `team ${teamKey || team?.linear?.team_key || "unknown"} not visible`,
   };
 }
 
-function mergePathRepoIdentityForDomain(domainContext) {
+function mergePathRepoIdentityForTeam(teamContext) {
   try {
-    return { repoIdentity: resourcesToRepoIdentity(domainContext) };
+    return { repoIdentity: resourcesToRepoIdentity(teamContext) };
   } catch (error) {
     return { repoIdentity: null, repoIdentityError: error.message };
   }
 }
 
-function doctorProductRepoBindingChecksForDomains(domains = []) {
-  return domains.map((domain) => {
-    const posture = productRepoBindingPosture(domain);
+function doctorProductRepoBindingChecksForTeams(teams = []) {
+  return teams.map((team) => {
+    const posture = productRepoBindingPosture(team);
     return doctorCheck({
-      name: `domain ${domain.id} product repo binding`,
+      name: `team ${team.id} product repo binding`,
       state: posture.state,
-      message: [formatProductRepoBindingReadout(domain), posture.message].filter(Boolean).join("; "),
+      message: [formatProductRepoBindingReadout(team), posture.message].filter(Boolean).join("; "),
       fix: posture.fix,
       showMessage: true,
     });
   });
 }
 
-function formatProductRepoBindingReadout(domain) {
-  const prefix = `domain=${formatDomainReadoutName(domain)}; linear_team=${formatLinearTeam(domain.linear)}`;
-  const gitRepo = domain.resources.find((resource) => resource.kind === "git_repo");
+function formatProductRepoBindingReadout(team) {
+  const prefix = `team=${formatTeamReadoutName(team)}; linear_team=${formatLinearTeam(team.linear)}`;
+  const gitRepo = team.resources.find((resource) => resource.kind === "git_repo");
   if (!gitRepo) {
-    return `${prefix}; no product repo granted (domain grant authorizes product repos; behavior repo GitHub setup remains separate config.github)`;
+    return `${prefix}; no product repo granted (team grant authorizes product repos; behavior repo GitHub setup remains separate config.github)`;
   }
   const binding = gitRepo.binding;
   return (
     `${prefix}; product repo remote=${binding.owner}/${binding.repo}; default_branch=${binding.default_branch}; ` +
     "materialization=fresh_remote_clone; " +
-    "granted_by=domain:grant; behavior repo GitHub setup remains separate config.github"
+    "granted_by=team:grant; behavior repo GitHub setup remains separate config.github"
   );
 }
 
 export function doctorProductRepoBindingChecks({
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
 } = {}) {
-  const registry = readDomainRegistry({ home });
+  const registry = readTeamRegistry({ home });
   if (!registry) return [];
-  const domains = domainId
-    ? registry.domains.filter((domain) => domain.id === domainId)
-    : registry.domains;
-  return doctorProductRepoBindingChecksForDomains(domains);
+  const teams = teamRef
+    ? registry.teams.filter((team) => team.id === teamRef)
+    : registry.teams;
+  return doctorProductRepoBindingChecksForTeams(teams);
 }
 
-function productRepoBindingPosture(domain) {
-  const gitRepo = domain.resources.find((resource) => resource.kind === "git_repo");
+function productRepoBindingPosture(team) {
+  const gitRepo = team.resources.find((resource) => resource.kind === "git_repo");
   if (!gitRepo) return { state: "ok", message: null, fix: null };
   const binding = gitRepo.binding || {};
   const missing = ["owner", "repo", "default_branch"].filter((field) =>
@@ -336,17 +347,17 @@ function productRepoBindingPosture(domain) {
     return {
       state: "fail",
       message: `product repo binding is missing ${missing.join(", ")} for remote materialization`,
-      fix: "Re-grant the domain repo with domain grant so execution can derive the GitHub remote.",
+      fix: "Re-grant the team repo with team grant so execution can derive the GitHub remote.",
     };
   }
   return { state: "ok", message: "fresh remote clone ready for execution", fix: null };
 }
 
-function formatDomainReadoutName(domain) {
-  if (isNonEmptyString(domain.adopter_provided_name) && domain.adopter_provided_name !== domain.id) {
-    return `${domain.adopter_provided_name} (${domain.id})`;
+function formatTeamReadoutName(team) {
+  if (isNonEmptyString(team.adopter_provided_name) && team.adopter_provided_name !== team.id) {
+    return `${team.adopter_provided_name} (${team.id})`;
   }
-  return domain.id;
+  return team.id;
 }
 
 function formatLinearTeam(linear = {}) {
@@ -361,26 +372,27 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
 
-async function doctorLegacyCredentialTargets({ config, repoRoot, context }) {
+async function doctorLegacyCredentialTargets({ config, repoRoot, home, context }) {
   const checks = [];
   const legacyOAuthStore = createLinearCredentialStore({
     config,
     repoRoot,
+    home,
     target: legacyCredentialTargetForConfig(config),
   });
 
   try {
     const tokenSet = await legacyOAuthStore.readTokenSet();
     checks.push({
-      name: `domain ${context.domainId} legacy Linear OAuth credential target`,
+      name: `team ${context.teamRef} legacy Linear OAuth credential target`,
       ok: !tokenSet,
       message: tokenSet
-        ? `legacy pre-domain target found for workspace=${context.linear.workspaceId}; rerun ${formatCommand(`init --domain ${context.domainId}`)} or ${formatCommand("reset")}`
-        : "no legacy pre-domain target found",
+        ? `legacy pre-team target found for workspace=${context.linear.workspaceId}; rerun ${formatCommand(`init --team ${context.teamRef}`)} or ${formatCommand("reset")}`
+        : "no legacy pre-team target found",
     });
   } catch (error) {
     checks.push({
-      name: `domain ${context.domainId} legacy Linear OAuth credential target`,
+      name: `team ${context.teamRef} legacy Linear OAuth credential target`,
       ok: false,
       message: redactOAuthSecrets(error.message),
     });
@@ -389,7 +401,7 @@ async function doctorLegacyCredentialTargets({ config, repoRoot, context }) {
   return checks;
 }
 
-function likelyDomainOrphans({ cachePath } = {}) {
+function likelyTeamOrphans({ cachePath } = {}) {
   const hints = [];
   if (cachePath && fs.existsSync(cachePath)) {
     hints.push(`legacy Linear cache ${cachePath}`);
@@ -407,5 +419,5 @@ function likelyDomainOrphans({ cachePath } = {}) {
 
 export {
   doctorGraphqlLinear,
-  domainTeamVisibilityCheck,
+  teamTeamVisibilityCheck,
 };

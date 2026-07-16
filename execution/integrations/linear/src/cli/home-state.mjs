@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { DEFAULT_CONFIG_PATH, loadLinearConfig } from "../config.mjs";
-import { readDomainRegistry } from "../domain-registry.mjs";
+import { readTeamRegistry } from "../team-registry.mjs";
 import { readGatewayLockLiveness } from "../gateway-loop.mjs";
 import { resolveTeamiHome } from "../app-home.mjs";
 
@@ -27,19 +27,19 @@ function probeResult(state, evidence) {
 }
 
 // Side-effect-free classifier for "what state is my factory in, and what's the next step?"
-// STRICTLY read-only: it reads config, the domain registry, and the gateway lock; it never calls
+// STRICTLY read-only: it reads config, the team registry, and the gateway lock; it never calls
 // runGatewayOnce, never touches the network, and never writes. It NEVER throws — every reader
 // error is caught and classified (an unreadable config/registry is `degraded`).
 //
 // Classification (S4):
-//   missing config OR missing registry OR no active domain  -> uninitialized
-//   active domain + live .teami/gateway.lock       -> listening
-//   active domain + no/stale gateway lock                    -> idle
+//   missing config OR missing registry OR no active team  -> uninitialized
+//   active team + live .teami/gateway.lock       -> listening
+//   active team + no/stale gateway lock                    -> idle
 //   any parse/validation/read error from config or registry  -> degraded
 export function homeStateProbe({ repoRoot = process.cwd(), home = resolveTeamiHome(), config = null } = {}) {
   const evidence = {
     hasConfig: false,
-    activeDomainId: null,
+    activeTeamRef: null,
     lockLive: false,
   };
 
@@ -58,10 +58,10 @@ export function homeStateProbe({ repoRoot = process.cwd(), home = resolveTeamiHo
     }
   }
 
-  // --- domain registry: missing => uninitialized; unreadable => degraded ---
+  // --- team registry: missing => uninitialized; unreadable => degraded ---
   let registry;
   try {
-    registry = readDomainRegistry({ home }); // null when the registry file is absent
+    registry = readTeamRegistry({ home }); // null when the registry file is absent
   } catch {
     return probeResult(HOME_STATE.DEGRADED, evidence);
   }
@@ -69,12 +69,12 @@ export function homeStateProbe({ repoRoot = process.cwd(), home = resolveTeamiHo
     return probeResult(HOME_STATE.UNINITIALIZED, evidence);
   }
 
-  // --- active domain: none => nothing to run yet, treat as uninitialized ---
-  const activeDomain = (registry.domains || []).find((domain) => domain?.status === "active") || null;
-  if (!activeDomain) {
+  // --- active team: none => nothing to run yet, treat as uninitialized ---
+  const activeTeam = (registry.teams || []).find((team) => team?.status === "active") || null;
+  if (!activeTeam) {
     return probeResult(HOME_STATE.UNINITIALIZED, evidence);
   }
-  evidence.activeDomainId = activeDomain.id ?? null;
+  evidence.activeTeamRef = activeTeam.id ?? null;
 
   // --- gateway lock: live => listening; missing/stale => idle (read-only liveness) ---
   // A lock-read problem is not a corrupt-config; the right next step is still `gateway start`,

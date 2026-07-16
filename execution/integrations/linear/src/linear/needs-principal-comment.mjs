@@ -30,7 +30,7 @@ export async function applyNeedsPrincipalEscalationPair({
   cache = null,
   issueId = null,
   issue = null,
-  domainContext = null,
+  teamContext = null,
   trace = null,
   runId = null,
   site = null,
@@ -94,7 +94,7 @@ export async function applyNeedsPrincipalEscalationPair({
   const teamId =
     nonEmptyString(issue?.teamId) ||
     nonEmptyString(issue?.team?.id) ||
-    nonEmptyString(domainContext?.linear?.teamId) ||
+    nonEmptyString(teamContext?.linear?.teamId) ||
     nonEmptyString(cache?.teamId);
   const escalation = await applyCommitEffects({
     effects: [issueNeedsPrincipalEscalationEffectDescriptor()],
@@ -105,7 +105,7 @@ export async function applyNeedsPrincipalEscalationPair({
       issue,
       issueId: targetIssueId,
       linearIssueId: targetIssueId,
-      domainContext,
+      teamContext,
       trace,
       runId,
       teamId,

@@ -118,7 +118,7 @@ test("current public trust docs keep product repositories disconnected from onbo
 
 test("published plugin and runtime repair guidance never requires a bare Teami command", () => {
   const planSkill = readText("skills/plan/SKILL.md");
-  const planningMutations = readText("execution/integrations/linear/src/domain-confined-planning-mutations.mjs");
+  const planningMutations = readText("execution/integrations/linear/src/team-confined-planning-mutations.mjs");
   const setupCommand = readText("execution/integrations/linear/src/cli/linear-setup-command.mjs");
 
   assert.match(planSkill, /npx @shulmansj\/teami init/);

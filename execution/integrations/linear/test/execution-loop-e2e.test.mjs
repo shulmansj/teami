@@ -6,14 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { materializeDomainResources } from "../../../engine/materialize.mjs";
+import { materializeTeamResources } from "../../../engine/materialize.mjs";
 import { branchNameForIssue } from "../../git/git-repo-commit-effect.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import {
-  DOMAIN_REGISTRY_SCHEMA_VERSION,
-  makeDomainRecord,
-} from "../src/domain-registry.mjs";
-import { buildDomainContext } from "../src/domain-resolver.mjs";
+  TEAM_REGISTRY_SCHEMA_VERSION,
+  makeTeamRecord,
+} from "../src/team-registry.mjs";
+import { buildTeamContext } from "../src/team-resolver.mjs";
 import { writeLinearCache } from "../src/cache.mjs";
 import {
   gatewayState,
@@ -36,18 +36,18 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
   writeExecutionAcceptedPromptFixture(tempRoot);
 
   const gitFixture = createGitFixture(tempRoot);
-  const runStoreDir = path.join(tempRoot, "domains", "domain-1", "runs");
-  const domain = domainFixture();
-  const registry = { schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION, domains: [domain] };
+  const runStoreDir = path.join(tempRoot, "teams", "team-1", "runs");
+  const team = teamFixture();
+  const registry = { schema_version: TEAM_REGISTRY_SCHEMA_VERSION, teams: [team] };
   const config = executionConfig();
-  const domainContext = buildDomainContext({
-    domain,
+  const teamContext = buildTeamContext({
+    team,
     config,
     repoRoot: tempRoot,
     home: tempRoot,
     behaviorRepoId: "local:execution-loop-e2e",
   });
-  const linearCache = writeExecutionLinearCache(domainContext.linear.cachePath);
+  const linearCache = writeExecutionLinearCache(teamContext.linear.cachePath);
   const linearClient = createMutableLinearClient();
   assert.deepEqual(Object.keys(linearCache.issueStatuses), [
     "backlog",
@@ -117,7 +117,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
     prAdapter,
     gitRemoteUrlOverride: gitFixture.remote,
     executionProfilePreflight: greenExecutionProfilePreflight,
-    materialize: (input) => materializeDomainResources({
+    materialize: (input) => materializeTeamResources({
       ...input,
       gitRemoteUrlOverride: gitFixture.remote,
     }),
@@ -133,8 +133,8 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
       home: tempRoot,
       runStoreDir,
       registry,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       createStore: () => triggerStore,
       createSetupGraphqlClient: () => ({ client: linearClient }),
       createTraceSink: createNoopTraceSink,
@@ -158,8 +158,8 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
       home: tempRoot,
       runStoreDir,
       registry,
-      domain,
-      domainContext,
+      team,
+      teamContext,
       cache: linearCache,
       client: linearClient,
       candidate: { id: issueId },
@@ -200,7 +200,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
   assert.equal(prAdapter.created[0].head.ref, firstPrIdentity.identity.branch);
 
   const firstMarker = triggerIdempotency.readGitReplayPending({
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectId: "issue-1",
     repoRoot: tempRoot,
     runStoreDir,
@@ -225,7 +225,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
     new RegExp(`run_id: ${secondCompletion.artifact.run_id}`),
   );
   const secondMarker = triggerIdempotency.readGitReplayPending({
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectId: "issue-1",
     repoRoot: tempRoot,
     runStoreDir,
@@ -235,7 +235,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
   assert.equal(secondMarker.git.head_sha, secondPrIdentity.identity.head_sha);
   assert.notEqual(secondMarker.git.head_sha, firstMarker.git.head_sha);
   assert.deepEqual(
-    triggerIdempotency.listGitReplayPending({ domainId: "domain-1", repoRoot: tempRoot, runStoreDir })
+    triggerIdempotency.listGitReplayPending({ teamRef: "team-1", repoRoot: tempRoot, runStoreDir })
       .filter((marker) => marker.objectId === "issue-1")
       .map((marker) => marker.runId),
     [secondCompletion.artifact.run_id],
@@ -301,7 +301,7 @@ test("Ready issue execution poll composes decide, synthetic dispatch, run, effec
   assert.equal(prAdapter.created.length, 2, "crash before PR-open must not create a PR");
 
   const killedMarker = triggerIdempotency.readGitReplayPending({
-    domainId: "domain-1",
+    teamRef: "team-1",
     objectId: "issue-kill-replay",
     repoRoot: tempRoot,
     runStoreDir,
@@ -478,7 +478,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
     completed,
     triggerEvents: [],
     async claimSyntheticIssueWake({
-      domainId,
+      teamRef,
       workspaceId,
       teamId,
       objectId,
@@ -496,7 +496,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
       const wake = {
         id: `wake-${safeRunIdSegment(objectId)}-${sequence}`,
         workspace_id: workspaceId,
-        domain_id: domainId,
+        team_ref: teamRef,
         trigger_type: triggerType,
         workflow_type: workflowType,
         object_type: objectType,
@@ -519,7 +519,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
     async renewLease({ wakeId }) {
       return { ok: true, wake: structuredClone(wakes.get(wakeId)) };
     },
-    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, domainId }) {
+    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, teamRef }) {
       const wake = wakes.get(wakeId);
       if (!wake) return { ok: false, reason: "wake_missing" };
       Object.assign(wake, {
@@ -527,7 +527,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
         runner_id: runnerId,
         lease_token: leaseToken,
         run_id: runId,
-        domain_id: domainId,
+        team_ref: teamRef,
       });
       runs.set(runId, {
         run_id: runId,
@@ -545,7 +545,7 @@ function createMutableTriggerStore({ repoRoot, runStoreDir }) {
       wake.lease_token = leaseToken;
       wake.mutation_started_at = new Date(Date.parse("2026-06-26T01:00:00.000Z") + mutationTick * 1000).toISOString();
       triggerIdempotency.writeMutationIntent({
-        domainId: wake.domain_id,
+        teamRef: wake.team_ref,
         objectType: "issue",
         objectId: wake.object_id,
         runId,
@@ -809,9 +809,9 @@ function writeExecutionAcceptedPromptFixture(repoRoot) {
   return namespaceRoot;
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "domain-1",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "team-1",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",

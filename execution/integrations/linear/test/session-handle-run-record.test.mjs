@@ -29,7 +29,7 @@ test("run records expose session handle pointers derived from runtime metadata",
   });
 
   const withHandle = await store.claimSyntheticWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-with-handle",
@@ -39,14 +39,14 @@ test("run records expose session handle pointers derived from runtime metadata",
     runnerId: "runner-1",
     leaseToken: withHandle.leaseToken,
     runId: "run-with-handle",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
   await store.completeWake({
     wakeId: withHandle.wake.id,
     runnerId: "runner-1",
     leaseToken: withHandle.leaseToken,
     status: "paused",
-    artifactPointer: { artifact_path: path.join(repoRoot, "domains", "support-ops", "runs", "run-with-handle.json") },
+    artifactPointer: { artifact_path: path.join(repoRoot, "teams", "support-ops", "runs", "run-with-handle.json") },
     artifact: {
       run_id: "run-with-handle",
       runtime_metadata: {
@@ -66,7 +66,7 @@ test("run records expose session handle pointers derived from runtime metadata",
   });
 
   const withoutHandle = await store.claimSyntheticWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-without-handle",
@@ -76,7 +76,7 @@ test("run records expose session handle pointers derived from runtime metadata",
     runnerId: "runner-1",
     leaseToken: withoutHandle.leaseToken,
     runId: "run-without-handle",
-    domainId: "support-ops",
+    teamRef: "support-ops",
   });
   await store.completeWake({
     wakeId: withoutHandle.wake.id,
@@ -100,7 +100,7 @@ test("run records expose session handle pointers derived from runtime metadata",
     runtime_metadata_paths: [["runtime_metadata", "pm", "session_handle"]],
   });
   assert.deepEqual(runWithHandle.artifact_pointer, {
-    artifact_path: path.join(repoRoot, "domains", "support-ops", "runs", "run-with-handle.json"),
+    artifact_path: path.join(repoRoot, "teams", "support-ops", "runs", "run-with-handle.json"),
   });
   assert.equal(runIsResumable(runWithHandle), true);
   assert.equal(runIsResumable(runWithoutHandle), false);

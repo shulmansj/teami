@@ -11,7 +11,7 @@ Use this skill to help a non-technical founder turn a rough intent into a decomp
 
 - Treat the human as the product decision-maker, not the technical operator.
 - Never ask for API keys, tokens, bearer strings, or secrets. Teami tools use the adopter's local auth.
-- Use Teami's project MCP tools: `resolve_domain`, `project_create`, `project_write_body`, and `project_move_status`.
+- Use Teami's project MCP tools: `resolve_team`, `project_create`, `project_write_body`, and `project_move_status`.
 - Use the planning body seam as the source of truth: `PROJECT_PLANNING_SLOTS`, `renderPlanningBody(slots)`, and `renderConfirmation(slots)` from `execution/integrations/linear/src/project-planning-body.mjs`.
 - Fill slot keys, not markdown headings. Do not handwrite final body sections; pass the canonical `slots` object to `project_write_body`.
 - Commit flow is always write, then move: `project_write_body({ project_id, slots })`, then `project_move_status({ project_id, confirm: true })`.
@@ -50,8 +50,8 @@ renderConfirmation(slots)
    - If the human explicitly asked to plan, dive in.
    - If you inferred this — they were describing an unshaped new idea or initiative that should become a project — first *offer*, in one line ("Sounds like a new project — want me to shape it into a plan with you?"), and proceed only on a yes. Never hijack an unrelated thread.
 
-1. Resolve the domain.
-   - Call `resolve_domain` if the session has not already established the Linear domain.
+1. Resolve the team.
+   - Call `resolve_team` if the session has not already established the Linear team.
    - If the tool reports that reauthorization is needed, tell the human to run `npx @shulmansj/teami init` and approve in the browser. Do not ask for credentials.
 
 2. Establish or create the project.

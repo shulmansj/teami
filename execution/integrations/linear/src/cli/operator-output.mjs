@@ -58,64 +58,64 @@ function formatCommand(subcommand = "") {
   return formatCommandForContext(subcommand);
 }
 
-const COMPLETE_DOMAIN_TEAM_MISSING_PATTERN =
-  /^complete_domain_team_missing: domain (.+?) records Linear team (.+?), but that team was not found in workspace (.+?)\.$/;
+const CONFIGURED_LINEAR_TEAM_MISSING_PATTERN =
+  /^configured_linear_team_missing: Team (.+?) points to Linear team (.+?), but that team was not found in workspace (.+?)\.$/;
 
-function completeDomainTeamMissingDiagnostic({ domainId, teamId, workspace } = {}) {
-  return `complete_domain_team_missing: domain ${domainId || "unknown"} records Linear team ${teamId || "unknown"}, but that team was not found in workspace ${workspace || "unknown"}.`;
+function completeTeamTeamMissingDiagnostic({ teamRef, teamId, workspace } = {}) {
+  return `configured_linear_team_missing: Team ${teamRef || "unknown"} points to Linear team ${teamId || "unknown"}, but that team was not found in workspace ${workspace || "unknown"}.`;
 }
 
-function completeDomainTeamMissingFix(domainId) {
-  const domainArg = domainId || "<id>";
+function completeTeamTeamMissingFix(teamRef) {
+  const teamArg = teamRef || "<id>";
   return (
-    `Run ${formatCommand(`uninstall --domain ${domainArg}`)}, then ` +
-    `${formatCommand(`init --domain ${domainArg}`)} to start this domain fresh, or restore the team in Linear ` +
-    `and re-run ${formatCommand(`init --domain ${domainArg}`)}.`
+    `Run ${formatCommand(`uninstall --team ${teamArg}`)}, then ` +
+    `${formatCommand(`init --team ${teamArg}`)} to start this team fresh, or restore the team in Linear ` +
+    `and re-run ${formatCommand(`init --team ${teamArg}`)}.`
   );
 }
 
-function completeDomainTeamMissingRecovery({ domainId, teamId, workspace, diagnostic = null } = {}) {
-  const renderedDiagnostic = diagnostic || completeDomainTeamMissingDiagnostic({ domainId, teamId, workspace });
+function completeTeamTeamMissingRecovery({ teamRef, teamId, workspace, diagnostic = null } = {}) {
+  const renderedDiagnostic = diagnostic || completeTeamTeamMissingDiagnostic({ teamRef, teamId, workspace });
   return {
-    code: "complete_domain_team_missing",
-    domainId: domainId || "unknown",
+    code: "configured_linear_team_missing",
+    teamRef: teamRef || "unknown",
     teamId: teamId || "unknown",
     workspace: workspace || "unknown",
     diagnostic: renderedDiagnostic,
     what:
-      `The Linear team saved for domain "${domainId || "unknown"}" no longer exists in workspace ${workspace || "unknown"}. ` +
+      `The Linear team saved for team "${teamRef || "unknown"}" no longer exists in workspace ${workspace || "unknown"}. ` +
       renderedDiagnostic,
-    why: `Teami resolves this domain by its saved team id ${teamId || "unknown"} and will not guess by name or silently recreate it.`,
-    fix: completeDomainTeamMissingFix(domainId),
+    why: `Teami resolves this team by its saved team id ${teamId || "unknown"} and will not guess by name or silently recreate it.`,
+    fix: completeTeamTeamMissingFix(teamRef),
   };
 }
 
-function completeDomainTeamMissingRecoveryFromError(error) {
+function completeTeamTeamMissingRecoveryFromError(error) {
   const message = String(error?.message || error || "");
-  const match = message.match(COMPLETE_DOMAIN_TEAM_MISSING_PATTERN);
+  const match = message.match(CONFIGURED_LINEAR_TEAM_MISSING_PATTERN);
   if (!match) return null;
-  const [, domainId, teamId, workspace] = match;
-  return completeDomainTeamMissingRecovery({
-    domainId,
+  const [, teamRef, teamId, workspace] = match;
+  return completeTeamTeamMissingRecovery({
+    teamRef,
     teamId,
     workspace,
     diagnostic: message,
   });
 }
 
-function completeDomainTeamMissingRecoveryForDomain(domain = {}) {
-  return completeDomainTeamMissingRecovery({
-    domainId: domain?.id || "unknown",
-    teamId: domain?.linear?.team_id || "unknown",
-    workspace: domain?.linear?.workspace_name || domain?.linear?.workspace_id || "unknown",
+function completeTeamTeamMissingRecoveryForTeam(team = {}) {
+  return completeTeamTeamMissingRecovery({
+    teamRef: team?.id || "unknown",
+    teamId: team?.linear?.team_id || "unknown",
+    workspace: team?.linear?.workspace_name || team?.linear?.workspace_id || "unknown",
   });
 }
 
 export {
   agenticFactoryHeading,
   compactPairs,
-  completeDomainTeamMissingRecoveryForDomain,
-  completeDomainTeamMissingRecoveryFromError,
+  completeTeamTeamMissingRecoveryForTeam,
+  completeTeamTeamMissingRecoveryFromError,
   formatCommand,
   formatCommandForContext,
   humanizeInterval,

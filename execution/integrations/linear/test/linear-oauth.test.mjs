@@ -222,6 +222,54 @@ test("token provider refreshes stored OAuth credentials and persists rotation", 
   assert.equal(writes[0].expiresAt, "2026-06-07T21:00:00.000Z");
 });
 
+test("a refresh paused across uninstall cannot recreate the deleted Team credential", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const observed = { refreshToken: "refresh-before-uninstall" };
+  let current = observed;
+  let releaseRefresh;
+  let markRefreshStarted;
+  const refreshStarted = new Promise((resolve) => { markRefreshStarted = resolve; });
+  const refreshMayFinish = new Promise((resolve) => { releaseRefresh = resolve; });
+  const credentialStore = {
+    async readTokenSet() {
+      return current;
+    },
+    async replaceTokenSetIfEqual(expected, tokenSet) {
+      if (JSON.stringify(current) !== JSON.stringify(expected)) {
+        return { ok: false, status: "conflict" };
+      }
+      current = tokenSet;
+      return { ok: true, status: "replaced" };
+    },
+    async writeTokenSet() {
+      throw new Error("refresh must use compare-replace");
+    },
+  };
+  const provider = createLinearOAuthTokenProvider({
+    config,
+    credentialStore,
+    fetchImpl: async () => {
+      markRefreshStarted();
+      await refreshMayFinish;
+      return jsonResponse({
+        access_token: "access-after-uninstall",
+        refresh_token: "refresh-after-uninstall",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: "read write",
+      });
+    },
+  });
+
+  const refresh = provider();
+  await refreshStarted;
+  current = null; // Uninstall removes the Team credential while the network request is paused.
+  releaseRefresh();
+
+  await assert.rejects(refresh, /credential changed while authorization was in progress/);
+  assert.equal(current, null);
+});
+
 test("token provider can defer browser OAuth persistence until explicit commit", async () => {
   const config = loadLinearConfig({ repoRoot });
   const writes = [];
@@ -258,6 +306,45 @@ test("token provider can defer browser OAuth persistence until explicit commit",
   assert.equal(writes.length, 1);
   assert.equal(writes[0].accessToken, "access-browser");
   assert.equal(writes[0].refreshToken, "refresh-browser");
+});
+
+test("token provider clear preserves a credential refreshed after observation", async () => {
+  const config = loadLinearConfig({ repoRoot });
+  const observed = {
+    accessToken: "access-observed",
+    refreshToken: "refresh-observed",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+  let current = observed;
+  const credentialStore = {
+    async readTokenSet() {
+      return current;
+    },
+    async writeTokenSet(tokenSet) {
+      current = tokenSet;
+    },
+    async deleteTokenSetIfEqual(expected) {
+      if (JSON.stringify(current) !== JSON.stringify(expected)) {
+        return { ok: false, status: "conflict" };
+      }
+      current = null;
+      return { ok: true, status: "deleted" };
+    },
+    async deleteTokenSet() {
+      throw new Error("compare-delete must protect observed credentials");
+    },
+  };
+  const provider = createLinearOAuthTokenProvider({ config, credentialStore });
+  assert.equal(await provider(), "access-observed");
+
+  current = {
+    accessToken: "access-refreshed",
+    refreshToken: "refresh-refreshed",
+    expiresAt: "2099-01-02T00:00:00.000Z",
+  };
+  await provider.clear();
+
+  assert.equal(current.refreshToken, "refresh-refreshed");
 });
 
 test("one-shot admin OAuth uses user admin consent without mutating or persisting standing auth", async () => {

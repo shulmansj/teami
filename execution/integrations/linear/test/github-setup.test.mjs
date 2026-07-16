@@ -1654,6 +1654,6 @@ test("cli init runs the GitHub phase and fails init (no silent eval-only complet
   assert.doesNotMatch(setupSource, /running/);
   assert.doesNotMatch(setupSource, /requestSetupGrant|writeInboxSetupGrant|setup_grant_conflict/);
   assert.ok(setupSource.includes('output.info("GitHub connected.")'), "init should surface the GitHub connected state");
-  assert.doesNotMatch(setupSource, /Linear workspace setup is ready|First domain is ready/);
+  assert.doesNotMatch(setupSource, /Linear workspace setup is ready|First team is ready/);
   assert.doesNotMatch(setupSource, /ensureWebhookAdminAuthorization/);
 });

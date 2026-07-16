@@ -10,14 +10,15 @@ import {
   readClaudePluginHealth,
 } from "../claude-plugin-health.mjs";
 import { normalizeDoctorChecks } from "../doctor-check.mjs";
-import { buildDomainContext } from "../domain-resolver.mjs";
+import { buildTeamContext } from "../team-resolver.mjs";
 import {
-  emptyDomainRegistry,
-  mintDomainId,
-  readDomainRegistry,
-  upsertDomainRecord,
-  writeDomainRegistry,
-} from "../domain-registry.mjs";
+  createAtomicTeamRegistryWriter,
+  emptyTeamRegistry,
+  readTeamRegistry,
+  upsertTeamRecord,
+  updateTeamRegistry,
+  writeTeamRegistry,
+} from "../team-registry.mjs";
 import {
   defaultRunCommand,
   ghJsonWithAmbientAuth,
@@ -29,17 +30,16 @@ import {
   createLinearSetupGraphqlClient,
 } from "../linear-setup-auth.mjs";
 import {
-  declaredWorkspaceFromResumeDomain,
+  declaredWorkspaceFromResumeTeam,
   isWorkspaceMismatchError,
   knownRegistryWorkspaces,
   resolveLinearSetupWorkspace,
-  setupCompleteDomainForName,
-  setupIncompleteDomainForName,
-  setupLinearDomain,
+  setupCompleteTeamForName,
+  setupIncompleteTeamForName,
+  setupLinearTeam,
   verifyDeclaredWorkspace,
   workspaceLabel,
 } from "../linear-service.mjs";
-import { domainNameMatchesRegistryDomain } from "../linear/matching-utils.mjs";
 import { createLinearCredentialStore } from "../linear-credential-store.mjs";
 import {
   ensurePhoenixReady,
@@ -76,10 +76,10 @@ import {
 import { homeStateProbe } from "./home-state.mjs";
 import {
   createBootstrapLinearCredentialStore,
-  promoteSetupCredentialToDomain,
+  promoteSetupCredentialToTeam,
 } from "./local-setup-cleanup.mjs";
 import {
-  completeDomainTeamMissingRecoveryFromError,
+  completeTeamTeamMissingRecoveryFromError,
   formatCommand,
 } from "./operator-output.mjs";
 import {
@@ -105,16 +105,16 @@ const PUBLISHED_CLAUDE_PLUGIN_MARKETPLACE_SOURCE = "https://github.com/shulmansj
 const ADMIN_REVOCATION_REPAIR = "open Linear Settings -> Applications and revoke Teami access. Linear cannot prove revocation of a lost token through a fresh token, so Teami will not clear this marker automatically. After external revocation, uninstall the blocked local state and start setup again.";
 
 const LINEAR_SETUP_COMMAND_OPTIONS = Object.freeze({
-  "domain:add": {
-    intro: "Teami will add a domain to the same factory and learning loop, then ask Linear for read/write browser authorization for that domain's workspace. If Principal Escalation is missing, setup asks once for admin approval to create that one project status.",
+  "team:add": {
+    intro: "Teami will add a team to the same factory and learning loop, then ask Linear for read/write browser authorization for that team's workspace. If Principal Escalation is missing, setup asks once for admin approval to create that one project status.",
     prompt: "Linear team name: ",
-    readyLabel: "Domain",
+    readyLabel: "Team",
     runGithubPhase: false,
   },
   init: {
     intro: "Teami will ask Linear for read/write browser authorization to verify setup and post project updates. If Principal Escalation is missing, setup asks once for admin approval to create that one project status. No API key is required.",
     prompt: "Linear team name: ",
-    readyLabel: "First domain",
+    readyLabel: "First team",
     runGithubPhase: true,
   },
 });
@@ -151,7 +151,7 @@ export async function runLinearSetupCommand({ context, command, args }) {
     process.exitCode = 1;
     return { ok: false, status: "blocked", reason: "admin_revocation_required" };
   }
-  if (["init", "domain:add"].includes(command)) {
+  if (["init", "team:add"].includes(command)) {
     return runCliSharedOnboarding({
       context: { ...(context || {}), output, home, setupStateStore: setupStore },
       command,
@@ -202,7 +202,7 @@ export async function runLinearSetupCommand({ context, command, args }) {
     }
     return result;
   } catch (error) {
-    const recovery = completeDomainTeamMissingRecoveryFromError(error);
+    const recovery = completeTeamTeamMissingRecoveryFromError(error);
     if (!recovery) throw error;
     output.error({
       what: recovery.what,
@@ -229,31 +229,36 @@ async function runCliSharedOnboarding({ context, command = "init", args, output,
     return { ok: false, status: "blocked", reason: "setup_session_active", setup_id: active.setup_id };
   }
   const { flags } = parseCliFlags(args || []);
-  const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
-  const resolution = resolveSetupCommandDomainNameHint(args || [], registry);
-  const initOnlyResumeDomain = command === "init"
-    ? resolveGitHubPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) ||
-      resolveClaudePluginPhaseResumeDomain({ args: args || [], registry, repoRoot, home }) || null
+  const registry = readTeamRegistry({ home }) || emptyTeamRegistry();
+  const resolution = resolveSetupCommandTeamNameHint(args || [], registry);
+  const initOnlyResumeTeam = command === "init"
+    ? resolveGitHubPhaseResumeTeam({ args: args || [], registry, repoRoot, home }) ||
+      resolveClaudePluginPhaseResumeTeam({ args: args || [], registry, repoRoot, home }) || null
     : null;
-  const implicitResumeDomain = resolution.completeResumeDomain || resolution.resumeDomain || initOnlyResumeDomain;
-  const domainName = resolution.domainNameHint ||
-    (implicitResumeDomain ? domainNameForResumeDomain(implicitResumeDomain) : null) ||
-    await resolveInitDomainName(args || [], {
+  const implicitResumeTeam = resolution.completeResumeTeam || resolution.resumeTeam || initOnlyResumeTeam;
+  const teamName = resolution.teamNameHint ||
+    (implicitResumeTeam ? teamNameForResumeTeam(implicitResumeTeam) : null) ||
+    await resolveInitTeamName(args || [], {
       command,
       registry,
       isTTY: "isTTY" in context
         ? Boolean(context.isTTY)
         : Boolean(process.stdin.isTTY && process.stdout.isTTY),
-      prompt: context.promptDomainName || promptLine,
+      prompt: context.promptTeamName || promptLine,
     });
-  const resumeDomain = implicitResumeDomain;
-  const priorDomain = registry.domains.find((domain) =>
-    String(domain?.adopter_provided_name || domain?.id || "").trim().toLowerCase() ===
-      String(domainName).trim().toLowerCase());
-  const workspaceHint = flags.workspace || resumeDomain?.linear?.workspace_id ||
-    priorDomain?.linear?.workspace_id || null;
+  const promptedResolution = implicitResumeTeam
+    ? null
+    : resolveSetupCommandTeamNameHint([
+        "--team",
+        teamName,
+        ...(flags.workspace ? ["--workspace", flags.workspace] : []),
+      ], registry);
+  const resumeTeam = implicitResumeTeam || promptedResolution?.resumeTeam ||
+    promptedResolution?.completeResumeTeam || null;
+  const workspaceHint = flags.workspace || resumeTeam?.linear?.workspace_id ||
+    null;
   // Onboarding never adds product-repository access. The shared setup service preserves
-  // resources already recorded on a complete-domain repair without accepting a new allowlist.
+  // resources already recorded on a complete-team repair without accepting a new allowlist.
   const repoIntent = { mode: "non_code" };
 
   const {
@@ -356,7 +361,7 @@ async function runCliSharedOnboarding({ context, command = "init", args, output,
   // setup stopped while the same action continued making approved changes.
   const callOnboarding = (input) => actions.init_onboarding(input);
   let result = await callOnboarding({
-    domain: domainName,
+    team: teamName,
     ...(workspaceHint ? { workspace: workspaceHint } : {}),
     repo_intent: repoIntent,
     ...(flags["github-owner"] ? { github_owner: flags["github-owner"] } : {}),
@@ -390,7 +395,7 @@ async function runCliSharedOnboarding({ context, command = "init", args, output,
         status: "blocked",
         setup_id: timedOutSetupId,
         reason: `cli_authorization_poll_timeout:${result?.authorization?.kind || result?.status || "unknown"}`,
-        repair: `Re-run ${formatCommand(command === "domain:add" ? "domain add" : "init")} for a fresh authorization session.`,
+        repair: `Re-run ${formatCommand(command === "team:add" ? "team add" : "init")} for a fresh authorization session.`,
       };
       break;
     }
@@ -635,33 +640,42 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
     const commandOptions = LINEAR_SETUP_COMMAND_OPTIONS[command] || LINEAR_SETUP_COMMAND_OPTIONS.init;
     const initArgs = args;
     const { flags: initFlags } = parseCliFlags(initArgs);
-    const registry = readDomainRegistry({ home }) || emptyDomainRegistry();
-    const domainNameResolution = resolveSetupCommandDomainNameHint(initArgs, registry);
-    const domainNameHint = domainNameResolution.domainNameHint;
-    const completeResumeDomain = domainNameResolution.completeResumeDomain || null;
-    const completeResumeContext = completeResumeDomain
-      ? buildDomainContext({ domain: completeResumeDomain, config, repoRoot, home })
+    const registry = readTeamRegistry({ home }) || emptyTeamRegistry();
+    const teamNameResolution = resolveSetupCommandTeamNameHint(initArgs, registry);
+    const teamNameHint = teamNameResolution.teamNameHint;
+    const completeResumeTeam = teamNameResolution.completeResumeTeam || null;
+    const incompleteResumeTeam = teamNameResolution.resumeTeam || null;
+    const resumeCredentialTeam = completeResumeTeam ||
+      (teamHasLinearCredentialIdentity(incompleteResumeTeam) ? incompleteResumeTeam : null);
+    const resumeContext = resumeCredentialTeam
+      ? buildTeamContext({ team: resumeCredentialTeam, config, repoRoot, home })
       : null;
-    const githubResumeDomain = commandOptions.runGithubPhase
-      ? resolveGitHubPhaseResumeDomain({ args: initArgs, registry, repoRoot, home })
+    const githubResumeTeam = commandOptions.runGithubPhase
+      ? resolveGitHubPhaseResumeTeam({ args: initArgs, registry, repoRoot, home })
       : null;
-    const claudePluginResumeDomain = commandOptions.runGithubPhase && !githubResumeDomain
-      ? resolveClaudePluginPhaseResumeDomain({ args: initArgs, registry, repoRoot, home })
+    const claudePluginResumeTeam = commandOptions.runGithubPhase && !githubResumeTeam
+      ? resolveClaudePluginPhaseResumeTeam({ args: initArgs, registry, repoRoot, home })
       : null;
-    const credentialStore = completeResumeContext
-      ? createLinearCredentialStore({ config, repoRoot, domainContext: completeResumeContext })
-      : createBootstrapLinearCredentialStore({ config, repoRoot });
+    const credentialStore = resumeContext
+      ? createLinearCredentialStore({ config, repoRoot, home, teamContext: resumeContext })
+      : createBootstrapLinearCredentialStore({ config, repoRoot, home });
+    const obsoleteBootstrapStore = !completeResumeTeam && resumeContext
+      ? createBootstrapLinearCredentialStore({ config, repoRoot, home })
+      : null;
+    const obsoleteBootstrapToken = obsoleteBootstrapStore
+      ? await obsoleteBootstrapStore.readTokenSet()
+      : null;
     const totalSteps = commandOptions.runGithubPhase ? 3 : 1;
     const authorizeOneShotAdmin = createCliOneShotAdminAuthorization({ context });
     output.heading(`Teami ${output.symbols.separator} setup`);
     output.detail(commandOptions.intro);
-    if (githubResumeDomain) {
+    if (githubResumeTeam) {
       output.step(1, totalSteps, "Connect Linear");
       output.info(
-        `Linear already connected for domain "${domainNameForResumeDomain(githubResumeDomain)}" in workspace ${workspaceLabel(githubResumeDomain.linear)}.`,
+        `Linear already connected for team "${teamNameForResumeTeam(githubResumeTeam)}" in workspace ${workspaceLabel(githubResumeTeam.linear)}.`,
       );
-      output.success(`Workspace: ${workspaceLabel(githubResumeDomain.linear)}`);
-      output.success(`Team "${githubResumeDomain.linear?.team_name || domainNameForResumeDomain(githubResumeDomain)}" already connected`);
+      output.success(`Workspace: ${workspaceLabel(githubResumeTeam.linear)}`);
+      output.success(`Team "${githubResumeTeam.linear?.team_name || teamNameForResumeTeam(githubResumeTeam)}" already connected`);
       output.info("Linear connected.");
       const githubOk = await runGitHubInitStep({
         repoRoot,
@@ -678,7 +692,7 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
         context,
         repoRoot,
         output,
-        domainContext: buildDomainContext({ domain: githubResumeDomain, config, repoRoot, home }),
+        teamContext: buildTeamContext({ team: githubResumeTeam, config, repoRoot, home }),
       });
       await finishSetupOutput({
         output,
@@ -689,20 +703,20 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
         repoRoot,
         home,
         cachePath,
-        domainId: githubResumeDomain.id,
+        teamRef: githubResumeTeam.id,
         finalGate: context.finalGate,
         runSmoke: context.runSmoke,
         runDoctor: context.runDoctor,
       });
       return;
     }
-    if (claudePluginResumeDomain) {
+    if (claudePluginResumeTeam) {
       output.step(1, totalSteps, "Connect Linear");
       output.info(
-        `Linear already connected for domain "${domainNameForResumeDomain(claudePluginResumeDomain)}" in workspace ${workspaceLabel(claudePluginResumeDomain.linear)}.`,
+        `Linear already connected for team "${teamNameForResumeTeam(claudePluginResumeTeam)}" in workspace ${workspaceLabel(claudePluginResumeTeam.linear)}.`,
       );
-      output.success(`Workspace: ${workspaceLabel(claudePluginResumeDomain.linear)}`);
-      output.success(`Team "${claudePluginResumeDomain.linear?.team_name || domainNameForResumeDomain(claudePluginResumeDomain)}" already connected`);
+      output.success(`Workspace: ${workspaceLabel(claudePluginResumeTeam.linear)}`);
+      output.success(`Team "${claudePluginResumeTeam.linear?.team_name || teamNameForResumeTeam(claudePluginResumeTeam)}" already connected`);
       output.info("Linear connected.");
       output.step(2, totalSteps, "Connect GitHub");
       output.info("GitHub already connected.");
@@ -713,7 +727,7 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
         context,
         repoRoot,
         output,
-        domainContext: buildDomainContext({ domain: claudePluginResumeDomain, config, repoRoot, home }),
+        teamContext: buildTeamContext({ team: claudePluginResumeTeam, config, repoRoot, home }),
       });
       await finishSetupOutput({
         output,
@@ -724,30 +738,30 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
         repoRoot,
         home,
         cachePath,
-        domainId: claudePluginResumeDomain.id,
+        teamRef: claudePluginResumeTeam.id,
         finalGate: context.finalGate,
         runSmoke: context.runSmoke,
         runDoctor: context.runDoctor,
       });
       return;
     }
-    output.step(1, totalSteps, commandOptions.runGithubPhase ? "Connect Linear" : "Connect Linear domain");
+    output.step(1, totalSteps, commandOptions.runGithubPhase ? "Connect Linear" : "Connect Linear team");
     if (credentialStore.warning) output.warn(credentialStore.warning);
-    if (domainNameResolution.resumeDomain) {
+    if (teamNameResolution.resumeTeam) {
       output.info(
-        `Resuming incomplete setup for domain "${domainNameHint}" in Linear workspace ${workspaceLabel(domainNameResolution.resumeDomain.linear)}.`,
+        `Resuming incomplete setup for team "${teamNameHint}" in Linear workspace ${workspaceLabel(teamNameResolution.resumeTeam.linear)}.`,
       );
-      if (domainNameResolution.resumeDomain.setup_incomplete_cause) {
-        output.info(`Previous setup stopped at: ${domainNameResolution.resumeDomain.setup_incomplete_cause}`);
+      if (teamNameResolution.resumeTeam.setup_incomplete_cause) {
+        output.info(`Previous setup stopped at: ${teamNameResolution.resumeTeam.setup_incomplete_cause}`);
       }
-    } else if (completeResumeDomain) {
+    } else if (completeResumeTeam) {
       output.info(
-        `Refreshing existing domain "${domainNameForResumeDomain(completeResumeDomain)}" in Linear workspace ${workspaceLabel(completeResumeDomain.linear)}.`,
+        `Refreshing existing team "${teamNameForResumeTeam(completeResumeTeam)}" in Linear workspace ${workspaceLabel(completeResumeTeam.linear)}.`,
       );
     }
     explicitWorkspaceExpectation(initFlags, process.env);
-    const domainName = domainNameHint || await resolveInitDomainName(initArgs, { command });
-    const setupRegistry = registryWithoutRemovedDomainsForName(registry, domainName);
+    const teamName = teamNameHint || await resolveInitTeamName(initArgs, { command });
+    const authorizationRegistry = registryWithoutRemovedTeamsForName(registry, teamName);
     const linearProgress = createLinearSetupProgress(output);
     const isTTY = "isTTY" in context
       ? Boolean(context.isTTY)
@@ -756,11 +770,11 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
       config,
       repoRoot,
       credentialStore,
-      registry: setupRegistry,
+      registry: authorizationRegistry,
       flags: initFlags,
       env: process.env,
-      domainNameHint,
-      resumeDomain: domainNameResolution.resumeDomain || completeResumeDomain,
+      teamNameHint,
+      resumeTeam: teamNameResolution.resumeTeam || completeResumeTeam,
       isTTY,
       log: linearProgress,
       createSetupAuth: context.createLinearSetupAuth || createLinearSetupGraphqlClient,
@@ -772,14 +786,14 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
     output.detail(`workspace_id=${workspaceAuthorization.workspace.id}`);
     output.detail("Linear setup authorization verified.");
 
-    const repoAllowlistSelection = completeResumeDomain
+    const repoAllowlistSelection = completeResumeTeam
       ? {
           confirmed: false,
           selectedRepos: [],
           discoveredRepos: [],
           reason: "complete_resume_repo_allowlist_skipped",
         }
-      : await discoverAndConfirmDomainGitHubRepos({
+      : await discoverAndConfirmTeamGitHubRepos({
           command,
           output,
           runCommand: context.githubDiscoveryRunCommand || context.runCommand || defaultRunCommand,
@@ -788,19 +802,19 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
         });
 
     const setupCache = setupCacheWithNeedsPrincipalStatus({
-      cache: completeResumeContext ? readLinearCache(completeResumeContext.linear.cachePath) : null,
+      cache: resumeContext ? readLinearCache(resumeContext.linear.cachePath) : null,
       status: workspaceAuthorization.needsPrincipalProjectStatus,
     });
 
-    const result = await setupLinearDomain({
+    const result = await setupLinearTeam({
       client: workspaceAuthorization.setupAuth.client,
       config,
-      registry: setupRegistry,
+      registry,
       repoRoot,
       home,
-      domainName,
+      teamName,
       cache: setupCache,
-      resumeDomain: completeResumeDomain || domainNameResolution.resumeDomain || null,
+      resumeTeam: completeResumeTeam || teamNameResolution.resumeTeam || null,
       workspace: workspaceAuthorization.workspace,
       declaredWorkspace: workspaceAuthorization.declaredWorkspace,
       ensureNeedsPrincipalProjectStatus: () => ensureNeedsPrincipalProjectStatus({
@@ -816,32 +830,35 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
       writeCache: (nextCache, context) => {
         writeLinearCache(context.linear.cachePath, nextCache);
       },
-      writeRegistry: (nextRegistry) => {
-        writeDomainRegistry({ home }, nextRegistry);
-      },
-      promoteCredential: completeResumeDomain
-        ? async () => {}
+      writeRegistry: createAtomicTeamRegistryWriter({ home, initialRegistry: registry }),
+      promoteCredential: resumeContext
+        ? async () => {
+            if (obsoleteBootstrapToken) {
+              await obsoleteBootstrapStore.deleteTokenSetIfEqual(obsoleteBootstrapToken);
+            }
+          }
         : ({ context }) =>
-            promoteSetupCredentialToDomain({
+            promoteSetupCredentialToTeam({
               setupCredentialStore: credentialStore,
               config,
               repoRoot,
-              domainContext: context,
+              home,
+              teamContext: context,
             }),
       onPreview: (line) => output.detail(line),
     });
     printSummary(result.summary, output);
     if (repoAllowlistSelection.confirmed) {
-      const repoAllowlistUpdate = await persistDomainGitHubRepoAllowlist({
+      const repoAllowlistUpdate = await persistTeamGitHubRepoAllowlist({
         repoRoot,
         home,
-        domainId: result.domain.id,
+        teamRef: result.team.id,
         repos: repoAllowlistSelection.selectedRepos,
       });
-      result.domain = repoAllowlistUpdate.domain;
+      result.team = repoAllowlistUpdate.team;
       result.registry = repoAllowlistUpdate.registry;
-      result.context = buildDomainContext({
-        domain: result.domain,
+      result.context = buildTeamContext({
+        team: result.team,
         config,
         repoRoot,
         home,
@@ -852,17 +869,17 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
       } else {
         output.success(`Repo allowlist: ${repoAllowlistUpdate.resources.map((resource) => repoLabel(resource.binding)).join(", ")}`);
       }
-    } else if (completeResumeDomain) {
-      output.detail("Repo allowlist unchanged; manage repo grants with domain grant.");
+    } else if (completeResumeTeam) {
+      output.detail("Repo allowlist unchanged; manage repo grants with team grant.");
     } else {
       output.detail("Repo allowlist unchanged; GitHub repo discovery was not confirmed.");
     }
     output.success(
-      `Team "${result.domain.linear?.team_name || domainName}" ${completeResumeDomain ? "ready" : "created"} (labels and statuses ready)`,
+      `Team "${result.team.linear?.team_name || teamName}" ${completeResumeTeam ? "ready" : "created"} (labels and statuses ready)`,
     );
     output.success("Local gateway ready for Planned projects");
     output.info("Linear connected.");
-    output.detail(`${commandOptions.readyLabel} connected: ${result.domain.id}`);
+    output.detail(`${commandOptions.readyLabel} connected: ${result.team.id}`);
     if (commandOptions.runGithubPhase) {
       const githubOk = await runGitHubInitStep({
         repoRoot,
@@ -878,7 +895,7 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
       const claudePluginOk = await runClaudePluginInitStep({ context, repoRoot, output, totalSteps });
       if (!claudePluginOk) return;
     }
-    const phoenix = await runCliPhoenixSetupPhase({ context, repoRoot, output, domainContext: result.context });
+    const phoenix = await runCliPhoenixSetupPhase({ context, repoRoot, output, teamContext: result.context });
     await finishSetupOutput({
       output,
       commandOptions,
@@ -888,7 +905,7 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
       repoRoot,
       home,
       cachePath,
-      domainId: result.domain.id,
+      teamRef: result.team.id,
       finalGate: context.finalGate,
       runSmoke: context.runSmoke,
       runDoctor: context.runDoctor,
@@ -896,7 +913,7 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
     if (!result.ok) process.exitCode = 1;
 }
 
-async function runCliPhoenixSetupPhase({ context, repoRoot, output, domainContext } = {}) {
+async function runCliPhoenixSetupPhase({ context, repoRoot, output, teamContext } = {}) {
   const ready = await (context.ensurePhoenixReady || ensurePhoenixReady)({
     repoRoot,
     onProgress: (line) => output.detail(line),
@@ -912,7 +929,7 @@ async function runCliPhoenixSetupPhase({ context, repoRoot, output, domainContex
   const preflight = await (context.runLocalPhoenixTracePreflight || runLocalPhoenixTracePreflight)({
     repoRoot,
     ensureReady: async () => ready,
-    domainContext,
+    teamContext,
   }).catch((error) => ({ ok: false, status: "trace_delivery_failed", reason: error.message }));
   if (!preflight.ok) {
     output.warn(`Local Phoenix trace preflight failed: ${preflight.reason || preflight.status || "unknown"}`);
@@ -950,16 +967,16 @@ function createCliOneShotAdminAuthorization({ context } = {}) {
 export async function runSetupGitHubRepoDiscoveryStep({
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId,
+  teamRef,
   command = "init",
   output = createCliOutput(),
   runCommand = defaultRunCommand,
   prompt = promptLine,
   isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
   registry = null,
-  writeRegistry = (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
+  writeRegistry = null,
 } = {}) {
-  const selection = await discoverAndConfirmDomainGitHubRepos({
+  const selection = await discoverAndConfirmTeamGitHubRepos({
     command,
     output,
     runCommand,
@@ -973,10 +990,10 @@ export async function runSetupGitHubRepoDiscoveryStep({
       resources: [],
     };
   }
-  const persisted = await persistDomainGitHubRepoAllowlist({
+  const persisted = await persistTeamGitHubRepoAllowlist({
     repoRoot,
     home,
-    domainId,
+    teamRef,
     repos: selection.selectedRepos,
     registry,
     writeRegistry,
@@ -988,7 +1005,7 @@ export async function runSetupGitHubRepoDiscoveryStep({
   };
 }
 
-export async function discoverAndConfirmDomainGitHubRepos({
+export async function discoverAndConfirmTeamGitHubRepos({
   command = "init",
   output = createCliOutput(),
   runCommand = defaultRunCommand,
@@ -1003,7 +1020,7 @@ export async function discoverAndConfirmDomainGitHubRepos({
   } catch (error) {
     output.warn(`GitHub repo discovery skipped: ${error.message}`);
     output.info(
-      `Fix GitHub CLI auth with gh auth login --hostname github.com, then re-run ${formatCommand(command === "domain:add" ? "domain add" : "init")}.`,
+      `Fix GitHub CLI auth with gh auth login --hostname github.com, then re-run ${formatCommand(command === "team:add" ? "team add" : "init")}.`,
     );
     return {
       confirmed: false,
@@ -1014,7 +1031,7 @@ export async function discoverAndConfirmDomainGitHubRepos({
   }
 
   if (discoveredRepos.length === 0) {
-    output.info("No GitHub repos were found for this account. This domain will start as a non-code team.");
+    output.info("No GitHub repos were found for this account. This team will start as a non-code team.");
     return {
       confirmed: true,
       selectedRepos: [],
@@ -1041,7 +1058,7 @@ export async function discoverAndConfirmDomainGitHubRepos({
     prompt,
   });
   if (selectedRepos.length === 0) {
-    output.info("No repo selected. This domain will start as a non-code team.");
+    output.info("No repo selected. This team will start as a non-code team.");
     return {
       confirmed: true,
       selectedRepos,
@@ -1078,38 +1095,57 @@ export async function discoverGitHubRepos({
   return normalizeGitHubRepoList(data);
 }
 
-export async function persistDomainGitHubRepoAllowlist({
+export async function persistTeamGitHubRepoAllowlist({
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId,
+  teamRef,
   repos = [],
   registry = null,
-  writeRegistry = (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
+  writeRegistry = null,
 } = {}) {
-  if (!nonEmptyString(domainId)) throw new Error("github_repo_allowlist_missing_domain");
+  if (!nonEmptyString(teamRef)) throw new Error("github_repo_allowlist_missing_team");
   registerGitRepoResourceKind();
-  const currentRegistry = registry || readDomainRegistry({ home });
-  if (!currentRegistry) throw new Error("github_repo_allowlist_registry_missing");
-  const domain = currentRegistry.domains.find((candidate) => candidate.id === domainId);
-  if (!domain) throw new Error(`github_repo_allowlist_unknown_domain:${domainId}`);
-
   const resources = uniqueGitRepoResources(
     repos.map((repo) => gitRepoResourceFromBinding(gitHubRepoBinding(repo))),
   );
-  const updatedDomain = {
-    ...structuredClone(domain),
+  if (registry === null && typeof writeRegistry !== "function") {
+    const outcome = updateTeamRegistry({ home }, (currentRegistry) =>
+      repoAllowlistRegistryUpdate(currentRegistry, { teamRef, resources }));
+    return repoAllowlistUpdateResult(outcome);
+  }
+  const currentRegistry = registry || readTeamRegistry({ home });
+  if (!currentRegistry) throw new Error("github_repo_allowlist_registry_missing");
+  const outcome = repoAllowlistRegistryUpdate(currentRegistry, { teamRef, resources });
+  const registryPath = await (writeRegistry || ((nextRegistry) =>
+    writeTeamRegistry({ home }, nextRegistry)))(outcome.registry, currentRegistry);
+  return repoAllowlistUpdateResult({ ...outcome, registryPath });
+}
+
+function repoAllowlistRegistryUpdate(currentRegistry, { teamRef, resources }) {
+  const team = currentRegistry?.teams?.find((candidate) => candidate.id === teamRef);
+  if (!currentRegistry) throw new Error("github_repo_allowlist_registry_missing");
+  if (!team) throw new Error(`github_repo_allowlist_unknown_team:${teamRef}`);
+  if (team.status === "removed") throw new Error(`github_repo_allowlist_team_removed:${teamRef}`);
+  const updatedTeam = {
+    ...structuredClone(team),
     resources: [
-      ...(domain.resources || []).filter((resource) => resource.kind !== "git_repo"),
+      ...(team.resources || []).filter((resource) => resource.kind !== "git_repo"),
       ...resources,
     ],
   };
-  const nextRegistry = upsertDomainRecord(currentRegistry, updatedDomain);
-  const registryPath = await writeRegistry(nextRegistry);
   return {
-    domain: nextRegistry.domains.find((candidate) => candidate.id === domainId),
-    registry: nextRegistry,
-    registryPath,
+    registry: upsertTeamRecord(currentRegistry, updatedTeam),
     resources,
+    teamRef,
+  };
+}
+
+function repoAllowlistUpdateResult(outcome) {
+  return {
+    team: outcome.registry.teams.find((candidate) => candidate.id === outcome.teamRef),
+    registry: outcome.registry,
+    registryPath: outcome.registryPath,
+    resources: outcome.resources,
   };
 }
 
@@ -1551,7 +1587,7 @@ async function runFinalGate({
   repoRoot,
   home = resolveTeamiHome(),
   cachePath,
-  domainId,
+  teamRef,
   output,
   phoenixOk = null,
   runSmoke = runRuntimeSmokeChecks,
@@ -1600,7 +1636,7 @@ async function runFinalGate({
             repoRoot,
             home,
             cachePath,
-            domainId,
+            teamRef,
             includeRuntimeSmoke: false,
             includePhoenix: true,
             includeLocalSupervisor: false,
@@ -1656,7 +1692,7 @@ async function finishSetupOutput({
   repoRoot,
   home = resolveTeamiHome(),
   cachePath,
-  domainId,
+  teamRef,
   finalGate = runFinalGate,
   runSmoke,
   runDoctor,
@@ -1666,7 +1702,7 @@ async function finishSetupOutput({
     repoRoot,
     home,
     cachePath,
-    domainId,
+    teamRef,
     output,
     phoenixOk,
     runSmoke,
@@ -1713,11 +1749,11 @@ async function authorizeLinearSetupWorkspace({
   config,
   repoRoot,
   credentialStore,
-  registry = emptyDomainRegistry(),
+  registry = emptyTeamRegistry(),
   flags = {},
   env = process.env,
-  domainNameHint = null,
-  resumeDomain = null,
+  teamNameHint = null,
+  resumeTeam = null,
   isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
   log = (line) => console.log(line),
   createSetupAuth = createLinearSetupGraphqlClient,
@@ -1731,8 +1767,8 @@ async function authorizeLinearSetupWorkspace({
     registry,
     flags,
     env,
-    domainNameHint,
-    resumeDomain,
+    teamNameHint,
+    resumeTeam,
     isTTY,
     log,
     promptWorkspace,
@@ -1750,7 +1786,7 @@ async function authorizeLinearSetupWorkspace({
   for (let attempt = 1; attempt <= maxAuthorizationAttempts; attempt += 1) {
     const allowBrowserAuth = !completeResume || forceBrowserAuthorization;
     if (completeResume && !allowBrowserAuth && !trustLinePrinted) {
-      log(`Using existing Linear authorization for domain "${domainNameForResumeDomain(selection.resumeDomain)}".`);
+      log(`Using existing Linear authorization for team "${teamNameForResumeTeam(selection.resumeTeam)}".`);
       trustLinePrinted = true;
     } else if (allowBrowserAuth && !trustLinePrinted) {
       log("Authorizing grants Teami read/write access to the entire selected Linear workspace; Linear has no narrower scope. Setup may ask once for admin approval only to create Principal Escalation if it is missing.");
@@ -1807,7 +1843,7 @@ async function authorizeLinearSetupWorkspace({
         forceBrowserAuthorization = true;
         continue;
       }
-      if (completeResume) throw completeResumeCredentialError(selection.resumeDomain, error);
+      if (completeResume) throw completeResumeCredentialError(selection.resumeTeam, error);
       throw error;
     }
     if (guard.retry) {
@@ -1983,11 +2019,11 @@ function isLinearAuthorizationFailure(error) {
     /\bHTTP 401\b/i.test(messages) ||
     /Authentication required|not authenticated|authorization is missing|OAuth token is missing|access token is expired or unavailable/i.test(messages);
 }
-function completeResumeCredentialError(domain, originalError) {
-  const domainName = domainNameForResumeDomain(domain) || "unknown";
-  const workspace = workspaceLabel(domain?.linear || {});
+function completeResumeCredentialError(team, originalError) {
+  const teamName = teamNameForResumeTeam(team) || "unknown";
+  const workspace = workspaceLabel(team?.linear || {});
   const error = new Error(
-    `Linear authorization for existing domain "${domainName}" points at the wrong workspace or could not be verified. Re-run ${formatCommand("init")} --domain "${domainName}" --workspace "${workspace}" from a browser-capable terminal and choose that workspace in Linear's dropdown. If you meant to replace it with another workspace, uninstall the domain first.`,
+    `Linear authorization for existing team "${teamName}" points at the wrong workspace or could not be verified. Re-run ${formatCommand("init")} --team "${teamName}" --workspace "${workspace}" from a browser-capable terminal and choose that workspace in Linear's dropdown. If you meant to replace it with another workspace, uninstall the team first.`,
   );
   error.cause = originalError;
   return error;
@@ -2076,29 +2112,29 @@ function workspaceMismatchCameFromStoredCredential(setupAuth) {
 }
 
 async function resolveLinearWorkspaceSelection({
-  registry = emptyDomainRegistry(),
+  registry = emptyTeamRegistry(),
   flags = {},
   env = process.env,
-  domainNameHint = null,
-  resumeDomain = null,
+  teamNameHint = null,
+  resumeTeam = null,
   isTTY = false,
   log = (line) => console.log(line),
   promptWorkspace = promptLinearWorkspacePicker,
 } = {}) {
   const knownWorkspaces = knownRegistryWorkspaces(registry);
-  const matchedResumeDomain =
-    resumeDomain ||
-    setupIncompleteDomainForName(registry, domainNameHint) ||
-    (!domainNameHint ? singleSetupIncompleteDomain(registry) : null);
-  const resumeDeclaredWorkspace = declaredWorkspaceFromResumeDomain(matchedResumeDomain);
+  const matchedResumeTeam =
+    resumeTeam ||
+    setupIncompleteTeamForName(registry, teamNameHint) ||
+    (!teamNameHint ? singleSetupIncompleteTeam(registry) : null);
+  const resumeDeclaredWorkspace = declaredWorkspaceFromResumeTeam(matchedResumeTeam);
   if (resumeDeclaredWorkspace) {
     return {
       mode: "known",
-      source: matchedResumeDomain?.status === "setup_incomplete" ? "resume" : "complete_resume",
+      source: matchedResumeTeam?.status === "setup_incomplete" ? "resume" : "complete_resume",
       knownWorkspaces,
       declaredWorkspace: resumeDeclaredWorkspace,
       label: workspaceLabel(resumeDeclaredWorkspace),
-      resumeDomain: matchedResumeDomain,
+      resumeTeam: matchedResumeTeam,
     };
   }
 
@@ -2329,108 +2365,100 @@ function createGitHubSetupProgress(output) {
   return { log, state };
 }
 
-async function resolveInitDomainName(args = [], {
+async function resolveInitTeamName(args = [], {
   command = "init",
-  registry = emptyDomainRegistry(),
+  registry = emptyTeamRegistry(),
   isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY),
   prompt = promptLine,
 } = {}) {
-  const explicit = explicitInitDomainName(args);
+  const explicit = explicitInitTeamName(args);
   if (explicit) return explicit;
-  const domains = (registry?.domains || []).filter((domain) => domain?.status !== "removed");
-  if (command === "init" && domains.length === 0) return DEFAULT_SETUP_TEAM_NAME;
-  if (command === "init" && domains.length === 1) return domainNameForResumeDomain(domains[0]);
+  const teams = (registry?.teams || []).filter((team) => team?.status !== "removed");
+  if (command === "init" && teams.length === 0) return DEFAULT_SETUP_TEAM_NAME;
+  if (command === "init" && teams.length === 1) return teamNameForResumeTeam(teams[0]);
   if (isTTY) {
     const promptText = (LINEAR_SETUP_COMMAND_OPTIONS[command] || LINEAR_SETUP_COMMAND_OPTIONS.init).prompt;
     const answer = await prompt(promptText);
     if (String(answer || "").trim()) return String(answer).trim();
   }
-  throw new Error("A Linear team name is required in non-interactive setup. Rerun with --domain \"Your Team Name\".");
+  throw new Error("A Linear team name is required in non-interactive setup. Rerun with --team \"Your Team Name\".");
 }
 
-function explicitInitDomainName(args = []) {
+function explicitInitTeamName(args = []) {
   const { positionals, flags } = parseCliFlags(args);
   const explicit = [
-    flags.domain,
-    flags["domain-name"],
+    flags.team,
+    flags["team-name"],
     ...positionals,
-    process.env.TEAMI_DOMAIN_NAME,
+    process.env.TEAMI_TEAM_NAME,
   ].find((value) => typeof value === "string" && value.trim());
   if (explicit) return explicit.trim();
   return null;
 }
 
-function registryWithoutRemovedDomains(registry = emptyDomainRegistry()) {
-  const domains = (registry?.domains || []).filter((domain) => domain.status !== "removed");
-  if (domains.length === (registry?.domains || []).length) return registry;
-  return { ...(registry || emptyDomainRegistry()), domains };
+function registryWithoutRemovedTeams(registry = emptyTeamRegistry()) {
+  const teams = (registry?.teams || []).filter((team) => team.status !== "removed");
+  if (teams.length === (registry?.teams || []).length) return registry;
+  return { ...(registry || emptyTeamRegistry()), teams };
 }
 
-export function registryWithoutRemovedDomainsForName(registry = emptyDomainRegistry(), domainName = "") {
-  if (typeof domainName !== "string" || domainName.trim() === "") return registryWithoutRemovedDomains(registry);
-  const trimmed = domainName.trim();
-  const slug = (() => {
-    try {
-      return mintDomainId(trimmed, []);
-    } catch {
-      return null;
-    }
-  })();
-  const domains = (registry?.domains || []).filter((domain) =>
-    domain.status !== "removed" || !domainNameMatchesRegistryDomain(domain, trimmed, slug),
-  );
-  if (domains.length === (registry?.domains || []).length) return registry;
-  return { ...(registry || emptyDomainRegistry()), domains };
+export function registryWithoutRemovedTeamsForName(registry = emptyTeamRegistry(), teamName = "") {
+  void teamName;
+  return registryWithoutRemovedTeams(registry);
 }
-function resolveSetupCommandDomainNameHint(args = [], registry = emptyDomainRegistry()) {
-  const resumableRegistry = registryWithoutRemovedDomains(registry);
-  const explicit = explicitInitDomainName(args);
+function resolveSetupCommandTeamNameHint(args = [], registry = emptyTeamRegistry()) {
+  const resumableRegistry = registryWithoutRemovedTeams(registry);
+  const explicit = explicitInitTeamName(args);
   if (explicit) {
-    const resumeDomain = setupIncompleteDomainForName(resumableRegistry, explicit);
+    const { flags } = parseCliFlags(args);
+    const workspace = typeof flags.workspace === "string" ? flags.workspace.trim() : null;
+    const resumeTeam = setupIncompleteTeamForName(resumableRegistry, explicit, workspace);
     return {
-      domainNameHint: explicit,
-      resumeDomain,
-      completeResumeDomain: resumeDomain ? null : setupCompleteDomainForName(resumableRegistry, explicit),
+      teamNameHint: explicit,
+      resumeTeam,
+      completeResumeTeam: resumeTeam
+        ? null
+        : setupCompleteTeamForName(resumableRegistry, explicit, workspace),
       source: "explicit",
     };
   }
 
-  const resumeDomain = singleSetupIncompleteDomain(resumableRegistry);
-  const domainNameHint = domainNameForResumeDomain(resumeDomain);
+  const resumeTeam = singleSetupIncompleteTeam(resumableRegistry);
+  const teamNameHint = teamNameForResumeTeam(resumeTeam);
   return {
-    domainNameHint,
-    resumeDomain: domainNameHint ? resumeDomain : null,
-    completeResumeDomain: null,
-    source: domainNameHint ? "single_setup_incomplete" : "none",
+    teamNameHint,
+    resumeTeam: teamNameHint ? resumeTeam : null,
+    completeResumeTeam: null,
+    source: teamNameHint ? "single_setup_incomplete" : "none",
   };
 }
 
-function resolveGitHubPhaseResumeDomain({
+function resolveGitHubPhaseResumeTeam({
   args = [],
-  registry = emptyDomainRegistry(),
+  registry = emptyTeamRegistry(),
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   readConnectionState = readGitHubConnectionState,
 } = {}) {
-  if (explicitInitDomainName(args)) return null;
-  if (singleSetupIncompleteDomain(registry)) return null;
-  const domains = (registry?.domains || []).filter((domain) => domain.status === "active");
-  if (domains.length !== 1) return null;
-  return githubConnectionNeedsInit({ repoRoot, home, readConnectionState }) ? domains[0] : null;
+  if (explicitInitTeamName(args)) return null;
+  if (singleSetupIncompleteTeam(registry)) return null;
+  const teams = (registry?.teams || []).filter((team) => team.status === "active");
+  if (teams.length !== 1) return null;
+  return githubConnectionNeedsInit({ repoRoot, home, readConnectionState }) ? teams[0] : null;
 }
 
-function resolveClaudePluginPhaseResumeDomain({
+function resolveClaudePluginPhaseResumeTeam({
   args = [],
-  registry = emptyDomainRegistry(),
+  registry = emptyTeamRegistry(),
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   readConnectionState = readGitHubConnectionState,
 } = {}) {
-  if (explicitInitDomainName(args)) return null;
-  if (singleSetupIncompleteDomain(registry)) return null;
-  const domains = (registry?.domains || []).filter((domain) => domain.status === "active");
-  if (domains.length !== 1) return null;
-  return githubConnectionNeedsInit({ repoRoot, home, readConnectionState }) ? null : domains[0];
+  if (explicitInitTeamName(args)) return null;
+  if (singleSetupIncompleteTeam(registry)) return null;
+  const teams = (registry?.teams || []).filter((team) => team.status === "active");
+  if (teams.length !== 1) return null;
+  return githubConnectionNeedsInit({ repoRoot, home, readConnectionState }) ? null : teams[0];
 }
 
 function githubConnectionNeedsInit({
@@ -2446,27 +2474,31 @@ function githubConnectionNeedsInit({
     connection.adoption_complete !== true;
 }
 
-function singleSetupIncompleteDomain(registry = emptyDomainRegistry()) {
-  const domains = (registry?.domains || []).filter((domain) => domain.status === "setup_incomplete");
-  return domains.length === 1 ? domains[0] : null;
+function singleSetupIncompleteTeam(registry = emptyTeamRegistry()) {
+  const teams = (registry?.teams || []).filter((team) => team.status === "setup_incomplete");
+  return teams.length === 1 ? teams[0] : null;
 }
 
-function domainNameForResumeDomain(domain = null) {
-  if (!domain) return null;
-  return domain.adopter_provided_name || domain.id || null;
+function teamNameForResumeTeam(team = null) {
+  if (!team) return null;
+  return team.adopter_provided_name || team.id || null;
+}
+
+function teamHasLinearCredentialIdentity(team) {
+  return Boolean(team?.id && team?.linear?.workspace_id && team?.linear?.team_id);
 }
 
 export {
   authorizeLinearSetupWorkspace,
   ensureNeedsPrincipalProjectStatus,
-  explicitInitDomainName,
+  explicitInitTeamName,
   finishSetupOutput,
   githubInitTransportFromFlags,
   promptLinearWorkspacePicker,
-  resolveClaudePluginPhaseResumeDomain,
-  resolveInitDomainName,
-  resolveGitHubPhaseResumeDomain,
+  resolveClaudePluginPhaseResumeTeam,
+  resolveInitTeamName,
+  resolveGitHubPhaseResumeTeam,
   resolveLinearWorkspaceSelection,
-  resolveSetupCommandDomainNameHint,
+  resolveSetupCommandTeamNameHint,
   runFinalGate,
 };

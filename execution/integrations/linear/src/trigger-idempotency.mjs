@@ -15,6 +15,11 @@ import {
   projectSnapshotProjection,
 } from "./project-snapshot-store.mjs";
 import { resolveTeamiHome } from "./app-home.mjs";
+import {
+  isLegacyTeamIdentityForRead,
+  markLegacyTeamIdentityForRead,
+  normalizeLegacyTeamIdentityForRead,
+} from "../../../engine/legacy-team-state-compat.mjs";
 
 export const TRIGGER_FINGERPRINT_FIELD = "trigger_fingerprint_v1";
 export const UNCONFIRMED_LINEAR_MUTATION_INTENT_SCHEMA_VERSION =
@@ -48,20 +53,20 @@ export function computeTriggerFingerprint(project) {
 }
 
 export function listReplayPending({
-  domainId,
+  teamRef,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
-  requireNonEmptyString(domainId, "domainId");
-  const dirPath = mutationIntentDir({ repoRoot, home, domainId, runStoreDir });
+  requireNonEmptyString(teamRef, "teamRef");
+  const dirPath = mutationIntentDir({ repoRoot, home, teamRef, runStoreDir });
   if (!fs.existsSync(dirPath)) return [];
 
   return fs.readdirSync(dirPath, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json") && !entry.name.startsWith("."))
     .map((entry) => replayPendingFromIntentPath({
       intentPath: path.join(dirPath, entry.name),
-      domainId,
+      teamRef,
       repoRoot,
       home,
       runStoreDir,
@@ -73,20 +78,20 @@ export function listReplayPending({
 }
 
 export function listGitReplayPending({
-  domainId,
+  teamRef,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
-  requireNonEmptyString(domainId, "domainId");
-  const dirPath = mutationIntentDir({ repoRoot, home, domainId, runStoreDir });
+  requireNonEmptyString(teamRef, "teamRef");
+  const dirPath = mutationIntentDir({ repoRoot, home, teamRef, runStoreDir });
   if (!fs.existsSync(dirPath)) return [];
 
   return fs.readdirSync(dirPath, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json") && !entry.name.startsWith("."))
     .map((entry) => replayPendingFromIntentPath({
       intentPath: path.join(dirPath, entry.name),
-      domainId,
+      teamRef,
       repoRoot,
       home,
       runStoreDir,
@@ -98,31 +103,31 @@ export function listGitReplayPending({
 }
 
 export function readReplayPending({
-  domainId,
+  teamRef,
   projectId,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
   requireNonEmptyString(projectId, "projectId");
-  return listReplayPending({ domainId, repoRoot, home, runStoreDir })
+  return listReplayPending({ teamRef, repoRoot, home, runStoreDir })
     .find((pending) => pending.projectId === projectId) || null;
 }
 
 export function readGitReplayPending({
-  domainId,
+  teamRef,
   objectId,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
   requireNonEmptyString(objectId, "objectId");
-  return listGitReplayPending({ domainId, repoRoot, home, runStoreDir })
+  return listGitReplayPending({ teamRef, repoRoot, home, runStoreDir })
     .find((pending) => pending.objectId === objectId) || null;
 }
 
 export async function replayPendingGitMutation({
-  domainId,
+  teamRef,
   objectId,
   pending = null,
   repoRoot = process.cwd(),
@@ -130,7 +135,7 @@ export async function replayPendingGitMutation({
   runStoreDir = null,
   applyGitMutationFn = null,
 } = {}) {
-  const target = pending || readGitReplayPending({ domainId, objectId, repoRoot, home, runStoreDir });
+  const target = pending || readGitReplayPending({ teamRef, objectId, repoRoot, home, runStoreDir });
   if (!target) return { action: "git_replay", status: "no_pending", cleared: false };
   if (target.objectType && target.objectType !== "issue") {
     return { action: "git_replay", status: "wrong_object_type", cleared: false };
@@ -140,7 +145,7 @@ export async function replayPendingGitMutation({
   }
   const resolvedObjectId = objectId || target.objectId;
   const result = await applyGitMutationFn({
-    domainId,
+    teamRef,
     objectId: resolvedObjectId,
     pending: target,
     repoRoot,
@@ -151,7 +156,7 @@ export async function replayPendingGitMutation({
 }
 
 export function writeMutationIntent({
-  domainId,
+  teamRef,
   projectId,
   objectType = "project",
   objectId = null,
@@ -168,7 +173,7 @@ export function writeMutationIntent({
   onBoundary = () => {},
 } = {}) {
   const record = mutationIntentRecord({
-    domainId,
+    teamRef,
     projectId,
     objectType,
     objectId,
@@ -180,7 +185,7 @@ export function writeMutationIntent({
     triggerType,
     git,
   });
-  const filePath = mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir });
+  const filePath = mutationIntentPath({ runId, repoRoot, home, teamRef, runStoreDir });
   writeJsonAtomic(filePath, record, { onBoundary });
 
   const readBack = readJsonFile(filePath);
@@ -191,15 +196,15 @@ export function writeMutationIntent({
 }
 
 export function readMutationIntent({
-  domainId,
+  teamRef,
   runId,
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
-  requireNonEmptyString(domainId, "domainId");
+  requireNonEmptyString(teamRef, "teamRef");
   assertSafeRunId(runId);
-  const filePath = mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir });
+  const filePath = mutationIntentPath({ runId, repoRoot, home, teamRef, runStoreDir });
   if (!fs.existsSync(filePath)) return null;
   const record = readJsonFile(filePath);
   normalizeMutationIntent(record);
@@ -212,7 +217,7 @@ export function mutationIntentDigest(record) {
 }
 
 export function clearMutationIntent({
-  domainId,
+  teamRef,
   projectId,
   objectId = null,
   objectType = null,
@@ -221,16 +226,16 @@ export function clearMutationIntent({
   home = resolveTeamiHome(),
   runStoreDir = null,
 } = {}) {
-  requireNonEmptyString(domainId, "domainId");
+  requireNonEmptyString(teamRef, "teamRef");
   const expectedObjectId = objectId || projectId;
   requireNonEmptyString(expectedObjectId, objectType === "issue" ? "objectId" : "projectId");
   assertSafeRunId(runId);
-  const filePath = mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir });
+  const filePath = mutationIntentPath({ runId, repoRoot, home, teamRef, runStoreDir });
   if (!fs.existsSync(filePath)) return { cleared: false };
 
   const existing = normalizeMutationIntent(readJsonFile(filePath));
   if (
-    existing.domain_id !== domainId ||
+    existing.team_ref !== teamRef ||
     existing.object_id !== expectedObjectId ||
     existing.run_id !== runId ||
     (objectType && existing.object_type !== objectType)
@@ -244,7 +249,7 @@ export function clearMutationIntent({
 }
 
 export function readSuppression({
-  domainId = null,
+  teamRef = null,
   projectId,
   objectType = "project",
   objectId = null,
@@ -255,7 +260,7 @@ export function readSuppression({
 } = {}) {
   const identity = suppressionObjectIdentity({ projectId, objectType, objectId });
   assertFingerprint(fingerprint);
-  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, home, domainId, runStoreDir });
+  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, home, teamRef, runStoreDir });
   if (!fs.existsSync(filePath)) return null;
   const note = readJsonFile(filePath);
   if (identity.objectType === "project") {
@@ -272,7 +277,7 @@ export function readSuppression({
 }
 
 export function writeSuppression({
-  domainId,
+  teamRef,
   projectId,
   objectType = "project",
   objectId = null,
@@ -286,7 +291,7 @@ export function writeSuppression({
   runStoreDir = null,
 } = {}) {
   const note = suppressionNote({
-    domainId,
+    teamRef,
     projectId,
     objectType,
     objectId,
@@ -297,11 +302,11 @@ export function writeSuppression({
     createdAt,
   });
   const identity = suppressionObjectIdentity({ projectId, objectType, objectId });
-  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, home, domainId, runStoreDir });
+  const filePath = suppressionPath({ projectId: identity.objectId, fingerprint, repoRoot, home, teamRef, runStoreDir });
   writeJsonAtomic(filePath, note);
 
   const readBack = readSuppression({
-    domainId,
+    teamRef,
     projectId,
     objectType,
     objectId,
@@ -316,15 +321,15 @@ export function writeSuppression({
   return note;
 }
 
-function replayPendingFromIntentPath({ intentPath, domainId, repoRoot, home, runStoreDir }) {
+function replayPendingFromIntentPath({ intentPath, teamRef, repoRoot, home, runStoreDir }) {
   const intent = normalizeMutationIntent(readJsonFile(intentPath));
-  if (intent.domain_id !== domainId) return null;
+  if (intent.team_ref !== teamRef) return null;
   if (!REPLAYABLE_ARTIFACT_KINDS.has(intent.artifact_kind)) return null;
 
   if (intent.object_type === "issue") {
     return {
       objectType: "issue",
-      domainId: intent.domain_id,
+      teamRef: intent.team_ref,
       objectId: intent.object_id,
       runId: intent.run_id,
       artifactKind: intent.artifact_kind,
@@ -333,9 +338,9 @@ function replayPendingFromIntentPath({ intentPath, domainId, repoRoot, home, run
     };
   }
 
-  const artifact = readRunArtifact({ runId: intent.run_id, repoRoot, home, domainId, runStoreDir });
+  const artifact = readRunArtifact({ runId: intent.run_id, repoRoot, home, teamRef, runStoreDir });
   if (!artifact) throw new Error(`mutation_intent_missing_run_artifact:${intent.run_id}`);
-  if (artifact.domain_id !== domainId) throw new Error(`mutation_intent_artifact_domain_mismatch:${intent.run_id}`);
+  if (artifact.team_ref !== teamRef) throw new Error(`mutation_intent_artifact_team_mismatch:${intent.run_id}`);
   if (artifact.linear_project_id !== intent.linear_project_id) {
     throw new Error(`mutation_intent_artifact_project_mismatch:${intent.run_id}`);
   }
@@ -348,7 +353,7 @@ function replayPendingFromIntentPath({ intentPath, domainId, repoRoot, home, run
 
   return {
     objectType: "project",
-    domainId: intent.domain_id,
+    teamRef: intent.team_ref,
     projectId: intent.linear_project_id,
     runId: intent.run_id,
     artifactKind: intent.artifact_kind,
@@ -357,7 +362,7 @@ function replayPendingFromIntentPath({ intentPath, domainId, repoRoot, home, run
 }
 
 function mutationIntentRecord({
-  domainId,
+  teamRef,
   runId,
   artifactKind,
   wakeId,
@@ -369,7 +374,7 @@ function mutationIntentRecord({
   triggerType = null,
   git = null,
 }) {
-  requireNonEmptyString(domainId, "domainId");
+  requireNonEmptyString(teamRef, "teamRef");
   assertSafeRunId(runId);
   requireNonEmptyString(wakeId, "wakeId");
   if (!MUTATION_INTENT_ARTIFACT_KINDS.has(artifactKind)) {
@@ -407,7 +412,7 @@ function mutationIntentRecord({
     object_id: resolvedObjectId,
     workflow_type: resolvedWorkflowType,
     trigger_type: resolvedTriggerType,
-    domain_id: domainId,
+    team_ref: teamRef,
     wake_id: wakeId,
     started_at: startedAt,
     ...(objectType === "project" ? { linear_project_id: resolvedObjectId } : {}),
@@ -428,7 +433,7 @@ function validateMutationIntent(record) {
   if (!MUTATION_INTENT_ARTIFACT_KINDS.has(record.artifact_kind)) {
     throw new Error(`invalid_mutation_intent_artifact_kind:${record.artifact_kind || "missing"}`);
   }
-  requireNonEmptyString(record.domain_id, "domain_id");
+  requireNonEmptyString(record.team_ref, "team_ref");
   requireNonEmptyString(record.wake_id, "wake_id");
   assertIsoTime(record.started_at, "started_at");
 
@@ -456,38 +461,43 @@ function validateMutationIntent(record) {
 
 function normalizeMutationIntent(record) {
   validateMutationIntent(record);
+  let normalized;
   if (record.schema_version === UNCONFIRMED_LINEAR_MUTATION_INTENT_SCHEMA_VERSION_V1) {
-    return {
+    normalized = {
       object_type: "project",
       object_id: record.linear_project_id,
       linear_project_id: record.linear_project_id,
       workflow_type: PROJECT_WORKFLOW_TYPE,
       trigger_type: PROJECT_TRIGGER_TYPE,
-      domain_id: record.domain_id,
+      team_ref: record.team_ref,
       run_id: record.run_id,
       artifact_kind: record.artifact_kind,
       wake_id: record.wake_id,
       started_at: record.started_at,
       git: null,
     };
+  } else {
+    normalized = {
+      object_type: record.object_type,
+      object_id: record.object_id,
+      linear_project_id: record.object_type === "project" ? record.object_id : null,
+      workflow_type: record.workflow_type,
+      trigger_type: record.trigger_type,
+      team_ref: record.team_ref,
+      run_id: record.run_id,
+      artifact_kind: record.artifact_kind,
+      wake_id: record.wake_id,
+      started_at: record.started_at,
+      git: record.object_type === "issue" ? record.git : null,
+    };
   }
-  return {
-    object_type: record.object_type,
-    object_id: record.object_id,
-    linear_project_id: record.object_type === "project" ? record.object_id : null,
-    workflow_type: record.workflow_type,
-    trigger_type: record.trigger_type,
-    domain_id: record.domain_id,
-    run_id: record.run_id,
-    artifact_kind: record.artifact_kind,
-    wake_id: record.wake_id,
-    started_at: record.started_at,
-    git: record.object_type === "issue" ? record.git : null,
-  };
+  return isLegacyTeamIdentityForRead(record)
+    ? markLegacyTeamIdentityForRead(normalized)
+    : normalized;
 }
 
 function suppressionNote({
-  domainId,
+  teamRef,
   projectId,
   objectType = "project",
   objectId = null,
@@ -498,7 +508,7 @@ function suppressionNote({
   createdAt,
 }) {
   const identity = suppressionObjectIdentity({ projectId, objectType, objectId });
-  requireNonEmptyString(domainId, "domainId");
+  requireNonEmptyString(teamRef, "teamRef");
   assertFingerprint(fingerprint);
   if (runId !== null) assertSafeRunId(runId);
   requireNonEmptyString(terminalStatus, "terminalStatus");
@@ -507,7 +517,7 @@ function suppressionNote({
   const note = identity.objectType === "project"
     ? {
         project_id: identity.objectId,
-        domain_id: domainId,
+        team_ref: teamRef,
         run_id: runId,
         terminal_status: terminalStatus,
         reason,
@@ -517,7 +527,7 @@ function suppressionNote({
     : {
         object_type: identity.objectType,
         object_id: identity.objectId,
-        domain_id: domainId,
+        team_ref: teamRef,
         run_id: runId,
         terminal_status: terminalStatus,
         reason,
@@ -537,7 +547,7 @@ function validateSuppressionNote(note) {
   } else {
     requireNonEmptyString(note.project_id, "project_id");
   }
-  requireNonEmptyString(note.domain_id, "domain_id");
+  requireNonEmptyString(note.team_ref, "team_ref");
   if (note.run_id !== null) assertSafeRunId(note.run_id);
   requireNonEmptyString(note.terminal_status, "terminal_status");
   requireNonEmptyString(note.reason, "reason");
@@ -600,31 +610,31 @@ function suppressionObjectIdentity({ projectId, objectType = "project", objectId
   return { objectType: "issue", objectId: resolvedObjectId };
 }
 
-function mutationIntentPath({ runId, repoRoot, home, domainId, runStoreDir }) {
+function mutationIntentPath({ runId, repoRoot, home, teamRef, runStoreDir }) {
   assertSafeRunId(runId);
-  return path.join(mutationIntentDir({ repoRoot, home, domainId, runStoreDir }), `${runId}.json`);
+  return path.join(mutationIntentDir({ repoRoot, home, teamRef, runStoreDir }), `${runId}.json`);
 }
 
-function mutationIntentDir({ repoRoot, home, domainId, runStoreDir }) {
-  return path.join(runCustodyDir({ repoRoot, home, domainId, runStoreDir }), "unconfirmed-linear-mutation-intents");
+function mutationIntentDir({ repoRoot, home, teamRef, runStoreDir }) {
+  return path.join(runCustodyDir({ repoRoot, home, teamRef, runStoreDir }), "unconfirmed-linear-mutation-intents");
 }
 
-function suppressionPath({ projectId, fingerprint, repoRoot, home, domainId, runStoreDir }) {
+function suppressionPath({ projectId, fingerprint, repoRoot, home, teamRef, runStoreDir }) {
   requireNonEmptyString(projectId, "projectId");
   assertFingerprint(fingerprint);
   return path.join(
-    suppressionDir({ repoRoot, home, domainId, runStoreDir }),
+    suppressionDir({ repoRoot, home, teamRef, runStoreDir }),
     `${contentAddress(projectId)}.${fingerprint}.json`,
   );
 }
 
-function suppressionDir({ repoRoot, home, domainId, runStoreDir }) {
-  return path.join(runCustodyDir({ repoRoot, home, domainId, runStoreDir }), "trigger-suppressions");
+function suppressionDir({ repoRoot, home, teamRef, runStoreDir }) {
+  return path.join(runCustodyDir({ repoRoot, home, teamRef, runStoreDir }), "trigger-suppressions");
 }
 
-function runCustodyDir({ repoRoot, home = resolveTeamiHome(), domainId, runStoreDir }) {
+function runCustodyDir({ repoRoot, home = resolveTeamiHome(), teamRef, runStoreDir }) {
   void repoRoot;
-  return path.resolve(runStoreDir || defaultRunStoreDir({ home, domainId }));
+  return path.resolve(runStoreDir || defaultRunStoreDir({ home, teamRef }));
 }
 
 function writeJsonAtomic(filePath, value, { onBoundary = () => {} } = {}) {
@@ -632,7 +642,7 @@ function writeJsonAtomic(filePath, value, { onBoundary = () => {} } = {}) {
 }
 
 function readJsonFile(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  return normalizeLegacyTeamIdentityForRead(JSON.parse(fs.readFileSync(filePath, "utf8")));
 }
 
 function contentAddress(value) {

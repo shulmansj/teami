@@ -17,8 +17,8 @@ import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs
 import { runBoundedGit, runBoundedSubprocess } from "../../git/bounded-subprocess.mjs";
 import { readLinearCache } from "../src/cache.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
-import { readDomainRegistry } from "../src/domain-registry.mjs";
-import { buildDomainContext } from "../src/domain-resolver.mjs";
+import { readTeamRegistry } from "../src/team-registry.mjs";
+import { buildTeamContext } from "../src/team-resolver.mjs";
 import { createDefaultExecutionPullRequestAdapter } from "../src/execution-pr-adapter.mjs";
 import {
   computeIssueTriggerFingerprint,
@@ -83,7 +83,7 @@ export function parseExecutionUatArgs(argv = process.argv.slice(2), env = proces
       env.TEAMI_UAT_REPO_ROOT ||
       REPO_ROOT,
     ),
-    domainId: env.TEAMI_EXECUTION_UAT_DOMAIN || env.TEAMI_UAT_DOMAIN || null,
+    teamRef: env.TEAMI_EXECUTION_UAT_TEAM || env.TEAMI_UAT_TEAM || null,
     prefix: env.TEAMI_EXECUTION_UAT_PREFIX || DEFAULT_EXECUTION_UAT_PREFIX,
     consecutive: parsePositiveInteger(
       env.TEAMI_EXECUTION_UAT_CONSECUTIVE,
@@ -109,8 +109,8 @@ export function parseExecutionUatArgs(argv = process.argv.slice(2), env = proces
       options.help = true;
     } else if (arg === "--repo-root") {
       options.repoRoot = path.resolve(requireNext(argv, ++index, arg));
-    } else if (arg === "--domain") {
-      options.domainId = requireNext(argv, ++index, arg);
+    } else if (arg === "--team") {
+      options.teamRef = requireNext(argv, ++index, arg);
     } else if (arg === "--resource-id") {
       options.resourceId = requireNext(argv, ++index, arg);
     } else if (arg === "--prefix") {
@@ -150,17 +150,17 @@ export function parseExecutionUatArgs(argv = process.argv.slice(2), env = proces
 
 export function buildExecutionUatUsage() {
   return [
-    "Usage: npm run uat:execution -- --repo-root <path-to-your-bound-checkout> [--domain <id>] [--resource-id <git_repo_resource_id>] [--consecutive 2] [--keep-artifacts]",
+    "Usage: npm run uat:execution -- --repo-root <path-to-your-bound-checkout> [--team <id>] [--resource-id <git_repo_resource_id>] [--consecutive 2] [--keep-artifacts]",
     "",
     "Live prerequisites:",
-    "- The repo root must be the checkout bound to your domain's git_repo resource; use --resource-id when the domain binds multiple git_repo resources.",
-    "- The selected Linear domain must be active and have OAuth read/write credentials.",
-    "- The domain must bind a git_repo resource whose owner/repo matches the repo root's origin.",
+    "- The repo root must be the checkout bound to your team's git_repo resource; use --resource-id when the team binds multiple git_repo resources.",
+    "- The selected Linear team must be active and have OAuth read/write credentials.",
+    "- The team must bind a git_repo resource whose owner/repo matches the repo root's origin.",
     "- The issue statuses Ready, In Review, and Backlog cleanup status must be configured/resolvable.",
     "- `gh auth status --hostname github.com` and `gh auth token` must work; the harness uses that ambient token for PRs.",
     "",
     "Environment equivalents:",
-    "- TEAMI_EXECUTION_UAT_DOMAIN selects the disposable Linear domain/team.",
+    "- TEAMI_EXECUTION_UAT_TEAM selects the disposable Linear team/team.",
     "- TEAMI_EXECUTION_UAT_PREFIX controls disposable Linear issue title prefixes.",
     "- TEAMI_EXECUTION_UAT_KEEP_ARTIFACTS=1 keeps PRs, branches, and Linear issue states.",
     "- TEAMI_EXECUTION_UAT_REPO_NAME enables an optional explicit repo-name guard.",
@@ -174,7 +174,7 @@ export async function runExecutionUat(options = parseExecutionUatArgs()) {
     ok: false,
     runId: `execution-uat-${uatStamp()}-${randomBytes(3).toString("hex")}`,
     repoRoot: context.repoRoot,
-    domainId: context.domain.id,
+    teamRef: context.team.id,
     prefix: context.prefix,
     scenarios: [],
     createdIssues: context.createdIssues,
@@ -205,9 +205,9 @@ export async function runExecutionUat(options = parseExecutionUatArgs()) {
     report.evidencePath = writeRunArtifact({ repoRoot: context.repoRoot, runId: report.runId }, {
       kind: "commit",
       run_id: report.runId,
-      domain_id: context.domain.id,
-      workspace_id: context.domainContext.linear.workspaceId,
-      team_id: context.domainContext.linear.teamId,
+      team_ref: context.team.id,
+      workspace_id: context.teamContext.linear.workspaceId,
+      team_id: context.teamContext.linear.teamId,
       function_version: "execution-uat/v1",
       workflow_version: "execution-uat/v1",
       runtime_assignments: { uat: { runtime: "node" } },
@@ -257,13 +257,13 @@ async function prepareLiveExecutionUatContext(options) {
   }
 
   const config = loadLinearConfig({ repoRoot });
-  const registry = readDomainRegistry({ repoRoot });
-  const domain = selectUatDomain({ registry, domainId: options.domainId });
-  const domainContext = buildDomainContext({ domain, config, repoRoot });
-  const credentialStore = createLinearCredentialStore({ config, repoRoot, domainContext });
+  const registry = readTeamRegistry({ repoRoot });
+  const team = selectUatTeam({ registry, teamRef: options.teamRef });
+  const teamContext = buildTeamContext({ team, config, repoRoot });
+  const credentialStore = createLinearCredentialStore({ config, repoRoot, teamContext });
   const tokenSet = await readLinearTokenSet(credentialStore);
   if (!tokenSet?.refreshToken && !tokenSet?.accessToken) {
-    throw new ExecutionUatUserError("no Linear OAuth credentials found for the selected domain", "no_linear_credential");
+    throw new ExecutionUatUserError("no Linear OAuth credentials found for the selected team", "no_linear_credential");
   }
 
   const client = createLinearSetupGraphqlClient({
@@ -275,8 +275,8 @@ async function prepareLiveExecutionUatContext(options) {
   }).client;
   await client.verifyAuth();
 
-  const cache = readLinearCache(domainContext.linear.cachePath);
-  const issueStatuses = await resolveIssueStatuses(client, config, domain.linear.team_id);
+  const cache = readLinearCache(teamContext.linear.cachePath);
+  const issueStatuses = await resolveIssueStatuses(client, config, team.linear.team_id);
   if (!issueStatuses.ready?.id) {
     throw new ExecutionUatUserError(
       "Execution UAT requires config.linear.issue.statuses.ready.name to resolve a Ready workflow state.",
@@ -289,16 +289,16 @@ async function prepareLiveExecutionUatContext(options) {
       "backlog_status_missing",
     );
   }
-  const inReviewTarget = await resolveInReviewIssueStatus(client, config, domain.linear.team_id);
+  const inReviewTarget = await resolveInReviewIssueStatus(client, config, team.linear.team_id);
   if (!inReviewTarget?.id) {
     throw new ExecutionUatUserError(
       "Execution UAT requires config.linear.issue.statuses.in_review.name to resolve.",
       "in_review_status_missing",
     );
   }
-  const completedStatus = await resolveCompletedIssueStatus(client, domain.linear.team_id);
+  const completedStatus = await resolveCompletedIssueStatus(client, team.linear.team_id);
 
-  const repoIdentity = resourcesToRepoIdentity(domainContext, { resourceId: options.resourceId });
+  const repoIdentity = resourcesToRepoIdentity(teamContext, { resourceId: options.resourceId });
   await assertUatRepoBinding({
     repoRoot,
     repoIdentity,
@@ -320,8 +320,8 @@ async function prepareLiveExecutionUatContext(options) {
     startedAt,
     config: liveConfig,
     registry,
-    domain,
-    domainContext,
+    team,
+    teamContext,
     cache,
     client,
     issueStatuses,
@@ -476,7 +476,7 @@ async function runCrashReplayScenario(context) {
     issueId: issue.id,
   });
   const pendingBefore = readGitReplayPending({
-    domainId: context.domain.id,
+    teamRef: context.team.id,
     objectId: issue.id,
     repoRoot: context.repoRoot,
   });
@@ -526,7 +526,7 @@ async function runSingleGatewayPass(context, { label }) {
     repoRoot: context.repoRoot,
     config: context.config,
     registry: context.registry,
-    domains: [context.domain],
+    teams: [context.team],
     pollIntervalMs: context.pollIntervalMs,
     runTimeoutMs: context.timeoutMs,
     inFlight,
@@ -774,7 +774,7 @@ async function createDisposableIssue(context, { slug, stateId, summary }) {
       "",
       "This issue was created by the live execution UAT harness and is disposable.",
     ].join("\n"),
-    teamId: context.domain.linear.team_id,
+    teamId: context.team.linear.team_id,
     stateId,
   });
   context.createdIssues.push(issue.id);
@@ -836,8 +836,8 @@ async function spawnCrashChild(context, { crashMode, issueId }) {
     crashMode,
     "--issue-id",
     issueId,
-    "--domain",
-    context.domain.id,
+    "--team",
+    context.team.id,
     "--repo-root",
     context.repoRoot,
     "--timeout-ms",
@@ -924,7 +924,7 @@ async function runChildCrashExecution(options) {
     repoRoot: context.repoRoot,
     config: context.config,
     registry: context.registry,
-    domains: [context.domain],
+    teams: [context.team],
     pollIntervalMs: context.pollIntervalMs,
     runTimeoutMs: context.timeoutMs,
     inFlight: new Set(),
@@ -1005,7 +1005,7 @@ async function cleanupExecutionUatArtifacts(context) {
     for (const run of executionRunsForIssue(context, issueId)) {
       try {
         const cleared = clearMutationIntent({
-          domainId: context.domain.id,
+          teamRef: context.team.id,
           objectType: "issue",
           objectId: issueId,
           runId: run.run_id,
@@ -1076,21 +1076,21 @@ async function githubApi(context, apiPath, { method = "GET", body = null, allowN
   return payload;
 }
 
-function selectUatDomain({ registry, domainId = null } = {}) {
-  const domains = Array.isArray(registry?.domains) ? registry.domains : [];
-  const active = domains.filter((domain) => domain.status === "active");
+function selectUatTeam({ registry, teamRef = null } = {}) {
+  const teams = Array.isArray(registry?.teams) ? registry.teams : [];
+  const active = teams.filter((team) => team.status === "active");
   if (active.length === 0) {
-    throw new ExecutionUatUserError("no active Linear domain configured; run init against a disposable test team", "no_linear_domain");
+    throw new ExecutionUatUserError("no active Linear team configured; run init against a disposable test team", "no_linear_team");
   }
-  if (domainId) {
-    const selected = active.find((domain) => domain.id === domainId);
-    if (!selected) throw new ExecutionUatUserError(`domain not active or not found for execution UAT: ${domainId}`, "domain");
+  if (teamRef) {
+    const selected = active.find((team) => team.id === teamRef);
+    if (!selected) throw new ExecutionUatUserError(`team not active or not found for execution UAT: ${teamRef}`, "team");
     return selected;
   }
   if (active.length > 1) {
     throw new ExecutionUatUserError(
-      `multiple Linear domains configured (${active.map((domain) => domain.id).join(", ")}) - pass --domain <domain_id>`,
-      "domain",
+      `multiple Linear teams configured (${active.map((team) => team.id).join(", ")}) - pass --team <team_ref>`,
+      "team",
     );
   }
   return active[0];
@@ -1211,9 +1211,9 @@ function buildExecutionUatPrBody({ runId, issue, proof }) {
 }
 
 function findProcessedIssueResult(gatewayResult, issueId) {
-  const domains = gatewayResult?.poll?.domains || [];
-  for (const domain of domains) {
-    for (const result of domain.processed || []) {
+  const teams = gatewayResult?.poll?.teams || [];
+  for (const team of teams) {
+    for (const result of team.processed || []) {
       if (result?.issueId === issueId) return result;
     }
   }

@@ -1,5 +1,5 @@
 {
-  "domainId": "support-ops",
+  "teamRef": "support-ops",
   "projectId": "project-webhook-inbox",
   "runId": "run_decomp_facade_commit",
   "artifactKind": "commit"

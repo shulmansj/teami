@@ -19,14 +19,14 @@ import {
   cachePathForConfig,
 } from "../src/config.mjs";
 import {
-  domainCachePath,
-  domainCacheRelativePath,
-  domainRegistryPath,
-  emptyDomainRegistry,
-  makeDomainRecord,
-  readDomainRegistry,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  teamCachePath,
+  teamCacheRelativePath,
+  teamRegistryPath,
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import {
   acquireGatewayLock,
   gatewayLockPath,
@@ -76,18 +76,18 @@ import {
 test("F2b runtime state defaults resolve under Teami home, never repoRoot .teami", async () => {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-f2b-repo-"));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-f2b-home-"));
-  const domainId = "support-ops";
+  const teamRef = "support-ops";
   const legacyRepoState = path.join(repoRoot, ".teami");
 
   const paths = [
     teamiHomePaths({ home }).registryPath,
-    domainRegistryPath(home),
-    domainCachePath({ home, domainId }),
+    teamRegistryPath(home),
+    teamCachePath({ home, teamRef }),
     cachePathForConfig({ linear: { cache_path: ".teami/linear.json" } }, home),
     gatewayLockPath(home),
     githubConnectionStatePath(home),
-    defaultRunStoreDir({ home, domainId }),
-    runArtifactPath({ runId: "run-home", home, domainId }),
+    defaultRunStoreDir({ home, teamRef }),
+    runArtifactPath({ runId: "run-home", home, teamRef }),
     defaultPromotionRegistryDir(home),
     defaultPromotionCandidateLedgerDir(home),
     promotionScannerLedgerPath(defaultPromotionCandidateLedgerDir(home)),
@@ -115,11 +115,11 @@ test("F2b runtime state defaults resolve under Teami home, never repoRoot .teami
     true,
   );
   assert.match(DEFAULT_CONFIG_PATH, /config\.(example|package-default)\.json$/);
-  assert.equal(domainCacheRelativePath(domainId), "domains/support-ops/linear.json");
+  assert.equal(teamCacheRelativePath(teamRef), "teams/support-ops/linear.json");
 
-  const registry = emptyDomainRegistry();
-  registry.domains.push(makeDomainRecord({
-    domainId,
+  const registry = emptyTeamRegistry();
+  registry.teams.push(makeTeamRecord({
+    teamRef,
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Support Ops",
@@ -128,12 +128,12 @@ test("F2b runtime state defaults resolve under Teami home, never repoRoot .teami
     teamName: "Support Ops",
     teamNameLastSeenAt: "2026-07-08T00:00:00.000Z",
   }));
-  writeDomainRegistry({ home }, registry);
-  assert.equal(readDomainRegistry({ home }).domains[0].id, domainId);
+  writeTeamRegistry({ home }, registry);
+  assert.equal(readTeamRegistry({ home }).teams[0].id, teamRef);
 
-  assert.deepEqual(assertRunStoreWritable({ home, domainId }), {
+  assert.deepEqual(assertRunStoreWritable({ home, teamRef }), {
     ok: true,
-    run_store_dir: defaultRunStoreDir({ home, domainId }),
+    run_store_dir: defaultRunStoreDir({ home, teamRef }),
   });
 
   const lock = acquireGatewayLock({
@@ -151,7 +151,7 @@ test("F2b runtime state defaults resolve under Teami home, never repoRoot .teami
     idGenerator: () => "wake-f2b",
   });
   await store.claimSyntheticWake({
-    domainId,
+    teamRef,
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-1",

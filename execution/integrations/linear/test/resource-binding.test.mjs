@@ -3,16 +3,16 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  materializeDomainResources,
+  materializeTeamResources,
 } from "../../../engine/materialize.mjs";
 import {
   resetResourceRegistry,
 } from "../../../engine/resource-registry.mjs";
 import {
-  DOMAIN_REGISTRY_SCHEMA_VERSION,
-  makeDomainRecord,
-  validateDomainRegistry,
-} from "../src/domain-registry.mjs";
+  TEAM_REGISTRY_SCHEMA_VERSION,
+  makeTeamRecord,
+  validateTeamRegistry,
+} from "../src/team-registry.mjs";
 import {
   DUMMY_VALUE,
   registerDummyResourceKind,
@@ -20,7 +20,7 @@ import {
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
 
-test("a test-only dummy resource kind declares through domain validation and materializes through the engine seam", async () => {
+test("a test-only dummy resource kind declares through team validation and materializes through the engine seam", async () => {
   resetResourceRegistry();
   let teardownAll = async () => {};
 
@@ -32,19 +32,19 @@ test("a test-only dummy resource kind declares through domain validation and mat
       role: "primary",
       binding: { fixture: "in-memory" },
     };
-    const domain = makeDomainRecord({
-      domainId: "dummy-domain",
+    const team = makeTeamRecord({
+      teamRef: "dummy-team",
       resources: [resource],
     });
     const registry = {
-      schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-      domains: [domain],
+      schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+      teams: [team],
     };
 
-    assert.equal(validateDomainRegistry(registry), true);
+    assert.equal(validateTeamRegistry(registry), true);
 
-    const materialized = await materializeDomainResources({
-      domainResources: domain.resources,
+    const materialized = await materializeTeamResources({
+      teamResources: team.resources,
       runId: "dummy-run",
       engineRepoRoot: REPO_ROOT,
     });

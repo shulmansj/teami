@@ -1,14 +1,14 @@
 {
-  "capturedFrom": "post-Phase-1 main (PR #80, 6fde18e): dispatch.mjs COMMAND_TABLE + NOUN_VERB_COMMANDS; updated for Issue 5b domain grant/show/revoke",
+  "capturedFrom": "post-Phase-1 main (PR #80, 6fde18e): dispatch.mjs COMMAND_TABLE + NOUN_VERB_COMMANDS; updated for Issue 5b team grant/show/revoke",
   "note": "FROZEN pre-cutover snapshot with retired commands removed. Do not regenerate. Issue L2 asserts the registry resolves each entry to the same handler name + normalized args (and same invokeCommand token for the S-INVOKE handlers).",
   "commandTable": [
     { "token": "uninstall", "handler": "runLocalSetupCleanupCommand" },
     { "token": "reset", "handler": "runLocalSetupCleanupCommand" },
     { "token": "init", "handler": "runLinearSetupCommand" },
-    { "token": "domain:add", "handler": "runLinearSetupCommand" },
-    { "token": "domain:show", "handler": "runDomainCommand" },
-    { "token": "domain:grant", "handler": "runDomainCommand" },
-    { "token": "domain:revoke", "handler": "runDomainCommand" },
+    { "token": "team:add", "handler": "runLinearSetupCommand" },
+    { "token": "team:show", "handler": "runTeamCommand" },
+    { "token": "team:grant", "handler": "runTeamCommand" },
+    { "token": "team:revoke", "handler": "runTeamCommand" },
     { "token": "github:init", "handler": "runGithubInitCommand" },
     { "token": "doctor", "handler": "runDoctorCommand" },
     { "token": "doctor:linear", "handler": "runDoctorLinearCommand" },
@@ -43,11 +43,11 @@
       "start": { "invokeCommand": "gateway", "consumeVerb": true, "handler": "runGatewayCommand" },
       "status": { "invokeCommand": "gateway", "consumeVerb": false, "handler": "runGatewayCommand" }
     },
-    "domain": {
-      "add": { "invokeCommand": "domain:add", "consumeVerb": true, "handler": "runLinearSetupCommand" },
-      "show": { "invokeCommand": "domain:show", "consumeVerb": true, "handler": "runDomainCommand" },
-      "grant": { "invokeCommand": "domain:grant", "consumeVerb": true, "handler": "runDomainCommand" },
-      "revoke": { "invokeCommand": "domain:revoke", "consumeVerb": true, "handler": "runDomainCommand" }
+    "team": {
+      "add": { "invokeCommand": "team:add", "consumeVerb": true, "handler": "runLinearSetupCommand" },
+      "show": { "invokeCommand": "team:show", "consumeVerb": true, "handler": "runTeamCommand" },
+      "grant": { "invokeCommand": "team:grant", "consumeVerb": true, "handler": "runTeamCommand" },
+      "revoke": { "invokeCommand": "team:revoke", "consumeVerb": true, "handler": "runTeamCommand" }
     }
   },
   "bareNounActions": {

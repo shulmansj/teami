@@ -14,7 +14,7 @@ import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs
 import {
   runWarmResumeIssueSyntheticWake,
 } from "../src/gateway-loop.mjs";
-import { DOMAIN_REGISTRY_SCHEMA_VERSION } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION } from "../src/team-registry.mjs";
 import {
   defaultOrchestratorRuntime,
 } from "../src/orchestrator-turn.mjs";
@@ -302,9 +302,9 @@ test("runWarmResumeIssueSyntheticWake refetches latest review notes and seeds re
   const result = await runWarmResumeIssueSyntheticWake({
     config: loadLinearConfig({ repoRoot }),
     repoRoot,
-    domain: { id: "domain-1" },
-    domainContext: domainContext(),
-    registry: domainRegistry(),
+    team: { id: "team-1" },
+    teamContext: teamContext(),
+    registry: teamRegistry(),
     issueId: "issue-1",
     priorRunId: "run-prior",
     prNumber: 7,
@@ -392,9 +392,9 @@ test("runWarmResumeIssueSyntheticWake refetches latest review notes and seeds re
 test("runWarmResumeIssueSyntheticWake includes failed merge facts and non-app Linear comments", async () => {
   const tempRoot = tempWarmRoot("teami-warm-context-");
   const ctx = {
-    ...domainContext(),
+    ...teamContext(),
     linear: {
-      ...domainContext().linear,
+      ...teamContext().linear,
       cachePath: path.join(tempRoot, "linear-cache.json"),
     },
   };
@@ -424,9 +424,9 @@ test("runWarmResumeIssueSyntheticWake includes failed merge facts and non-app Li
   const result = await runWarmResumeIssueSyntheticWake({
     config: loadLinearConfig({ repoRoot }),
     repoRoot,
-    domain: { id: "domain-1" },
-    domainContext: ctx,
-    registry: domainRegistry(),
+    team: { id: "team-1" },
+    teamContext: ctx,
+    registry: teamRegistry(),
     issueId: "issue-1",
     priorRunId: "run-prior",
     prNumber: 7,
@@ -533,9 +533,9 @@ test("runWarmResumeIssueSyntheticWake cold-reconstructs from durable PR identity
   const result = await runWarmResumeIssueSyntheticWake({
     config: loadLinearConfig({ repoRoot }),
     repoRoot,
-    domain: { id: "domain-1" },
-    domainContext: domainContext(),
-    registry: domainRegistry(),
+    team: { id: "team-1" },
+    teamContext: teamContext(),
+    registry: teamRegistry(),
     issueId: "issue-1",
     prNumber: 7,
     head_sha: HEAD_SHA,
@@ -611,7 +611,7 @@ test("runWarmResumeIssueSyntheticWake cold-reconstructs from durable PR identity
 test("runWarmResumeIssueSyntheticWake cold-reconstructs when the prior session is recorded as unpersisted", async () => {
   const tempRoot = tempWarmRoot("teami-warm-unpersisted-");
   const runId = "run-prior-unpersisted";
-  const runDir = path.join(tempRoot, "domains", "domain-1", "runs");
+  const runDir = path.join(tempRoot, "teams", "team-1", "runs");
   fs.mkdirSync(runDir, { recursive: true });
   const terminalOutput = {
     outcome: "commit",
@@ -629,7 +629,7 @@ test("runWarmResumeIssueSyntheticWake cold-reconstructs when the prior session i
     workflow_version: "test-execution",
     kind: "commit",
     run_id: runId,
-    domain_id: "domain-1",
+    team_ref: "team-1",
     workspace_id: "workspace-1",
     team_id: "team-1",
     linear_issue_id: "issue-1",
@@ -655,9 +655,9 @@ test("runWarmResumeIssueSyntheticWake cold-reconstructs when the prior session i
       config: loadLinearConfig({ repoRoot }),
       repoRoot: tempRoot,
       home: tempRoot,
-      domain: { id: "domain-1" },
-      domainContext: domainContext(),
-      registry: domainRegistry(),
+      team: { id: "team-1" },
+      teamContext: teamContext(),
+      registry: teamRegistry(),
       issueId: "issue-1",
       prNumber: 7,
       head_sha: HEAD_SHA,
@@ -739,8 +739,8 @@ test("warm resume escalates without reconstruction when no prior run is resumabl
   const result = await runWarmResumeIssueSyntheticWake({
     config: executionConfig(),
     repoRoot,
-    domain: { id: "domain-1" },
-    domainContext: domainContext(),
+    team: { id: "team-1" },
+    teamContext: teamContext(),
     issueId: "issue-1",
     priorRunId: "run-prior",
     prNumber: 7,
@@ -771,8 +771,8 @@ function runOptions({ repoRoot, store, runDeps }) {
   return {
     executionReadiness: () => ({ ok: true }),
     issueId: "issue-1",
-    domainContext: domainContext(),
-    registry: domainRegistry(),
+    teamContext: teamContext(),
+    registry: teamRegistry(),
     claim: {
       ok: true,
       leaseToken: "lease-1",
@@ -784,7 +784,7 @@ function runOptions({ repoRoot, store, runDeps }) {
       wake: {
         id: "wake-1",
         workspace_id: "workspace-1",
-        domain_id: "domain-1",
+        team_ref: "team-1",
         trigger_type: "linear.issue.ready",
         workflow_type: "execution",
         object_type: "issue",
@@ -816,7 +816,7 @@ function runOptions({ repoRoot, store, runDeps }) {
     cache: { workspaceId: "workspace-1", teamId: "team-1" },
     repoRoot,
     home: repoRoot,
-    runStoreDir: path.join(repoRoot, "domains", "domain-1", "runs"),
+    runStoreDir: path.join(repoRoot, "teams", "team-1", "runs"),
     runtimeExecutor: {
       async executeSubagent() {
         throw new Error("subagent executor should not be called by this one-turn fixture");
@@ -848,7 +848,7 @@ function createRunDeps({ tempRoot, store }) {
     executionProfilePreflight: greenExecutionProfilePreflight,
     async materialize(input) {
       runDeps.materializeCalls.push(input);
-      const selected = input.domainResources[0];
+      const selected = input.teamResources[0];
       const selectedResourceId = selected?.id || "repo-1";
       const selectedResource = {
         id: selectedResourceId,
@@ -955,7 +955,7 @@ function createFakeStore() {
     async renewLease({ wakeId }) {
       return { ok: true, wake: wakes.get(wakeId) || null };
     },
-    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, domainId }) {
+    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, teamRef }) {
       const wake = wakes.get(wakeId) || {
         id: wakeId,
         workspace_id: "workspace-1",
@@ -968,7 +968,7 @@ function createFakeStore() {
         runner_id: runnerId,
         lease_token: leaseToken,
         run_id: runId,
-        domain_id: domainId,
+        team_ref: teamRef,
       });
       wakes.set(wakeId, wake);
       runs.set(runId, { run_id: runId, wake_id: wakeId, status: "running" });
@@ -1027,9 +1027,9 @@ function writeExecutionAcceptedPromptFixture(root) {
   );
 }
 
-function domainContext() {
+function teamContext() {
   return {
-    domainId: "domain-1",
+    teamRef: "team-1",
     status: "active",
     linear: {
       workspaceId: "workspace-1",
@@ -1040,7 +1040,7 @@ function domainContext() {
       cachePath: "unused-cache.json",
     },
     trace: {
-      domain_id: "domain-1",
+      team_ref: "team-1",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test",
@@ -1058,11 +1058,11 @@ function domainContext() {
   };
 }
 
-function domainRegistry() {
+function teamRegistry() {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [{
-      id: "domain-1",
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [{
+      id: "team-1",
       status: "active",
       linear: {
         workspace_id: "workspace-1",
@@ -1073,9 +1073,9 @@ function domainRegistry() {
         team_name_last_seen_at: "2026-06-26T00:00:00.000Z",
         provisioned_by_teami: true,
         webhook_id: "webhook-1",
-        cache_path: "domains/domain-1/linear.json",
+        cache_path: "teams/team-1/linear.json",
       },
-      resources: domainContext().resources,
+      resources: teamContext().resources,
       policy_profile: "default",
       policy_overlay_ref: null,
     }],

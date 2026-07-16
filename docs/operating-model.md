@@ -16,7 +16,7 @@ scope, user experience, trust, priority, release timing, and business risk.
 
 ## Sources Of Truth
 
-| Domain | Source of truth |
+| Team | Source of truth |
 | --- | --- |
 | Roadmap item content | Linear projects inside the `Teami` team |
 | Execution work | Linear issues inside the source roadmap project |
@@ -54,12 +54,12 @@ reviewable proposal branches and pull requests for process changes. Teami
 stores no GitHub secret. PR provenance is visible in local run evidence
 and the PR body.
 
-Product-repo grants are local and explicit. `teami domain grant` records
-selected GitHub repo coordinates as a domain `git_repo` resource. The grant
+Product-repo grants are local and explicit. `teami team grant` records
+selected GitHub repo coordinates as a team `git_repo` resource. The grant
 records `owner/repo` and default branch only. Product-repo write-capable
 execution is not shipped: the presence of materializer and workflow modules is
 not permission to edit, commit, push, or open a product-repo PR. Any future
-activation must prove credential and process isolation, domain confinement,
+activation must prove credential and process isolation, team confinement,
 bounded Git behavior, staged-content guards, and no push after a failed safety
 gate.
 

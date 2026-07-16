@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 
 import { defaultRunStoreDir } from "../../../engine/run-store.mjs";
 import { loadLinearConfig } from "../src/config.mjs";
-import { readDomainRegistry } from "../src/domain-registry.mjs";
-import { buildDomainContext } from "../src/domain-resolver.mjs";
+import { readTeamRegistry } from "../src/team-registry.mjs";
+import { buildTeamContext } from "../src/team-resolver.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import { readGitHubConnectionState, resolveBehaviorRepoIdentity } from "../src/github-setup.mjs";
 import { redactGitHubSecrets } from "../src/github-secret-hygiene.mjs";
@@ -21,9 +21,9 @@ import {
   DEFAULT_POLL_GRACE_MS,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_UAT_PREFIX,
-  NO_LINEAR_DOMAIN_MESSAGE,
+  NO_LINEAR_TEAM_MESSAGE,
   runGatewayUat,
-  selectUatDomain,
+  selectUatTeam,
 } from "./gateway-uat.mjs";
 import {
   assertHostedSurfaceFilesRemoved,
@@ -52,7 +52,7 @@ export function parseNoHostedUatArgs(argv = process.argv.slice(2), env = process
         || env.TEAMI_UAT_REPO_ROOT
         || REPO_ROOT,
     ),
-    domainId: env.TEAMI_NO_HOSTED_UAT_DOMAIN || env.TEAMI_UAT_DOMAIN || null,
+    teamRef: env.TEAMI_NO_HOSTED_UAT_TEAM || env.TEAMI_UAT_TEAM || null,
     prefix: env.TEAMI_NO_HOSTED_UAT_PREFIX || env.TEAMI_UAT_PREFIX || DEFAULT_NO_HOSTED_PREFIX,
     consecutive: parsePositiveInteger(
       env.TEAMI_NO_HOSTED_UAT_CONSECUTIVE || env.TEAMI_UAT_CONSECUTIVE,
@@ -92,8 +92,8 @@ export function parseNoHostedUatArgs(argv = process.argv.slice(2), env = process
       options.help = true;
     } else if (arg === "--repo-root") {
       options.repoRoot = path.resolve(requireNext(argv, ++index, arg));
-    } else if (arg === "--domain") {
-      options.domainId = requireNext(argv, ++index, arg);
+    } else if (arg === "--team") {
+      options.teamRef = requireNext(argv, ++index, arg);
     } else if (arg === "--prefix") {
       options.prefix = requireNext(argv, ++index, arg);
     } else if (arg === "--consecutive") {
@@ -121,18 +121,18 @@ export function parseNoHostedUatArgs(argv = process.argv.slice(2), env = process
 
 export function buildNoHostedUatUsage() {
   return [
-    "Usage: npm run uat:no-hosted -- [--domain <id>] [--repo-root <path>] [--keep-artifacts]",
+    "Usage: npm run uat:no-hosted -- [--team <id>] [--repo-root <path>] [--keep-artifacts]",
     "                               [--prefix AF-NO-HOSTED-UAT] [--consecutive 2]",
     "                               [--poll-interval-ms 10000] [--timeout-ms 600000]",
     "                               [--workspace-dir <path>] [--branch-prefix af-uat-github-local]",
     "",
     "Live prerequisites:",
-    "- The selected Linear domain is authenticated locally and points at a disposable test team.",
+    "- The selected Linear team is authenticated locally and points at a disposable test team.",
     "- The behavior repo is bound as a real local_ambient GitHub connection.",
     "- Local git and gh auth can push a disposable branch and open a PR.",
     "",
     "Environment equivalents:",
-    "- TEAMI_NO_HOSTED_UAT_DOMAIN or TEAMI_UAT_DOMAIN selects the Linear domain.",
+    "- TEAMI_NO_HOSTED_UAT_TEAM or TEAMI_UAT_TEAM selects the Linear team.",
     "- TEAMI_NO_HOSTED_UAT_REPO_ROOT or TEAMI_UAT_REPO_ROOT selects the checkout.",
     "- TEAMI_NO_HOSTED_UAT_KEEP_ARTIFACTS=1 keeps disposable artifacts where child harnesses allow it.",
   ].join("\n");
@@ -143,7 +143,7 @@ export async function runNoHostedUat(options = parseNoHostedUatArgs()) {
   const preflight = assertNoHostedPreconditions({ repoRoot });
   const prerequisites = await assertNoHostedLivePrerequisites({
     repoRoot,
-    domainId: options.domainId,
+    teamRef: options.teamRef,
     branchPrefix: options.branchPrefix,
   });
   const beforeRunFiles = snapshotRunEvidenceFiles({ repoRoot });
@@ -159,7 +159,7 @@ export async function runNoHostedUat(options = parseNoHostedUatArgs()) {
 
   const gateway = await runGatewayUat({
     repoRoot,
-    domainId: options.domainId,
+    teamRef: options.teamRef,
     prefix: options.prefix || DEFAULT_UAT_PREFIX,
     consecutive: options.consecutive,
     pollIntervalMs: options.pollIntervalMs,
@@ -197,22 +197,22 @@ export async function runNoHostedUat(options = parseNoHostedUatArgs()) {
 
 export async function assertNoHostedLivePrerequisites({
   repoRoot = process.cwd(),
-  domainId = null,
+  teamRef = null,
   branchPrefix = DEFAULT_GITHUB_LOCAL_UAT_BRANCH_PREFIX,
 } = {}) {
   const config = loadLinearConfig({ repoRoot });
-  const registry = readDomainRegistry({ repoRoot });
-  const domain = selectUatDomain({ registry, domainId });
-  const domainContext = buildDomainContext({ domain, config, repoRoot });
-  const credentialStore = createLinearCredentialStore({ config, repoRoot, domainContext });
+  const registry = readTeamRegistry({ repoRoot });
+  const team = selectUatTeam({ registry, teamRef });
+  const teamContext = buildTeamContext({ team, config, repoRoot });
+  const credentialStore = createLinearCredentialStore({ config, repoRoot, teamContext });
   let tokenSet = null;
   try {
     tokenSet = await credentialStore.readTokenSet();
   } catch {
-    throw new NoHostedUatUserError(NO_LINEAR_DOMAIN_MESSAGE, "no_linear_credential");
+    throw new NoHostedUatUserError(NO_LINEAR_TEAM_MESSAGE, "no_linear_credential");
   }
   if (!tokenSet?.refreshToken && !tokenSet?.accessToken) {
-    throw new NoHostedUatUserError(NO_LINEAR_DOMAIN_MESSAGE, "no_linear_credential");
+    throw new NoHostedUatUserError(NO_LINEAR_TEAM_MESSAGE, "no_linear_credential");
   }
 
   githubLocalUatBranchName({ branchPrefix, stamp: "validate" });
@@ -223,7 +223,7 @@ export async function assertNoHostedLivePrerequisites({
 
   return {
     ok: true,
-    domainId: domain.id,
+    teamRef: team.id,
     github: {
       owner: github.repo.owner,
       repo: github.repo.repo,
@@ -236,17 +236,17 @@ export async function assertNoHostedLivePrerequisites({
 export function assertNoHostedPreconditions({ repoRoot = process.cwd() } = {}) {
   const config = loadLinearConfig({ repoRoot });
   // Register the git_repo resource kind before reading a registry that may bind git_repo
-  // resources (since #90), or readDomainRegistry throws unknown_resource_kind:git_repo.
+  // resources (since #90), or readTeamRegistry throws unknown_resource_kind:git_repo.
   registerGitRepoResourceKind();
-  const domainRegistry = readDomainRegistry({ repoRoot });
+  const teamRegistry = readTeamRegistry({ repoRoot });
   const githubConnectionRead = readGitHubConnectionState({ repoRoot });
   const githubConnection = githubConnectionRead.ok ? githubConnectionRead.connection : null;
-  assertNoHostedConfiguration({ config, domainRegistry, githubConnection });
+  assertNoHostedConfiguration({ config, teamRegistry, githubConnection });
   assertHostedSurfaceFilesRemoved({ repoRoot });
   return {
     ok: true,
     configLoaded: true,
-    domainRegistryLoaded: Boolean(domainRegistry),
+    teamRegistryLoaded: Boolean(teamRegistry),
     githubConnectionLoaded: githubConnectionRead.ok,
     githubConnectionReason: githubConnectionRead.ok ? null : githubConnectionRead.reason,
   };
@@ -314,7 +314,7 @@ function listFilesRecursive(dirPath) {
 function summarizeGatewayReport(report = {}) {
   return {
     ok: report.ok === true,
-    domainId: report.domainId,
+    teamRef: report.teamRef,
     prefix: report.prefix,
     createdProjectCount: Array.isArray(report.createdProjects) ? report.createdProjects.length : 0,
     scenarios: Array.isArray(report.scenarios)

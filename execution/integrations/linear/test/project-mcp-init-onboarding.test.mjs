@@ -9,7 +9,17 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { loadLinearConfig } from "../src/config.mjs";
-import { readDomainRegistry } from "../src/domain-registry.mjs";
+import {
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  upsertTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
+import {
+  createLinearCredentialStore,
+  legacyCredentialTargetForConfig,
+} from "../src/linear-credential-store.mjs";
 import {
   createMockGitHubSetupTransport,
   githubConnectionStatePath,
@@ -84,12 +94,12 @@ test("init_onboarding bare MCP call returns setup needs without minting an auth 
 test("init_onboarding mutates nothing before exact disclosure-bound consent", async (t) => {
   const harness = createProgrammaticHarness(t);
   const result = await harness.actions.init_onboarding({
-    domain: "Support Ops",
+    team: "Support Ops",
     workspace: "Example Workspace",
     repo_intent: { mode: "non_code" },
   });
   assert.equal(result.status, "consent_required");
-  assert.equal(readDomainRegistry({ home: harness.home }), null);
+  assert.equal(readTeamRegistry({ home: harness.home }), null);
   assert.equal(fs.existsSync(path.join(harness.home, "setup")), false);
   assert.equal(harness.githubTransport.calls.length, 0);
   assert.deepEqual(harness.fakeClaude.calls, []);
@@ -98,7 +108,7 @@ test("init_onboarding mutates nothing before exact disclosure-bound consent", as
 test("init_onboarding rejects product-repository access before browser authorization", async (t) => {
   const harness = createProgrammaticHarness(t);
   const result = await startOnboarding(harness, {
-    domain: "Support Ops",
+    team: "Support Ops",
     repo_intent: { mode: "allowlist", repos: ["Acme/app"] },
   });
 
@@ -107,7 +117,7 @@ test("init_onboarding rejects product-repository access before browser authoriza
   assert.equal(result.reason, "product_repo_access_not_supported_during_setup");
   assert.match(result.repair, /separate explicit action/i);
   assert.equal(harness.authorize.calls.length, 0);
-  assert.equal(readDomainRegistry({ home: harness.home }), null);
+  assert.equal(readTeamRegistry({ home: harness.home }), null);
   assert.equal(harness.githubTransport.calls.length, 0);
 });
 
@@ -116,7 +126,7 @@ test("fresh onboarding rejects an existing-team choice until Teami offers the li
     existingTeams: [{ id: "team-existing", key: "EX", name: "Existing Team" }],
   });
   const result = await startOnboarding(harness, {
-    domain: "Teami",
+    team: "Teami",
     repo_intent: { mode: "non_code" },
     linear_team_id: "team-existing",
     linear_team_confirm: true,
@@ -126,7 +136,7 @@ test("fresh onboarding rejects an existing-team choice until Teami offers the li
   assert.equal(result.status, "blocked");
   assert.equal(result.reason, "linear_team_selection_not_requested");
   assert.equal(harness.authorize.calls.length, 0);
-  assert.equal(readDomainRegistry({ home: harness.home }), null);
+  assert.equal(readTeamRegistry({ home: harness.home }), null);
   assert.equal(harness.client.projectLabels.length, 0);
 });
 
@@ -144,7 +154,7 @@ test("team-limit recovery stays on the same setup and configures an existing tea
     },
   });
   const awaiting = await startOnboarding(harness, {
-    domain: "Teami",
+    team: "Teami",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-team-limit",
@@ -182,9 +192,9 @@ test("team-limit recovery stays on the same setup and configures an existing tea
   });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(harness.authorize.calls.length, 1, "the saved ordinary Linear grant must be reused");
-  const domain = readDomainRegistry({ home: harness.home }).domains.find((candidate) => candidate.id === "teami");
-  assert.equal(domain.linear.team_id, "team-agent-platform");
-  assert.equal(domain.linear.provisioned_by_teami, false);
+  const team = readTeamRegistry({ home: harness.home }).teams.find((candidate) => candidate.id === "teami");
+  assert.equal(team.linear.team_id, "team-agent-platform");
+  assert.equal(team.linear.provisioned_by_teami, false);
   const stateText = fs.readFileSync(
     path.join(harness.home, "setup", "sessions", `${awaiting.setup_id}.json`),
     "utf8",
@@ -203,7 +213,7 @@ test("team-limit recovery rehydrates the saved Linear grant after a process rest
     existingTeams: [{ id: "team-existing", key: "EX", name: "Existing Team" }],
     teamCreateError,
   });
-  const awaiting = await startOnboarding(harness, { domain: "Teami", repo_intent: { mode: "non_code" } });
+  const awaiting = await startOnboarding(harness, { team: "Teami", repo_intent: { mode: "non_code" } });
   await new Promise((resolve) => setImmediate(resolve));
   const choice = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
   assert.equal(choice.status, "team_selection_required");
@@ -228,7 +238,7 @@ test("team-limit recovery rehydrates the saved Linear grant after a process rest
     isSetupOwnerProcessAlive: () => false,
   });
   const restarted = await startOnboarding({ actions: restartedActions }, {
-    domain: "Teami",
+    team: "Teami",
     repo_intent: { mode: "non_code" },
   });
 
@@ -247,7 +257,7 @@ test("interrupted admin authorization cannot be cleared by revoking a fresh toke
   });
   const store = createSetupStateStore({ home: harness.home });
   const started = store.start({
-    input: { domain: "Interrupted Admin", repo_intent: { mode: "non_code" } },
+    input: { team: "Interrupted Admin", repo_intent: { mode: "non_code" } },
     consent: {
       confirmed: true,
       version: SETUP_DISCLOSURE_VERSION,
@@ -279,7 +289,7 @@ test("conversational setup refuses to race the shared CLI setup writer", async (
   assert.equal(cliLock.ok, true);
   try {
     const result = await startOnboarding(harness, {
-      domain: "Concurrent Setup",
+      team: "Concurrent Setup",
       repo_intent: { mode: "non_code" },
     });
     assert.equal(result.status, "blocked");
@@ -293,11 +303,11 @@ test("conversational setup refuses to race the shared CLI setup writer", async (
 test("a pending conversational setup reserves setup ownership until it is resumed", async (t) => {
   const harness = createProgrammaticHarness(t);
   const first = await startOnboarding(harness, {
-    domain: "First Pending",
+    team: "First Pending",
     repo_intent: { mode: "non_code" },
   });
   const second = await startOnboarding(harness, {
-    domain: "Second Pending",
+    team: "Second Pending",
     repo_intent: { mode: "non_code" },
   });
   assert.equal(second.status, "blocked");
@@ -319,7 +329,7 @@ test("callback-listener start failure is typed and does not strand the next setu
   });
 
   const failed = await startOnboarding(harness, {
-    domain: "Listener Recovery",
+    team: "Listener Recovery",
     repo_intent: { mode: "non_code" },
   });
   assert.equal(failed.status, "blocked");
@@ -330,7 +340,7 @@ test("callback-listener start failure is typed and does not strand the next setu
   assert.equal(store.read(failed.setup_id).phases.linear.status, "blocked");
 
   const retry = await startOnboarding(harness, {
-    domain: "Listener Recovery",
+    team: "Listener Recovery",
     repo_intent: { mode: "non_code" },
   });
   assert.equal(retry.status, "awaiting_authorization");
@@ -375,7 +385,7 @@ test("init_onboarding returns the live URL over stdio while the OAuth callback i
       client.callTool({
         name: "init_onboarding",
         arguments: {
-          domain: "Stdio Pending",
+          team: "Stdio Pending",
           repo_intent: { mode: "non_code" },
           confirm: true,
           disclosure_version: SETUP_DISCLOSURE_VERSION,
@@ -442,7 +452,7 @@ test("admin authorization returns its live URL over stdio while the elevated cal
     const started = await client.callTool({
       name: "init_onboarding",
       arguments: {
-        domain: "Admin Stdio",
+        team: "Admin Stdio",
         repo_intent: { mode: "non_code" },
         confirm: true,
         disclosure_version: SETUP_DISCLOSURE_VERSION,
@@ -482,7 +492,7 @@ test("init_onboarding keeps manual recovery live when automatic browser launch f
     authorizationBrowser: { opened: false, reason: "browser fixture failed" },
   });
   const awaiting = await startOnboarding(harness, {
-    domain: "Manual Browser",
+    team: "Manual Browser",
     repo_intent: { mode: "non_code" },
   });
   assert.equal(awaiting.status, "awaiting_authorization");
@@ -495,7 +505,7 @@ test("init_onboarding keeps manual recovery live when automatic browser launch f
 test("init_onboarding reports a process restart without pretending the old callback listener survived", async (t) => {
   const harness = createProgrammaticHarness(t);
   const awaiting = await startOnboarding(harness, {
-    domain: "Restarted Setup",
+    team: "Restarted Setup",
     repo_intent: { mode: "non_code" },
   });
   const restartedActions = createProjectMcpToolActions({
@@ -513,7 +523,7 @@ test("init_onboarding reports a process restart without pretending the old callb
 test("a fresh start after process restart retires the orphaned callback and issues a new URL", async (t) => {
   const harness = createProgrammaticHarness(t);
   const orphaned = await startOnboarding(harness, {
-    domain: "Orphaned Setup",
+    team: "Orphaned Setup",
     repo_intent: { mode: "non_code" },
   });
   const restartedActions = createProjectMcpToolActions({
@@ -524,7 +534,7 @@ test("a fresh start after process restart retires the orphaned callback and issu
     isSetupOwnerProcessAlive: () => false,
   });
   const fresh = await restartedActions.init_onboarding({
-    domain: "Fresh Setup",
+    team: "Fresh Setup",
     repo_intent: { mode: "non_code" },
     confirm: true,
     disclosure_version: SETUP_DISCLOSURE_VERSION,
@@ -557,7 +567,7 @@ test("init_onboarding asks just in time before admin OAuth and leaves a durable 
     },
   });
   const awaiting = await startOnboarding(harness, {
-    domain: "Admin Boundary",
+    team: "Admin Boundary",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-admin-boundary",
@@ -611,7 +621,7 @@ test("init_onboarding clears the admin marker only when remote revocation is ver
     }),
   });
   const awaiting = await startOnboarding(harness, {
-    domain: "Verified Admin",
+    team: "Verified Admin",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-verified-admin",
@@ -650,7 +660,7 @@ test("admin authorization returns its live URL before the callback and preserves
     }),
   });
   const appAwaiting = await startOnboarding(harness, {
-    domain: "Pending Admin",
+    team: "Pending Admin",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-pending-admin",
@@ -698,7 +708,7 @@ test("admin authorization process restart is typed and persists no elevated cred
     }),
   });
   const appAwaiting = await startOnboarding(harness, {
-    domain: "Restart Admin",
+    team: "Restart Admin",
     repo_intent: { mode: "non_code" },
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -735,7 +745,7 @@ test("expired admin authorization is typed and requires revocation review", asyn
     },
   });
   const appAwaiting = await startOnboarding(harness, {
-    domain: "Expired Admin",
+    team: "Expired Admin",
     repo_intent: { mode: "non_code" },
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -762,7 +772,7 @@ test("unused in-memory admin grant is automatically revoked within a bounded win
     }),
   });
   const appAwaiting = await startOnboarding(harness, {
-    domain: "Bounded Admin",
+    team: "Bounded Admin",
     repo_intent: { mode: "non_code" },
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -786,7 +796,7 @@ test("init_onboarding returns awaiting authorization before completing full setu
   });
 
   const { awaiting, result } = await startAndResume(harness, {
-    domain: "Support Ops",
+    team: "Support Ops",
     workspace: "Example Workspace",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
@@ -804,7 +814,7 @@ test("init_onboarding returns awaiting authorization before completing full setu
   }]);
   assert.deepEqual(result.steps.linear, {
     ok: true,
-    domain: { id: "support-ops", status: "active" },
+    team: { id: "support-ops", status: "active" },
     workspace: { id: "workspace-1", name: "Example Workspace" },
     team: { id: "team-1", key: "SO", name: "Support Ops" },
     repos: [],
@@ -820,22 +830,22 @@ test("init_onboarding returns awaiting authorization before completing full setu
   assert.equal(result.steps.plugin.already_installed, false);
   assert.match(result.next_steps.join("\n"), /gateway start/);
 
-  const registry = readDomainRegistry({ home: harness.home });
-  const domain = registry.domains.find((candidate) => candidate.id === "support-ops");
-  assert.equal(domain.status, "active");
-  assert.deepEqual(domain.resources, []);
+  const registry = readTeamRegistry({ home: harness.home });
+  const team = registry.teams.find((candidate) => candidate.id === "support-ops");
+  assert.equal(team.status, "active");
+  assert.deepEqual(team.resources, []);
 
   const cache = JSON.parse(
-    fs.readFileSync(path.resolve(harness.home, domain.linear.cache_path), "utf8"),
+    fs.readFileSync(path.resolve(harness.home, team.linear.cache_path), "utf8"),
   );
-  assert.equal(cache.domainId, "support-ops");
+  assert.equal(cache.teamRef, "support-ops");
   assert.equal(cache.workspaceId, "workspace-1");
   assert.equal(cache.teamId, "team-1");
 
   const credentialPath = path.join(
     harness.home,
     "credentials",
-    "domains",
+    "teams",
     "support-ops",
     "linear-oauth-token.json",
   );
@@ -883,7 +893,7 @@ test("init_onboarding treats an already-installed Claude plugin as a successful 
   });
 
   const { result } = await startAndResume(harness, {
-    domain: "Customer Ops",
+    team: "Customer Ops",
     workspace: "Example Workspace",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
@@ -922,7 +932,7 @@ test("init_onboarding reuses the exact plugin proof instead of repeating a flaky
   });
 
   const { result } = await startAndResume(harness, {
-    domain: "Plugin Proof",
+    team: "Plugin Proof",
     workspace: "Example Workspace",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
@@ -957,7 +967,7 @@ test("init_onboarding keeps the final Claude doctor check when plugin proof has 
   });
 
   const { result } = await startAndResume(harness, {
-    domain: "Unproven Plugin",
+    team: "Unproven Plugin",
     workspace: "Example Workspace",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
@@ -973,12 +983,12 @@ test("init_onboarding keeps the final Claude doctor check when plugin proof has 
   );
 });
 
-test("revoked complete-domain authorization starts a fresh resumable browser session", async (t) => {
+test("revoked complete-team authorization starts a fresh resumable browser session", async (t) => {
   const credentialControl = { revoked: false };
   const authorize = createSuccessfulAuthorize("https://linear.test/oauth/authorize?fresh=1");
   const harness = createProgrammaticHarness(t, { authorize, credentialControl });
   const { result: first } = await startAndResume(harness, {
-    domain: "Revoked Grant",
+    team: "Revoked Grant",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-revoked-grant",
@@ -987,7 +997,7 @@ test("revoked complete-domain authorization starts a fresh resumable browser ses
 
   credentialControl.revoked = true;
   const retry = await startOnboarding(harness, {
-    domain: "Revoked Grant",
+    team: "Revoked Grant",
     repo_intent: { mode: "non_code" },
   });
   assert.equal(retry.status, "awaiting_authorization", JSON.stringify(retry));
@@ -995,14 +1005,198 @@ test("revoked complete-domain authorization starts a fresh resumable browser ses
   assert.match(retry.recovery.resume, /setup_id/i);
 });
 
-test("init_onboarding auth failure is typed and persists no credential or domain mutation", async (t) => {
+test("failed credential validation preserves a concurrently refreshed Team grant", async (t) => {
+  const credentialControl = { revoked: false, replaceBeforeDelete: false };
+  const createCredentialStore = (options) => {
+    const store = createLinearCredentialStore(options);
+    return {
+      ...store,
+      async deleteTokenSetIfEqual(expected) {
+        if (credentialControl.replaceBeforeDelete) {
+          credentialControl.replaceBeforeDelete = false;
+          await store.writeTokenSet({
+            accessToken: "access-refreshed-concurrently",
+            refreshToken: "refresh-refreshed-concurrently",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+          });
+        }
+        return store.deleteTokenSetIfEqual(expected);
+      },
+    };
+  };
+  const harness = createProgrammaticHarness(t, { credentialControl, createCredentialStore });
+  const { result: first } = await startAndResume(harness, {
+    team: "Concurrent Refresh",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-concurrent-refresh",
+  });
+  assert.equal(first.status, "complete", JSON.stringify(first));
+
+  credentialControl.revoked = true;
+  credentialControl.replaceBeforeDelete = true;
+  const retry = await startOnboarding(harness, {
+    team: "Concurrent Refresh",
+    repo_intent: { mode: "non_code" },
+  });
+
+  assert.equal(retry.status, "blocked");
+  assert.equal(retry.reason, "linear_authorization_changed_during_validation");
+  assert.equal(harness.authorize.calls.length, 1, "a credential race must not open a replacement OAuth session");
+  const preserved = await createLinearCredentialStore({
+    config: testConfig(),
+    home: harness.home,
+    repoRoot: harness.home,
+    teamRef: "concurrent-refresh",
+    workspaceId: "workspace-1",
+  }).readTokenSet();
+  assert.equal(preserved.refreshToken, "refresh-refreshed-concurrently");
+});
+
+test("setup_incomplete retry uses the canonical Team credential and cleans only the observed bootstrap", async (t) => {
+  const harness = createProgrammaticHarness(t, {
+    existingTeams: [{ id: "team-retry", key: "RTY", name: "Credential Retry" }],
+  });
+  const config = testConfig();
+  writeTeamRegistry(
+    { home: harness.home },
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "credential-retry",
+        status: "setup_incomplete",
+        adopterProvidedName: "Credential Retry",
+        workspaceId: "workspace-1",
+        workspaceName: "Example Workspace",
+        teamId: "team-retry",
+        teamKey: "RTY",
+        teamName: "Credential Retry",
+      }),
+    ),
+  );
+  const canonicalStore = createLinearCredentialStore({
+    config,
+    home: harness.home,
+    repoRoot: harness.home,
+    teamRef: "credential-retry",
+    workspaceId: "workspace-1",
+  });
+  const bootstrapStore = createLinearCredentialStore({
+    config,
+    home: harness.home,
+    repoRoot: harness.home,
+    target: legacyCredentialTargetForConfig(config),
+  });
+  await canonicalStore.writeTokenSet({ refreshToken: "refresh-canonical" });
+  await bootstrapStore.writeTokenSet({ refreshToken: "refresh-obsolete-bootstrap" });
+
+  const result = await startOnboarding(harness, {
+    team: "credential-retry",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-credential-retry",
+  });
+
+  assert.equal(result.status, "complete", JSON.stringify(result));
+  assert.equal(harness.authorize.calls.length, 0, "retry must not reopen OAuth when the Team grant is valid");
+  assert.equal(readTeamRegistry({ home: harness.home }).teams[0].status, "active");
+  assert.equal((await canonicalStore.readTokenSet()).refreshToken, "refresh-canonical");
+  assert.equal(await bootstrapStore.readTokenSet(), null);
+});
+
+test("setup retry preserves a bootstrap authorization replaced during cleanup", async (t) => {
+  let replaceBeforeCleanup = false;
+  const createBootstrapCredentialStore = ({ config, repoRoot, home }) => {
+    const store = createLinearCredentialStore({
+      config,
+      repoRoot,
+      home,
+      target: legacyCredentialTargetForConfig(config),
+    });
+    return {
+      ...store,
+      async deleteTokenSetIfEqual(expected) {
+        if (replaceBeforeCleanup) {
+          replaceBeforeCleanup = false;
+          await store.writeTokenSet({ refreshToken: "refresh-new-bootstrap-authorization" });
+        }
+        return store.deleteTokenSetIfEqual(expected);
+      },
+    };
+  };
+  const harness = createProgrammaticHarness(t, {
+    existingTeams: [{ id: "team-bootstrap-race", key: "BRA", name: "Bootstrap Race" }],
+    createBootstrapCredentialStore,
+  });
+  const config = testConfig();
+  writeTeamRegistry(
+    { home: harness.home },
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "bootstrap-race",
+        status: "setup_incomplete",
+        workspaceId: "workspace-1",
+        workspaceName: "Example Workspace",
+        teamId: "team-bootstrap-race",
+        teamKey: "BRA",
+        teamName: "Bootstrap Race",
+      }),
+    ),
+  );
+  await createLinearCredentialStore({
+    config,
+    home: harness.home,
+    repoRoot: harness.home,
+    teamRef: "bootstrap-race",
+    workspaceId: "workspace-1",
+  }).writeTokenSet({ refreshToken: "refresh-canonical" });
+  const bootstrapStore = createLinearCredentialStore({
+    config,
+    home: harness.home,
+    repoRoot: harness.home,
+    target: legacyCredentialTargetForConfig(config),
+  });
+  await bootstrapStore.writeTokenSet({ refreshToken: "refresh-observed-bootstrap" });
+  replaceBeforeCleanup = true;
+
+  const result = await startOnboarding(harness, {
+    team: "bootstrap-race",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-bootstrap-race",
+  });
+
+  assert.equal(result.status, "complete", JSON.stringify(result));
+  assert.equal((await bootstrapStore.readTokenSet()).refreshToken, "refresh-new-bootstrap-authorization");
+});
+
+test("replaying a completed setup id is idempotent and preserves terminal state", async (t) => {
+  const harness = createProgrammaticHarness(t);
+  const { result: completed } = await startAndResume(harness, {
+    team: "Completed Replay",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-completed-replay",
+  });
+  assert.equal(completed.status, "complete", JSON.stringify(completed));
+
+  const replay = await harness.actions.init_onboarding({ setup_id: completed.setup_id });
+
+  assert.equal(replay.ok, true);
+  assert.equal(replay.status, "complete");
+  assert.equal(replay.setup_id, completed.setup_id);
+  assert.equal(createSetupStateStore({ home: harness.home }).read(completed.setup_id).status, "complete");
+});
+
+test("init_onboarding auth failure is typed and persists no credential or team mutation", async (t) => {
   const authorizationError = new Error("Timed out waiting for Linear OAuth authorization callback.");
   const harness = createProgrammaticHarness(t, {
     authorize: createRejectingAuthorize(authorizationError),
   });
 
   const awaiting = await startOnboarding(harness, {
-    domain: "Support Ops",
+    team: "Support Ops",
     workspace: "Example Workspace",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
@@ -1015,7 +1209,7 @@ test("init_onboarding auth failure is typed and persists no credential or domain
   assert.equal(structured.status, "blocked");
   assert.equal(structured.reason, "linear_authorization_expired");
   assert.match(structured.repair, /fresh authorization URL/);
-  assert.equal(readDomainRegistry({ home: harness.home }), null);
+  assert.equal(readTeamRegistry({ home: harness.home }), null);
   assert.equal(fs.existsSync(path.join(harness.home, "credentials")), false, "no OAuth token is persisted");
   assert.equal(harness.githubTransport.calls.length, 0);
   assert.deepEqual(harness.fakeClaude.calls, []);
@@ -1026,7 +1220,7 @@ test("init_onboarding gives installed-app recovery instead of dead air", async (
     authorize: createRejectingAuthorize(new Error("Teami is already installed but Linear did not redirect to the callback.")),
   });
   const awaiting = await startOnboarding(harness, {
-    domain: "Installed App",
+    team: "Installed App",
     repo_intent: { mode: "non_code" },
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -1040,7 +1234,7 @@ test("init_onboarding gives installed-app recovery instead of dead air", async (
 test("init_onboarding wrong-workspace recovery is typed, mutation-free, and requires a fresh URL", async (t) => {
   const harness = createProgrammaticHarness(t);
   const awaiting = await startOnboarding(harness, {
-    domain: "Wrong Workspace",
+    team: "Wrong Workspace",
     workspace: "A Different Workspace",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
@@ -1052,7 +1246,7 @@ test("init_onboarding wrong-workspace recovery is typed, mutation-free, and requ
   assert.equal(blocked.reason, "workspace_mismatch");
   assert.equal(blocked.error.code, "workspace_mismatch");
   assert.match(blocked.error.repair, /fresh Linear authorization URL/i);
-  assert.equal(readDomainRegistry({ home: harness.home }), null);
+  assert.equal(readTeamRegistry({ home: harness.home }), null);
   assert.equal(fs.existsSync(path.join(harness.home, "credentials")), false);
   assert.equal(harness.githubTransport.calls.length, 0);
   assert.deepEqual(harness.fakeClaude.calls, []);
@@ -1065,7 +1259,7 @@ test("init_onboarding wrong-workspace recovery is typed, mutation-free, and requ
 test("init_onboarding resumes a repaired post-Linear phase without retaining the OAuth session", async (t) => {
   const harness = createProgrammaticHarness(t, { pluginFails: true });
   const { awaiting, result: pluginBlocked } = await startAndResume(harness, {
-    domain: "Resume Plugin",
+    team: "Resume Plugin",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-resume-plugin",
@@ -1091,7 +1285,7 @@ test("init_onboarding preserves durable Linear progress across a recoverable Git
   };
   const harness = createProgrammaticHarness(t, { githubSetupTransport: githubTransport });
   const { awaiting, result: githubBlocked } = await startAndResume(harness, {
-    domain: "Resume GitHub",
+    team: "Resume GitHub",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-resume-github",
@@ -1143,7 +1337,7 @@ test("implicit repair blocks a changed GitHub identity until exact replacement c
     runGit: createCheckoutlessRunGit(),
   });
   const { awaiting, result: blocked } = await startAndResume(harness, {
-    domain: "GitHub Identity",
+    team: "GitHub Identity",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-identity",
@@ -1178,7 +1372,7 @@ test("an adopter can explicitly replace a missing GitHub workspace repository wi
     pluginFails: true,
   });
   const { result: blocked } = await startAndResume(harness, {
-    domain: "GitHub Replacement",
+    team: "GitHub Replacement",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-old",
@@ -1187,7 +1381,7 @@ test("an adopter can explicitly replace a missing GitHub workspace repository wi
 
   harness.fakeClaude.setInstallFails(false);
   const resumed = await startOnboarding(harness, {
-    domain: "GitHub Replacement",
+    team: "GitHub Replacement",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-new",
@@ -1206,7 +1400,7 @@ test("a legacy GitHub record without an immutable repository ID requires explici
     runGit: createCheckoutlessRunGit(),
   });
   const { awaiting, result: blocked } = await startAndResume(harness, {
-    domain: "Legacy GitHub Identity",
+    team: "Legacy GitHub Identity",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-legacy",
@@ -1252,7 +1446,7 @@ test("checkout-based repair rechecks current GitHub write authority and recovers
     pluginFails: true,
   });
   const { awaiting, result: pluginBlocked } = await startAndResume(harness, {
-    domain: "Checkout Write Recheck",
+    team: "Checkout Write Recheck",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-checkout-write",
@@ -1280,7 +1474,7 @@ test("checkoutless repair performs a fresh dry-run push and recovers after auth 
     runGit: createCheckoutlessRunGit({ writeControl }),
   });
   const { awaiting, result: pluginBlocked } = await startAndResume(harness, {
-    domain: "Checkoutless Write Recheck",
+    team: "Checkoutless Write Recheck",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
     github_repo: "teami-checkoutless-write",
@@ -1305,7 +1499,7 @@ test("init_onboarding honors github_dry_run with the shared GitHub dry-run trans
   });
 
   const { result } = await startAndResume(harness, {
-    domain: "Research Ops",
+    team: "Research Ops",
     workspace: "Example Workspace",
     repo_intent: { mode: "non_code" },
     github_owner: "Acme",
@@ -1323,10 +1517,10 @@ test("init_onboarding honors github_dry_run with the shared GitHub dry-run trans
   assert.equal(result.steps.github.repo.full_name, "Acme/teami-research");
   assert.match(result.next_steps.join("\n"), /dry run/i);
 
-  const registry = readDomainRegistry({ home: harness.home });
-  const domain = registry.domains.find((candidate) => candidate.id === "research-ops");
-  assert.equal(domain.status, "active");
-  assert.deepEqual(domain.resources, []);
+  const registry = readTeamRegistry({ home: harness.home });
+  const team = registry.teams.find((candidate) => candidate.id === "research-ops");
+  assert.equal(team.status, "active");
+  assert.deepEqual(team.resources, []);
 });
 
 for (const fixture of [
@@ -1338,7 +1532,7 @@ for (const fixture of [
   test(`init_onboarding live health makes ${fixture.label} non-complete`, async (t) => {
     const harness = createProgrammaticHarness(t, fixture.options);
     const { result } = await startAndResume(harness, {
-      domain: `Health ${fixture.phase}`,
+      team: `Health ${fixture.phase}`,
       workspace: "Example Workspace",
       repo_intent: { mode: "non_code" },
       github_owner: "Acme",
@@ -1377,6 +1571,8 @@ function createProgrammaticHarness(
     runGit = createInMemoryRunGit(),
     onSetupProgress = null,
     credentialControl = null,
+    createCredentialStore = null,
+    createBootstrapCredentialStore = null,
     existingTeams = [],
     teamCreateError = null,
     runSetupDoctor = null,
@@ -1400,6 +1596,8 @@ function createProgrammaticHarness(
     repoRoot: home,
     home,
     config: testConfig(),
+    ...(createCredentialStore ? { createCredentialStore } : {}),
+    ...(createBootstrapCredentialStore ? { createBootstrapCredentialStore } : {}),
     createLinearSetupAuth: createAuthorizingSetupAuthFactory(client, credentialControl),
     startLinearBrowserAuthorization: startLinearBrowserAuthorization ||
       createFakeAuthorizationSessionStarter(authorize, authorizationBrowser),

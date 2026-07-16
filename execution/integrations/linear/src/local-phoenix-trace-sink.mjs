@@ -17,7 +17,7 @@ import {
 import {
   PRODUCED_IDENTITIES_TRACE_ATTRIBUTE,
 } from "../../../engine/produced-identities.mjs";
-import { behaviorRepoIdForRepoRoot } from "./domain-resolver.mjs";
+import { behaviorRepoIdForRepoRoot } from "./team-resolver.mjs";
 
 const SERVICE_NAME = "teami-local-runner";
 const PROJECT_ATTRIBUTE = "openinference.project.name";
@@ -36,9 +36,9 @@ const ROOT_COMPACT_ATTRIBUTE_KEYS = new Set([
   "linear_project_id",
   "workspace_id",
   "team_id",
-  "domain_id",
+  "team_ref",
   "behavior_repo_id",
-  "teami.domain_id",
+  "teami.team_ref",
   "teami.behavior_repo_id",
   "teami.trace_id",
   PRODUCED_IDENTITIES_TRACE_ATTRIBUTE,
@@ -75,10 +75,10 @@ export function createLocalPhoenixTraceSink({
       workspaceId,
       runnerId,
       runnerVersion,
-      domainContext = null,
+      teamContext = null,
     } = {}) {
       const traceId = idFactory();
-      const run = runRecordFromWake({ wake, sourceEvent, runId, workspaceId, domainContext, repoRoot });
+      const run = runRecordFromWake({ wake, sourceEvent, runId, workspaceId, teamContext, repoRoot });
       let ready;
       try {
         ready = await withTimeout(
@@ -99,7 +99,7 @@ export function createLocalPhoenixTraceSink({
         recordTraceStatus({
           repoRoot,
           runId,
-          domainId: run.domain_id,
+          teamRef: run.team_ref,
           workspaceId: run.workspace_id,
           teamId: run.team_id,
           wakeId: wake?.id || null,
@@ -118,7 +118,7 @@ export function createLocalPhoenixTraceSink({
           observedAt: now().toISOString(),
           record: {
             run_id: runId,
-            domain_id: run.domain_id,
+            team_ref: run.team_ref,
             wake_id: wake?.id || null,
             trace_id: traceId,
             reason: ready.reason || "phoenix_unavailable",
@@ -163,7 +163,7 @@ export function createLocalPhoenixTraceSink({
 
     async startAgentRun({
       runId,
-      domainId,
+      teamRef,
       workflowType,
       agentRole,
       resource,
@@ -173,7 +173,7 @@ export function createLocalPhoenixTraceSink({
       const traceId = idFactory();
       const run = runRecordFromAgent({
         runId,
-        domainId,
+        teamRef,
         workflowType,
         agentRole,
         resource,
@@ -201,7 +201,7 @@ export function createLocalPhoenixTraceSink({
         recordTraceStatus({
           repoRoot,
           runId,
-          domainId: run.domain_id,
+          teamRef: run.team_ref,
           workspaceId: run.workspace_id,
           teamId: run.team_id,
           workflowType: run.workflow_type,
@@ -220,7 +220,7 @@ export function createLocalPhoenixTraceSink({
           observedAt: now().toISOString(),
           record: {
             run_id: runId,
-            domain_id: run.domain_id,
+            team_ref: run.team_ref,
             resource: run.resource,
             github_behavior_repo_id: run.github_behavior_repo_id,
             github_behavior_repo_label: run.github_behavior_repo_label,
@@ -337,7 +337,7 @@ export function createLocalPhoenixTraceSink({
       recordTraceStatus({
         repoRoot,
         runId: run.run_id,
-        domainId: run.domain_id,
+        teamRef: run.team_ref,
         workspaceId: run.workspace_id,
         teamId: run.team_id,
         wakeId: run.wake_id,
@@ -582,14 +582,14 @@ export async function runLocalPhoenixTracePreflight({
   now = () => new Date(),
   idFactory = newTraceId,
   onProgress = () => {},
-  domainContext = null,
+  teamContext = null,
 } = {}) {
   if (
-    !domainContext?.trace?.domain_id ||
-    !domainContext?.trace?.workspace_id ||
-    !domainContext?.trace?.team_id
+    !teamContext?.trace?.team_ref ||
+    !teamContext?.trace?.workspace_id ||
+    !teamContext?.trace?.team_id
   ) {
-    throw new Error("Local Phoenix preflight requires a resolved DomainContext. Run npm run init or pass --domain after setup.");
+    throw new Error("Local Phoenix preflight requires a resolved TeamContext. Run npm run init or pass --team after setup.");
   }
   const observedAt = now().toISOString();
   const runId = `phoenix-preflight-${observedAt.replace(/[^0-9TZ]/g, "")}`;
@@ -603,9 +603,9 @@ export async function runLocalPhoenixTracePreflight({
   });
   const session = await sink.startRun({
     runId,
-    workspaceId: domainContext.trace.workspace_id,
+    workspaceId: teamContext.trace.workspace_id,
     sourceEvent: { id: "local-phoenix-preflight" },
-    domainContext,
+    teamContext,
   });
   try {
     const trace = {
@@ -682,10 +682,10 @@ export function buildPhoenixOtlpTraceExport({
         attributes: otlpAttributes({
           "openinference.span.kind": "CHAIN",
           "teami.run_id": run?.run_id || trace?.attributes?.run_id,
-          "teami.domain_id":
-            run?.domain_id ||
-            trace?.attributes?.["teami.domain_id"] ||
-            trace?.attributes?.domain_id,
+          "teami.team_ref":
+            run?.team_ref ||
+            trace?.attributes?.["teami.team_ref"] ||
+            trace?.attributes?.team_ref,
           "teami.behavior_repo_id":
             run?.behavior_repo_id ||
             trace?.attributes?.["teami.behavior_repo_id"] ||
@@ -1165,7 +1165,7 @@ function recordTraceFailure({ repoRoot, session, status, reason, now, wake = nul
   recordTraceStatus({
     repoRoot,
     runId: session.run?.run_id,
-    domainId: session.run?.domain_id,
+    teamRef: session.run?.team_ref,
     workspaceId: session.run?.workspace_id,
     teamId: session.run?.team_id,
     wakeId: session.run?.wake_id || wake?.id || null,
@@ -1187,7 +1187,7 @@ function recordTraceFailure({ repoRoot, session, status, reason, now, wake = nul
     observedAt: now().toISOString(),
     record: {
       run_id: session.run?.run_id,
-      domain_id: session.run?.domain_id,
+      team_ref: session.run?.team_ref,
       wake_id: session.run?.wake_id || wake?.id || null,
       resource: session.run?.resource || null,
       github_behavior_repo_id: session.run?.github_behavior_repo_id || null,
@@ -1297,14 +1297,14 @@ function withTimeout(promise, timeoutMs, reason) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function runRecordFromWake({ wake, sourceEvent, runId, workspaceId, domainContext = null, repoRoot = process.cwd() }) {
-  const domainTrace = domainContext?.trace || {};
+function runRecordFromWake({ wake, sourceEvent, runId, workspaceId, teamContext = null, repoRoot = process.cwd() }) {
+  const teamTrace = teamContext?.trace || {};
   return {
     run_id: runId,
-    domain_id: domainTrace.domain_id || wake?.domain_id || null,
-    workspace_id: domainTrace.workspace_id || wake?.workspace_id || workspaceId || null,
-    team_id: domainTrace.team_id || wake?.team_id || null,
-    behavior_repo_id: domainTrace.behavior_repo_id || behaviorRepoIdForRepoRoot(repoRoot),
+    team_ref: teamTrace.team_ref || wake?.team_ref || null,
+    workspace_id: teamTrace.workspace_id || wake?.workspace_id || workspaceId || null,
+    team_id: teamTrace.team_id || wake?.team_id || null,
+    behavior_repo_id: teamTrace.behavior_repo_id || behaviorRepoIdForRepoRoot(repoRoot),
     workflow_type: wake?.workflow_type || "decomposition",
     wake_id: wake?.id || null,
     object_id: wake?.object_id || null,
@@ -1317,7 +1317,7 @@ function runRecordFromWake({ wake, sourceEvent, runId, workspaceId, domainContex
 
 function runRecordFromAgent({
   runId,
-  domainId,
+  teamRef,
   workflowType,
   agentRole,
   resource,
@@ -1333,7 +1333,7 @@ function runRecordFromAgent({
   });
   return {
     run_id: runId,
-    domain_id: domainId || null,
+    team_ref: teamRef || null,
     workspace_id: null,
     team_id: null,
     behavior_repo_id: behaviorRepoIdForRepoRoot(repoRoot),

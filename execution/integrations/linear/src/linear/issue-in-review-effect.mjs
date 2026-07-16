@@ -179,7 +179,7 @@ function teamIdFromContext(ctx = {}) {
     ctx.teamId,
     ctx.team_id,
     ctx.shape?.team?.id,
-    ctx.domainContext?.linear?.teamId,
+    ctx.teamContext?.linear?.teamId,
     ctx.issue?.teamId,
     ctx.issue?.team?.id,
     ctx.linearIssue?.teamId,

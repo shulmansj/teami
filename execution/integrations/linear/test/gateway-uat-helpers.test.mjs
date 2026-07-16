@@ -6,9 +6,9 @@ import {
   cleanupProjects,
   DEFAULT_CONSECUTIVE_COMMITS,
   DEFAULT_UAT_PREFIX,
-  NO_LINEAR_DOMAIN_MESSAGE,
+  NO_LINEAR_TEAM_MESSAGE,
   parseGatewayUatArgs,
-  selectUatDomain,
+  selectUatTeam,
 } from "../uat/gateway-uat.mjs";
 
 test("gateway UAT cleanup archives every created issue before its project", async () => {
@@ -68,36 +68,36 @@ test("gateway UAT cleanup leaves the project visible when any issue cannot be ar
   assert.equal(result.results[0].action, "issue_archive_failed");
 });
 
-test("gateway UAT no-domain guard fails before any live Linear setup", () => {
+test("gateway UAT no-team guard fails before any live Linear setup", () => {
   assert.throws(
-    () => selectUatDomain({ registry: null }),
-    (error) => error.message === NO_LINEAR_DOMAIN_MESSAGE && error.code === "no_linear_domain",
+    () => selectUatTeam({ registry: null }),
+    (error) => error.message === NO_LINEAR_TEAM_MESSAGE && error.code === "no_linear_team",
   );
   assert.throws(
-    () => selectUatDomain({ registry: { domains: [{ id: "paused", status: "paused" }] } }),
-    (error) => error.message === NO_LINEAR_DOMAIN_MESSAGE && error.code === "no_linear_domain",
+    () => selectUatTeam({ registry: { teams: [{ id: "paused", status: "paused" }] } }),
+    (error) => error.message === NO_LINEAR_TEAM_MESSAGE && error.code === "no_linear_team",
   );
 });
 
-test("gateway UAT domain selection requires an explicit disposable domain when ambiguous", () => {
+test("gateway UAT team selection requires an explicit disposable team when ambiguous", () => {
   const registry = {
-    domains: [
+    teams: [
       { id: "alpha", status: "active" },
       { id: "beta", status: "active" },
     ],
   };
 
-  assert.equal(selectUatDomain({ registry, domainId: "beta" }).id, "beta");
+  assert.equal(selectUatTeam({ registry, teamRef: "beta" }).id, "beta");
   assert.throws(
-    () => selectUatDomain({ registry }),
-    /multiple Linear domains configured \(alpha, beta\) - pass --domain <domain_id>/,
+    () => selectUatTeam({ registry }),
+    /multiple Linear teams configured \(alpha, beta\) - pass --team <team_ref>/,
   );
 });
 
 test("gateway UAT args accept flags and env for disposable team selection", () => {
   const parsed = parseGatewayUatArgs([
-    "--domain",
-    "uat-domain",
+    "--team",
+    "uat-team",
     "--prefix",
     "AF-LIVE-UAT",
     "--consecutive",
@@ -109,7 +109,7 @@ test("gateway UAT args accept flags and env for disposable team selection", () =
     "--keep-artifacts",
   ], {});
 
-  assert.equal(parsed.domainId, "uat-domain");
+  assert.equal(parsed.teamRef, "uat-team");
   assert.equal(parsed.prefix, "AF-LIVE-UAT");
   assert.equal(parsed.consecutive, 3);
   assert.equal(parsed.pollIntervalMs, 2500);
@@ -117,10 +117,10 @@ test("gateway UAT args accept flags and env for disposable team selection", () =
   assert.equal(parsed.keepArtifacts, true);
 
   const fromEnv = parseGatewayUatArgs([], {
-    TEAMI_UAT_DOMAIN: "env-domain",
+    TEAMI_UAT_TEAM: "env-team",
     TEAMI_UAT_PREFIX: "ENV-UAT",
   });
-  assert.equal(fromEnv.domainId, "env-domain");
+  assert.equal(fromEnv.teamRef, "env-team");
   assert.equal(fromEnv.prefix, "ENV-UAT");
   assert.equal(fromEnv.consecutive, DEFAULT_CONSECUTIVE_COMMITS);
   assert.equal(parseGatewayUatArgs([], {}).prefix, DEFAULT_UAT_PREFIX);
@@ -128,7 +128,7 @@ test("gateway UAT args accept flags and env for disposable team selection", () =
 
 test("gateway UAT replay classifier rejects fresh redecompose and uncleared intents", () => {
   const pending = {
-    domainId: "support",
+    teamRef: "support",
     projectId: "project-1",
     runId: "run-1",
     artifactKind: "commit",

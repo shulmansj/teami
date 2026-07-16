@@ -193,7 +193,7 @@ function writeRunArtifactFixture(runStoreDir, runId, {
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
     kind: "commit",
     run_id: runId,
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     runtime_assignments: { pm: { runtime: "claude" } },

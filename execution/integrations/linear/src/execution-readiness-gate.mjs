@@ -9,7 +9,7 @@ export const EXECUTION_READINESS_EVIDENCE_KEYS = Object.freeze([
   "agent_tool_environment_isolation",
   "os_process_isolation",
   "recoverable_git_effects",
-  "domain_confinement",
+  "team_confinement",
   "no_push_on_safety_failure",
 ]);
 export const PRODUCT_REPO_EXECUTION_DISABLED_REASON = "product_repo_execution_not_released";

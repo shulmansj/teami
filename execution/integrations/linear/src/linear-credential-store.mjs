@@ -3,7 +3,17 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import {
+  fsyncDirectoryAfterRename,
+  renameWithRetry,
+} from "../../../engine/atomic-file.mjs";
+import { acquireExclusiveFileLock } from "../../../engine/exclusive-file-lock.mjs";
 import { teamiHomePaths } from "./app-home.mjs";
+import {
+  legacyFileCredentialPath,
+  legacyTeamCredentialTargetsForConfig,
+} from "./legacy-team-state-migration.mjs";
+import { readTeamRegistry, teamRegistryPath } from "./team-registry.mjs";
 
 const DEFAULT_FILE_CREDENTIAL_NAME = "linear-oauth-token.json";
 const CREDENTIAL_ACCOUNT = "refresh_token";
@@ -56,31 +66,51 @@ if ($action -eq "read") {
 
 export function createLinearCredentialStore({
   config,
-  domainContext = null,
-  domainId = null,
+  teamContext = null,
+  teamRef = null,
   workspaceId = null,
   target = null,
   repoRoot = process.cwd(),
   home = undefined,
   platform = process.platform,
   run = spawnSync,
+  promoteLegacyOnRead = true,
 } = {}) {
   const oauth = config?.linear?.oauth;
   if (!oauth) throw new Error("Linear OAuth config is required for credential storage.");
 
-  const identity = credentialIdentity({ domainContext, domainId, workspaceId });
+  const identity = credentialIdentity({ teamContext, teamRef, workspaceId });
   const resolvedTarget = target || credentialTargetForConfig(config, identity);
+  const resolvedHome = teamiHomePaths({ home }).home;
+  const promotionLockPath = credentialPromotionLockPath({
+    home: resolvedHome,
+    target: resolvedTarget,
+  });
   const legacyTargets = target
     ? []
     : legacyCredentialTargetsForConfig(config, {
         repoRoot,
-        domainIdentity: identity,
+        teamIdentity: identity,
         currentTarget: resolvedTarget,
       });
   if (oauth.credential_storage === "file") {
+    const filePath = credentialFilePath({ oauth, teamRef: identity.teamRef, home });
     return createFileCredentialStore({
-      filePath: credentialFilePath({ oauth, domainId: identity.domainId, home }),
+      filePath,
+      safeRoot: resolvedHome,
+      promotionLockPath,
+      legacyFilePaths:
+        !oauth.credential_file && identity.teamRef
+          ? [
+              legacyFileCredentialPath({
+                home: resolvedHome,
+                teamRef: identity.teamRef,
+                credentialName: DEFAULT_FILE_CREDENTIAL_NAME,
+              }),
+            ]
+          : [],
       target: resolvedTarget,
+      promoteLegacyOnRead,
     });
   }
 
@@ -88,19 +118,30 @@ export function createLinearCredentialStore({
     throw new Error(`Unsupported Linear OAuth credential storage: ${oauth.credential_storage}`);
   }
 
-  return createOsCredentialStore({ platform, run, target: resolvedTarget, legacyTargets });
+  return createOsCredentialStore({
+    platform,
+    run,
+    target: resolvedTarget,
+    legacyTargets,
+    promotionLockPath,
+    safeRoot: resolvedHome,
+    promoteLegacyOnRead,
+    onTokenSetReady: target || !promoteLegacyOnRead
+      ? null
+      : () => cleanupSharedBootstrapIfSafe({ config, repoRoot, home, platform, run }),
+  });
 }
 
-export function credentialTargetForConfig(config, domainIdentity = {}, maybeDomainIdentity = null) {
+export function credentialTargetForConfig(config, teamIdentity = {}, maybeTeamIdentity = null) {
   const oauth = config?.linear?.oauth || {};
   const identityInput =
-    typeof domainIdentity === "string" ? maybeDomainIdentity || {} : domainIdentity;
+    typeof teamIdentity === "string" ? maybeTeamIdentity || {} : teamIdentity;
   const identityFields = requireCredentialIdentity(identityInput, "Linear OAuth credential target");
   const identity = [
     oauth.client_id || "",
     oauth.redirect_uri || "",
     `workspace_id:${identityFields.workspaceId}`,
-    `domain_id:${identityFields.domainId}`,
+    `team_ref:${identityFields.teamRef}`,
   ].join("\n");
   const digest = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 24);
   return `AgenticFactoryLinearOAuth:${digest}`;
@@ -122,86 +163,151 @@ export function isLegacyCredentialTargetForConfig(target, config, repoRoot = pro
   return target === legacyCredentialTargetForConfig(config, repoRoot);
 }
 
-function legacyDomainCredentialTargetForConfig(config, repoRoot = process.cwd(), domainIdentity = {}) {
-  const oauth = config?.linear?.oauth || {};
-  const identityFields = requireCredentialIdentity(
-    domainIdentity,
-    "Legacy Linear OAuth credential target",
-  );
-  const identity = [
-    "teami-linear-oauth",
-    oauth.client_id || "",
-    oauth.redirect_uri || "",
-    path.resolve(repoRoot),
-    `workspace_id:${identityFields.workspaceId}`,
-    `domain_id:${identityFields.domainId}`,
-  ].join("\n");
-  const digest = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 24);
-  return `AgenticFactoryLinearOAuth:${digest}`;
-}
-
 function legacyCredentialTargetsForConfig(
   config,
-  { repoRoot = process.cwd(), domainIdentity = {}, currentTarget = null } = {},
+  { repoRoot = process.cwd(), teamIdentity = {}, currentTarget = null } = {},
 ) {
+  // Exhaustive shipped history through the Team terminology release:
+  // released Team-scoped, older checkout+Team-scoped, then checkout bootstrap.
   const targets = [];
-  const identity = credentialIdentity(domainIdentity);
-  if (identity.domainId && identity.workspaceId) {
-    targets.push(legacyDomainCredentialTargetForConfig(config, repoRoot, identity));
+  const identity = credentialIdentity(teamIdentity);
+  if (identity.teamRef && identity.workspaceId) {
+    targets.push(
+      ...legacyTeamCredentialTargetsForConfig(config, {
+        repoRoot,
+        teamRef: identity.teamRef,
+        workspaceId: identity.workspaceId,
+      }).map((target) => ({ target, deleteAfterPromotion: true })),
+    );
   }
-  targets.push(legacyCredentialTargetForConfig(config, repoRoot));
-  return uniqueCredentialTargets(targets).filter((candidate) => candidate !== currentTarget);
+  // The oldest bootstrap target was checkout-scoped rather than Team-scoped.
+  // Multiple Teams can still depend on it, so promotion must never delete it.
+  targets.push({
+    target: legacyCredentialTargetForConfig(config, repoRoot),
+    deleteAfterPromotion: false,
+  });
+  return uniqueLegacyCredentialTargets(targets)
+    .filter((candidate) => candidate.target !== currentTarget);
 }
 
-export function createFileCredentialStore({ filePath, target }) {
+export function createFileCredentialStore({
+  filePath,
+  legacyFilePaths = [],
+  target,
+  safeRoot = path.dirname(filePath),
+  promotionLockPath = `${filePath}.promotion.lock`,
+  acquireLock = acquireExclusiveFileLock,
+  promoteLegacyOnRead = true,
+}) {
   const raw = createRawFileCredentialStore({
     filePath,
+    safeRoot,
     target,
     warning:
       "Linear OAuth credential_storage=file stores a local refresh token in an ignored file. Use only for local testing when OS credential storage is unavailable.",
   });
+  const legacyStores = uniqueCredentialTargets(legacyFilePaths).map((legacyFilePath) => ({
+    store: createRawFileCredentialStore({
+      filePath: legacyFilePath,
+      safeRoot,
+      target,
+      warning: raw.warning,
+    }),
+    deleteAfterPromotion: true,
+  }));
+  let cleanupChecked = false;
   return {
     kind: "file",
     target,
     warning: raw.warning,
 
     async readTokenSet() {
-      return parseTokenSecret(await raw.readSecret());
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, async () => {
+        const current = parseTokenSecret(await raw.readSecret());
+        if (!promoteLegacyOnRead) return current;
+        if (current) {
+          if (!cleanupChecked) {
+            cleanupChecked = true;
+            await cleanSafeLegacyDuplicates({ current, legacyStores });
+          }
+          return current;
+        }
+        const migrated = await migrateLegacyCredentialForRead({ raw, legacyStores });
+        if (migrated) cleanupChecked = true;
+        return migrated;
+      });
     },
 
     async writeTokenSet(tokenSet) {
-      await raw.writeSecret(serializeTokenSet(tokenSet));
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => raw.writeSecret(serializeTokenSet(tokenSet)));
+    },
+
+    async writeTokenSetIfAbsentOrEqual(tokenSet) {
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => writeTokenSetWithoutOverwrite({ raw, legacyStores, tokenSet }));
+    },
+
+    async replaceTokenSetIfEqual(expectedTokenSet, tokenSet) {
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => replaceMatchingTokenSet({ raw, expectedTokenSet, tokenSet }));
+    },
+
+    async deleteTokenSetIfEqual(tokenSet) {
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => deleteMatchingTokenSet({ raw, tokenSet }));
     },
 
     async deleteTokenSet() {
-      await raw.deleteSecret();
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, async () => {
+        await raw.deleteSecret();
+        for (const legacy of legacyStores) await legacy.store.deleteSecret();
+      });
     },
   };
 }
 
-export function createRawFileCredentialStore({ filePath, target, warning = null }) {
+export function createRawFileCredentialStore({
+  filePath,
+  target,
+  warning = null,
+  safeRoot = path.dirname(filePath),
+}) {
   return {
     kind: "file",
     target,
     warning,
 
     async readSecret() {
-      if (!fs.existsSync(filePath)) return null;
-      return fs.readFileSync(filePath, "utf8");
+      return readCredentialFileSafely({ filePath, safeRoot });
     },
 
     async writeSecret(secret) {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(filePath, secret, { encoding: "utf8", mode: 0o600 });
-      try {
-        fs.chmodSync(filePath, 0o600);
-      } catch {
-        // Best effort; Windows does not honor POSIX modes the same way.
-      }
+      writeCredentialFileAtomically({ filePath, safeRoot, secret });
     },
 
     async deleteSecret() {
-      if (fs.existsSync(filePath)) fs.rmSync(filePath, { force: true });
+      deleteCredentialFileSafely({ filePath, safeRoot });
     },
   };
 }
@@ -211,40 +317,410 @@ export function createOsCredentialStore({
   run = spawnSync,
   target,
   legacyTargets = [],
+  onTokenSetReady = null,
+  promotionLockPath = null,
+  safeRoot = null,
+  acquireLock = acquireExclusiveFileLock,
+  promoteLegacyOnRead = true,
 }) {
   const raw = createRawOsCredentialStore({ platform, run, target });
-  const legacyStores = uniqueCredentialTargets(legacyTargets).map((legacyTarget) =>
-    createRawOsCredentialStore({ platform, run, target: legacyTarget }),
-  );
+  const legacyStores = uniqueLegacyCredentialTargets(legacyTargets).map((legacy) => ({
+    store: createRawOsCredentialStore({ platform, run, target: legacy.target }),
+    deleteAfterPromotion: legacy.deleteAfterPromotion,
+  }));
+  let cleanupChecked = false;
+  let tokenReadyChecked = false;
+  const notifyTokenReady = async () => {
+    if (tokenReadyChecked) return;
+    tokenReadyChecked = true;
+    await onTokenSetReady?.();
+  };
   return {
     kind: raw.kind,
     target,
 
     async readTokenSet() {
-      const tokenSet = parseTokenSecret(await raw.readSecret());
-      if (tokenSet) return tokenSet;
-      return migrateLegacyCredentialForRead({ raw, legacyStores });
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, async () => {
+        const tokenSet = parseTokenSecret(await raw.readSecret());
+        if (!promoteLegacyOnRead) return tokenSet;
+        if (tokenSet) {
+          if (!cleanupChecked) {
+            cleanupChecked = true;
+            await cleanSafeLegacyDuplicates({ current: tokenSet, legacyStores });
+          }
+          await notifyTokenReady();
+          return tokenSet;
+        }
+        const migrated = await migrateLegacyCredentialForRead({ raw, legacyStores });
+        if (migrated) cleanupChecked = true;
+        if (migrated) await notifyTokenReady();
+        return migrated;
+      });
     },
 
     async writeTokenSet(tokenSet) {
-      await raw.writeSecret(serializeTokenSet(tokenSet));
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => raw.writeSecret(serializeTokenSet(tokenSet)));
+    },
+
+    async writeTokenSetIfAbsentOrEqual(tokenSet) {
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => writeTokenSetWithoutOverwrite({ raw, legacyStores, tokenSet }));
+    },
+
+    async replaceTokenSetIfEqual(expectedTokenSet, tokenSet) {
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => replaceMatchingTokenSet({ raw, expectedTokenSet, tokenSet }));
+    },
+
+    async deleteTokenSetIfEqual(tokenSet) {
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, () => deleteMatchingTokenSet({ raw, tokenSet }));
     },
 
     async deleteTokenSet() {
-      await raw.deleteSecret();
+      return withCredentialPromotionLock({
+        promotionLockPath,
+        safeRoot,
+        acquireLock,
+      }, async () => {
+        await raw.deleteSecret();
+        for (const legacy of legacyStores) {
+          if (legacy.deleteAfterPromotion) await legacy.store.deleteSecret();
+        }
+      });
     },
   };
 }
 
+async function cleanupSharedBootstrapIfSafe({
+  config,
+  repoRoot,
+  home,
+  platform,
+  run,
+}) {
+  const resolvedHome = teamiHomePaths({ home }).home;
+  const bootstrapStore = createLinearCredentialStore({
+    config,
+    repoRoot,
+    home: resolvedHome,
+    platform,
+    run,
+    target: legacyCredentialTargetForConfig(config, repoRoot),
+  });
+  let bootstrapToken;
+  try {
+    bootstrapToken = await bootstrapStore.readTokenSet();
+    if (!bootstrapToken) return false;
+  } catch {
+    return false;
+  }
+  if (!fs.existsSync(teamRegistryPath(resolvedHome))) return false;
+  let registry;
+  try {
+    registry = readTeamRegistry({ home: resolvedHome });
+  } catch {
+    return false;
+  }
+  const identities = (registry?.teams || [])
+    .filter((team) => team.status !== "removed" && team.linear?.workspace_id)
+    .map((team) => ({ teamRef: team.id, workspaceId: team.linear.workspace_id }));
+  if (identities.length === 0) return false;
+
+  try {
+    for (const identity of identities) {
+      const currentTarget = credentialTargetForConfig(config, identity);
+      const currentStore = createRawOsCredentialStore({ platform, run, target: currentTarget });
+      if (!parseTokenSecret(await currentStore.readSecret())) return false;
+    }
+    const deleted = await bootstrapStore.deleteTokenSetIfEqual(bootstrapToken);
+    return deleted?.ok === true;
+  } catch {
+    // Credential cleanup cannot turn a working Team into an authorization failure.
+    return false;
+  }
+}
+
 async function migrateLegacyCredentialForRead({ raw, legacyStores }) {
-  for (const legacyStore of legacyStores) {
-    const tokenSet = parseTokenSecret(await legacyStore.readSecret());
+  for (const legacy of legacyStores) {
+    const tokenSet = parseTokenSecret(await legacy.store.readSecret());
     if (!tokenSet) continue;
     await raw.writeSecret(serializeTokenSet(tokenSet));
-    await legacyStore.deleteSecret();
+    const readBack = parseTokenSecret(await raw.readSecret());
+    if (!sameTokenSet(readBack, tokenSet)) {
+      throw new Error("Linear OAuth credential promotion read-back validation failed.");
+    }
+    if (legacy.deleteAfterPromotion) await legacy.store.deleteSecret();
     return tokenSet;
   }
   return null;
+}
+
+async function cleanSafeLegacyDuplicates({ current, legacyStores }) {
+  for (const legacy of legacyStores) {
+    if (!legacy.deleteAfterPromotion) continue;
+    const prior = parseTokenSecret(await legacy.store.readSecret());
+    if (prior && sameTokenSet(prior, current)) await legacy.store.deleteSecret();
+  }
+}
+
+function sameTokenSet(first, second) {
+  if (!first || !second) return false;
+  return serializeTokenSet(first) === serializeTokenSet(second);
+}
+
+async function writeTokenSetWithoutOverwrite({ raw, legacyStores, tokenSet }) {
+  let current = parseTokenSecret(await raw.readSecret());
+  if (!current) current = await migrateLegacyCredentialForRead({ raw, legacyStores });
+  if (current) {
+    return sameTokenSet(current, tokenSet)
+      ? { ok: true, status: "already_current" }
+      : { ok: false, status: "conflict" };
+  }
+  await raw.writeSecret(serializeTokenSet(tokenSet));
+  const readBack = parseTokenSecret(await raw.readSecret());
+  if (!sameTokenSet(readBack, tokenSet)) {
+    throw new Error("Linear OAuth credential promotion read-back validation failed.");
+  }
+  return { ok: true, status: "written" };
+}
+
+async function deleteMatchingTokenSet({ raw, tokenSet }) {
+  const current = parseTokenSecret(await raw.readSecret());
+  if (!current) return { ok: true, status: "absent" };
+  if (!sameTokenSet(current, tokenSet)) return { ok: false, status: "conflict" };
+  await raw.deleteSecret();
+  const readBack = parseTokenSecret(await raw.readSecret());
+  if (readBack) throw new Error("Linear OAuth credential deletion read-back validation failed.");
+  return { ok: true, status: "deleted" };
+}
+
+async function replaceMatchingTokenSet({ raw, expectedTokenSet, tokenSet }) {
+  const current = parseTokenSecret(await raw.readSecret());
+  if (!sameTokenSet(current, expectedTokenSet)) return { ok: false, status: "conflict" };
+  await raw.writeSecret(serializeTokenSet(tokenSet));
+  const readBack = parseTokenSecret(await raw.readSecret());
+  if (!sameTokenSet(readBack, tokenSet)) {
+    throw new Error("Linear OAuth credential replacement read-back validation failed.");
+  }
+  return { ok: true, status: "replaced" };
+}
+
+async function withCredentialPromotionLock(
+  { promotionLockPath, safeRoot, acquireLock },
+  action,
+) {
+  if (!promotionLockPath) return action();
+  let lock;
+  try {
+    if (safeRoot) ensureSafeCredentialParent({
+      filePath: promotionLockPath,
+      safeRoot,
+      create: true,
+    });
+    lock = acquireLock({
+      lockPath: promotionLockPath,
+      purpose: "linear_credential_update",
+    });
+  } catch (error) {
+    throw publicCredentialFileError(error);
+  }
+  if (!lock.ok) {
+    throw new Error("Linear OAuth credential is being updated; retry after it finishes.");
+  }
+  try {
+    return await action();
+  } finally {
+    lock.release();
+  }
+}
+
+function credentialPromotionLockPath({ home, target }) {
+  const digest = crypto.createHash("sha256").update(String(target)).digest("hex");
+  return path.join(home, "credentials", ".promotion-locks", `${digest}.lock`);
+}
+
+function readCredentialFileSafely({ filePath, safeRoot }) {
+  try {
+    if (!ensureSafeCredentialParent({ filePath, safeRoot, create: false })) return null;
+    const before = lstatCredentialEntry(filePath);
+    if (!before) return null;
+    assertRegularCredentialFile(before);
+    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+    const fd = fs.openSync(filePath, flags);
+    try {
+      const opened = fs.fstatSync(fd);
+      assertSameCredentialFile(before, opened);
+      const contents = fs.readFileSync(fd, "utf8");
+      const after = fs.fstatSync(fd);
+      assertSameCredentialFile(opened, after);
+      return contents;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    throw publicCredentialFileError(error);
+  }
+}
+
+function writeCredentialFileAtomically({ filePath, safeRoot, secret }) {
+  try {
+    ensureSafeCredentialParent({ filePath, safeRoot, create: true });
+    const existing = lstatCredentialEntry(filePath);
+    if (existing) assertRegularCredentialFile(existing);
+    const directory = path.dirname(filePath);
+    const tempPath = path.join(
+      directory,
+      `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+    );
+    let fd = null;
+    try {
+      fd = fs.openSync(tempPath, "wx", 0o600);
+      fs.writeFileSync(fd, secret, "utf8");
+      fs.fsyncSync(fd);
+      const tempStat = fs.fstatSync(fd);
+      assertRegularCredentialFile(tempStat);
+      fs.closeSync(fd);
+      fd = null;
+      try {
+        fs.chmodSync(tempPath, 0o600);
+      } catch {
+        // Best effort; Windows does not honor POSIX modes the same way.
+      }
+      renameWithRetry(tempPath, filePath);
+      try {
+        fs.chmodSync(filePath, 0o600);
+      } catch {
+        // Best effort; Windows does not honor POSIX modes the same way.
+      }
+      const committedStat = fs.lstatSync(filePath);
+      assertRegularCredentialFile(committedStat);
+      const committedFd = fs.openSync(
+        filePath,
+        fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0),
+      );
+      try {
+        assertSameCredentialFile(committedStat, fs.fstatSync(committedFd));
+        fs.fsyncSync(committedFd);
+        assertSameCredentialFile(committedStat, fs.fstatSync(committedFd));
+      } finally {
+        fs.closeSync(committedFd);
+      }
+      fsyncDirectoryAfterRename(directory, { committedFilePath: filePath });
+    } finally {
+      if (fd !== null) fs.closeSync(fd);
+      fs.rmSync(tempPath, { force: true });
+    }
+    if (readCredentialFileSafely({ filePath, safeRoot }) !== secret) {
+      throw credentialFileError("Linear OAuth credential file read-back validation failed.");
+    }
+  } catch (error) {
+    throw publicCredentialFileError(error);
+  }
+}
+
+function deleteCredentialFileSafely({ filePath, safeRoot }) {
+  try {
+    if (!ensureSafeCredentialParent({ filePath, safeRoot, create: false })) return;
+    const stat = lstatCredentialEntry(filePath);
+    if (!stat) return;
+    assertRegularCredentialFile(stat);
+    fs.rmSync(filePath, { force: true });
+    fsyncDirectoryAfterRename(path.dirname(filePath));
+  } catch (error) {
+    throw publicCredentialFileError(error);
+  }
+}
+
+function ensureSafeCredentialParent({ filePath, safeRoot, create }) {
+  const root = path.resolve(safeRoot || path.dirname(filePath));
+  const target = path.resolve(filePath);
+  const relative = path.relative(root, target);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw credentialFileError("Linear OAuth credential file is outside its allowed local directory.");
+  }
+  let rootStat = lstatCredentialEntry(root);
+  if (!rootStat) {
+    if (!create) return false;
+    fs.mkdirSync(root, { recursive: true });
+    rootStat = lstatCredentialEntry(root);
+  }
+  assertPlainCredentialDirectory(rootStat);
+  const parentRelative = path.relative(root, path.dirname(target));
+  let current = root;
+  for (const segment of parentRelative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    let stat = lstatCredentialEntry(current);
+    if (!stat) {
+      if (!create) return false;
+      fs.mkdirSync(current);
+      stat = lstatCredentialEntry(current);
+    }
+    assertPlainCredentialDirectory(stat);
+  }
+  return true;
+}
+
+function lstatCredentialEntry(entryPath) {
+  try {
+    return fs.lstatSync(entryPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function assertPlainCredentialDirectory(stat) {
+  if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw credentialFileError("Linear OAuth credential directory is not a supported local directory.");
+  }
+}
+
+function assertRegularCredentialFile(stat) {
+  if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+    throw credentialFileError("Linear OAuth credential file is not a supported regular file.");
+  }
+}
+
+function assertSameCredentialFile(expected, actual) {
+  assertRegularCredentialFile(actual);
+  if (
+    expected.dev !== actual.dev
+    || expected.ino !== actual.ino
+    || expected.size !== actual.size
+    || expected.mtimeMs !== actual.mtimeMs
+    || expected.ctimeMs !== actual.ctimeMs
+  ) {
+    throw credentialFileError("Linear OAuth credential file changed while it was being read.");
+  }
+}
+
+class CredentialFileError extends Error {}
+
+function credentialFileError(message, cause = undefined) {
+  return new CredentialFileError(message, cause === undefined ? undefined : { cause });
+}
+
+function publicCredentialFileError(error) {
+  if (error instanceof CredentialFileError) return error;
+  return credentialFileError("Linear OAuth credential file could not be accessed safely.", error);
 }
 
 export function createRawOsCredentialStore({ platform = process.platform, run = spawnSync, target }) {
@@ -460,7 +936,7 @@ function normalizeTokenSet(tokenSet) {
   };
 }
 
-function credentialFilePath({ oauth, domainId, home }) {
+function credentialFilePath({ oauth, teamRef, home }) {
   const paths = teamiHomePaths({ home });
   const pathApi = pathApiForHome(paths.home);
   const credentialsDir = pathApi.join(paths.home, "credentials");
@@ -470,20 +946,20 @@ function credentialFilePath({ oauth, domainId, home }) {
     }
     return pathApi.join(credentialsDir, oauth.credential_file);
   }
-  if (domainId) {
-    return pathApi.join(credentialsDir, "domains", domainId, DEFAULT_FILE_CREDENTIAL_NAME);
+  if (teamRef) {
+    return pathApi.join(credentialsDir, "teams", teamRef, DEFAULT_FILE_CREDENTIAL_NAME);
   }
   return pathApi.join(credentialsDir, DEFAULT_FILE_CREDENTIAL_NAME);
 }
 
 function credentialIdentity(input = {}) {
-  const source = input?.domainContext || input?.context || input || {};
+  const source = input?.teamContext || input?.context || input || {};
   return {
-    domainId:
-      input.domainId ||
-      source.domainId ||
-      source.domain_id ||
-      source.trace?.domain_id ||
+    teamRef:
+      input.teamRef ||
+      source.teamRef ||
+      source.team_ref ||
+      source.trace?.team_ref ||
       null,
     workspaceId:
       input.workspaceId ||
@@ -499,7 +975,7 @@ function requireCredentialIdentity(input = {}, label) {
   const identity = credentialIdentity(input);
   const missing = [];
   if (!identity.workspaceId) missing.push("workspace_id");
-  if (!identity.domainId) missing.push("domain_id");
+  if (!identity.teamRef) missing.push("team_ref");
   if (missing.length > 0) {
     throw new Error(`${label} requires ${missing.join(" and ")}.`);
   }
@@ -508,6 +984,23 @@ function requireCredentialIdentity(input = {}, label) {
 
 function uniqueCredentialTargets(targets) {
   return [...new Set(targets.filter((target) => typeof target === "string" && target.trim() !== ""))];
+}
+
+function uniqueLegacyCredentialTargets(targets) {
+  const unique = new Map();
+  for (const entry of targets) {
+    const normalized = typeof entry === "string"
+      ? { target: entry, deleteAfterPromotion: true }
+      : entry;
+    if (typeof normalized?.target !== "string" || normalized.target.trim() === "") continue;
+    const existing = unique.get(normalized.target);
+    unique.set(normalized.target, {
+      target: normalized.target,
+      deleteAfterPromotion:
+        Boolean(normalized.deleteAfterPromotion) && (existing?.deleteAfterPromotion ?? true),
+    });
+  }
+  return [...unique.values()];
 }
 
 function pathApiForHome(home) {

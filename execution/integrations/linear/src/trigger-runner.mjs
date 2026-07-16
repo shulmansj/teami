@@ -77,7 +77,7 @@ import {
 import {
   selectEffectsForDisposition,
 } from "./workflows/review/effect-selector.mjs";
-import { resolveWakeDomainContext } from "./domain-resolver.mjs";
+import { resolveWakeTeamContext } from "./team-resolver.mjs";
 import { defaultRunGit } from "../../git/git-repo-materializer.mjs";
 import { applyCommitEffects } from "../../../engine/commit-effects.mjs";
 import {
@@ -119,10 +119,10 @@ export async function runDecompositionOrchestrator(options = {}) {
 
 const REQUIRED_CAPABILITIES = DECOMPOSITION_REQUIRED_CAPABILITIES;
 
-export const PRE_DOMAIN_CACHE_REPAIR_REASON = "pre_domain_cache_requires_reinit";
-export const PRE_DOMAIN_CACHE_REPAIR_HINT = `Run ${formatCommand("init")} or ${formatCommand("reset")} to write a per-domain Linear cache.`;
-export const DOMAIN_CONTEXT_REQUIRED_REASON = "domain_context_required";
-export const DOMAIN_REGISTRY_REQUIRED_REASON = "domain_registry_required";
+export const PRE_TEAM_CACHE_REPAIR_REASON = "pre_team_cache_requires_reinit";
+export const PRE_TEAM_CACHE_REPAIR_HINT = `Run ${formatCommand("init")} or ${formatCommand("reset")} to write a per-team Linear cache.`;
+export const TEAM_CONTEXT_REQUIRED_REASON = "team_context_required";
+export const TEAM_REGISTRY_REQUIRED_REASON = "team_registry_required";
 export const EXECUTION_RUN_DEPS_REQUIRED_REASON = "execution_run_deps_required";
 export const REVIEW_RUN_DEPS_REQUIRED_REASON = "review_run_deps_required";
 export const RESOURCE_TARGET_MISSING_REASON = "resource_target_missing";
@@ -162,7 +162,7 @@ export async function runTriggeredDecomposition(options = {}) {
     idGenerator = defaultRunId,
     traceSink = null,
     spanSink = null,
-    domainContext,
+    teamContext,
     registry,
     claimWebhookIds = null,
     claim: claimedWake = null,
@@ -173,12 +173,12 @@ export async function runTriggeredDecomposition(options = {}) {
     qualityJudge = true,
   } = options;
   if (!store) throw new Error("wake queue store is required.");
-  const servedDomainContext = requireDomainContext(domainContext);
-  if (!registry) throw new Error(`${DOMAIN_REGISTRY_REQUIRED_REASON}: trigger runner requires the domain registry.`);
+  const servedTeamContext = requireTeamContext(teamContext);
+  if (!registry) throw new Error(`${TEAM_REGISTRY_REQUIRED_REASON}: trigger runner requires the team registry.`);
 
   if (!claimedWake) {
     const webhookFilter = claimWebhookIds === null
-      ? [servedDomainContext.linear.webhookId].filter(Boolean)
+      ? [servedTeamContext.linear.webhookId].filter(Boolean)
       : claimWebhookIds;
     await store.heartbeat?.({
       runnerId,
@@ -202,11 +202,11 @@ export async function runTriggeredDecomposition(options = {}) {
 
   const claim = claimedWake;
   const { wake, leaseToken } = claim;
-  const resolved = resolveWakeDomainContext({
+  const resolved = resolveWakeTeamContext({
     registry,
     config,
     repoRoot,
-    selector: wakeDomainSelector({ wake, workspaceId }),
+    selector: wakeTeamSelector({ wake, workspaceId }),
   });
   if (!resolved.ok) {
     const quarantined = await store.markWakeRoutingError({
@@ -227,20 +227,20 @@ export async function runTriggeredDecomposition(options = {}) {
     };
   }
 
-  const resolvedDomainContext = resolved.context;
-  if (resolvedDomainContext.domainId !== servedDomainContext.domainId) {
+  const resolvedTeamContext = resolved.context;
+  if (resolvedTeamContext.teamRef !== servedTeamContext.teamRef) {
     const released = await store.releaseWake({
       wakeId: wake.id,
       runnerId,
       leaseToken,
-      reason: "domain_not_served",
+      reason: "team_not_served",
     });
     if (!released.ok) return { status: "failed_closed", reason: released.reason, wake };
     return {
       status: "released",
-      reason: "domain_not_served",
-      resolvedDomainId: resolvedDomainContext.domainId,
-      servedDomainId: servedDomainContext.domainId,
+      reason: "team_not_served",
+      resolvedTeamRef: resolvedTeamContext.teamRef,
+      servedTeamRef: servedTeamContext.teamRef,
       release: released,
       wake: (await store.getWake?.(wake.id)) || wake,
     };
@@ -254,13 +254,13 @@ export async function runTriggeredDecomposition(options = {}) {
     store.triggerEvents?.find((event) => event.id === wake.source_event_id) ||
     null;
   const runId = idGenerator({ wake, sourceEvent });
-  const domainTrace = resolvedDomainContext.trace;
+  const teamTrace = resolvedTeamContext.trace;
   const running = await store.markWakeRunning({
     wakeId: wake.id,
     runnerId,
     leaseToken,
     runId,
-    domainId: resolvedDomainContext.domainId,
+    teamRef: resolvedTeamContext.teamRef,
   });
   if (!running.ok) return { status: "failed_closed", reason: running.reason, wake };
   const renewal = startLeaseRenewal({
@@ -276,7 +276,7 @@ export async function runTriggeredDecomposition(options = {}) {
   let traceSession = null;
 
   try {
-    assertRunStoreWritable({ repoRoot, home, domainId: resolvedDomainContext.domainId, runStoreDir });
+    assertRunStoreWritable({ repoRoot, home, teamRef: resolvedTeamContext.teamRef, runStoreDir });
     await renewal.renewNow();
     traceSession = traceSink
       ? await traceSink.startRun?.({
@@ -286,7 +286,7 @@ export async function runTriggeredDecomposition(options = {}) {
           workspaceId,
           runnerId,
           runnerVersion,
-          domainContext: resolvedDomainContext,
+          teamContext: resolvedTeamContext,
         }).catch((error) => ({
           ok: false,
           traceId: null,
@@ -295,13 +295,13 @@ export async function runTriggeredDecomposition(options = {}) {
         }))
       : null;
     const runLinearClient = linearClient || await linearClientFactory?.();
-    if (!runLinearClient) throw new Error("linear_client_required_after_domain_resolution");
+    if (!runLinearClient) throw new Error("linear_client_required_after_team_resolution");
     const eligibilityTrace = createTrace(decompositionDefinition.trace_descriptor.trace_name, knownTraceAttributes({
       "workflow.name": "project_decomposition",
-      "teami.domain_id": domainTrace.domain_id,
-      "teami.behavior_repo_id": domainTrace.behavior_repo_id,
-      "linear.workspace_id": domainTrace.workspace_id,
-      "linear.team_id": domainTrace.team_id,
+      "teami.team_ref": teamTrace.team_ref,
+      "teami.behavior_repo_id": teamTrace.behavior_repo_id,
+      "linear.workspace_id": teamTrace.workspace_id,
+      "linear.team_id": teamTrace.team_id,
       "linear.project_id": wake.object_id,
       linear_project_id: wake.object_id,
       run_id: runId,
@@ -309,10 +309,10 @@ export async function runTriggeredDecomposition(options = {}) {
       wake_id: wake.id,
       trace_id: traceSession?.traceId || null,
       attempt: wake.attempt_count || null,
-      workspace_id: domainTrace.workspace_id,
-      domain_id: domainTrace.domain_id,
-      team_id: domainTrace.team_id,
-      behavior_repo_id: domainTrace.behavior_repo_id,
+      workspace_id: teamTrace.workspace_id,
+      team_ref: teamTrace.team_ref,
+      team_id: teamTrace.team_id,
+      behavior_repo_id: teamTrace.behavior_repo_id,
       source_provider: sourceEvent?.provider || "linear",
       source_object_id: wake.object_id,
       trigger_type: wake.trigger_type || null,
@@ -380,7 +380,7 @@ export async function runTriggeredDecomposition(options = {}) {
       commitPayload: decompositionCommitPayload,
       renew: () => renewal.renewNow(),
       repoRoot: MODULE_REPO_ROOT,
-      allowedRepoPacket: resolvedDomainContext?.allowedRepoPacket ?? [],
+      allowedRepoPacket: resolvedTeamContext?.allowedRepoPacket ?? [],
       spanSink: spanSink || ownTurnSpanSink,
     });
 
@@ -404,17 +404,17 @@ export async function runTriggeredDecomposition(options = {}) {
         run_id: runId,
         trace_id: traceSession?.traceId || null,
         attempt: wake.attempt_count || null,
-        workspace_id: domainTrace.workspace_id,
-        domain_id: domainTrace.domain_id,
-        team_id: domainTrace.team_id,
-        behavior_repo_id: domainTrace.behavior_repo_id,
+        workspace_id: teamTrace.workspace_id,
+        team_ref: teamTrace.team_ref,
+        team_id: teamTrace.team_id,
+        behavior_repo_id: teamTrace.behavior_repo_id,
         source_provider: sourceEvent?.provider || "linear",
         source_object_id: wake.object_id,
         trigger_type: wake.trigger_type || null,
         runner_id: runnerId,
         runner_version: runnerVersion,
       },
-      domainContext: resolvedDomainContext,
+      teamContext: resolvedTeamContext,
       qualityJudge,
       onBeforeLinearMutation: async ({ artifactKind, runId: artifactRunId, trace }) => {
         await traceSink?.forceFlush?.({
@@ -515,7 +515,7 @@ async function runTriggeredExecutionInternal(options = {}) {
     idGenerator = defaultRunId,
     traceSink = null,
     spanSink = null,
-    domainContext,
+    teamContext,
     registry,
     claim: claimedWake = null,
     issueId = null,
@@ -538,8 +538,8 @@ async function runTriggeredExecutionInternal(options = {}) {
   if (typeof runDeps.materialize !== "function") {
     throw new Error(`${EXECUTION_RUN_DEPS_REQUIRED_REASON}: runDeps.materialize is required.`);
   }
-  const servedDomainContext = requireDomainContext(domainContext);
-  if (!registry) throw new Error(`${DOMAIN_REGISTRY_REQUIRED_REASON}: execution trigger runner requires the domain registry.`);
+  const servedTeamContext = requireTeamContext(teamContext);
+  if (!registry) throw new Error(`${TEAM_REGISTRY_REQUIRED_REASON}: execution trigger runner requires the team registry.`);
 
   let claim = claimedWake;
   if (!claim) {
@@ -549,9 +549,9 @@ async function runTriggeredExecutionInternal(options = {}) {
       throw new Error(`${EXECUTION_RUN_DEPS_REQUIRED_REASON}: store.claimSyntheticIssueWake is required for direct issue execution.`);
     }
     claim = await store.claimSyntheticIssueWake({
-      domainId: servedDomainContext.domainId,
-      workspaceId: servedDomainContext.linear.workspaceId,
-      teamId: servedDomainContext.linear.teamId,
+      teamRef: servedTeamContext.teamRef,
+      workspaceId: servedTeamContext.linear.workspaceId,
+      teamId: servedTeamContext.linear.teamId,
       objectId: syntheticIssueId,
       workflowType: EXECUTION_WORKFLOW_TYPE,
       triggerType: "linear.issue.ready",
@@ -567,11 +567,11 @@ async function runTriggeredExecutionInternal(options = {}) {
   }
 
   const { wake, leaseToken } = claim;
-  const resolved = resolveWakeDomainContext({
+  const resolved = resolveWakeTeamContext({
     registry,
     config,
     repoRoot,
-    selector: wakeDomainSelector({ wake, workspaceId }),
+    selector: wakeTeamSelector({ wake, workspaceId }),
   });
   if (!resolved.ok) {
     const quarantined = await store.markWakeRoutingError?.({
@@ -592,20 +592,20 @@ async function runTriggeredExecutionInternal(options = {}) {
     };
   }
 
-  const resolvedDomainContext = resolved.context;
-  if (resolvedDomainContext.domainId !== servedDomainContext.domainId) {
+  const resolvedTeamContext = resolved.context;
+  if (resolvedTeamContext.teamRef !== servedTeamContext.teamRef) {
     const released = await store.releaseWake?.({
       wakeId: wake.id,
       runnerId,
       leaseToken,
-      reason: "domain_not_served",
+      reason: "team_not_served",
     });
     if (released && !released.ok) return { status: "failed_closed", reason: released.reason, wake };
     return {
       status: "released",
-      reason: "domain_not_served",
-      resolvedDomainId: resolvedDomainContext.domainId,
-      servedDomainId: servedDomainContext.domainId,
+      reason: "team_not_served",
+      resolvedTeamRef: resolvedTeamContext.teamRef,
+      servedTeamRef: servedTeamContext.teamRef,
       release: released,
       wake: (await store.getWake?.(wake.id)) || wake,
     };
@@ -623,7 +623,7 @@ async function runTriggeredExecutionInternal(options = {}) {
     runnerId,
     leaseToken,
     runId,
-    domainId: resolvedDomainContext.domainId,
+    teamRef: resolvedTeamContext.teamRef,
   });
   if (!running.ok) return { status: "failed_closed", reason: running.reason, wake };
 
@@ -640,7 +640,7 @@ async function runTriggeredExecutionInternal(options = {}) {
   let traceSession = null;
 
   try {
-    assertRunStoreWritable({ repoRoot, home, domainId: resolvedDomainContext.domainId, runStoreDir });
+    assertRunStoreWritable({ repoRoot, home, teamRef: resolvedTeamContext.teamRef, runStoreDir });
     await renewal.renewNow();
     traceSession = traceSink
       ? await traceSink.startRun?.({
@@ -650,7 +650,7 @@ async function runTriggeredExecutionInternal(options = {}) {
           workspaceId,
           runnerId,
           runnerVersion,
-          domainContext: resolvedDomainContext,
+          teamContext: resolvedTeamContext,
         }).catch((error) => ({
           ok: false,
           traceId: null,
@@ -659,23 +659,23 @@ async function runTriggeredExecutionInternal(options = {}) {
         }))
       : null;
     const runLinearClient = linearClient || await linearClientFactory?.();
-    if (!runLinearClient) throw new Error("linear_client_required_after_domain_resolution");
+    if (!runLinearClient) throw new Error("linear_client_required_after_team_resolution");
 
     const definition = getExecutionDefinition();
     let issue = await loadExecutionIssueContext({ client: runLinearClient, issueId: effectiveIssueId });
     const issueIdentifier = stringOrNull(issue?.identifier);
     if (!issueIdentifier) throw new Error("git_repo_issue_identifier_required");
     const pendingGitIntent = await triggerIdempotency.readGitReplayPending({
-      domainId: resolvedDomainContext.domainId,
+      teamRef: resolvedTeamContext.teamRef,
       objectId: effectiveIssueId,
       repoRoot,
       runStoreDir,
     }) || coldResumeGitIntentFromRunDeps(runDeps, {
-      domainId: resolvedDomainContext.domainId,
+      teamRef: resolvedTeamContext.teamRef,
       objectId: effectiveIssueId,
     });
-    const domainResources = domainResourcesForExecution({
-      domainContext: resolvedDomainContext,
+    const teamResources = teamResourcesForExecution({
+      teamContext: resolvedTeamContext,
       registry,
       issue,
     });
@@ -686,11 +686,11 @@ async function runTriggeredExecutionInternal(options = {}) {
       runDeps,
     });
     const materialized = await runDeps.materialize({
-      domainResources,
+      teamResources,
       runId,
       engineRepoRoot: MODULE_REPO_ROOT,
       repoRoot,
-      domainContext: resolvedDomainContext,
+      teamContext: resolvedTeamContext,
       registry,
       issueId: effectiveIssueId,
       issue,
@@ -708,9 +708,9 @@ async function runTriggeredExecutionInternal(options = {}) {
       traceAttributes: knownTraceAttributes({
         run_id: runId,
         wake_id: wake.id,
-        domain_id: resolvedDomainContext.trace?.domain_id,
-        workspace_id: resolvedDomainContext.trace?.workspace_id,
-        team_id: resolvedDomainContext.trace?.team_id,
+        team_ref: resolvedTeamContext.trace?.team_ref,
+        workspace_id: resolvedTeamContext.trace?.workspace_id,
+        team_id: resolvedTeamContext.trace?.team_id,
         source_object_id: effectiveIssueId,
         trigger_type: wake.trigger_type || null,
       }),
@@ -732,7 +732,7 @@ async function runTriggeredExecutionInternal(options = {}) {
           config,
           cache,
           definition,
-          domainContext: resolvedDomainContext,
+          teamContext: resolvedTeamContext,
           issue,
           issueId: effectiveIssueId,
           runId,
@@ -816,17 +816,17 @@ async function runTriggeredExecutionInternal(options = {}) {
             run_id: runId,
             trace_id: traceSession?.traceId || null,
             attempt: wake.attempt_count || null,
-            workspace_id: resolvedDomainContext.trace.workspace_id,
-            domain_id: resolvedDomainContext.trace.domain_id,
-            team_id: resolvedDomainContext.trace.team_id,
-            behavior_repo_id: resolvedDomainContext.trace.behavior_repo_id,
+            workspace_id: resolvedTeamContext.trace.workspace_id,
+            team_ref: resolvedTeamContext.trace.team_ref,
+            team_id: resolvedTeamContext.trace.team_id,
+            behavior_repo_id: resolvedTeamContext.trace.behavior_repo_id,
             source_provider: sourceEvent?.provider || "linear",
             source_object_id: effectiveIssueId,
             trigger_type: wake.trigger_type || null,
             runner_id: runnerId,
             runner_version: runnerVersion,
           },
-          domainContext: resolvedDomainContext,
+          teamContext: resolvedTeamContext,
           runContext,
           runtimeAssignments: resolveRoleRuntimeAssignments(config, EXECUTION_WORKFLOW_TYPE),
           definition,
@@ -904,7 +904,7 @@ export async function runTriggeredReview(options = {}) {
     idGenerator = defaultRunId,
     traceSink = null,
     spanSink = null,
-    domainContext,
+    teamContext,
     registry,
     claim: claimedWake = null,
     issueId = null,
@@ -914,8 +914,8 @@ export async function runTriggeredReview(options = {}) {
   } = options;
   const store = topLevelStore || runDeps.store;
   if (!store) throw new Error(`${REVIEW_RUN_DEPS_REQUIRED_REASON}: runDeps.store is required.`);
-  const servedDomainContext = requireDomainContext(domainContext);
-  if (!registry) throw new Error(`${DOMAIN_REGISTRY_REQUIRED_REASON}: review trigger runner requires the domain registry.`);
+  const servedTeamContext = requireTeamContext(teamContext);
+  if (!registry) throw new Error(`${TEAM_REGISTRY_REQUIRED_REASON}: review trigger runner requires the team registry.`);
 
   let claim = claimedWake;
   if (!claim) {
@@ -925,9 +925,9 @@ export async function runTriggeredReview(options = {}) {
       throw new Error(`${REVIEW_RUN_DEPS_REQUIRED_REASON}: store.claimSyntheticIssueWake is required for direct issue review.`);
     }
     claim = await store.claimSyntheticIssueWake({
-      domainId: servedDomainContext.domainId,
-      workspaceId: servedDomainContext.linear.workspaceId,
-      teamId: servedDomainContext.linear.teamId,
+      teamRef: servedTeamContext.teamRef,
+      workspaceId: servedTeamContext.linear.workspaceId,
+      teamId: servedTeamContext.linear.teamId,
       objectId: syntheticIssueId,
       workflowType: REVIEW_WORKFLOW_TYPE,
       triggerType: REVIEW_IN_REVIEW_TRIGGER_TYPE,
@@ -943,11 +943,11 @@ export async function runTriggeredReview(options = {}) {
   }
 
   const { wake, leaseToken } = claim;
-  const resolved = resolveWakeDomainContext({
+  const resolved = resolveWakeTeamContext({
     registry,
     config,
     repoRoot,
-    selector: wakeDomainSelector({ wake, workspaceId }),
+    selector: wakeTeamSelector({ wake, workspaceId }),
   });
   if (!resolved.ok) {
     const quarantined = await store.markWakeRoutingError?.({
@@ -968,20 +968,20 @@ export async function runTriggeredReview(options = {}) {
     };
   }
 
-  const resolvedDomainContext = resolved.context;
-  if (resolvedDomainContext.domainId !== servedDomainContext.domainId) {
+  const resolvedTeamContext = resolved.context;
+  if (resolvedTeamContext.teamRef !== servedTeamContext.teamRef) {
     const released = await store.releaseWake?.({
       wakeId: wake.id,
       runnerId,
       leaseToken,
-      reason: "domain_not_served",
+      reason: "team_not_served",
     });
     if (released && !released.ok) return { status: "failed_closed", reason: released.reason, wake };
     return {
       status: "released",
-      reason: "domain_not_served",
-      resolvedDomainId: resolvedDomainContext.domainId,
-      servedDomainId: servedDomainContext.domainId,
+      reason: "team_not_served",
+      resolvedTeamRef: resolvedTeamContext.teamRef,
+      servedTeamRef: servedTeamContext.teamRef,
       release: released,
       wake: (await store.getWake?.(wake.id)) || wake,
     };
@@ -999,7 +999,7 @@ export async function runTriggeredReview(options = {}) {
     runnerId,
     leaseToken,
     runId,
-    domainId: resolvedDomainContext.domainId,
+    teamRef: resolvedTeamContext.teamRef,
   });
   if (!running.ok) return { status: "failed_closed", reason: running.reason, wake };
 
@@ -1016,7 +1016,7 @@ export async function runTriggeredReview(options = {}) {
   let traceSession = null;
 
   try {
-    assertRunStoreWritable({ repoRoot, home, domainId: resolvedDomainContext.domainId, runStoreDir });
+    assertRunStoreWritable({ repoRoot, home, teamRef: resolvedTeamContext.teamRef, runStoreDir });
     await renewal.renewNow();
     traceSession = traceSink
       ? await traceSink.startRun?.({
@@ -1026,7 +1026,7 @@ export async function runTriggeredReview(options = {}) {
           workspaceId,
           runnerId,
           runnerVersion,
-          domainContext: resolvedDomainContext,
+          teamContext: resolvedTeamContext,
         }).catch((error) => ({
           ok: false,
           traceId: null,
@@ -1035,12 +1035,12 @@ export async function runTriggeredReview(options = {}) {
         }))
       : null;
     const runLinearClient = linearClient || await linearClientFactory?.();
-    if (!runLinearClient) throw new Error("linear_client_required_after_domain_resolution");
+    if (!runLinearClient) throw new Error("linear_client_required_after_team_resolution");
 
     const definition = getReviewDefinition();
     const issue = await loadExecutionIssueContext({ client: runLinearClient, issueId: effectiveIssueId });
     const reviewResourceTarget = resourceTargetForIssue(issue);
-    const repoIdentity = reviewDecision?.repoIdentity || resourcesToRepoIdentity(resolvedDomainContext, {
+    const repoIdentity = reviewDecision?.repoIdentity || resourcesToRepoIdentity(resolvedTeamContext, {
       resourceId: stringOrNull(
         reviewDecision?.resource_id ||
         reviewDecision?.producedIdentity?.resource_id ||
@@ -1070,9 +1070,9 @@ export async function runTriggeredReview(options = {}) {
       traceAttributes: knownTraceAttributes({
         run_id: runId,
         wake_id: wake.id,
-        domain_id: resolvedDomainContext.trace?.domain_id,
-        workspace_id: resolvedDomainContext.trace?.workspace_id,
-        team_id: resolvedDomainContext.trace?.team_id,
+        team_ref: resolvedTeamContext.trace?.team_ref,
+        workspace_id: resolvedTeamContext.trace?.workspace_id,
+        team_id: resolvedTeamContext.trace?.team_id,
         source_object_id: effectiveIssueId,
         trigger_type: wake.trigger_type || null,
       }),
@@ -1166,17 +1166,17 @@ export async function runTriggeredReview(options = {}) {
         run_id: runId,
         trace_id: traceSession?.traceId || null,
         attempt: wake.attempt_count || null,
-        workspace_id: resolvedDomainContext.trace.workspace_id,
-        domain_id: resolvedDomainContext.trace.domain_id,
-        team_id: resolvedDomainContext.trace.team_id,
-        behavior_repo_id: resolvedDomainContext.trace.behavior_repo_id,
+        workspace_id: resolvedTeamContext.trace.workspace_id,
+        team_ref: resolvedTeamContext.trace.team_ref,
+        team_id: resolvedTeamContext.trace.team_id,
+        behavior_repo_id: resolvedTeamContext.trace.behavior_repo_id,
         source_provider: sourceEvent?.provider || "linear",
         source_object_id: effectiveIssueId,
         trigger_type: wake.trigger_type || null,
         runner_id: runnerId,
         runner_version: runnerVersion,
       },
-      domainContext: resolvedDomainContext,
+      teamContext: resolvedTeamContext,
       runtimeAssignments: resolveRoleRuntimeAssignments(config, REVIEW_WORKFLOW_TYPE),
       definition,
       runDeps,
@@ -1287,7 +1287,7 @@ async function runExecutionTerminalCommit({
   acceptedRefs = null,
   driverSessionHandle = null,
   traceContext = {},
-  domainContext = null,
+  teamContext = null,
   runContext = null,
   runtimeAssignments = null,
   definition = getExecutionDefinition(),
@@ -1301,26 +1301,26 @@ async function runExecutionTerminalCommit({
   executionReadiness = shippedExecutionReadiness,
   resumeRecord = null,
 } = {}) {
-  const domainTrace = domainContext?.trace || {};
+  const teamTrace = teamContext?.trace || {};
   const resource = primaryResource(runContext);
   const selectedResourceId = stringOrNull(runContext?.selectedResourceId) || resource?.id || null;
   const trace = createTrace(definition.trace_descriptor.trace_name, knownTraceAttributes({
     "workflow.name": "issue_execution",
     "workflow.version": EXECUTION_FUNCTION_VERSION,
-    "teami.domain_id": domainTrace.domain_id,
-    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
-    "linear.workspace_id": domainTrace.workspace_id,
-    "linear.team_id": domainTrace.team_id,
+    "teami.team_ref": teamTrace.team_ref,
+    "teami.behavior_repo_id": teamTrace.behavior_repo_id,
+    "linear.workspace_id": teamTrace.workspace_id,
+    "linear.team_id": teamTrace.team_id,
     "linear.issue_id": issueId,
     run_id: runId || runResult?.terminal_output?.run_id || null,
     event_id: traceContext.event_id || null,
     wake_id: traceContext.wake_id || null,
     trace_id: traceContext.trace_id || null,
     attempt: traceContext.attempt || null,
-    workspace_id: domainTrace.workspace_id,
-    domain_id: domainTrace.domain_id,
-    team_id: domainTrace.team_id,
-    behavior_repo_id: domainTrace.behavior_repo_id,
+    workspace_id: teamTrace.workspace_id,
+    team_ref: teamTrace.team_ref,
+    team_id: teamTrace.team_id,
+    behavior_repo_id: teamTrace.behavior_repo_id,
     source_provider: traceContext.source_provider || "linear",
     source_object_id: traceContext.source_object_id || issueId,
     trigger_type: traceContext.trigger_type || null,
@@ -1357,7 +1357,7 @@ async function runExecutionTerminalCommit({
   const terminalOutput = runResult.terminal_output;
   const artifact = executionTerminalArtifact({
     runId: runId || terminalOutput.run_id,
-    domainTrace,
+    teamTrace,
     issueId,
     issue,
     runResult,
@@ -1375,7 +1375,7 @@ async function runExecutionTerminalCommit({
       runId: artifact.run_id,
       repoRoot,
       home,
-      domainId: artifact.domain_id,
+      teamRef: artifact.team_ref,
       runStoreDir,
       returnDurabilityResult: true,
       payloadValidator: executionCommitPayload,
@@ -1394,7 +1394,7 @@ async function runExecutionTerminalCommit({
     runId: artifact.run_id,
     repoRoot,
     home,
-    domainId: artifact.domain_id,
+    teamRef: artifact.team_ref,
     runStoreDir,
     payloadValidator: executionCommitPayload,
     functionVersion: EXECUTION_FUNCTION_VERSION,
@@ -1437,7 +1437,7 @@ async function runExecutionTerminalCommit({
         cache,
         issueId,
         issue,
-        domainContext,
+        teamContext,
         trace,
         runId: persistedArtifact.run_id,
         site: "pause",
@@ -1505,7 +1505,7 @@ async function runExecutionTerminalCommit({
     cache,
     issue,
     issueId,
-    domainContext,
+    teamContext,
     runContext,
     pendingGitIntent: runContext?.pendingGitIntent || null,
     resources: runContext?.resources || {},
@@ -1569,7 +1569,7 @@ async function runExecutionTerminalCommit({
       runId: artifactWithProducedIdentities.run_id,
       repoRoot,
       home,
-      domainId: artifactWithProducedIdentities.domain_id,
+      teamRef: artifactWithProducedIdentities.team_ref,
       runStoreDir,
       payloadValidator: executionCommitPayload,
       functionVersion: EXECUTION_FUNCTION_VERSION,
@@ -1660,7 +1660,7 @@ async function executionPreflightRemediationBlocked({
   config = {},
   cache = null,
   definition,
-  domainContext = null,
+  teamContext = null,
   issue = null,
   issueId = null,
   runId = null,
@@ -1668,27 +1668,27 @@ async function executionPreflightRemediationBlocked({
   runContext = null,
   preflight,
 } = {}) {
-  const domainTrace = domainContext?.trace || {};
+  const teamTrace = teamContext?.trace || {};
   const resource = primaryResource(runContext);
   const selectedResourceId = stringOrNull(runContext?.selectedResourceId) || resource?.id || null;
   const failureReasons = [...new Set(preflight?.failure_reasons || ["execution_profile_preflight_failed"])];
   const trace = createTrace(definition.trace_descriptor.trace_name, knownTraceAttributes({
     "workflow.name": "issue_execution",
     "workflow.version": EXECUTION_FUNCTION_VERSION,
-    "teami.domain_id": domainTrace.domain_id,
-    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
-    "linear.workspace_id": domainTrace.workspace_id,
-    "linear.team_id": domainTrace.team_id,
+    "teami.team_ref": teamTrace.team_ref,
+    "teami.behavior_repo_id": teamTrace.behavior_repo_id,
+    "linear.workspace_id": teamTrace.workspace_id,
+    "linear.team_id": teamTrace.team_id,
     "linear.issue_id": issueId,
     run_id: runId,
     event_id: traceContext.event_id || null,
     wake_id: traceContext.wake_id || null,
     trace_id: traceContext.trace_id || null,
     attempt: traceContext.attempt || null,
-    workspace_id: domainTrace.workspace_id,
-    domain_id: domainTrace.domain_id,
-    team_id: domainTrace.team_id,
-    behavior_repo_id: domainTrace.behavior_repo_id,
+    workspace_id: teamTrace.workspace_id,
+    team_ref: teamTrace.team_ref,
+    team_id: teamTrace.team_id,
+    behavior_repo_id: teamTrace.behavior_repo_id,
     source_provider: traceContext.source_provider || "linear",
     source_object_id: traceContext.source_object_id || issueId,
     trigger_type: traceContext.trigger_type || null,
@@ -1711,14 +1711,14 @@ async function executionPreflightRemediationBlocked({
     issueId,
     runContext,
     preflight,
-    domainContext,
+    teamContext,
   });
   if (plan.action === "escalate") {
     return executionPreflightNeedsPrincipalEscalated({
       client,
       config,
       cache,
-      domainContext,
+      teamContext,
       issue,
       issueId,
       runId,
@@ -1736,7 +1736,7 @@ async function executionPreflightRemediationBlocked({
     cache,
     issue,
     issueId,
-    domainContext,
+    teamContext,
     runContext,
     trace,
     runId,
@@ -1800,7 +1800,7 @@ async function planExecutionPreflightRemediation({
   issue = null,
   issueId = null,
   runContext = null,
-  domainContext = null,
+  teamContext = null,
   preflight = {},
 } = {}) {
   if (typeof client?.findOrCreateIssueRelation !== "function") {
@@ -1842,7 +1842,7 @@ async function planExecutionPreflightRemediation({
 
   const teamId = stringOrNull(issue?.teamId) ||
     stringOrNull(issue?.team?.id) ||
-    stringOrNull(domainContext?.linear?.teamId) ||
+    stringOrNull(teamContext?.linear?.teamId) ||
     stringOrNull(cache?.teamId);
   if (!teamId) throw new Error("linear_remediation_team_id_missing");
   const projectId = stringOrNull(issue?.projectId) || stringOrNull(issue?.project?.id);
@@ -1943,7 +1943,7 @@ async function executionPreflightNeedsPrincipalEscalated({
   client,
   config = {},
   cache = null,
-  domainContext = null,
+  teamContext = null,
   issue = null,
   issueId = null,
   runId = null,
@@ -1959,7 +1959,7 @@ async function executionPreflightNeedsPrincipalEscalated({
     cache,
     issue,
     issueId,
-    domainContext,
+    teamContext,
     trace,
     runId,
     site: "preflight",
@@ -2331,7 +2331,7 @@ async function runReviewTerminalCommit({
   acceptedRefs = null,
   driverSessionHandle = null,
   traceContext = {},
-  domainContext = null,
+  teamContext = null,
   runtimeAssignments = null,
   definition = getReviewDefinition(),
   runDeps = {},
@@ -2350,24 +2350,24 @@ async function runReviewTerminalCommit({
   void wake;
   void leaseToken;
   void runnerId;
-  const domainTrace = domainContext?.trace || {};
+  const teamTrace = teamContext?.trace || {};
   const trace = createTrace(definition.trace_descriptor.trace_name, knownTraceAttributes({
     "workflow.name": "review",
     "workflow.version": REVIEW_FUNCTION_VERSION,
-    "teami.domain_id": domainTrace.domain_id,
-    "teami.behavior_repo_id": domainTrace.behavior_repo_id,
-    "linear.workspace_id": domainTrace.workspace_id,
-    "linear.team_id": domainTrace.team_id,
+    "teami.team_ref": teamTrace.team_ref,
+    "teami.behavior_repo_id": teamTrace.behavior_repo_id,
+    "linear.workspace_id": teamTrace.workspace_id,
+    "linear.team_id": teamTrace.team_id,
     "linear.issue_id": issueId,
     run_id: runId || runResult?.terminal_output?.run_id || null,
     event_id: traceContext.event_id || null,
     wake_id: traceContext.wake_id || null,
     trace_id: traceContext.trace_id || null,
     attempt: traceContext.attempt || null,
-    workspace_id: domainTrace.workspace_id,
-    domain_id: domainTrace.domain_id,
-    team_id: domainTrace.team_id,
-    behavior_repo_id: domainTrace.behavior_repo_id,
+    workspace_id: teamTrace.workspace_id,
+    team_ref: teamTrace.team_ref,
+    team_id: teamTrace.team_id,
+    behavior_repo_id: teamTrace.behavior_repo_id,
     source_provider: traceContext.source_provider || "linear",
     source_object_id: traceContext.source_object_id || issueId,
     trigger_type: traceContext.trigger_type || null,
@@ -2429,7 +2429,7 @@ async function runReviewTerminalCommit({
   recordSpan(trace, "review_verdict_payload", verdictPayload);
   const artifact = reviewTerminalArtifact({
     runId: runId || terminalOutput.run_id,
-    domainTrace,
+    teamTrace,
     issueId,
     issue,
     runResult: effectiveRunResult,
@@ -2448,7 +2448,7 @@ async function runReviewTerminalCommit({
       runId: artifact.run_id,
       repoRoot,
       home,
-      domainId: artifact.domain_id,
+      teamRef: artifact.team_ref,
       runStoreDir,
       returnDurabilityResult: true,
       payloadValidator: reviewCommitPayload,
@@ -2467,7 +2467,7 @@ async function runReviewTerminalCommit({
     runId: artifact.run_id,
     repoRoot,
     home,
-    domainId: artifact.domain_id,
+    teamRef: artifact.team_ref,
     runStoreDir,
     payloadValidator: reviewCommitPayload,
     functionVersion: REVIEW_FUNCTION_VERSION,
@@ -2530,7 +2530,7 @@ async function runReviewTerminalCommit({
     cache,
     issue,
     issueId,
-    domainContext,
+    teamContext,
     artifact: persistedArtifact,
     payload: persistedArtifact.payload,
     trace,
@@ -2546,7 +2546,7 @@ async function runReviewTerminalCommit({
     runnerId,
     prAdapter,
     review,
-    teamId: domainContext?.linear?.teamId || issue?.team?.id || null,
+    teamId: teamContext?.linear?.teamId || issue?.team?.id || null,
     artifactSetLineage: persistedArtifact.artifact_set_lineage,
     plan,
   };
@@ -2586,7 +2586,7 @@ async function runReviewTerminalCommit({
       cache,
       issueId,
       issue,
-      domainContext,
+      teamContext,
       trace,
       runId: persistedArtifact.run_id,
       site: "review",
@@ -2664,7 +2664,7 @@ function reviewFailClosed(trace, failureReasons) {
 
 function executionTerminalArtifact({
   runId,
-  domainTrace,
+  teamTrace,
   issueId,
   issue,
   runResult,
@@ -2691,9 +2691,9 @@ function executionTerminalArtifact({
     workflow_version: EXECUTION_FUNCTION_VERSION,
     kind,
     run_id: terminalRunId,
-    domain_id: domainTrace?.domain_id || null,
-    workspace_id: domainTrace?.workspace_id || null,
-    team_id: domainTrace?.team_id || null,
+    team_ref: teamTrace?.team_ref || null,
+    workspace_id: teamTrace?.workspace_id || null,
+    team_id: teamTrace?.team_id || null,
     linear_issue_id: issueId || issue?.id || null,
     terminal_output: terminalOutputAudit(terminalOutput),
     evidence: terminalEvidence(runResult?.evidence),
@@ -2847,7 +2847,7 @@ async function assembleReviewRuntimeInput({ issue, pr, repoIdentity, prAdapter }
 
 function reviewTerminalArtifact({
   runId,
-  domainTrace,
+  teamTrace,
   issueId,
   issue,
   runResult,
@@ -2872,9 +2872,9 @@ function reviewTerminalArtifact({
     workflow_version: REVIEW_FUNCTION_VERSION,
     kind: "commit",
     run_id: terminalRunId,
-    domain_id: domainTrace?.domain_id || null,
-    workspace_id: domainTrace?.workspace_id || null,
-    team_id: domainTrace?.team_id || null,
+    team_ref: teamTrace?.team_ref || null,
+    workspace_id: teamTrace?.workspace_id || null,
+    team_id: teamTrace?.team_id || null,
     linear_issue_id: issueId || issue?.id || null,
     terminal_output: terminalOutputAudit(terminalOutput),
     evidence: terminalEvidence(runResult?.evidence),
@@ -3441,8 +3441,8 @@ function normalizeResumeRecord(record) {
   };
 }
 
-function domainResourcesForExecution({ domainContext, registry, issue = null } = {}) {
-  const resources = domainResourceRecordsForExecution({ domainContext, registry });
+function teamResourcesForExecution({ teamContext, registry, issue = null } = {}) {
+  const resources = teamResourceRecordsForExecution({ teamContext, registry });
   const target = resourceTargetForIssue(issue);
   const gitResources = resources.filter((resource) => resource?.kind === "git_repo");
   if (target) {
@@ -3459,10 +3459,10 @@ function domainResourcesForExecution({ domainContext, registry, issue = null } =
   throw resourceTargetSelectionError(RESOURCE_TARGET_MISSING_REASON);
 }
 
-function domainResourceRecordsForExecution({ domainContext, registry } = {}) {
-  if (Array.isArray(domainContext?.resources)) return domainContext.resources;
-  const domain = registry?.domains?.find((candidate) => candidate.id === domainContext?.domainId);
-  return Array.isArray(domain?.resources) ? domain.resources : [];
+function teamResourceRecordsForExecution({ teamContext, registry } = {}) {
+  if (Array.isArray(teamContext?.resources)) return teamContext.resources;
+  const team = registry?.teams?.find((candidate) => candidate.id === teamContext?.teamRef);
+  return Array.isArray(team?.resources) ? team.resources : [];
 }
 
 function resourceTargetForIssue(issue = null) {
@@ -3487,7 +3487,7 @@ function isResourceTargetSelectionError(error) {
     [RESOURCE_TARGET_MISSING_REASON, RESOURCE_TARGET_NOT_ALLOWED_REASON].includes(error.message);
 }
 
-function coldResumeGitIntentFromRunDeps(runDeps = {}, { domainId = null, objectId = null } = {}) {
+function coldResumeGitIntentFromRunDeps(runDeps = {}, { teamRef = null, objectId = null } = {}) {
   const intent = runDeps?.coldResumeGitIntent || runDeps?.resumeGitIntent || null;
   if (!isRecord(intent?.git)) return null;
   const git = compactRecord({
@@ -3502,7 +3502,7 @@ function coldResumeGitIntentFromRunDeps(runDeps = {}, { domainId = null, objectI
   if (!git.owner || !git.repo || !git.branch || !git.head_sha) return null;
   return {
     objectType: "issue",
-    domainId: stringOrNull(intent.domainId) || domainId,
+    teamRef: stringOrNull(intent.teamRef) || teamRef,
     objectId: stringOrNull(intent.objectId) || objectId,
     runId: stringOrNull(intent.runId) || "cold_resume",
     artifactKind: stringOrNull(intent.artifactKind) || "commit",
@@ -3623,10 +3623,10 @@ export async function runDecompositionEvalMode({
   home = resolveTeamiHome(),
   runStoreDir = null,
   traceId = null,
-  domainContext = null,
+  teamContext = null,
   spanSink = null,
 } = {}) {
-  const evalDomainContext = requireDomainContext(domainContext);
+  const evalTeamContext = requireTeamContext(teamContext);
   // Constructor-injected non-mutation guarantee: even a live GraphQL client
   // becomes read-only inside eval mode (CONSTRAINTS #27).
   const client = createEvalModeReadOnlyLinearClient(linearClient);
@@ -3659,7 +3659,7 @@ export async function runDecompositionEvalMode({
     definition,
     commitPayload: decompositionCommitPayload,
     repoRoot,
-    allowedRepoPacket: evalDomainContext?.allowedRepoPacket ?? [],
+    allowedRepoPacket: evalTeamContext?.allowedRepoPacket ?? [],
     spanSink: spanSink || ownTurnSpanSink,
   });
   const result = await runDecomposition({
@@ -3676,17 +3676,17 @@ export async function runDecompositionEvalMode({
     runtimeEvidence,
     acceptedRefs,
     evalMode: true,
-    domainContext: evalDomainContext,
+    teamContext: evalTeamContext,
     traceContext: {
       wake_id: wake.id,
       trace_id: traceId,
       trigger_type: "eval.local",
       source_provider: "local_eval",
       source_object_id: projectId,
-      domain_id: evalDomainContext.trace.domain_id,
-      team_id: evalDomainContext.trace.team_id,
-      behavior_repo_id: evalDomainContext.trace.behavior_repo_id,
-      workspace_id: evalDomainContext.trace.workspace_id,
+      team_ref: evalTeamContext.trace.team_ref,
+      team_id: evalTeamContext.trace.team_id,
+      behavior_repo_id: evalTeamContext.trace.behavior_repo_id,
+      workspace_id: evalTeamContext.trace.workspace_id,
     },
   });
   ownTurnSpanSink?.drainInto(result?.trace);
@@ -3840,21 +3840,21 @@ function startLeaseRenewal({
   };
 }
 
-function requireDomainContext(domainContext) {
+function requireTeamContext(teamContext) {
   const missingFields = [];
-  if (!domainContext?.domainId) missingFields.push("domainId");
-  if (!domainContext?.linear?.workspaceId) missingFields.push("linear.workspaceId");
-  if (!domainContext?.linear?.teamId) missingFields.push("linear.teamId");
-  if (!domainContext?.trace?.domain_id) missingFields.push("trace.domain_id");
-  if (!domainContext?.trace?.workspace_id) missingFields.push("trace.workspace_id");
-  if (!domainContext?.trace?.team_id) missingFields.push("trace.team_id");
+  if (!teamContext?.teamRef) missingFields.push("teamRef");
+  if (!teamContext?.linear?.workspaceId) missingFields.push("linear.workspaceId");
+  if (!teamContext?.linear?.teamId) missingFields.push("linear.teamId");
+  if (!teamContext?.trace?.team_ref) missingFields.push("trace.team_ref");
+  if (!teamContext?.trace?.workspace_id) missingFields.push("trace.workspace_id");
+  if (!teamContext?.trace?.team_id) missingFields.push("trace.team_id");
   if (missingFields.length > 0) {
-    throw new Error(`${DOMAIN_CONTEXT_REQUIRED_REASON}: trigger runner requires a resolved DomainContext (${missingFields.join(", ")}).`);
+    throw new Error(`${TEAM_CONTEXT_REQUIRED_REASON}: trigger runner requires a resolved TeamContext (${missingFields.join(", ")}).`);
   }
-  return domainContext;
+  return teamContext;
 }
 
-function wakeDomainSelector({ wake, workspaceId = null } = {}) {
+function wakeTeamSelector({ wake, workspaceId = null } = {}) {
   return {
     workspaceId: wake?.workspace_id || wake?.workspaceId || workspaceId || null,
     webhookId: wakeFactArray(wake?.webhook_ids || wake?.webhookIds || wake?.webhook_id),

@@ -91,7 +91,7 @@ The preview has three adopter-facing surfaces:
 - Setup and repair: `init_onboarding` through MCP as the primary conversational
   path, or `npx @shulmansj/teami init` /
   `npx @shulmansj/teami doctor` through the thin CLI fallback.
-- Planning: MCP tools `resolve_domain`, `project_create`,
+- Planning: MCP tools `resolve_team`, `project_create`,
   `project_write_body`, and `project_move_status`.
 - Running: `npx @shulmansj/teami gateway start` to poll Linear for
   Planned projects, and `npx @shulmansj/teami gateway status` for a
@@ -127,8 +127,8 @@ repository. It creates or verifies that dedicated repository, keeps starter/temp
 only as template state, verifies local git/`gh` access, and checks whether
 process-change PR generation can work. The workspace-repository path is for
 reviewable process-change proposals; it is distinct from product-repo grants
-and must not be treated as product-repo access. Grant product repos to a domain
-with `npx @shulmansj/teami domain grant <id> --repo <owner/name>`.
+and must not be treated as product-repo access. Grant product repos to a team
+with `npx @shulmansj/teami team grant <id> --repo <owner/name>`.
 The grant records the product repo's `owner/repo` and default branch. No local
 checkout path is recorded, and product-repo execution is not shipped.
 
@@ -149,9 +149,9 @@ rehearsal:
 
 - `npx @shulmansj/teami init`
 - `npx @shulmansj/teami doctor`
-- `npx @shulmansj/teami domain show <id>`
-- `npx @shulmansj/teami domain grant <id> --repo <owner/name>`
-- `npx @shulmansj/teami domain revoke <id> --repo <owner/name>`
+- `npx @shulmansj/teami team show <id>`
+- `npx @shulmansj/teami team grant <id> --repo <owner/name>`
+- `npx @shulmansj/teami team revoke <id> --repo <owner/name>`
 - `npx @shulmansj/teami phoenix:doctor`
 - `npx @shulmansj/teami phoenix:start`
 - `npx @shulmansj/teami phoenix:stop`
@@ -169,14 +169,14 @@ path.
 ## Product-Repo Binding
 
 Product-repo grants are local and explicit.
-`npx @shulmansj/teami domain grant` adds a GitHub repo identity to a
-domain as a `git_repo` resource, and
-`npx @shulmansj/teami domain revoke` removes it. Each grant records
+`npx @shulmansj/teami team grant` adds a GitHub repo identity to a
+team as a `git_repo` resource, and
+`npx @shulmansj/teami team revoke` removes it. Each grant records
 `owner/repo` and default branch only.
 
 The trust boundary is narrow: product-repo binding is repo-selection scoping
 for one selected GitHub repo, plus the foundation for sanitized per-run
-clone/cwd selection in domain-scoped execution work. It is not OS isolation,
+clone/cwd selection in team-scoped execution work. It is not OS isolation,
 container isolation, Teami workspace-repository proposal authority, or an all-repositories
 GitHub grant. Local run state stays on the adopter's machine and must not
 appear in public examples, prompts, logs, traces, or export artifacts.
@@ -187,7 +187,7 @@ Product-repo write-capable execution is not shipped. The repository contains a
 prototype materializer and execution workflow code, but those modules are not
 a supported permission to edit, commit, push, or open product-repo PRs. Any
 future activation must first prove a fresh per-run clone, bounded Git effects,
-credential and tool isolation, domain confinement, staged-content guards, and
+credential and tool isolation, team confinement, staged-content guards, and
 no push when a safety gate fails.
 
 Known limits:
@@ -247,8 +247,8 @@ GitHub:
 
 - Create or verify a private Teami workspace repository during setup using the
   adopter's local git/`gh` auth.
-- Grant product repos separately per domain with
-  `npx @shulmansj/teami domain grant`; keep that separate from
+- Grant product repos separately per team with
+  `npx @shulmansj/teami team grant`; keep that separate from
   workspace-repository setup, and do not treat workspace-repository authority as
   product-repo authority.
 - Keep proposal automation scoped to the configured Teami workspace-repository remote.

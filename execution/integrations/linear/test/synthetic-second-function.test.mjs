@@ -114,7 +114,7 @@ test("synthetic second function inherits in-loop tracing, lineage, produced iden
     attribute_keys: [
       "workflow.name",
       "workflow.version",
-      "teami.domain_id",
+      "teami.team_ref",
       "resource.kind",
       "resource.id",
       "resource.label",
@@ -469,7 +469,7 @@ test("synthetic second function inherits in-loop tracing, lineage, produced iden
         projectName: "teami",
         run: {
           run_id: PROBE_RUN_ID,
-          domain_id: "probe-domain",
+          team_ref: "probe-team",
           workflow_type: synthetic.trace_descriptor.trace_name,
           resource: {
             kind: "probe_resource",
@@ -569,7 +569,7 @@ test("standalone A2 agent trace exports a non-decomposition non-Linear resource 
     agent_role: "probe_agent",
     run_id: "probe-standalone-1",
     resource: { kind: "probe_resource", id: "probe-1", label: "Probe" },
-    domain_id: "probe-domain",
+    team_ref: "probe-team",
     workflow_type: "probe_standalone",
     repoRoot,
     idFactory: () => traceId,
@@ -1052,7 +1052,7 @@ function buildSyntheticDefinition({ effectCalls }) {
       attribute_keys: [
         "workflow.name",
         "workflow.version",
-        "teami.domain_id",
+        "teami.team_ref",
         "resource.kind",
         "resource.id",
         "resource.label",
@@ -1546,7 +1546,7 @@ function probeJudgeArtifact(runId) {
     function_version: PROBE_FUNCTION_VERSION,
     workflow_version: PROBE_FUNCTION_VERSION,
     run_id: runId,
-    domain_id: "probe-domain",
+    team_ref: "probe-team",
     workspace_id: "probe-workspace",
     team_id: "probe-team",
     kind: "commit",
@@ -1625,7 +1625,7 @@ function buildSyntheticTrace({ definition }) {
     attributes: {
       "workflow.name": definition.trace_descriptor.trace_name,
       "workflow.version": PROBE_FUNCTION_VERSION,
-      "teami.domain_id": "probe-domain",
+      "teami.team_ref": "probe-team",
       "resource.kind": "probe_resource",
       "resource.id": "project-probe",
       "resource.label": "Synthetic probe",
@@ -1720,7 +1720,7 @@ function probeCommitArtifact(runResult) {
     engine_version: ENGINE_VERSION,
     function_version: PROBE_FUNCTION_VERSION,
     run_id: PROBE_RUN_ID,
-    domain_id: "d",
+    team_ref: "d",
     workspace_id: "w",
     team_id: "t",
     kind: "commit",

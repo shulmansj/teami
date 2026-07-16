@@ -82,7 +82,7 @@ export const executionDefinition = Object.freeze({
     attribute_keys: Object.freeze([
       "workflow.name",
       "workflow.version",
-      "teami.domain_id",
+      "teami.team_ref",
       "teami.behavior_repo_id",
       "linear.workspace_id",
       "linear.team_id",
@@ -93,7 +93,7 @@ export const executionDefinition = Object.freeze({
       "trace_id",
       "attempt",
       "workspace_id",
-      "domain_id",
+      "team_ref",
       "team_id",
       "behavior_repo_id",
       "source_provider",

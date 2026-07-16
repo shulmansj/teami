@@ -40,7 +40,7 @@ import {
 } from "../src/trace-status-store.mjs";
 import {
   BASE_RUNNER_CAPABILITIES,
-  CANONICAL_DOMAIN_TRACE_ATTRIBUTES,
+  CANONICAL_TEAM_TRACE_ATTRIBUTES,
   boundedRunReceiptProjection,
   enforceTraceContentPolicy,
   findSecretContentKeys,
@@ -135,7 +135,7 @@ test("Phoenix data and trace telemetry land under the Teami home", async () => {
     recordTraceStatus({
       repoRoot,
       runId: "run-home",
-      domainId: "support-ops",
+      teamRef: "support-ops",
       workspaceId: "workspace-1",
       teamId: "team-1",
       traceId: "55555555555555555555555555555555",
@@ -495,7 +495,7 @@ test("trace status writes per-run receipts, health counters, and audit-only dead
   recordTraceStatus({
     repoRoot,
     runId: "run-1",
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     wakeId: "wake-1",
@@ -507,7 +507,7 @@ test("trace status writes per-run receipts, health counters, and audit-only dead
   });
   const receipt = readTraceReceipt({ repoRoot, runId: "run-1" });
   assert.equal(receipt.schema_version, 2);
-  assert.equal(receipt.domain_id, "support-ops");
+  assert.equal(receipt.team_ref, "support-ops");
   assert.equal(receipt.workspace_id, "workspace-1");
   assert.equal(receipt.team_id, "team-1");
   assert.equal(receipt.trace_status, "trace_unavailable");
@@ -525,7 +525,7 @@ test("trace status writes per-run receipts, health counters, and audit-only dead
   recordTraceStatus({
     repoRoot,
     runId: "run-secret",
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     traceId: "22222222222222222222222222222222",
@@ -565,20 +565,20 @@ test("local trace contract keeps base capabilities and excludes secret material"
   );
 });
 
-test("local trace receipt includes domain_id, workspace_id, and team_id", () => {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-trace-domain-receipt-"));
+test("local trace receipt includes team_ref, workspace_id, and team_id", () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "teami-trace-team-receipt-"));
   recordTraceStatus({
     repoRoot,
-    runId: "run-domain",
-    domainId: "domain-a",
+    runId: "run-team",
+    teamRef: "team-a",
     workspaceId: "workspace-a",
     teamId: "team-a",
     traceId: "33333333333333333333333333333333",
     status: "trace_exported",
   });
-  const receipt = readTraceReceipt({ repoRoot, runId: "run-domain" });
+  const receipt = readTraceReceipt({ repoRoot, runId: "run-team" });
   assert.equal(receipt.schema_version, 2);
-  assert.equal(receipt.domain_id, "domain-a");
+  assert.equal(receipt.team_ref, "team-a");
   assert.equal(receipt.workspace_id, "workspace-a");
   assert.equal(receipt.team_id, "team-a");
   assert.throws(
@@ -592,7 +592,7 @@ test("local trace receipt includes domain_id, workspace_id, and team_id", () => 
   assert.throws(
     () =>
       boundedRunReceiptProjection({
-        run: { run_id: "run-missing-workspace", domain_id: "domain-a", team_id: "team-a" },
+        run: { run_id: "run-missing-workspace", team_ref: "team-a", team_id: "team-a" },
         traceStatus: "trace_exported",
       }),
     /workspace_id is required/,
@@ -600,7 +600,7 @@ test("local trace receipt includes domain_id, workspace_id, and team_id", () => 
   assert.throws(
     () =>
       boundedRunReceiptProjection({
-        run: { run_id: "run-missing-team", domain_id: "domain-a", workspace_id: "workspace-a" },
+        run: { run_id: "run-missing-team", team_ref: "team-a", workspace_id: "workspace-a" },
         traceStatus: "trace_exported",
       }),
     /team_id is required/,
@@ -625,12 +625,12 @@ test("v1-shaped trace receipts return a typed legacy result instead of throwing"
   assert.equal(isInvalidTraceReceiptResult(receipt), true);
   assert.equal(receipt.ok, false);
   assert.equal(receipt.reason, "trace_receipt_schema_legacy");
-  assert.match(receipt.detail, /missing_domain_id/);
+  assert.match(receipt.detail, /missing_team_ref/);
 });
 
-test("canonical trace contract does not require teami.domain_name", () => {
-  assert.equal(CANONICAL_DOMAIN_TRACE_ATTRIBUTES.includes("teami.domain_id"), true);
-  assert.equal(CANONICAL_DOMAIN_TRACE_ATTRIBUTES.includes("teami.domain_name"), false);
+test("canonical trace contract does not require teami.team_name", () => {
+  assert.equal(CANONICAL_TEAM_TRACE_ATTRIBUTES.includes("teami.team_ref"), true);
+  assert.equal(CANONICAL_TEAM_TRACE_ATTRIBUTES.includes("teami.team_name"), false);
 });
 
 test("OTLP export uses existing trace spans and exporter shuts down only when asked", async () => {
@@ -747,7 +747,7 @@ test("runtime tool-event evidence is redacted and exported with outcome and pers
     linearClient: new PhoenixLinearClient(),
     config,
     cache: {
-      domainId: "domain-a",
+      teamRef: "team-a",
       workspaceId: "workspace-1",
       teamId: "team-1",
       issueLabels: {
@@ -772,7 +772,7 @@ test("runtime tool-event evidence is redacted and exported with outcome and pers
     runtimeExecutor: phoenixToolEventRuntimeExecutor(runId),
     orchestratorTurnExecutor: phoenixToolEventOrchestrator(runId),
     roster: phoenixToolEventRoster(),
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
   });
 
   const evidenceSpan = result.trace.spans.find((span) => span.name === "runtime_tool_events");
@@ -989,7 +989,7 @@ test("content policy rejection through the local sink records one failed run", a
     runId: "run-policy",
     wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
     workspaceId: "workspace-1",
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
   });
   const result = await sink.finishRun({
     session,
@@ -1046,7 +1046,7 @@ test("oversized non-rich trace exports a digest span with a root evidence-unavai
     runId: "run-oversized",
     wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
     workspaceId: "workspace-1",
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
   });
   const trace = {
     attributes: { run_id: "run-oversized" },
@@ -1113,7 +1113,7 @@ test("multi-flush trace verification uses cumulative exported names instead of c
     runId: "run-multiflush",
     wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
     workspaceId: "workspace-1",
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
   });
   const trace = { attributes: { run_id: "run-multiflush" }, annotations: [], spans: [] };
   const appendSpans = (offset) => {
@@ -1174,7 +1174,7 @@ test("trace sink adopts a healthy collector after readiness startup failure inst
     runId: "run-adopt-after-failure",
     wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
     workspaceId: "workspace-1",
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
   });
 
   assert.equal(session.ok, true);
@@ -1207,7 +1207,7 @@ test("multiple trace failures in one run count as one local health failure", asy
     runId: "run-double-failure",
     wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
     workspaceId: "workspace-1",
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
   });
   const trace = { attributes: {}, annotations: [], spans: [{ name: "load_project_context" }] };
 
@@ -1245,7 +1245,7 @@ test("Phoenix preflight emits and proves a synthetic trace through local OTLP", 
     repoRoot,
     idFactory: () => "11111111111111111111111111111111",
     now: () => new Date("2026-06-09T00:00:00.000Z"),
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
     ensureReady: async () => ({
       ok: true,
       appUrl: "http://127.0.0.1:6006",
@@ -1278,7 +1278,7 @@ test("Phoenix preflight emits and proves a synthetic trace through local OTLP", 
   const receipt = readTraceReceipt({ repoRoot, runId: result.runId });
   assert.equal(receipt.trace_status, "trace_exported");
   assert.equal(receipt.schema_version, 2);
-  assert.equal(receipt.domain_id, "domain-a");
+  assert.equal(receipt.team_ref, "team-a");
   assert.equal(receipt.workspace_id, "workspace-1");
   assert.equal(receipt.team_id, "team-1");
 });
@@ -1288,7 +1288,7 @@ test("OTLP payload carries Phoenix project and Teami attributes", () => {
     projectName: "teami",
     run: {
       run_id: "run-1",
-      domain_id: "support-ops",
+      team_ref: "support-ops",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test",
@@ -1311,7 +1311,7 @@ test("OTLP payload carries Phoenix project and Teami attributes", () => {
   const rootAttrs = payload.resourceSpans[0].scopeSpans[0].spans[0].attributes;
   assert.ok(attrs.some((attr) => attr.key === "openinference.project.name"));
   assert.ok(rootAttrs.some((attr) => attr.key === "teami.run_id"));
-  assert.ok(rootAttrs.some((attr) => attr.key === "teami.domain_id"));
+  assert.ok(rootAttrs.some((attr) => attr.key === "teami.team_ref"));
   assert.ok(rootAttrs.some((attr) => attr.key === "linear.workspace_id"));
   assert.ok(rootAttrs.some((attr) => attr.key === "linear.team_id"));
   assert.ok(rootAttrs.some((attr) => attr.key === "teami.behavior_repo_id"));
@@ -1319,7 +1319,7 @@ test("OTLP payload carries Phoenix project and Teami attributes", () => {
   assert.equal(otlpAttributeValue(rootAttrs, "teami.selected_resource_id"), "repo-2");
   assert.equal(otlpAttributeValue(rootAttrs, "selected_resource_id"), "repo-2");
   assert.equal(otlpAttributeValue(rootAttrs, "resource_id"), "repo-2");
-  assert.equal(rootAttrs.some((attr) => attr.key === "teami.domain_name"), false);
+  assert.equal(rootAttrs.some((attr) => attr.key === "teami.team_name"), false);
 });
 
 test("OTLP root span exports produced identities as a JSON carrier", () => {
@@ -1338,7 +1338,7 @@ test("OTLP root span exports produced identities as a JSON carrier", () => {
     projectName: "teami",
     run: {
       run_id: "run-produced",
-      domain_id: "support-ops",
+      team_ref: "support-ops",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test",
@@ -1365,7 +1365,7 @@ test("OTLP root span exports the unpinned runtime marker when present", () => {
     projectName: "teami",
     run: {
       run_id: "run-unpinned",
-      domain_id: "support-ops",
+      team_ref: "support-ops",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test",
@@ -1420,7 +1420,7 @@ test("trace sink receipt provider_update_ids include reused Linear issue ids", a
     runId: "run-provider-updates",
     wake: { id: "wake-1", object_id: "project-1", attempt_count: 1 },
     workspaceId: "workspace-1",
-    domainContext: testDomainContext(),
+    teamContext: testTeamContext(),
   });
   const trace = {
     attributes: { run_id: "run-provider-updates" },
@@ -1507,7 +1507,7 @@ test("Phoenix dataset promotion uses bounded local receipts and auto create or a
   const receipt = {
     schema_version: 2,
     run_id: "run-1",
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     wake_id: "wake-1",
@@ -1524,7 +1524,7 @@ test("Phoenix dataset promotion uses bounded local receipts and auto create or a
     action: "create",
   });
   assert.equal(payload.inputs[0].run_id, "run-1");
-  assert.equal(payload.inputs[0].domain_id, "support-ops");
+  assert.equal(payload.inputs[0].team_ref, "support-ops");
   assert.equal(payload.inputs[0].trace_id, "11111111111111111111111111111111");
   assert.equal(payload.outputs[0].status, "completed");
   assert.equal(payload.example_ids[0], "teami:run-1");
@@ -1778,7 +1778,7 @@ function otlpValueToJs(value = {}) {
 class PhoenixLinearClient {
   constructor() {
     this.cache = {
-      domainId: "domain-a",
+      teamRef: "team-a",
       workspaceId: "workspace-1",
       teamId: "team-1",
       issueLabels: {
@@ -1808,7 +1808,7 @@ class PhoenixLinearClient {
   }
 
   async listTeams() {
-    return [{ id: "team-1", key: "DA", name: "Domain A" }];
+    return [{ id: "team-1", key: "DA", name: "Team A" }];
   }
 
   async listProjectStatuses() {
@@ -1858,15 +1858,15 @@ class PhoenixLinearClient {
   }
 }
 
-function testDomainContext() {
+function testTeamContext() {
   return Object.freeze({
-    domainId: "domain-a",
+    teamRef: "team-a",
     status: "active",
     linear: Object.freeze({
       workspaceId: "workspace-1",
       teamId: "team-1",
       teamKey: "DA",
-      teamName: "Domain A",
+      teamName: "Team A",
       webhookId: "webhook-1",
       cachePath: "unused",
     }),
@@ -1875,7 +1875,7 @@ function testDomainContext() {
       runnerInbox: "runner-target",
     }),
     trace: Object.freeze({
-      domain_id: "domain-a",
+      team_ref: "team-a",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:test-behavior",

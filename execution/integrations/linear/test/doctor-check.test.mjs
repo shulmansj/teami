@@ -7,7 +7,7 @@ import {
   normalizeDoctorCheck,
   normalizeDoctorChecks,
 } from "../src/doctor-check.mjs";
-import { domainTeamVisibilityCheck } from "../src/cli/doctor-command.mjs";
+import { teamTeamVisibilityCheck } from "../src/cli/doctor-command.mjs";
 import { formatCommand } from "../src/cli/operator-output.mjs";
 
 test("doctorCheck builds an S3 record with a derived ok (warn is not a failure)", () => {
@@ -59,9 +59,9 @@ test("normalizeDoctorChecks is idempotent", () => {
   const twice = normalizeDoctorChecks(once);
   assert.deepEqual(twice, once);
 });
-test("domainTeamVisibilityCheck gives deleted saved-team recovery guidance", () => {
-  const check = domainTeamVisibilityCheck({
-    domain: {
+test("teamTeamVisibilityCheck gives deleted saved-team recovery guidance", () => {
+  const check = teamTeamVisibilityCheck({
+    team: {
       id: "livetest",
       linear: {
         workspace_id: "workspace-1",
@@ -78,9 +78,9 @@ test("domainTeamVisibilityCheck gives deleted saved-team recovery guidance", () 
 
   assert.equal(check.ok, false);
   assert.equal(check.showMessage, true);
-  assert.match(check.message, /The Linear team saved for domain "livetest" no longer exists/);
-  assert.match(check.message, /complete_domain_team_missing: domain livetest records Linear team 18cc5008-0b05-44f9-bdef-2d9e1a56f6d1/);
+  assert.match(check.message, /The Linear team saved for team "livetest" no longer exists/);
+  assert.match(check.message, /configured_linear_team_missing: Team livetest points to Linear team 18cc5008-0b05-44f9-bdef-2d9e1a56f6d1/);
   assert.match(check.message, /will not guess by name or silently recreate it/);
-  assert.ok(check.fix.includes(formatCommand("uninstall --domain livetest")));
-  assert.ok(check.fix.includes(formatCommand("init --domain livetest")));
+  assert.ok(check.fix.includes(formatCommand("uninstall --team livetest")));
+  assert.ok(check.fix.includes(formatCommand("init --team livetest")));
 });

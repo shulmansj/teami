@@ -1,4 +1,4 @@
-# Wake Domain Identity Contract (Superseded)
+# Wake Team Identity Contract (Superseded)
 
 Status: superseded
 Current product path: no

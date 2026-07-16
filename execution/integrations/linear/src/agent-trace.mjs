@@ -5,7 +5,7 @@ export async function startAgentTrace({
   agent_role,
   run_id,
   resource,
-  domain_id,
+  team_ref,
   workflow_type,
   repoRoot = process.cwd(),
   sinkFactory = createLocalPhoenixTraceSink,
@@ -19,7 +19,7 @@ export async function startAgentTrace({
 } = {}) {
   requireNonEmpty(agent_role, "agent_role");
   requireNonEmpty(run_id, "run_id");
-  requireNonEmpty(domain_id, "domain_id");
+  requireNonEmpty(team_ref, "team_ref");
   requireNonEmpty(workflow_type, "workflow_type");
   const normalizedResource = normalizeResource(resource);
   requireNonEmpty(normalizedResource?.kind, "resource.kind");
@@ -30,7 +30,7 @@ export async function startAgentTrace({
   const trace = createTrace(workflow_type, {
     run_id,
     "workflow.name": workflow_type,
-    "teami.domain_id": domain_id,
+    "teami.team_ref": team_ref,
     "teami.agent_role": agent_role,
     "resource.kind": normalizedResource.kind,
     "resource.id": normalizedResource.id,
@@ -55,7 +55,7 @@ export async function startAgentTrace({
     });
     session = await sink.startAgentRun({
       runId: run_id,
-      domainId: domain_id,
+      teamRef: team_ref,
       workflowType: workflow_type,
       agentRole: agent_role,
       resource: normalizedResource,

@@ -26,7 +26,7 @@ test("startAgentTrace exports a github_behavior_repo trace without Linear worksp
     agent_role: "self_improvement_drafter",
     run_id: "run-github-behavior-repo",
     resource,
-    domain_id: "domain-a",
+    team_ref: "team-a",
     workflow_type: "self_improvement_draft",
     repoRoot,
     idFactory: () => traceId,
@@ -86,7 +86,7 @@ test("startAgentTrace exports a github_behavior_repo trace without Linear worksp
   const receipt = readTraceReceipt({ repoRoot, runId: "run-github-behavior-repo" });
   validateTraceReceipt(receipt);
   assert.equal(receipt.schema_version, TRACE_RECEIPT_SCHEMA_VERSION);
-  assert.equal(receipt.domain_id, "domain-a");
+  assert.equal(receipt.team_ref, "team-a");
   assert.equal(receipt.workspace_id, null);
   assert.equal(receipt.team_id, null);
   assert.deepEqual(receipt.resource, resource);
@@ -99,7 +99,7 @@ test("strict Linear receipts still reject missing workspace and team identity", 
     () => validateTraceReceipt({
       schema_version: TRACE_RECEIPT_SCHEMA_VERSION,
       run_id: "run-linear-missing-identity",
-      domain_id: "domain-a",
+      team_ref: "team-a",
       trace_status: "trace_exported",
     }),
     /missing_workspace_id/,
@@ -108,7 +108,7 @@ test("strict Linear receipts still reject missing workspace and team identity", 
     () => validateTraceReceipt({
       schema_version: TRACE_RECEIPT_SCHEMA_VERSION,
       run_id: "run-linear-explicit-kind",
-      domain_id: "domain-a",
+      team_ref: "team-a",
       resource: { kind: "linear", id: "project-1", label: "Project 1" },
       trace_status: "trace_exported",
     }),
@@ -118,7 +118,7 @@ test("strict Linear receipts still reject missing workspace and team identity", 
     () => boundedRunReceiptProjection({
       run: {
         run_id: "run-linear-projection",
-        domain_id: "domain-a",
+        team_ref: "team-a",
         resource: { kind: "linear", id: "project-1", label: "Project 1" },
       },
       traceStatus: "trace_exported",
@@ -136,7 +136,7 @@ test("startAgentTrace finish is non-throwing when the sink throws", async () => 
       id: "github:teami",
       label: "teami",
     },
-    domain_id: "domain-a",
+    team_ref: "team-a",
     workflow_type: "self_improvement_draft",
     sinkFactory: () => ({
       async startAgentRun() {

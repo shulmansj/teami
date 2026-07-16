@@ -60,7 +60,7 @@ and recovery guidance must reach the user while authorization is pending. A
 client that cannot surface in-flight communication must receive a resumable
 state, never a silent wait or a success claim after a dead end.
 
-Required setup phases are Linear authorization/domain setup,
+Required setup phases are Linear authorization/team setup,
 product-repository boundary verification (no new access during setup), private
 Teami workspace-repository setup, Claude plugin registration, Phoenix
 preparation and trace preflight, runtime readiness, and final doctor
@@ -75,19 +75,19 @@ step with accurate repair guidance.
 - The local gateway polls current Linear state, records local wake state, and
   hands claimed work to the local runner. It does not imply a background
   service or machine-off behavior.
-- Linear writes occur only after domain resolution, eligibility checks, durable
+- Linear writes occur only after team resolution, eligibility checks, durable
   local intent/run evidence, and the relevant deterministic gates.
 - Project-body and Planned-status mutations must resolve to exactly one Teami
-  domain/team. Foreign-team and ambiguous multi-team targets fail closed before
-  mutation. A wake cannot run while its domain is unresolved, including when a
-  project spans teams belonging to two active domains.
+  team/team. Foreign-team and ambiguous multi-team targets fail closed before
+  mutation. A wake cannot run while its team is unresolved, including when a
+  project spans teams belonging to two active teams.
 - Teami workspace-repository process-change proposals remain human-reviewed.
 
 Product-repo write-capable execution and PR effects are not shipped. Repository
 binding records scope. A separate post-setup product-repository grant records
 that scope only; dormant materializer or workflow modules are not
 activation. A future activation requires explicit product approval plus
-credible isolation, domain confinement, bounded Git behavior, staged-content
+credible isolation, team confinement, bounded Git behavior, staged-content
 guards, and no push after a failed safety gate.
 
 ## Custody And Recovery

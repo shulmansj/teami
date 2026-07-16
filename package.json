@@ -40,7 +40,7 @@
   ],
   "scripts": {
     "init": "node execution/integrations/linear/cli.mjs init",
-    "domain:add": "node execution/integrations/linear/cli.mjs domain:add",
+    "team:add": "node execution/integrations/linear/cli.mjs team:add",
     "doctor": "node execution/integrations/linear/cli.mjs doctor",
     "phoenix:doctor": "node execution/integrations/linear/cli.mjs phoenix:doctor",
     "phoenix:start": "node execution/integrations/linear/cli.mjs phoenix:start",

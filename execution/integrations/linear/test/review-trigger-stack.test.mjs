@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { branchNameForIssue } from "../../git/git-branch-names.mjs";
-import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION, makeTeamRecord } from "../src/team-registry.mjs";
 import {
   decideReviewIssue,
   gatewayPollTargets,
@@ -46,7 +46,7 @@ test("In Review poll target is registered and lists issues from the in_review st
   const calls = [];
   const page = await listInReviewIssueCandidates({
     config: reviewConfig(),
-    domain: domainFixture(),
+    team: teamFixture(),
     client: {
       async listWorkflowStates(teamId) {
         calls.push(["states", teamId]);
@@ -152,7 +152,7 @@ test("decideReviewIssue routes PR discovery statuses and idempotency without exe
 });
 
 test("decideReviewIssue uses produced PR identity and scopes branch-search recovery to the selected repo", async () => {
-  const domainContext = multiRepoDomainContextFixture();
+  const teamContext = multiRepoTeamContextFixture();
   const issueContext = issueFixture({
     id: "issue-6",
     identifier: "AF-6",
@@ -163,7 +163,7 @@ test("decideReviewIssue uses produced PR identity and scopes branch-search recov
     ].join("\n"),
   });
   const branch = branchNameForIssue("AF-6");
-  const legacyFirstRepo = domainContext.resources.find((resource) => resource.kind === "git_repo");
+  const legacyFirstRepo = teamContext.resources.find((resource) => resource.kind === "git_repo");
   assert.equal(
     legacyFirstRepo.binding.repo,
     "repo-a",
@@ -174,7 +174,7 @@ test("decideReviewIssue uses produced PR identity and scopes branch-search recov
   const producedDecision = await decideReviewIssue({
     issueId: "issue-6",
     issueContext,
-    domainContext,
+    teamContext,
     store: {
       findLatestRunForObject: () => executionRunWithProducedPrIdentity({
         resource_id: "repo-b",
@@ -221,7 +221,7 @@ test("decideReviewIssue uses produced PR identity and scopes branch-search recov
   const recoveryDecision = await decideReviewIssue({
     issueId: "issue-6",
     issueContext,
-    domainContext,
+    teamContext,
     store: {
       findLatestRunForObject: () => executionRunWithProducedPrIdentity(null),
     },
@@ -250,7 +250,7 @@ test("decideReviewIssue uses produced PR identity and scopes branch-search recov
 test("processReviewIssue respects the global maxInFlight gate", async () => {
   const state = gatewayState({ inFlight: new Set(["other-issue"]), maxInFlight: 1 });
   const result = await processReviewIssue({
-    domain: { id: "domain-1" },
+    team: { id: "team-1" },
     client: {
       async getIssueContext() {
         throw new Error("maxInFlight skip should not read the issue");
@@ -548,8 +548,8 @@ function reviewRunOptions({
   },
 }) {
   const store = createFakeReviewStore();
-  const domain = domainFixture();
-  const registry = { schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION, domains: [domain] };
+  const team = teamFixture();
+  const registry = { schema_version: TEAM_REGISTRY_SCHEMA_VERSION, teams: [team] };
   return {
     issueId: "issue-1",
     reviewDecision: {
@@ -559,7 +559,7 @@ function reviewRunOptions({
       repoIdentity: repoIdentityFixture(),
       hasPr: true,
     },
-    domainContext: domainContextFixture(),
+    teamContext: teamContextFixture(),
     registry,
     claim: {
       ok: true,
@@ -572,7 +572,7 @@ function reviewRunOptions({
       wake: {
         id: "wake-1",
         workspace_id: "workspace-1",
-        domain_id: "domain-1",
+        team_ref: "team-1",
         trigger_type: "linear.issue.in_review",
         workflow_type: "review",
         object_type: "issue",
@@ -626,7 +626,7 @@ function createFakeReviewStore() {
     async renewLease({ wakeId }) {
       return { ok: true, wake: structuredClone(wakes.get(wakeId) || null) };
     },
-    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, domainId }) {
+    async markWakeRunning({ wakeId, runnerId, leaseToken, runId, teamRef }) {
       const wake = wakes.get(wakeId) || {
         id: wakeId,
         workspace_id: "workspace-1",
@@ -639,7 +639,7 @@ function createFakeReviewStore() {
         runner_id: runnerId,
         lease_token: leaseToken,
         run_id: runId,
-        domain_id: domainId,
+        team_ref: teamRef,
       });
       wakes.set(wakeId, wake);
       runs.set(runId, { run_id: runId, wake_id: wakeId, status: "running" });
@@ -912,9 +912,9 @@ function workflowStates() {
   ];
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "domain-1",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "team-1",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",
@@ -935,11 +935,11 @@ function domainFixture() {
   });
 }
 
-function domainContextFixture() {
+function teamContextFixture() {
   return {
-    domainId: "domain-1",
+    teamRef: "team-1",
     status: "active",
-    resources: domainFixture().resources,
+    resources: teamFixture().resources,
     linear: {
       workspaceId: "workspace-1",
       teamId: "team-1",
@@ -949,7 +949,7 @@ function domainContextFixture() {
       cachePath: "unused-cache.json",
     },
     trace: {
-      domain_id: "domain-1",
+      team_ref: "team-1",
       workspace_id: "workspace-1",
       team_id: "team-1",
       behavior_repo_id: "local:review-test",
@@ -957,9 +957,9 @@ function domainContextFixture() {
   };
 }
 
-function multiRepoDomainContextFixture() {
+function multiRepoTeamContextFixture() {
   return {
-    ...domainContextFixture(),
+    ...teamContextFixture(),
     resources: [
       {
         id: "repo-a",

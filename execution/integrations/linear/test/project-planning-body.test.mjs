@@ -9,7 +9,7 @@ import {
 
 const COMPLETE_SLOTS = Object.freeze({
   problem: "Activation stalls because founders cannot translate intent into decomposition-ready work.",
-  audience: "Non-technical founders using Teami with a connected Linear domain.",
+  audience: "Non-technical founders using Teami with a connected Linear team.",
   desired_outcome: "A clear project body that a human can review before committing the factory.",
   acceptance: "Every planning slot is visible in Linear and can be traced back to the confirmation receipt.",
   scope: "Include upstream planning intent; exclude downstream issue decomposition.",
@@ -41,7 +41,7 @@ Activation stalls because founders cannot translate intent into decomposition-re
 
 ## Audience / Who It's For
 
-Non-technical founders using Teami with a connected Linear domain.
+Non-technical founders using Teami with a connected Linear team.
 
 ## Desired Outcome
 

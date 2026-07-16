@@ -29,7 +29,7 @@ test("Principal Review and park-record sweep targets are registered after In Rev
 test("Principal Review polling uses the cached role id even if the status has been renamed", async () => {
   const calls = [];
   const page = await listHumanReviewIssueCandidates({
-    domain: domainFixture(),
+    team: teamFixture(),
     cache: cacheFixture(),
     pollScope: null,
     client: {
@@ -650,7 +650,7 @@ test("completed issues with park records retain replay markers until park cleanu
 
   const result = await sweepIssueReplayMarker({
     repoRoot,
-    domain: domainFixture(),
+    team: teamFixture(),
     store,
     marker: { objectId: "issue-1", runId: "run-execution-1" },
     client: {
@@ -701,8 +701,8 @@ function mergeGateOptions({
 } = {}) {
   return {
     repoRoot,
-    domain: domainFixture(),
-    domainContext: domainContextFixture(),
+    team: teamFixture(),
+    teamContext: teamContextFixture(),
     config: configFixture(),
     cache: cacheFixture(),
     client,
@@ -968,9 +968,9 @@ function cacheFixture() {
   };
 }
 
-function domainFixture() {
+function teamFixture() {
   return {
-    id: "domain-1",
+    id: "team-1",
     linear: {
       workspace_id: "workspace-1",
       team_id: "team-1",
@@ -978,9 +978,9 @@ function domainFixture() {
   };
 }
 
-function domainContextFixture() {
+function teamContextFixture() {
   return {
-    domainId: "domain-1",
+    teamRef: "team-1",
     linear: {
       workspaceId: "workspace-1",
       teamId: "team-1",

@@ -2,25 +2,25 @@ import { readLinearCache, writeLinearCache } from "./cache.mjs";
 import { resolveTeamiHome } from "./app-home.mjs";
 import { loadLinearConfig } from "./config.mjs";
 import { normalizeDoctorChecks } from "./doctor-check.mjs";
-import { createDomainConfinedPlanningMutations } from "./domain-confined-planning-mutations.mjs";
-import { resolveForegroundDomainCache } from "./domain-command-context.mjs";
-import { buildDomainContext } from "./domain-resolver.mjs";
+import { createTeamConfinedPlanningMutations } from "./team-confined-planning-mutations.mjs";
+import { resolveForegroundTeamCache } from "./team-command-context.mjs";
+import { buildTeamContext } from "./team-resolver.mjs";
 import {
-  emptyDomainRegistry,
-  readDomainRegistry,
-  writeDomainRegistry,
-} from "./domain-registry.mjs";
+  createAtomicTeamRegistryWriter,
+  emptyTeamRegistry,
+  readTeamRegistry,
+} from "./team-registry.mjs";
 import {
   createBootstrapLinearCredentialStore,
-  promoteSetupCredentialToDomain,
+  promoteSetupCredentialToTeam,
 } from "./cli/local-setup-cleanup.mjs";
 import {
   authorizeLinearSetupWorkspace,
   discoverGitHubRepos,
   ensureNeedsPrincipalProjectStatus,
-  persistDomainGitHubRepoAllowlist,
-  registryWithoutRemovedDomainsForName,
-  resolveSetupCommandDomainNameHint,
+  persistTeamGitHubRepoAllowlist,
+  registryWithoutRemovedTeamsForName,
+  resolveSetupCommandTeamNameHint,
   runClaudePluginRegistrationStep,
 } from "./cli/linear-setup-command.mjs";
 import {
@@ -28,7 +28,7 @@ import {
   githubSetupTransportFromFlags,
 } from "./cli/github-command-options.mjs";
 import {
-  completeDomainTeamMissingRecoveryFromError,
+  completeTeamTeamMissingRecoveryFromError,
   formatCommand,
 } from "./cli/operator-output.mjs";
 import { doctorGraphqlLinear } from "./cli/doctor-command.mjs";
@@ -51,10 +51,11 @@ import {
 } from "./linear-oauth.mjs";
 import { knownTraceAttributes } from "./linear/matching-utils.mjs";
 import { resolveLinearShape } from "./linear/shape-resolver.mjs";
-import { setupLinearDomain } from "./linear-service.mjs";
+import { setupLinearTeam } from "./linear-service.mjs";
 import { renderPlanningBody } from "./project-planning-body.mjs";
 import { createTrace, recordSpan } from "./trace.mjs";
 import { runRuntimeSmokeChecks } from "./runtime-smoke.mjs";
+import { acquireTeamOperationLock } from "./team-operation-lock.mjs";
 import {
   DEFAULT_SETUP_TEAM_NAME,
   SETUP_DISCLOSURE_HASH,
@@ -74,7 +75,7 @@ import {
 } from "../../../engine/trace-contract.mjs";
 export const TEAMI_PROJECT_MCP_TOOL_NAMES = Object.freeze([
   "init_onboarding",
-  "resolve_domain",
+  "resolve_team",
   "project_create",
   "project_write_body",
   "project_move_status",
@@ -99,6 +100,7 @@ export function createProjectMcpToolActions({
   readCache = readLinearCache,
   loadConfig = loadLinearConfig,
   createCredentialStore = createLinearCredentialStore,
+  createBootstrapCredentialStore = createBootstrapLinearCredentialStore,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
   linearClient = null,
   linearClientFactory = null,
@@ -134,6 +136,7 @@ export function createProjectMcpToolActions({
   setupSurface = "mcp",
   setupOwnerPid = process.pid,
   isSetupOwnerProcessAlive = null,
+  acquireTeamAuthority = acquireTeamOperationLock,
 } = {}) {
   const baseConfig = config || loadConfig({ repoRoot });
   const setupStore = setupStateStore || createSetupStateStore({ home });
@@ -179,6 +182,7 @@ export function createProjectMcpToolActions({
           registry,
           readCache,
           createCredentialStore,
+          createBootstrapCredentialStore,
           createSetupGraphqlClient,
           createLinearSetupAuth,
           authorizeLinearBrowser: async () => tokenSet,
@@ -213,12 +217,12 @@ export function createProjectMcpToolActions({
         onSetupProgress,
       });
     }
-    const currentRegistry = readDomainRegistry({ home }) || emptyDomainRegistry();
-    const domainName = optionalString(args.domain) || inferredSetupDomainName(currentRegistry);
-    if (!domainName || args.confirm !== true) {
+    const currentRegistry = readTeamRegistry({ home }) || emptyTeamRegistry();
+    const teamName = optionalString(args.team) || inferredSetupTeamName(currentRegistry);
+    if (!teamName || args.confirm !== true) {
       return initOnboardingNeedsResult({
-        domainName,
-        domainRequired: !domainName,
+        teamName,
+        teamRequired: !teamName,
       });
     }
     let requestedRepoIntent;
@@ -242,27 +246,30 @@ export function createProjectMcpToolActions({
     }
     const setupArgs = {
       ...args,
-      domain: domainName,
+      team: teamName,
       repo_intent: { mode: "non_code" },
     };
-    const domainResolution = resolveSetupCommandDomainNameHint(
-      ["--domain", domainName],
+    const teamResolution = resolveSetupCommandTeamNameHint(
+      ["--team", teamName],
       currentRegistry,
     );
-    const completeDomain = domainResolution.completeResumeDomain || null;
-    const incompleteDomain = domainResolution.resumeDomain || null;
+    const completeTeam = teamResolution.completeResumeTeam || null;
+    const incompleteTeam = teamResolution.resumeTeam || null;
+    const credentialTeam = completeTeam ||
+      (teamHasLinearCredentialIdentity(incompleteTeam) ? incompleteTeam : null);
     setupArgs.github_replacement_explicit = Boolean(
-      completeDomain && optionalString(args.github_owner) && optionalString(args.github_repo),
+      completeTeam && optionalString(args.github_owner) && optionalString(args.github_repo),
     );
     let existingTokenSet = null;
-    if (completeDomain || incompleteDomain) {
-      const existingCredentialStore = completeDomain
+    if (completeTeam || incompleteTeam) {
+      const existingCredentialStore = credentialTeam
         ? createCredentialStore({
             config: baseConfig,
             repoRoot,
-            domainContext: buildDomainContext({ domain: completeDomain, config: baseConfig, repoRoot, home }),
+            home,
+            teamContext: buildTeamContext({ team: credentialTeam, config: baseConfig, repoRoot, home }),
           })
-        : createBootstrapLinearCredentialStore({ config: baseConfig, repoRoot });
+        : createBootstrapCredentialStore({ config: baseConfig, repoRoot, home });
       existingTokenSet = await existingCredentialStore.readTokenSet();
       if (existingTokenSet) {
         const setupAuthFactory = createLinearSetupAuth ||
@@ -278,7 +285,7 @@ export function createProjectMcpToolActions({
             fetchImpl,
           });
           await existingAuth.client.verifyAuth();
-          const expectedWorkspaceId = (completeDomain || incompleteDomain)?.linear?.workspace_id || null;
+          const expectedWorkspaceId = (completeTeam || incompleteTeam)?.linear?.workspace_id || null;
           if (expectedWorkspaceId && typeof existingAuth.client.getOrganization === "function") {
             const organization = await existingAuth.client.getOrganization();
             if (organization?.id !== expectedWorkspaceId) {
@@ -297,7 +304,17 @@ export function createProjectMcpToolActions({
               repair: "Check the network and Linear availability, then retry setup. Teami did not replace the existing grant.",
             };
           }
-          await existingCredentialStore.deleteTokenSet?.();
+          const deletion = typeof existingCredentialStore.deleteTokenSetIfEqual === "function"
+            ? await existingCredentialStore.deleteTokenSetIfEqual(existingTokenSet)
+            : (await existingCredentialStore.deleteTokenSet?.(), { ok: true });
+          if (deletion?.ok === false) {
+            return {
+              ok: false,
+              status: "blocked",
+              reason: "linear_authorization_changed_during_validation",
+              repair: "The Linear credential was refreshed while setup was checking it. Retry setup; Teami preserved the newer credential.",
+            };
+          }
           existingTokenSet = null;
         }
       }
@@ -320,11 +337,11 @@ export function createProjectMcpToolActions({
     return started;
   }
 
-  async function resolve_domain(args = {}) {
-    const { context, cache } = resolveDomainCache(args);
+  async function resolve_team(args = {}) {
+    const { context, cache } = resolveTeamCache(args);
     return {
       ok: true,
-      domain: publicDomainContext(context),
+      team: publicTeamContext(context),
       cache: publicCacheSummary(cache),
     };
   }
@@ -332,46 +349,50 @@ export function createProjectMcpToolActions({
   async function project_create(args = {}) {
     const name = requiredString(args.name, "name");
     const description = optionalString(args.description);
-    const prepared = await prepareLinear(args);
-    const backlogStatusId = prepared.shape.projectStatuses?.backlog?.id;
-    if (!backlogStatusId) {
-      throw new ProjectMcpToolError("shape_unavailable", "Linear Backlog project status is not configured.");
-    }
+    return withTeamAuthority(async () => {
+      const prepared = await prepareLinear(args);
+      const backlogStatusId = prepared.shape.projectStatuses?.backlog?.id;
+      if (!backlogStatusId) {
+        throw new ProjectMcpToolError("shape_unavailable", "Linear Backlog project status is not configured.");
+      }
 
-    const project = await prepared.mutations.createProject({
-      name,
-      ...(description ? { description } : {}),
-      statusId: backlogStatusId,
-    });
-    await emitPlanningTrace({
-      outcome: "created",
-      project,
-      context: prepared.context,
-    });
+      const project = await prepared.mutations.createProject({
+        name,
+        ...(description ? { description } : {}),
+        statusId: backlogStatusId,
+      });
+      await emitPlanningTrace({
+        outcome: "created",
+        project,
+        context: prepared.context,
+      });
 
-    return {
-      ok: true,
-      project: publicProject(project),
-      domain: publicDomainContext(prepared.context),
-      status: {
-        role: "backlog",
-        id: backlogStatusId,
-      },
-    };
+      return {
+        ok: true,
+        project: publicProject(project),
+        team: publicTeamContext(prepared.context),
+        status: {
+          role: "backlog",
+          id: backlogStatusId,
+        },
+      };
+    });
   }
 
   async function project_write_body(args = {}) {
     const projectId = requiredString(args.project_id || args.projectId, "project_id");
     const content = requiredProjectBodyContent(args);
-    const prepared = await prepareLinear(args, { resolveShapeForStatus: false });
-    const project = await prepared.mutations.updateProject(projectId, { content });
+    return withTeamAuthority(async () => {
+      const prepared = await prepareLinear(args, { resolveShapeForStatus: false });
+      const project = await prepared.mutations.updateProject(projectId, { content });
 
-    return {
-      ok: true,
-      project: publicProject(project),
-      domain: publicDomainContext(prepared.context),
-      content_length: content.length,
-    };
+      return {
+        ok: true,
+        project: publicProject(project),
+        team: publicTeamContext(prepared.context),
+        content_length: content.length,
+      };
+    });
   }
 
   async function project_move_status(args = {}) {
@@ -383,66 +404,84 @@ export function createProjectMcpToolActions({
       );
     }
 
-    const prepared = await prepareLinear(args);
-    const plannedStatusId = prepared.shape.projectStatuses?.planned?.id;
-    if (!plannedStatusId) {
-      throw new ProjectMcpToolError("shape_unavailable", "Linear Planned project status is not configured.");
-    }
+    return withTeamAuthority(async () => {
+      const prepared = await prepareLinear(args);
+      const plannedStatusId = prepared.shape.projectStatuses?.planned?.id;
+      if (!plannedStatusId) {
+        throw new ProjectMcpToolError("shape_unavailable", "Linear Planned project status is not configured.");
+      }
 
-    const project = await prepared.mutations.updateProject(projectId, { statusId: plannedStatusId });
-    await emitPlanningTrace({
-      outcome: "committed",
-      project,
-      context: prepared.context,
-      planningTelemetry: normalizePlanningTelemetry(args.planning_telemetry),
+      const project = await prepared.mutations.updateProject(projectId, { statusId: plannedStatusId });
+      await emitPlanningTrace({
+        outcome: "committed",
+        project,
+        context: prepared.context,
+        planningTelemetry: normalizePlanningTelemetry(args.planning_telemetry),
+      });
+      return {
+        ok: true,
+        project: publicProject(project),
+        team: publicTeamContext(prepared.context),
+        status: {
+          role: "planned",
+          id: plannedStatusId,
+        },
+      };
     });
-    return {
-      ok: true,
-      project: publicProject(project),
-      domain: publicDomainContext(prepared.context),
-      status: {
-        role: "planned",
-        id: plannedStatusId,
-      },
-    };
+  }
+
+  async function withTeamAuthority(operation) {
+    const authority = acquireTeamAuthority({ home, installHandlers: false });
+    if (!authority.ok) {
+      throw new ProjectMcpToolError(
+        "team_authority_busy",
+        "Another Teami planning, review, setup, or gateway operation is active; wait for it to finish, then retry.",
+        { repair: "Wait for the current Team operation to finish, then retry the planning action." },
+      );
+    }
+    try {
+      return await operation();
+    } finally {
+      authority.release();
+    }
   }
 
   async function prepareLinear(args = {}, { resolveShapeForStatus = true } = {}) {
-    const { context, cache, config: domainConfig } = resolveDomainCache(args);
-    const client = await resolveClient({ context, config: domainConfig });
+    const { context, cache, config: teamConfig } = resolveTeamCache(args);
+    const client = await resolveClient({ context, config: teamConfig });
     const shape = resolveShapeForStatus
-      ? await resolveShape({ client, config: domainConfig, cache })
+      ? await resolveShape({ client, config: teamConfig, cache })
       : null;
-    const mutations = createDomainConfinedPlanningMutations({
+    const mutations = createTeamConfinedPlanningMutations({
       client,
       context,
       createError: (code, message, repair) => new ProjectMcpToolError(code, message, { repair }),
     });
-    return { context, cache, config: domainConfig, client, mutations, shape };
+    return { context, cache, config: teamConfig, client, mutations, shape };
   }
 
-  function resolveDomainCache(args = {}) {
-    return resolveForegroundDomainCache({
+  function resolveTeamCache(args = {}) {
+    return resolveForegroundTeamCache({
       config: baseConfig,
       repoRoot,
       registry,
-      domainId: optionalString(args.domain || args.domain_id || args.domainId),
+      teamRef: optionalString(args.team || args.team_ref || args.teamRef),
       readCache,
     });
   }
 
-  async function resolveClient({ context, config: domainConfig }) {
+  async function resolveClient({ context, config: teamConfig }) {
     if (linearClient) return linearClient;
     if (linearClientFactory) {
-      return linearClientFactory({ context, config: domainConfig, repoRoot });
+      return linearClientFactory({ context, config: teamConfig, repoRoot });
     }
     const credentialStore = createCredentialStore({
-      config: domainConfig,
-      domainContext: context,
+      config: teamConfig,
+      teamContext: context,
       repoRoot,
     });
     const { client } = createSetupGraphqlClient({
-      config: domainConfig,
+      config: teamConfig,
       repoRoot,
       credentialStore,
       allowBrowserAuth: false,
@@ -468,7 +507,7 @@ export function createProjectMcpToolActions({
 
   return Object.freeze({
     init_onboarding,
-    resolve_domain,
+    resolve_team,
     project_create,
     project_write_body,
     project_move_status,
@@ -567,7 +606,7 @@ async function beginInitOnboardingAuthorization({
       });
       setupStore.recordPhase(state.setup_id, "linear", {
         status: "healthy",
-        reason: "existing_domain_authorization_reused",
+        reason: "existing_team_authorization_reused",
         setupStatus: "running",
       });
       return { ok: false, status: "authorization_reused", setup_id: state.setup_id };
@@ -644,6 +683,9 @@ async function resumeInitOnboardingAuthorization({
       repair: "Start setup again; Teami will create a fresh authorization URL.",
     };
   }
+  if (state.status === "complete" && !state.admin_revocation_required) {
+    return completedSetupStateResult(state);
+  }
   if (state.consent?.version !== SETUP_DISCLOSURE_VERSION || state.consent?.hash !== SETUP_DISCLOSURE_HASH) {
     discardTrackedAuthorizationSession(authorizationSessions, setupId);
     setupStore.recordPhase(setupId, "linear", {
@@ -686,7 +728,7 @@ async function resumeInitOnboardingAuthorization({
   if (!tracked && canResumeAfterDurableLinearSetup(state)) {
     // Linear's ordinary app credential was already promoted durably before later phases ran.
     // Re-enter through the same idempotent setup engine without retaining the original token in
-    // setup state or process memory. The engine resolves the complete domain credential itself.
+    // setup state or process memory. The engine resolves the complete team credential itself.
     tracked = {
       kind: "app",
       session: null,
@@ -959,11 +1001,29 @@ function canResumeAfterDurableLinearSetup(state) {
     state?.phases?.linear?.status === "healthy";
 }
 
-function initOnboardingNeedsResult({ domainName = DEFAULT_SETUP_TEAM_NAME, domainRequired = false } = {}) {
+function completedSetupStateResult(state) {
+  return {
+    ok: true,
+    status: "complete",
+    setup_id: state.setup_id,
+    steps: Object.fromEntries(Object.entries(state.phases || {}).map(([phase, receipt]) => [
+      phase,
+      {
+        ok: receipt?.status === "healthy",
+        status: receipt?.status || "pending",
+        reason: receipt?.reason || null,
+      },
+    ])),
+    health: { ok: true, status: "complete" },
+    next_steps: [],
+  };
+}
+
+function initOnboardingNeedsResult({ teamName = DEFAULT_SETUP_TEAM_NAME, teamRequired = false } = {}) {
   const needs = [];
-  if (domainRequired) {
+  if (teamRequired) {
     needs.push({
-      field: "domain",
+      field: "team",
       required: true,
       question: "Ask which existing Teami team to repair.",
     });
@@ -978,7 +1038,7 @@ function initOnboardingNeedsResult({ domainName = DEFAULT_SETUP_TEAM_NAME, domai
     status: "consent_required",
     disclosure: setupEffectsDisclosure(),
     defaults: {
-      team: domainName || null,
+      team: teamName || null,
       product_repositories: "none",
     },
     needs,
@@ -989,10 +1049,10 @@ function initOnboardingNeedsResult({ domainName = DEFAULT_SETUP_TEAM_NAME, domai
   };
 }
 
-function inferredSetupDomainName(registry = emptyDomainRegistry()) {
-  const domains = (registry?.domains || []).filter((domain) => domain?.status !== "removed");
-  if (domains.length === 0) return DEFAULT_SETUP_TEAM_NAME;
-  if (domains.length === 1) return domains[0].adopter_provided_name || domains[0].id || DEFAULT_SETUP_TEAM_NAME;
+function inferredSetupTeamName(registry = emptyTeamRegistry()) {
+  const teams = (registry?.teams || []).filter((team) => team?.status !== "removed");
+  if (teams.length === 0) return DEFAULT_SETUP_TEAM_NAME;
+  if (teams.length === 1) return teams[0].adopter_provided_name || teams[0].id || DEFAULT_SETUP_TEAM_NAME;
   return null;
 }
 
@@ -1166,7 +1226,7 @@ function classifyAdminAuthorizationSessionFailure(error) {
 
 function persistedSetupArgs(input = {}) {
   return {
-    domain: input.domain,
+    team: input.team,
     ...(input.workspace ? { workspace: input.workspace } : {}),
     repo_intent: input.repo_intent,
     repos: input.repo_intent?.repos || [],
@@ -1187,6 +1247,7 @@ async function runInitOnboardingSetup({
   registry = null,
   readCache = readLinearCache,
   createCredentialStore = createLinearCredentialStore,
+  createBootstrapCredentialStore = createBootstrapLinearCredentialStore,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
   createLinearSetupAuth = null,
   authorizeLinearBrowser = authorizeWithBrowser,
@@ -1225,18 +1286,25 @@ async function runInitOnboardingSetup({
     if (url) recordAuthorizationUrl(url);
   };
 
-  const currentRegistry = registry || readDomainRegistry({ home }) || emptyDomainRegistry();
-  const initArgs = ["--domain", input.domain, ...(input.workspace ? ["--workspace", input.workspace] : [])];
-  const domainNameResolution = resolveSetupCommandDomainNameHint(initArgs, currentRegistry);
-  const resumeDomain = domainNameResolution.resumeDomain || domainNameResolution.completeResumeDomain || null;
-  const completeResumeDomain = domainNameResolution.completeResumeDomain || null;
-  const setupRegistry = registryWithoutRemovedDomainsForName(currentRegistry, input.domain);
-  const completeResumeContext = completeResumeDomain
-    ? buildDomainContext({ domain: completeResumeDomain, config, repoRoot, home })
+  const currentRegistry = registry || readTeamRegistry({ home }) || emptyTeamRegistry();
+  const initArgs = ["--team", input.team, ...(input.workspace ? ["--workspace", input.workspace] : [])];
+  const teamNameResolution = resolveSetupCommandTeamNameHint(initArgs, currentRegistry);
+  const resumeTeam = teamNameResolution.resumeTeam || teamNameResolution.completeResumeTeam || null;
+  const completeResumeTeam = teamNameResolution.completeResumeTeam || null;
+  const authorizationRegistry = registryWithoutRemovedTeamsForName(currentRegistry, input.team);
+  const resumeCredentialTeam = teamHasLinearCredentialIdentity(resumeTeam) ? resumeTeam : null;
+  const resumeContext = resumeCredentialTeam
+    ? buildTeamContext({ team: resumeCredentialTeam, config, repoRoot, home })
     : null;
-  const credentialStore = completeResumeContext
-    ? createCredentialStore({ config, repoRoot, domainContext: completeResumeContext })
-    : createBootstrapLinearCredentialStore({ config, repoRoot });
+  const credentialStore = resumeContext
+    ? createCredentialStore({ config, repoRoot, home, teamContext: resumeContext })
+    : createBootstrapCredentialStore({ config, repoRoot, home });
+  const obsoleteBootstrapStore = !completeResumeTeam && resumeContext
+    ? createBootstrapCredentialStore({ config, repoRoot, home })
+    : null;
+  const obsoleteBootstrapToken = obsoleteBootstrapStore
+    ? await obsoleteBootstrapStore.readTokenSet()
+    : null;
   const setupAuthFactory = createLinearSetupAuth || ((options) => createSetupGraphqlClient(options));
   const setupFlags = setupFlagsForInitOnboarding(input);
   const promptAdminProvisioning = async () => {
@@ -1276,11 +1344,11 @@ async function runInitOnboardingSetup({
     config,
     repoRoot,
     credentialStore,
-    registry: setupRegistry,
+    registry: authorizationRegistry,
     flags: setupFlags,
     env: process.env,
-    domainNameHint: input.domain,
-    resumeDomain,
+    teamNameHint: input.team,
+    resumeTeam,
     isTTY: true,
     log,
     createSetupAuth: (options) => setupAuthFactory({
@@ -1295,15 +1363,15 @@ async function runInitOnboardingSetup({
     promptReauthorize: promptLinearWorkspaceConfirmation,
   });
 
-  let linearResult = await setupLinearDomain({
+  let linearResult = await setupLinearTeam({
     client: workspaceAuthorization.setupAuth.client,
     config,
-    registry: setupRegistry,
+    registry: currentRegistry,
     repoRoot,
     home,
-    domainName: input.domain,
-    cache: completeResumeContext ? readCache(completeResumeContext.linear.cachePath) : null,
-    resumeDomain,
+    teamName: input.team,
+    cache: resumeContext ? readCache(resumeContext.linear.cachePath) : null,
+    resumeTeam,
     workspace: workspaceAuthorization.workspace,
     declaredWorkspace: workspaceAuthorization.declaredWorkspace,
     ensureNeedsPrincipalProjectStatus: () => ensureNeedsPrincipalProjectStatus({
@@ -1323,45 +1391,48 @@ async function runInitOnboardingSetup({
     writeCache: (nextCache, context) => {
       writeLinearCache(context.linear.cachePath, nextCache);
     },
-    writeRegistry: (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
-    promoteCredential: completeResumeDomain
-      ? async () => {}
-      : ({ context }) => promoteSetupCredentialToDomain({
+    writeRegistry: createAtomicTeamRegistryWriter({ home, initialRegistry: currentRegistry }),
+    promoteCredential: resumeContext
+      ? async () => {
+          if (obsoleteBootstrapToken) {
+            await obsoleteBootstrapStore.deleteTokenSetIfEqual(obsoleteBootstrapToken);
+          }
+        }
+      : ({ context }) => promoteSetupCredentialToTeam({
           setupCredentialStore: credentialStore,
           config,
           repoRoot,
-          domainContext: context,
+          home,
+          teamContext: context,
         }),
     onPreview: log,
     selectedExistingTeamId: input.linear_team_confirm === true ? input.linear_team_id : null,
   });
 
-  const allowlistUpdate = completeResumeDomain
+  const allowlistUpdate = completeResumeTeam
     ? {
-        domain: linearResult.domain,
+        team: linearResult.team,
         registry: linearResult.registry,
-        resources: (linearResult.domain.resources || []).filter((resource) => resource.kind === "git_repo"),
+        resources: (linearResult.team.resources || []).filter((resource) => resource.kind === "git_repo"),
       }
     : await (async () => {
         const allowlistRepos = await resolveInitOnboardingRepoAllowlist({
           requestedRepos: input.repos,
           runCommand: githubDiscoveryRunCommand,
         });
-        return persistDomainGitHubRepoAllowlist({
+        return persistTeamGitHubRepoAllowlist({
           repoRoot,
           home,
-          domainId: linearResult.domain.id,
+          teamRef: linearResult.team.id,
           repos: allowlistRepos,
-          registry: linearResult.registry,
-          writeRegistry: (nextRegistry) => writeDomainRegistry({ home }, nextRegistry),
         });
       })();
   linearResult = {
     ...linearResult,
-    domain: allowlistUpdate.domain,
+    team: allowlistUpdate.team,
     registry: allowlistUpdate.registry,
-    context: buildDomainContext({
-      domain: allowlistUpdate.domain,
+    context: buildTeamContext({
+      team: allowlistUpdate.team,
       config,
       repoRoot,
       home,
@@ -1371,7 +1442,7 @@ async function runInitOnboardingSetup({
 
   const githubFlags = githubFlagsForInitOnboarding(input);
   const githubConfig = configWithGithubFlags(config, githubFlags);
-  const existingGitHub = completeResumeDomain ? readGitHubConnectionState({ repoRoot, home }) : null;
+  const existingGitHub = completeResumeTeam ? readGitHubConnectionState({ repoRoot, home }) : null;
   const existingConnection = existingGitHub?.ok === true ? existingGitHub.connection : null;
   let requestedGithubOwner = input.github_owner || existingConnection?.repo?.owner || null;
   let requestedGithubRepo = input.github_repo || existingConnection?.repo?.name || null;
@@ -1447,7 +1518,7 @@ async function runInitOnboardingSetup({
       phoenix: async () => {
         phoenixStep = await runInitOnboardingPhoenixStep({
           repoRoot,
-          domainContext: linearResult.context,
+          teamContext: linearResult.context,
           ensurePhoenix,
           runPhoenixPreflight,
           onProgress: log,
@@ -1464,7 +1535,7 @@ async function runInitOnboardingSetup({
           repoRoot,
           home,
           cachePath: linearResult.context?.linear?.cachePath,
-          domainId: linearResult.domain.id,
+          teamRef: linearResult.team.id,
           pluginStep,
           runSetupDoctor,
           claudePluginRunCommand,
@@ -1502,9 +1573,13 @@ async function runInitOnboardingSetup({
   };
 }
 
+function teamHasLinearCredentialIdentity(team) {
+  return Boolean(team?.id && team?.linear?.workspace_id && team?.linear?.team_id);
+}
+
 async function runInitOnboardingPhoenixStep({
   repoRoot,
-  domainContext,
+  teamContext,
   ensurePhoenix,
   runPhoenixPreflight,
   onProgress,
@@ -1528,7 +1603,7 @@ async function runInitOnboardingPhoenixStep({
     preflight = await runPhoenixPreflight({
       repoRoot,
       ensureReady: async () => ready,
-      domainContext,
+      teamContext,
     });
   } catch (error) {
     preflight = { ok: false, reason: redactOAuthSecrets(error.message) };
@@ -1591,7 +1666,7 @@ async function runInitOnboardingDoctorStep({
   repoRoot,
   home,
   cachePath,
-  domainId,
+  teamRef,
   pluginStep,
   runSetupDoctor,
   claudePluginRunCommand,
@@ -1605,7 +1680,7 @@ async function runInitOnboardingDoctorStep({
       repoRoot,
       home,
       cachePath,
-      domainId,
+      teamRef,
       includeRuntimeSmoke: false,
       includePhoenix: false,
       includeClaudePlugin: pluginVersion === null,
@@ -1653,8 +1728,8 @@ function verifiedSetupPluginVersion(pluginStep = {}) {
 }
 
 function normalizeInitOnboardingInput(args = {}) {
-  const domain = optionalString(args.domain);
-  if (!domain) throw new ProjectMcpToolError("invalid_input", "domain is required to run setup.");
+  const team = optionalString(args.team);
+  if (!team) throw new ProjectMcpToolError("invalid_input", "team is required to run setup.");
   let repoIntent;
   try {
     repoIntent = normalizeSetupRepoIntent(args.repo_intent || { mode: "non_code" });
@@ -1662,7 +1737,7 @@ function normalizeInitOnboardingInput(args = {}) {
     throw new ProjectMcpToolError("invalid_input", error.message);
   }
   return {
-    domain,
+    team,
     workspace: optionalString(args.workspace),
     repo_intent: repoIntent,
     repos: normalizeInitOnboardingRepos(repoIntent.repos),
@@ -1837,21 +1912,21 @@ function publicInitOnboardingPluginStep(result = {}) {
 }
 
 function publicInitOnboardingLinearStep(result, resources = []) {
-  const domain = result.domain || {};
+  const team = result.team || {};
   return {
     ok: result.ok === true,
-    domain: {
-      id: domain.id || null,
-      status: domain.status || null,
+    team: {
+      id: team.id || null,
+      status: team.status || null,
     },
     workspace: {
-      id: domain.linear?.workspace_id || result.cache?.workspaceId || null,
-      name: domain.linear?.workspace_name || null,
+      id: team.linear?.workspace_id || result.cache?.workspaceId || null,
+      name: team.linear?.workspace_name || null,
     },
     team: {
-      id: domain.linear?.team_id || result.cache?.teamId || null,
-      key: domain.linear?.team_key || result.cache?.teamKey || null,
-      name: domain.linear?.team_name || null,
+      id: team.linear?.team_id || result.cache?.teamId || null,
+      key: team.linear?.team_key || result.cache?.teamKey || null,
+      name: team.linear?.team_name || null,
     },
     repos: resources.map((resource) => ({
       owner: resource.binding.owner,
@@ -1976,13 +2051,13 @@ async function emitPlanningSessionTrace({
         observedAt,
       });
       const projectId = project.id;
-      const domainId = context?.trace?.domain_id || context?.domainId || null;
+      const teamRef = context?.trace?.team_ref || context?.teamRef || null;
       const workspaceId = context?.trace?.workspace_id || context?.linear?.workspaceId || null;
       const teamId = context?.trace?.team_id || context?.linear?.teamId || null;
       const runId = `planning-session-${outcome}-${projectId}-${Date.now()}`;
       const wake = {
         id: `${PLANNING_SESSION_TRACE_KIND}:${outcome}:${projectId}`,
-        domain_id: domainId,
+        team_ref: teamRef,
         workspace_id: workspaceId,
         team_id: teamId,
         object_id: projectId,
@@ -2000,7 +2075,7 @@ async function emitPlanningSessionTrace({
         sourceEvent,
         runId,
         workspaceId,
-        domainContext: context,
+        teamContext: context,
       });
       return await sink.finishRun?.({
         session,
@@ -2030,7 +2105,7 @@ function buildPlanningSessionTrace({
   const attributes = knownTraceAttributes({
     "workflow.name": PLANNING_SESSION_TRACE_KIND,
     "workflow.version": "v1",
-    "teami.domain_id": context?.trace?.domain_id || context?.domainId || null,
+    "teami.team_ref": context?.trace?.team_ref || context?.teamRef || null,
     "teami.behavior_repo_id": context?.trace?.behavior_repo_id,
     "linear.workspace_id": context?.trace?.workspace_id || context?.linear?.workspaceId || null,
     "linear.team_id": context?.trace?.team_id || context?.linear?.teamId || null,
@@ -2127,7 +2202,7 @@ function normalizePlanningTelemetry(value) {
 }
 
 export function sanitizeProjectMcpError(error) {
-  const teamMissing = completeDomainTeamMissingRecoveryFromError(error);
+  const teamMissing = completeTeamTeamMissingRecoveryFromError(error);
   if (teamMissing) {
     return {
       ok: false,
@@ -2154,12 +2229,13 @@ export function sanitizeProjectMcpError(error) {
   }
 
   const reason = typeof error?.reason === "string" ? error.reason : "";
-  if (DOMAIN_ERROR_MESSAGES[reason]) {
+  if (TEAM_ERROR_MESSAGES[reason]) {
     return {
       ok: false,
       error: {
         code: reason,
-        message: DOMAIN_ERROR_MESSAGES[reason],
+        message: TEAM_ERROR_MESSAGES[reason],
+        ...(Array.isArray(error?.candidates) ? { candidates: error.candidates } : {}),
       },
     };
   }
@@ -2234,11 +2310,11 @@ function isReauthorizeError(error) {
   );
 }
 
-const DOMAIN_ERROR_MESSAGES = Object.freeze({
-  domain_required: "domain_required",
-  no_active_domains: "no_active_domains",
-  domain_not_found: "domain_not_found",
-  domain_not_active: "domain_not_active",
+const TEAM_ERROR_MESSAGES = Object.freeze({
+  team_required: "team_required",
+  no_active_teams: "no_active_teams",
+  team_not_found: "team_not_found",
+  team_not_active: "team_not_active",
 });
 
 function requiredString(value, fieldName) {
@@ -2277,9 +2353,9 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function publicDomainContext(context) {
+function publicTeamContext(context) {
   return {
-    domain_id: context.domainId,
+    team_ref: context.teamRef,
     workspace_id: context.linear.workspaceId,
     team_id: context.linear.teamId,
     team_key: context.linear.teamKey,
@@ -2290,7 +2366,7 @@ function publicDomainContext(context) {
 function publicCacheSummary(cache) {
   return {
     present: Boolean(cache),
-    domain_id: cache?.domainId || null,
+    team_ref: cache?.teamRef || null,
     workspace_id: cache?.workspaceId || null,
     team_id: cache?.teamId || null,
   };

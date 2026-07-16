@@ -8,12 +8,12 @@ import { createCliOutput } from "../src/cli/cli-output.mjs";
 import { runLocalSetupCleanupCommand } from "../src/cli/local-setup-cleanup.mjs";
 import { cachePathForConfig, loadLinearConfig } from "../src/config.mjs";
 import {
-  emptyDomainRegistry,
-  makeDomainRecord,
-  readDomainRegistry,
-  upsertDomainRecord,
-  writeDomainRegistry,
-} from "../src/domain-registry.mjs";
+  emptyTeamRegistry,
+  makeTeamRecord,
+  readTeamRegistry,
+  upsertTeamRecord,
+  writeTeamRegistry,
+} from "../src/team-registry.mjs";
 import { setupStatePathForCache } from "../src/local-state.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
@@ -48,23 +48,23 @@ function cleanupFixture(prefix) {
   };
 }
 
-function registryWithDomains(domains) {
-  return domains.reduce(
-    (registry, domain) => upsertDomainRecord(registry, makeDomainRecord(domain)),
-    emptyDomainRegistry(),
+function registryWithTeams(teams) {
+  return teams.reduce(
+    (registry, team) => upsertTeamRecord(registry, makeTeamRecord(team)),
+    emptyTeamRegistry(),
   );
 }
 
-function activeDomain(domainId, workspaceId, teamId, teamKey, teamName) {
+function activeTeam(teamRef, workspaceId, teamId, teamKey, teamName) {
   return {
-    domainId,
+    teamRef,
     status: "active",
     workspaceId,
     workspaceName: `${teamName} Workspace`,
     teamId,
     teamKey,
     teamName,
-    webhookId: `webhook-${domainId}`,
+    webhookId: `webhook-${teamRef}`,
   };
 }
 
@@ -110,42 +110,42 @@ async function runUninstallCommand(fixture, args = []) {
   }
 }
 
-test("uninstall with multiple domains and no domain exits non-zero without success banner", async (t) => {
+test("uninstall with multiple teams and no team exits non-zero without success banner", async (t) => {
   const fixture = cleanupFixture("teami-uninstall-ambiguous-");
   t.after(() => fs.rmSync(fixture.tempRoot, { recursive: true, force: true }));
-  writeDomainRegistry(
+  writeTeamRegistry(
     { home: fixture.home },
-    registryWithDomains([
-      activeDomain("support-ops", "workspace-1", "team-support", "SUP", "Support Ops"),
-      activeDomain("sales-ops", "workspace-2", "team-sales", "SAL", "Sales Ops"),
+    registryWithTeams([
+      activeTeam("support-ops", "workspace-1", "team-support", "SUP", "Support Ops"),
+      activeTeam("sales-ops", "workspace-2", "team-sales", "SAL", "Sales Ops"),
     ]),
   );
 
   const result = await runUninstallCommand(fixture);
 
   assert.equal(result.exitCode, 1);
-  assert.match(result.output, /could not resolve a single domain to uninstall; pass --domain <domain_id>\./);
+  assert.match(result.output, /could not resolve a single team to uninstall; pass --team <team_ref>\./);
   assert.doesNotMatch(result.output, /Uninstall complete\./);
   assert.doesNotMatch(result.output, /Revoke the Linear browser grant/);
 });
 
-test("uninstall with explicit domain still prints success banner and exits zero", async (t) => {
-  const fixture = cleanupFixture("teami-uninstall-domain-");
+test("uninstall with explicit team still prints success banner and exits zero", async (t) => {
+  const fixture = cleanupFixture("teami-uninstall-team-");
   t.after(() => fs.rmSync(fixture.tempRoot, { recursive: true, force: true }));
-  writeDomainRegistry(
+  writeTeamRegistry(
     { home: fixture.home },
-    registryWithDomains([
-      activeDomain("support-ops", "workspace-1", "team-support", "SUP", "Support Ops"),
-      activeDomain("sales-ops", "workspace-2", "team-sales", "SAL", "Sales Ops"),
+    registryWithTeams([
+      activeTeam("support-ops", "workspace-1", "team-support", "SUP", "Support Ops"),
+      activeTeam("sales-ops", "workspace-2", "team-sales", "SAL", "Sales Ops"),
     ]),
   );
 
-  const result = await runUninstallCommand(fixture, ["--domain", "support-ops"]);
+  const result = await runUninstallCommand(fixture, ["--team", "support-ops"]);
 
   assert.equal(result.exitCode, 0);
   assert.match(result.output, /Uninstall complete\./);
   assert.match(result.output, /Revoke the Linear browser grant/);
-  const registry = readDomainRegistry({ home: fixture.home });
-  assert.equal(registry.domains.find((domain) => domain.id === "support-ops")?.status, "removed");
-  assert.equal(registry.domains.find((domain) => domain.id === "sales-ops")?.status, "active");
+  const registry = readTeamRegistry({ home: fixture.home });
+  assert.equal(registry.teams.find((team) => team.id === "support-ops")?.status, "removed");
+  assert.equal(registry.teams.find((team) => team.id === "sales-ops")?.status, "active");
 });

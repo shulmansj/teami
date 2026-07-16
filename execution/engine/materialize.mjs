@@ -10,8 +10,8 @@ export async function materialize(resource, runContext) {
   return { kind, handle, teardown };
 }
 
-export async function materializeDomainResources({
-  domainResources = [],
+export async function materializeTeamResources({
+  teamResources = [],
   runId,
   engineRepoRoot,
   runGit,
@@ -43,7 +43,7 @@ export async function materializeDomainResources({
   }
 
   try {
-    for (const resource of domainResources) {
+    for (const resource of teamResources) {
       const { teardown } = await materialize(resource, runContext);
       teardowns.push(teardown);
     }
@@ -60,8 +60,8 @@ export async function materializeDomainResources({
 }
 
 export async function materializeRunContext({
-  domainContext,
-  domainResources = domainContext?.resources,
+  teamContext,
+  teamResources = teamContext?.resources,
   runId,
   engineRepoRoot,
   runGit,
@@ -71,9 +71,9 @@ export async function materializeRunContext({
   gitRemoteUrlOverride = null,
   gitRemoteUrlOverrides = null,
   resolveGitRemoteUrl = null,
-  materializeDomainResourcesFn = materializeDomainResources,
+  materializeTeamResourcesFn = materializeTeamResources,
 } = {}) {
-  const resources = Array.isArray(domainResources) ? domainResources : [];
+  const resources = Array.isArray(teamResources) ? teamResources : [];
   if (resources.length === 0) {
     return {
       materialized: false,
@@ -92,8 +92,8 @@ export async function materializeRunContext({
     };
   }
 
-  const materialized = await materializeDomainResourcesFn({
-    domainResources: resources,
+  const materialized = await materializeTeamResourcesFn({
+    teamResources: resources,
     runId,
     engineRepoRoot,
     runGit,

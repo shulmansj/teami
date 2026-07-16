@@ -13,7 +13,7 @@
             "created_at": "2026-06-29T10:02:00.000Z"
           }
         ],
-        "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking domains.",
+        "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking teams.",
         "status": "Planned",
         "labels": [],
         "existing_issues": []
@@ -37,7 +37,7 @@
           "output": "Updated templates live behind the existing send schedule.",
           "acceptanceCriteria": [
             "Test sends render correctly in the provider preview",
-            "No new tracking domains are introduced"
+            "No new tracking teams are introduced"
           ],
           "decompositionKey": "onboarding-email-refresh/templates",
           "dependsOn": ["onboarding-email-refresh/copy"]
@@ -92,7 +92,7 @@
           "created_at": "2026-06-29T10:02:00.000Z"
         }
       ],
-      "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking domains.",
+      "content": "## Goal\nRefresh the three-step onboarding email sequence so new users reach the first useful action within one session.\n\n## Constraints\nKeep the existing email provider. No new tracking teams.",
       "status": "Planned",
       "labels": [],
       "existing_issues": []
@@ -128,7 +128,7 @@
         "output": "Updated templates live behind the existing send schedule.",
         "acceptanceCriteria": [
           "Test sends render correctly in the provider preview",
-          "No new tracking domains are introduced"
+          "No new tracking teams are introduced"
         ],
         "decompositionKey": "onboarding-email-refresh/templates",
         "dependsOn": ["onboarding-email-refresh/copy"]

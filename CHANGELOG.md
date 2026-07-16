@@ -185,10 +185,10 @@ Setup reruns now resume the GitHub step when Linear setup already completed.
 ### Fixed
 
 - Bare `npm run init` now detects the common interrupted state where exactly
-  one Linear domain is active but the GitHub connection is missing, failed, or
+  one Linear team is active but the GitHub connection is missing, failed, or
   incomplete, then skips Linear setup and resumes `Connect GitHub`.
 - Rerunning after a GitHub repo-name collision no longer asks for another
-  domain name or creates another Linear team.
+  team name or creates another Linear team.
 
 ## [0.3.9] - 2026-06-14
 
@@ -227,13 +227,13 @@ punctuation in its own message.
 
 ## [0.3.6] - 2026-06-14
 
-Setup reruns after an incomplete Linear attempt now resume the incomplete domain
+Setup reruns after an incomplete Linear attempt now resume the incomplete team
 instead of asking an unexplained workspace question.
 
 ### Fixed
 
-- Bare `npm run init` now detects a single `setup_incomplete` domain and resumes
-  it automatically, printing the domain, Linear workspace, and previous stop
+- Bare `npm run init` now detects a single `setup_incomplete` team and resumes
+  it automatically, printing the team, Linear workspace, and previous stop
   reason before authorizing.
 - The fallback known-workspace picker now asks for a numbered choice
   (`Choose workspace number...`) instead of the ambiguous `Workspace:` prompt.
@@ -323,7 +323,7 @@ credential+grant, then a full-surface pass) plus a /ship review were reconciled.
 
 ### Changed
 
-- **Server-enforced runner-credential scope (C3)**: credentials carry team/webhook/domain;
+- **Server-enforced runner-credential scope (C3)**: credentials carry team/webhook/team;
   claim/get/views/lease/mark-running enforce the stored scope (presented filters narrow, never
   widen) — two teams in one workspace cannot touch each other's wakes.
 - **Routing trusts the grant-bound team (G2)**: wake routing/dedup uses the webhook's stored
@@ -336,7 +336,7 @@ credential+grant, then a full-surface pass) plus a /ship review were reconciled.
 - Webhook abuse controls (C4): body-size cap, fail-fast header prechecks, per-workspace + global
   issuance caps.
 - Reconciled adversarial-review findings: bound-grant lifetime bug, cross-team webhook-secret
-  clobber, domain enforcement, a production-vs-test gap, lease-sweep race, secret-file perms,
+  clobber, team enforcement, a production-vs-test gap, lease-sweep race, secret-file perms,
   issuance-cap lockout, broker repo-write proof, and a re-mint audit + throttle.
 - Accepted, documented residuals (never described as cryptographic): setup-ownership is
   first-connected-wins with maintainer recovery; GitHub setup proof is socially delegable but
@@ -428,9 +428,9 @@ documented as an execution plan.
   unconfigured identity fails closed, and an unverifiable slug is an error.
   The broker's error handler now type-checks under `deno check`.
 - **Legacy wake repair**: a migration recovers routing identity for
-  pre-domain-identity queued wakes where the linked trigger event preserved
+  pre-team-identity queued wakes where the linked trigger event preserved
   it, and terminally dead-letters the rest with a clear reason instead of
-  leaving them silently invisible to domain-scoped claims.
+  leaving them silently invisible to team-scoped claims.
 - Placeholder Supabase endpoints fail closed at client construction with a
   targeted setup/self-host message instead of surfacing as network noise.
 

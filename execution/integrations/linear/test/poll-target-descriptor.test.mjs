@@ -5,10 +5,10 @@ import path from "node:path";
 import test from "node:test";
 
 import { writeLinearCache } from "../src/cache.mjs";
-import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION, makeTeamRecord } from "../src/team-registry.mjs";
 import {
   gatewayPollTargets,
-  pollGatewayDomain,
+  pollGatewayTeam,
   registerPollTarget,
   replaceGatewayPollTargetsForTest,
 } from "../src/gateway-loop.mjs";
@@ -31,20 +31,20 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
   const calls = [];
   const wrappedDescriptor = {
     ...projectDescriptor,
-    async listCandidates(domainCtx, page) {
-      calls.push(["descriptor-list", domainCtx.domain.id, page]);
-      return projectDescriptor.listCandidates(domainCtx, page);
+    async listCandidates(teamCtx, page) {
+      calls.push(["descriptor-list", teamCtx.team.id, page]);
+      return projectDescriptor.listCandidates(teamCtx, page);
     },
-    async process(candidate, domainCtx) {
+    async process(candidate, teamCtx) {
       calls.push(["descriptor-process", candidate.id]);
-      return projectDescriptor.process(candidate, domainCtx);
+      return projectDescriptor.process(candidate, teamCtx);
     },
   };
   const restore = replaceGatewayPollTargetsForTest([wrappedDescriptor]);
   t.after(restore);
 
   const repoRoot = tempRepo();
-  writeLinearCache(path.join(repoRoot, "domains", "support-ops", "linear.json"), {
+  writeLinearCache(path.join(repoRoot, "teams", "support-ops", "linear.json"), {
     projectStatuses: { planned: "status-planned" },
   });
   const suppression = { reason: "same_fingerprint_rejected" };
@@ -66,12 +66,12 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
     },
   };
 
-  const result = await pollGatewayDomain({
+  const result = await pollGatewayTeam({
     repoRoot,
     home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     runTimeoutMs: 0,
     emitStatus: (event) => events.push(event),
     createLinearClient: async () => client,
@@ -83,7 +83,7 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
       readReplayPending: async (input) => {
         calls.push(["read-replay", input.projectId]);
         assert.deepEqual(input, {
-          domainId: "support-ops",
+          teamRef: "support-ops",
           projectId: "project-1",
           repoRoot,
           home: repoRoot,
@@ -94,7 +94,7 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
       readSuppression: async (input) => {
         calls.push(["read-suppression", input.projectId]);
         assert.deepEqual(input, {
-          domainId: "support-ops",
+          teamRef: "support-ops",
           projectId: "project-1",
           fingerprint: FINGERPRINT,
           repoRoot,
@@ -128,12 +128,12 @@ test("project poll runs through the registered Planned descriptor", async (t) =>
   ]);
 });
 
-test("a second registered descriptor is iterated by pollGatewayDomain", async (t) => {
+test("a second registered descriptor is iterated by pollGatewayTeam", async (t) => {
   const calls = [];
   const unregister = registerPollTarget({
     input_status: "Ready",
-    async listCandidates(domainCtx, page) {
-      calls.push(["stub-list", domainCtx.domain.id, page]);
+    async listCandidates(teamCtx, page) {
+      calls.push(["stub-list", teamCtx.team.id, page]);
       return {
         candidates: [{ id: "issue-1" }],
         pageInfo: { hasNextPage: false, endCursor: null },
@@ -149,12 +149,12 @@ test("a second registered descriptor is iterated by pollGatewayDomain", async (t
   t.after(unregister);
 
   const repoRoot = tempRepo();
-  const result = await pollGatewayDomain({
+  const result = await pollGatewayTeam({
     repoRoot,
     home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     createLinearClient: async () => ({
       async listPlannedProjectCandidates() {
         calls.push(["project-list"]);
@@ -189,14 +189,14 @@ function projectFixture() {
 
 function registryFixture() {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [domainFixture()],
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [teamFixture()],
   };
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "support-ops",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "support-ops",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",

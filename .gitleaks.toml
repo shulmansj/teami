@@ -253,13 +253,13 @@ regexes = [
 ]
 
 [[rules]]
-id = "teami-domain-state-path"
-description = "Committed .teami domain state is local runtime state and must never ship."
-regex = '''^\.teami/(?:domains\.json|domains/)'''
-path_regex = '''^\.teami/(?:domains\.json|domains/)'''
+id = "teami-team-state-path"
+description = "Committed .teami team state is local runtime state and must never ship."
+regex = '''^\.teami/(?:teams\.json|teams/)'''
+path_regex = '''^\.teami/(?:teams\.json|teams/)'''
 history = false
 keywords = [
-  ".teami/domains",
+  ".teami/teams",
 ]
 
 [[rules]]
@@ -272,11 +272,11 @@ keywords = [
 ]
 
 [[rules]]
-id = "domain-bind-repo-real-path"
-description = "domain:bind-repo examples must not include real local paths."
-regex = '''domain:bind-repo[^\r\n]*--path\s+["']?(?:[A-Za-z]:[\\/]|/(?:Users|home)/|\\\\)[^\s`"']+'''
+id = "team-bind-repo-real-path"
+description = "team:bind-repo examples must not include real local paths."
+regex = '''team:bind-repo[^\r\n]*--path\s+["']?(?:[A-Za-z]:[\\/]|/(?:Users|home)/|\\\\)[^\s`"']+'''
 history = false
 keywords = [
-  "domain:bind-repo",
+  "team:bind-repo",
   "--path",
 ]

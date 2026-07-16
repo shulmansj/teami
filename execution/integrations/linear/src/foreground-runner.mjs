@@ -1,4 +1,5 @@
 import { readLinearCache } from "./cache.mjs";
+import { acquireGatewayLock } from "./gateway-loop.mjs";
 import { createLinearSetupGraphqlClient } from "./linear-setup-auth.mjs";
 import { createLocalPhoenixTraceSink } from "./local-phoenix-trace-sink.mjs";
 import {
@@ -22,63 +23,70 @@ export async function runForegroundTriggerRunnerOnce({
   home = resolveTeamiHome(),
   credentialStore,
   cachePath,
-  domainContext = null,
+  teamContext = null,
   registry = null,
   createSetupGraphqlClient = createLinearSetupGraphqlClient,
   createTraceSink = createLocalPhoenixTraceSink,
   runTriggeredWorkflowFn = null,
   runTriggeredDecompositionFn = null,
   recoverMutationState = recoverLocalMutationReconciliation,
+  acquireTeamAuthority = acquireGatewayLock,
 } = {}) {
-  const cache = readLinearCache(cachePath);
-  recoverMutationState({ repoRoot, home });
-  const store = createLocalTriggerStore({ repoRoot, home });
-  const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
-  const runtimeExecutor = createProcessRuntimeExecutor({
-    smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
-    repoRoot,
-  });
-  const traceSink = createTraceSink({ repoRoot });
-  const runWorkflow = runTriggeredWorkflowFn || runTriggeredDecompositionFn || runTriggeredWorkflow;
-  let result;
+  const teamAuthority = acquireTeamAuthority({ home, installHandlers: false });
+  if (!teamAuthority.ok) return { status: "refused", reason: "team_authority_busy" };
   try {
-    result = await runWorkflow({
-      store,
-      runnerId: localRunnerId({ domainContext, workspaceId: cache?.workspaceId }),
-      workspaceId: domainContext?.linear?.workspaceId || cache?.workspaceId,
-      linearClientFactory: async () => createSetupGraphqlClient({
-        config,
-        repoRoot,
-        credentialStore,
-        allowBrowserAuth: false,
-        allowRefresh: true,
-      }).client,
-      config,
-      cache,
-      runtimeExecutor,
+    const cache = readLinearCache(cachePath);
+    recoverMutationState({ repoRoot, home });
+    const store = createLocalTriggerStore({ repoRoot, home });
+    const runtimeSmokeCache = readRuntimeSmokeCache(runtimeSmokeCachePath(config, home));
+    const runtimeExecutor = createProcessRuntimeExecutor({
+      smokeTests: smokeTestsFromRuntimeSmokeCache(runtimeSmokeCache),
       repoRoot,
-      home,
-      leaseDurationMs: config?.runner?.lease_duration_ms || DEFAULT_LOCAL_LEASE_DURATION_MS,
-      runnerVersion: process.version,
-      capabilities: config?.runner?.required_capabilities || DECOMPOSITION_REQUIRED_CAPABILITIES,
-      traceSink,
-      domainContext,
-      registry,
     });
-  } finally {
-    await traceSink.shutdown();
-  }
+    const traceSink = createTraceSink({ repoRoot });
+    const runWorkflow = runTriggeredWorkflowFn || runTriggeredDecompositionFn || runTriggeredWorkflow;
+    let result;
+    try {
+      result = await runWorkflow({
+        store,
+        runnerId: localRunnerId({ teamContext, workspaceId: cache?.workspaceId }),
+        workspaceId: teamContext?.linear?.workspaceId || cache?.workspaceId,
+        linearClientFactory: async () => createSetupGraphqlClient({
+          config,
+          repoRoot,
+          credentialStore,
+          allowBrowserAuth: false,
+          allowRefresh: true,
+        }).client,
+        config,
+        cache,
+        runtimeExecutor,
+        repoRoot,
+        home,
+        leaseDurationMs: config?.runner?.lease_duration_ms || DEFAULT_LOCAL_LEASE_DURATION_MS,
+        runnerVersion: process.version,
+        capabilities: config?.runner?.required_capabilities || DECOMPOSITION_REQUIRED_CAPABILITIES,
+        traceSink,
+        teamContext,
+        registry,
+      });
+    } finally {
+      await traceSink.shutdown();
+    }
 
-  return {
-    ...result,
-    foreground_runner: {
-      phoenix_lifecycle: "trace_sink_adopt_or_start",
-    },
-  };
+    return {
+      ...result,
+      foreground_runner: {
+        phoenix_lifecycle: "trace_sink_adopt_or_start",
+      },
+    };
+  } finally {
+    teamAuthority.release();
+  }
 }
 
-function localRunnerId({ domainContext = null, workspaceId = null } = {}) {
-  return `local-runner:${domainContext?.domainId || workspaceId || "default"}`;
+function localRunnerId({ teamContext = null, workspaceId = null } = {}) {
+  return `local-runner:${teamContext?.teamRef || workspaceId || "default"}`;
 }
 
 export function formatForegroundRunnerReport(result) {

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { DOMAIN_REGISTRY_SCHEMA_VERSION, makeDomainRecord } from "../src/domain-registry.mjs";
+import { TEAM_REGISTRY_SCHEMA_VERSION, makeTeamRecord } from "../src/team-registry.mjs";
 import {
   AF_REVIEW_STATUS_CONTEXT,
   formatAfReviewCommentBody,
@@ -13,7 +13,7 @@ import { writeLinearCache } from "../src/cache.mjs";
 import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 import {
   gatewayState,
-  pollGatewayDomain,
+  pollGatewayTeam,
 } from "../src/gateway-loop.mjs";
 
 registerGitRepoResourceKind();
@@ -22,15 +22,15 @@ const HEAD_SHA = "b".repeat(40);
 
 test("In Progress recovery skips an issue with a live wake lease", async () => {
   const repoRoot = tempRepo();
-  writeDomainCache(repoRoot);
+  writeTeamCache(repoRoot);
   const calls = [];
 
-  const result = await pollGatewayDomain({
+  const result = await pollGatewayTeam({
     repoRoot,
     home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     state: gatewayState(),
     store: storeFixture({
       wake: {
@@ -59,15 +59,15 @@ test("In Progress recovery skips an issue with a live wake lease", async () => {
 
 test("In Progress recovery warm-resumes an expired running wake with a failed review PR", async () => {
   const repoRoot = tempRepo();
-  writeDomainCache(repoRoot);
+  writeTeamCache(repoRoot);
   const warmCalls = [];
 
-  const result = await pollGatewayDomain({
+  const result = await pollGatewayTeam({
     repoRoot,
     home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     state: gatewayState(),
     store: storeFixture({
       wake: {
@@ -97,15 +97,15 @@ test("In Progress recovery warm-resumes an expired running wake with a failed re
 
 test("In Progress recovery escalates an expired running wake when no execution PR is found", async () => {
   const repoRoot = tempRepo();
-  writeDomainCache(repoRoot);
+  writeTeamCache(repoRoot);
   const calls = [];
 
-  const result = await pollGatewayDomain({
+  const result = await pollGatewayTeam({
     repoRoot,
     home: repoRoot,
     config: configFixture(),
     registry: registryFixture(),
-    domain: domainFixture(),
+    team: teamFixture(),
     state: gatewayState(),
     store: storeFixture({
       wake: {
@@ -318,14 +318,14 @@ function configFixture() {
 
 function registryFixture() {
   return {
-    schema_version: DOMAIN_REGISTRY_SCHEMA_VERSION,
-    domains: [domainFixture()],
+    schema_version: TEAM_REGISTRY_SCHEMA_VERSION,
+    teams: [teamFixture()],
   };
 }
 
-function domainFixture() {
-  return makeDomainRecord({
-    domainId: "domain-1",
+function teamFixture() {
+  return makeTeamRecord({
+    teamRef: "team-1",
     status: "active",
     workspaceId: "workspace-1",
     workspaceName: "Workspace",
@@ -346,9 +346,9 @@ function domainFixture() {
   });
 }
 
-function writeDomainCache(repoRoot) {
+function writeTeamCache(repoRoot) {
   writeLinearCache(
-    path.join(repoRoot, "domains", "domain-1", "linear.json"),
+    path.join(repoRoot, "teams", "team-1", "linear.json"),
     {
       teamId: "team-1",
       app_identity_id: "app-viewer-1",

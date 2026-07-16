@@ -217,7 +217,7 @@ export function buildDatasetUploadPayloadFromTraceReceipt({
   if (!receipt?.run_id) throw new Error("trace receipt with run_id is required.");
   const input = {
     run_id: receipt.run_id,
-    domain_id: receipt.domain_id || null,
+    team_ref: receipt.team_ref || null,
     workflow_type: receipt.workflow_type || null,
     wake_id: receipt.wake_id || null,
     object_id: receipt.object_id || receipt.project_id || null,

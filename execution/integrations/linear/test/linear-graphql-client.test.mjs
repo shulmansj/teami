@@ -1438,7 +1438,7 @@ test("GraphQL client preserves Linear structured errors for setup classification
   });
 
   await assert.rejects(
-    () => client.createTeam({ name: "Blocked Domain" }),
+    () => client.createTeam({ name: "Blocked Team" }),
     (error) => {
       assert.match(error.message, /You have reached the limit of teams allowed/);
       assert.doesNotMatch(error.message, /secret-oauth-token/);

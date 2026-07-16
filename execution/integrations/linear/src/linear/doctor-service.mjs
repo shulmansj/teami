@@ -2,10 +2,10 @@ import {
   doctorCheck,
 } from "../doctor-check.mjs";
 import {
-  domainRegistryPath,
-  readDomainRegistry,
-  validateDomainRegistry,
-} from "../domain-registry.mjs";
+  teamRegistryPath,
+  readTeamRegistry,
+  validateTeamRegistry,
+} from "../team-registry.mjs";
 import {
   check,
   issueLabelNames,
@@ -342,7 +342,7 @@ export async function doctorMergePathGitHubCheck({
   repoIdentityError = null,
 } = {}) {
   if (!repoIdentity) {
-    const missingReason = repoIdentityError || "no git_repo resource is bound to this domain";
+    const missingReason = repoIdentityError || "no git_repo resource is bound to this team";
     if (repoIdentityError === "review_git_repo_resource_missing") {
       return doctorCheck({
         name: MERGE_PATH_GITHUB_CHECK_NAME,
@@ -353,7 +353,7 @@ export async function doctorMergePathGitHubCheck({
     return doctorCheck({
       name: MERGE_PATH_GITHUB_CHECK_NAME,
       state: "warn",
-      message: `${missingReason}; no code merge path is checkable for this domain.`,
+      message: `${missingReason}; no code merge path is checkable for this team.`,
     });
   }
 
@@ -370,7 +370,7 @@ export async function doctorMergePathGitHubCheck({
       name: MERGE_PATH_GITHUB_CHECK_NAME,
       ok: false,
       message: `GitHub PR adapter unavailable for ${formatRepoIdentity(repoIdentity)}: ${error.message}.`,
-      fix: "repair local GitHub auth or the domain repo binding, then re-run npm run doctor",
+      fix: "repair local GitHub auth or the team repo binding, then re-run npm run doctor",
     };
   }
 
@@ -393,7 +393,7 @@ export async function doctorMergePathGitHubCheck({
       message:
         `GitHub PR API was not reachable for ${formatRepoIdentity(repoIdentity)}: ${error.message}. ` +
         "Merge permission is proven at the first real merge.",
-      fix: "repair local GitHub auth or the domain repo binding, then re-run npm run doctor",
+      fix: "repair local GitHub auth or the team repo binding, then re-run npm run doctor",
     };
   }
 }
@@ -464,27 +464,27 @@ function formatWorkflowState(state) {
   return state.type ? `${name} (${state.type})` : name;
 }
 
-export function doctorDomainRegistryFromDisk({
+export function doctorTeamRegistryFromDisk({
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
   orphanHints = [],
 } = {}) {
   void repoRoot;
   try {
-    const registry = readDomainRegistry({ home });
+    const registry = readTeamRegistry({ home });
     if (!registry) {
-      return doctorDomainRegistry({
-        registryError: new Error(`Domain registry not found: ${domainRegistryPath(home)}`),
+      return doctorTeamRegistry({
+        registryError: new Error(`Team registry not found: ${teamRegistryPath(home)}`),
         orphanHints,
       });
     }
-    return doctorDomainRegistry({ registry, orphanHints });
+    return doctorTeamRegistry({ registry, orphanHints });
   } catch (error) {
-    return doctorDomainRegistry({ registryError: error, orphanHints });
+    return doctorTeamRegistry({ registryError: error, orphanHints });
   }
 }
 
-export function doctorDomainRegistry({ registry = null, registryError = null, orphanHints = [] } = {}) {
+export function doctorTeamRegistry({ registry = null, registryError = null, orphanHints = [] } = {}) {
   if (registryError) {
     const orphanText = orphanHints.length > 0
       ? ` Likely orphaned local state: ${orphanHints.join("; ")}.`
@@ -493,32 +493,32 @@ export function doctorDomainRegistry({ registry = null, registryError = null, or
       healthy: false,
       registryAvailable: false,
       checks: [{
-        name: "domain registry",
+        name: "team registry",
         ok: false,
         message:
-          `${registryError.message}.${orphanText} Run npm run reset to remove local setup state; no domain was inferred from names.`,
+          `${registryError.message}.${orphanText} Run npm run reset to remove local setup state; no team was inferred from names.`,
       }],
     };
   }
 
-  validateDomainRegistry(registry);
-  const checks = registry.domains.map((domain) => {
-    if (domain.status === "setup_incomplete") {
-      const cause = domain.setup_incomplete_cause || "setup_incomplete";
+  validateTeamRegistry(registry);
+  const checks = registry.teams.map((team) => {
+    if (team.status === "setup_incomplete") {
+      const cause = team.setup_incomplete_cause || "setup_incomplete";
       return {
-        name: `domain ${domain.id}`,
+        name: `team ${team.id}`,
         ok: false,
         message: `${cause}; ${repairPathForSetupIncompleteCause(cause)}`,
         fix: repairPathForSetupIncompleteCause(cause),
       };
     }
     return {
-      name: `domain ${domain.id}`,
-      ok: domain.status === "active",
+      name: `team ${team.id}`,
+      ok: team.status === "active",
       message:
-        `${domain.status}; workspace=${domain.linear.workspace_id || "missing"}; ` +
-        `team=${domain.linear.team_id || "missing"} ${domain.linear.team_key || ""} ${domain.linear.team_name || ""}; ` +
-        `webhook=${domain.linear.webhook_id || "missing"}; cache=${domain.linear.cache_path}`,
+        `${team.status}; workspace=${team.linear.workspace_id || "missing"}; ` +
+        `team=${team.linear.team_id || "missing"} ${team.linear.team_key || ""} ${team.linear.team_name || ""}; ` +
+        `webhook=${team.linear.webhook_id || "missing"}; cache=${team.linear.cache_path}`,
     };
   });
   return {

@@ -138,15 +138,15 @@ test("the curated adopter set is registry-derived", () => {
   const forms = adopter.map((descriptor) => [descriptor.noun, descriptor.verb].filter(Boolean).join(" ")).sort();
   assert.deepEqual(forms, [
     "doctor",
-    "domain add",
-    "domain grant",
-    "domain revoke",
-    "domain show",
     "gateway start",
     "gateway status",
     "init",
     "phoenix open",
     "phoenix status",
+    "team add",
+    "team grant",
+    "team revoke",
+    "team show",
     "uninstall",
   ]);
 });

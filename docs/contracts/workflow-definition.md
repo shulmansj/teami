@@ -78,7 +78,7 @@ identity. It is NOT re-derived from role membership.
   effects = what the run does to the world, outcomes = what the world reports back). Every agent traces
   through the engine path — in-loop agents (orchestrator + subagents) via the per-turn `spanSink`,
   standalone agents (judge, self-improvement drafter, future off-loop agents) via `startAgentTrace`
-  (non-Linear `resource` identity OK; `domain_id` required, Linear workspace/team optional). The trace
+  (non-Linear `resource` identity OK; `team_ref` required, Linear workspace/team optional). The trace
   name comes from `definition.trace_descriptor`. Each run carries bounded, JSON-safe `produced_identities`
   (created **+** reused — the optimizer's `target_ids` join key) and turn-level / artifact-set **lineage**
   (`agent_turn_id` / `parent_turn_id` / `spawn_reason`, incremental `consumed_input_refs`, and

@@ -4,7 +4,7 @@
   "function_version": "0.0.1",
   "workflow_version": "0.0.1",
   "run_id": "probe-1",
-  "domain_id": "d",
+  "team_ref": "d",
   "workspace_id": "w",
   "team_id": "t",
   "kind": "commit",

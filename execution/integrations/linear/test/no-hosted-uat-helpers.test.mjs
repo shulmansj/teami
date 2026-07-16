@@ -24,8 +24,8 @@ test("no-hosted UAT args accept the gateway and GitHub local selectors", () => {
   const parsed = parseNoHostedUatArgs([
     "--repo-root",
     "relative-root",
-    "--domain",
-    "uat-domain",
+    "--team",
+    "uat-team",
     "--prefix",
     "AF-ZERO-HOSTED",
     "--consecutive",
@@ -44,7 +44,7 @@ test("no-hosted UAT args accept the gateway and GitHub local selectors", () => {
   ], {});
 
   assert.equal(parsed.repoRoot, path.resolve("relative-root"));
-  assert.equal(parsed.domainId, "uat-domain");
+  assert.equal(parsed.teamRef, "uat-team");
   assert.equal(parsed.prefix, "AF-ZERO-HOSTED");
   assert.equal(parsed.consecutive, 3);
   assert.equal(parsed.pollIntervalMs, 2500);
@@ -55,11 +55,11 @@ test("no-hosted UAT args accept the gateway and GitHub local selectors", () => {
   assert.equal(parsed.keepArtifacts, true);
 
   const fromEnv = parseNoHostedUatArgs([], {
-    TEAMI_NO_HOSTED_UAT_DOMAIN: "env-domain",
+    TEAMI_NO_HOSTED_UAT_TEAM: "env-team",
     TEAMI_NO_HOSTED_UAT_BRANCH_PREFIX: "env-no-hosted",
     TEAMI_NO_HOSTED_UAT_KEEP_ARTIFACTS: "yes",
   });
-  assert.equal(fromEnv.domainId, "env-domain");
+  assert.equal(fromEnv.teamRef, "env-team");
   assert.equal(fromEnv.branchPrefix, "env-no-hosted");
   assert.equal(fromEnv.keepArtifacts, true);
 });
@@ -68,7 +68,7 @@ test("no-hosted UAT usage documents the combined live preconditions", () => {
   const usage = buildNoHostedUatUsage();
 
   assert.match(usage, /npm run uat:no-hosted/);
-  assert.match(usage, /--domain <id>/);
+  assert.match(usage, /--team <id>/);
   assert.match(usage, /--workspace-dir <path>/);
   assert.match(usage, /local_ambient GitHub connection/);
 });
@@ -76,7 +76,7 @@ test("no-hosted UAT usage documents the combined live preconditions", () => {
 test("no-hosted config assertion accepts the current local-only public config", () => {
   const config = loadLinearConfig({ repoRoot });
 
-  assert.equal(assertNoHostedConfiguration({ config, domainRegistry: null, githubConnection: null }), true);
+  assert.equal(assertNoHostedConfiguration({ config, teamRegistry: null, githubConnection: null }), true);
   assert.equal(assertNoHostedPreconditions({ repoRoot }).ok, true);
 });
 
@@ -87,8 +87,8 @@ test("no-hosted config assertion rejects hosted inbox, webhook, broker, and GitH
       inbox: { url: hostedUrl },
       github: { token_broker: { url: "https://example.invalid/teami-github-broker" } },
     },
-    domainRegistry: {
-      domains: [{ id: "support", linear: { webhook_id: "wh_123" } }],
+    teamRegistry: {
+      teams: [{ id: "support", linear: { webhook_id: "wh_123" } }],
     },
     githubConnection: {
       github_app: { app_id: "123", installation_id: "456" },

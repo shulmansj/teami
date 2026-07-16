@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  materializeDomainResources,
+  materializeTeamResources,
 } from "../../../engine/materialize.mjs";
 import {
   resetResourceRegistry,
@@ -83,8 +83,8 @@ test("runtime command cwd is bound to the materialized git clone handle", async 
   let teardownAll = async () => {};
 
   try {
-    const { runContext, teardownAll: materializedTeardownAll } = await materializeDomainResources({
-      domainResources: [gitResource],
+    const { runContext, teardownAll: materializedTeardownAll } = await materializeTeamResources({
+      teamResources: [gitResource],
       runId: "probe-run",
       engineRepoRoot: REPO_ROOT,
       runGit: fakeRunGit,

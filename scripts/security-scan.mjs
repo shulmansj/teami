@@ -224,7 +224,7 @@ async function runSeedCheck() {
     )}`,
     `private_key=${seedValue("-----BEGIN ", "PRIVATE KEY", "-----")}`,
     `local_checkout_path = "${seedLocalPath}"`,
-    "teami domain grant support --repo example/private-repo",
+    "teami team grant support --repo example/private-repo",
   ].join("\n");
 
   try {

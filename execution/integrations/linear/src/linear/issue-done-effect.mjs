@@ -94,7 +94,7 @@ function expectedSourceRoleFromContext(ctx = {}) {
 function cacheFromContext(ctx = {}) {
   if (ctx.cache) return ctx.cache;
   if (ctx.linearCache) return ctx.linearCache;
-  const cachePath = ctx.domainContext?.linear?.cachePath || ctx.domainContext?.linear?.cache_path;
+  const cachePath = ctx.teamContext?.linear?.cachePath || ctx.teamContext?.linear?.cache_path;
   return cachePath ? readLinearCache(cachePath) : null;
 }
 
@@ -105,8 +105,8 @@ function teamIdFromContext(ctx = {}) {
     ctx.shape?.team?.id,
     ctx.cache?.teamId,
     ctx.linearCache?.teamId,
-    ctx.domainContext?.linear?.teamId,
-    ctx.domainContext?.linear?.team_id,
+    ctx.teamContext?.linear?.teamId,
+    ctx.teamContext?.linear?.team_id,
     ctx.issue?.teamId,
     ctx.issue?.team?.id,
     ctx.linearIssue?.teamId,

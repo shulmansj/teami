@@ -159,7 +159,7 @@
     {
       "issue_id": "issue-absent",
       "issue_missing": true,
-      "read_error": "Linear issue was not found in active domains",
+      "read_error": "Linear issue was not found in active teams",
       "park_record": {
         "issue_id": "issue-absent",
         "pr_number": 19,

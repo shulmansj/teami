@@ -208,7 +208,7 @@ test("generic run envelope accepts a non-decomposition commit payload without fi
       engine_version: ENGINE_VERSION,
       function_version: "0.0.1",
       run_id: "probe-1",
-      domain_id: "d",
+      team_ref: "d",
       workspace_id: "w",
       team_id: "t",
       kind: "commit",
@@ -294,7 +294,7 @@ function artifactFor(runId, overrides = {}) {
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
     kind: "checkpoint",
     run_id: runId,
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     runtime_assignments: {
@@ -351,7 +351,7 @@ function legacyTerminalCommitArtifactFor(runId) {
     workflow_version: DECOMPOSITION_FUNCTION_VERSION,
     kind: "commit",
     run_id: runId,
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     runtime_assignments: {

@@ -17,8 +17,8 @@ const receipt = {
   schema_version: "teami-live-canary-cleanup/v1",
   status: "cleanup_required",
   setup_id: "setup-1",
-  domain_id: "domain-1",
-  domain_name: "Teami Canary",
+  team_ref: "team-1",
+  team_name: "Teami Canary",
   linear_team: { id: "team-1", key: "TEA", name: "Teami Canary" },
   github_repo: "acme/teami-canary",
   recorded_at: "2026-07-11T00:00:00.000Z",
@@ -147,7 +147,7 @@ test("receipt writer invalidates absence and revocation proofs when target ident
   const proofAt = "2026-07-11T01:00:00.000Z";
   writeCanaryCleanupReceipt({
     home,
-    domainName: "Teami Canary",
+    teamName: "Teami Canary",
     linearTeam: receipt.linear_team,
     githubRepo: receipt.github_repo,
     linearAbsenceVerifiedAt: proofAt,
@@ -157,7 +157,7 @@ test("receipt writer invalidates absence and revocation proofs when target ident
 
   writeCanaryCleanupReceipt({
     home,
-    domainName: "Teami Canary",
+    teamName: "Teami Canary",
     linearTeam: receipt.linear_team,
     githubRepo: "acme/new-canary",
   });
@@ -168,7 +168,7 @@ test("receipt writer invalidates absence and revocation proofs when target ident
 
   writeCanaryCleanupReceipt({
     home,
-    domainName: "Teami Canary",
+    teamName: "Teami Canary",
     linearTeam: receipt.linear_team,
     githubRepo: "acme/new-canary",
     linearAbsenceVerifiedAt: proofAt,
@@ -177,7 +177,7 @@ test("receipt writer invalidates absence and revocation proofs when target ident
   });
   writeCanaryCleanupReceipt({
     home,
-    domainName: "Teami Canary",
+    teamName: "Teami Canary",
     linearTeam: { id: "team-2", key: "NEW", name: "Teami Canary 2" },
     githubRepo: "acme/new-canary",
   });

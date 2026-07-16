@@ -50,7 +50,7 @@ async function runningMutationStore({ home, events, clearFails = false, failTerm
     },
   });
   const claim = await store.claimSyntheticWake({
-    domainId: "domain-1",
+    teamRef: "team-1",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: "project-1",
@@ -60,7 +60,7 @@ async function runningMutationStore({ home, events, clearFails = false, failTerm
     leaseToken: claim.leaseToken,
     runnerId: "runner-1",
     runId: "run-1",
-    domainId: "domain-1",
+    teamRef: "team-1",
   });
   await store.markMutationStarted({
     wakeId: claim.wake.id,
@@ -189,7 +189,7 @@ test("startup reconstructs mutation state after intent durability wins the crash
       },
     });
     const claim = await store.claimSyntheticWake({
-      domainId: "domain-1",
+      teamRef: "team-1",
       workspaceId: "workspace-1",
       teamId: "team-1",
       projectId: "project-1",
@@ -199,7 +199,7 @@ test("startup reconstructs mutation state after intent durability wins the crash
       leaseToken: claim.leaseToken,
       runnerId: "runner-1",
       runId: "run-intent-crash",
-      domainId: "domain-1",
+      teamRef: "team-1",
     });
     await assert.rejects(() => store.markMutationStarted({
       wakeId: claim.wake.id,
@@ -208,7 +208,7 @@ test("startup reconstructs mutation state after intent durability wins the crash
       runId: "run-intent-crash",
       artifactKind: "commit",
     }), /crash_after_intent_before_wake_state/);
-    assert.ok(readMutationIntent({ domainId: "domain-1", runId: "run-intent-crash", home }));
+    assert.ok(readMutationIntent({ teamRef: "team-1", runId: "run-intent-crash", home }));
     assert.equal(readLocalTriggerState(localTriggerStorePath(home)).wakes[0].mutation_started_at, null);
 
     failIntentStatePersist = false;
@@ -246,7 +246,7 @@ test("startup closes the cleanup flag after intent deletion wins the crash race"
       },
     });
     const claim = await store.claimSyntheticWake({
-      domainId: "domain-1",
+      teamRef: "team-1",
       workspaceId: "workspace-1",
       teamId: "team-1",
       projectId: "project-1",
@@ -256,7 +256,7 @@ test("startup closes the cleanup flag after intent deletion wins the crash race"
       leaseToken: claim.leaseToken,
       runnerId: "runner-1",
       runId: "run-clear-crash",
-      domainId: "domain-1",
+      teamRef: "team-1",
     });
     await store.markMutationStarted({
       wakeId: claim.wake.id,
@@ -275,7 +275,7 @@ test("startup closes the cleanup flag after intent deletion wins the crash race"
       reconciliationEvidenceDigest: "b".repeat(64),
     });
     assert.equal(completed.ok, true);
-    assert.equal(readMutationIntent({ domainId: "domain-1", runId: "run-clear-crash", home }), null);
+    assert.equal(readMutationIntent({ teamRef: "team-1", runId: "run-clear-crash", home }), null);
     assert.equal(
       readLocalTriggerState(localTriggerStorePath(home)).wakes[0].mutation_intent_clear_pending,
       true,

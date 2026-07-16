@@ -37,7 +37,7 @@ const TRACE_IDS = {
   fresh: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa08",
 };
 const TRACE_IDENTITY = Object.freeze({
-  domainId: "support-ops",
+  teamRef: "support-ops",
   workspaceId: "workspace-1",
   teamId: "team-1",
 });
@@ -62,14 +62,14 @@ function writeReceipt(repoRoot, { runId, traceId, projectId, observedAt }) {
 }
 
 function writeRunArtifactFile(repoRoot, { runId, kind = "commit", phasePackets = [] }) {
-  const runsDir = path.join(repoRoot, "domains", TRACE_IDENTITY.domainId, "runs");
+  const runsDir = path.join(repoRoot, "teams", TRACE_IDENTITY.teamRef, "runs");
   fs.mkdirSync(runsDir, { recursive: true });
   fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify({
     schema_version: "linear-decomposition-run-artifact/v1",
     workflow_version: "0.2.0",
     kind,
     run_id: runId,
-    domain_id: TRACE_IDENTITY.domainId,
+    team_ref: TRACE_IDENTITY.teamRef,
     workspace_id: TRACE_IDENTITY.workspaceId,
     team_id: TRACE_IDENTITY.teamId,
     phase_packets: phasePackets,
@@ -485,7 +485,7 @@ test("worklist ranking matches the plan's priority order across fixture classes"
 
   // Nothing durable is persisted: local stores are unchanged after computing.
   const receiptsDir = path.join(repoRoot, "phoenix-data", "telemetry", "runs");
-  const artifactsDir = path.join(repoRoot, "domains", TRACE_IDENTITY.domainId, "runs");
+  const artifactsDir = path.join(repoRoot, "teams", TRACE_IDENTITY.teamRef, "runs");
   const before = [fs.readdirSync(receiptsDir).sort(), fs.readdirSync(artifactsDir).sort()];
   const lines = formatWorklistReport({ report, items });
   assert.ok(lines.some((line) => line.includes("never persisted")));
@@ -525,7 +525,7 @@ test("status report covers per-run flags including dataset-membership receipts",
   const repoRoot = makeRepoRoot("teami-eval-status-");
   writeReceipt(repoRoot, { runId: "run-promoted", traceId: TRACE_IDS.low1, projectId: "proj-A", observedAt: "2026-06-09T01:00:00.000Z" });
   writeRunArtifactFile(repoRoot, { runId: "run-promoted", kind: "commit" });
-  const artifactsDir = path.join(repoRoot, "domains", TRACE_IDENTITY.domainId, "runs");
+  const artifactsDir = path.join(repoRoot, "teams", TRACE_IDENTITY.teamRef, "runs");
   // Local dataset-membership receipt (sibling file; read-only input here).
   fs.writeFileSync(path.join(artifactsDir, "run-promoted.promotion.json"), JSON.stringify({
     datasets: [{ name: "teami-decomposition-examples", dataset_id: "RGF0YXNldDox" }],

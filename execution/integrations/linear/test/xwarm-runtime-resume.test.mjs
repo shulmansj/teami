@@ -274,7 +274,7 @@ test("runOrchestratorLoop converts warm_continuation_unavailable into failed_clo
 
 test("driver handle metadata persists through run records and resolves from the artifact pointer", async () => {
   const temp = tempRepo();
-  const runStoreDir = path.join(temp, "domains", "support-ops", "runs");
+  const runStoreDir = path.join(temp, "teams", "support-ops", "runs");
   const store = createLocalTriggerStore({
     repoRoot: temp,
     home: temp,
@@ -395,7 +395,7 @@ async function completeIssueRun({
   artifactPointer = undefined,
 }) {
   const claim = await store.claimSyntheticIssueWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     objectId,
@@ -407,7 +407,7 @@ async function completeIssueRun({
     runnerId: "runner-1",
     leaseToken: claim.leaseToken,
     runId,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     at: startedAt,
   });
   await store.completeWake({
@@ -423,7 +423,7 @@ async function completeIssueRun({
 
 async function completeProjectRunIgnoredByLatestLookup({ store, objectId, runId, startedAt, terminalAt }) {
   const claim = await store.claimSyntheticWake({
-    domainId: "support-ops",
+    teamRef: "support-ops",
     workspaceId: "workspace-1",
     teamId: "team-1",
     projectId: objectId,
@@ -433,7 +433,7 @@ async function completeProjectRunIgnoredByLatestLookup({ store, objectId, runId,
     runnerId: "runner-1",
     leaseToken: claim.leaseToken,
     runId,
-    domainId: "support-ops",
+    teamRef: "support-ops",
     at: startedAt,
   });
   await store.completeWake({
@@ -453,7 +453,7 @@ function checkpointArtifact({ runId, runtimeAssignments, runtimeMetadata }) {
     workflow_version: "execution-test/v1",
     kind: "checkpoint",
     run_id: runId,
-    domain_id: "support-ops",
+    team_ref: "support-ops",
     workspace_id: "workspace-1",
     team_id: "team-1",
     runtime_assignments: runtimeAssignments,

@@ -15,7 +15,7 @@ repository was used during this package build.
 | Local runner | Runs on the adopter machine, re-reads Linear through OAuth and GraphQL, persists local run evidence, performs deterministic gates, and commits allowed Linear mutations. | Local authority. Credentials, local run state, and product checkout access stay on the adopter machine. |
 | Local Phoenix and evals | Stores traces, annotations, datasets, experiments, scores, and process-improvement evidence for the decomposition workflow. | Local custody. Phoenix evidence is linked from proposals or summaries. |
 | Behavior-repo GitHub path | The adopter-selected repository for Teami process changes, for example `example-org/teami-behavior`. | Reviewable process changes only. It uses the adopter's own git/`gh` auth and is separate from any product source repository. |
-| Local domain `git_repo` binding | The landed local binding behavior between one domain and one existing local product checkout. | The public proof uses labels, source names, and test outcomes only. Public examples must not expose local paths, repo contents, credentials, or private repository names. |
+| Local team `git_repo` binding | The landed local binding behavior between one team and one existing local product checkout. | The public proof uses labels, source names, and test outcomes only. Public examples must not expose local paths, repo contents, credentials, or private repository names. |
 
 ## Flow In This Demo
 
@@ -36,14 +36,14 @@ steps 2 through 6 ran against a live workspace for this package.
 
 ## Resource-Binding Seam
 
-The local domain `git_repo` binding is the seam that keeps behavior-repo
+The local team `git_repo` binding is the seam that keeps behavior-repo
 proposals separate from product-repo binding. The behavior repo is where
 Teami process changes are proposed. The product repo binding is where
-a domain points to one existing local checkout for future product work.
+a team points to one existing local checkout for future product work.
 
 The landed resource-binding behavior proves:
 
-- `domain:bind-repo` records one primary `git_repo` resource for a domain.
+- `team:bind-repo` records one primary `git_repo` resource for a team.
 - The resource manifest exposes serializable label facts rather than checkout
   paths or live handles.
 - Runtime commands can be bound to the detached worktree created from the

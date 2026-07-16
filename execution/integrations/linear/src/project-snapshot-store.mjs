@@ -30,7 +30,7 @@ export function projectSnapshotPath({
   runId,
   repoRoot = null,
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir,
 } = {}) {
   void repoRoot;
@@ -42,7 +42,7 @@ export function projectSnapshotPath({
   }
   // Same custody directory as run artifacts. `<runId>.snapshot.json` cannot
   // collide with another run's `<runId>.json` because run ids cannot contain dots.
-  return path.join(runStoreDir || defaultRunStoreDir({ home, domainId }), `${runId}.snapshot.json`);
+  return path.join(runStoreDir || defaultRunStoreDir({ home, teamRef }), `${runId}.snapshot.json`);
 }
 
 // Deterministic JSON serialization (recursively sorted object keys) so the
@@ -203,11 +203,11 @@ export function captureProjectSnapshot({
   capturedAt = new Date().toISOString(),
   repoRoot = process.cwd(),
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir = null,
 } = {}) {
   const snapshot = buildProjectSnapshot({ runId, project, semanticStatus, captureSource, capturedAt });
-  const filePath = writeProjectSnapshot({ runId, repoRoot, home, domainId, runStoreDir }, snapshot);
+  const filePath = writeProjectSnapshot({ runId, repoRoot, home, teamRef, runStoreDir }, snapshot);
   return { snapshot, path: filePath };
 }
 
@@ -218,12 +218,12 @@ export function captureProjectSnapshot({
 export function loadCapturedProjectSnapshot(runId, {
   repoRoot = null,
   home = resolveTeamiHome(),
-  domainId = null,
+  teamRef = null,
   runStoreDir = null,
 } = {}) {
   let filePath;
   try {
-    filePath = projectSnapshotPath({ runId, repoRoot, home, domainId, runStoreDir });
+    filePath = projectSnapshotPath({ runId, repoRoot, home, teamRef, runStoreDir });
   } catch (error) {
     return { ok: false, reason: "invalid_run_id", run_id: runId ?? null, error: error.message };
   }

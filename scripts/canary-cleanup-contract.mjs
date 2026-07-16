@@ -13,8 +13,8 @@ export function canaryCleanupReceiptPath(home) {
 export function writeCanaryCleanupReceipt({
   home,
   setupId = null,
-  domainId = null,
-  domainName,
+  teamRef = null,
+  teamName,
   linearTeam = null,
   githubRepo,
   linearAbsenceVerifiedAt = null,
@@ -24,9 +24,9 @@ export function writeCanaryCleanupReceipt({
   const filePath = canaryCleanupReceiptPath(home);
   let previous = null;
   if (fs.existsSync(filePath)) previous = readCanaryCleanupReceipt(home);
-  const resolvedDomainName = requiredString(
-    domainName || previous?.domain_name,
-    "canary_cleanup_domain_name_required",
+  const resolvedTeamName = requiredString(
+    teamName || previous?.team_name,
+    "canary_cleanup_team_name_required",
   );
   const resolvedLinearTeam = linearTeam ? {
     id: optionalString(linearTeam.id),
@@ -34,7 +34,7 @@ export function writeCanaryCleanupReceipt({
     name: requiredString(linearTeam.name, "canary_cleanup_linear_team_name_required"),
   } : previous?.linear_team || null;
   const resolvedGitHubRepo = requiredString(githubRepo, "canary_cleanup_github_repo_required");
-  const linearIdentity = resolvedLinearTeam?.id || resolvedDomainName;
+  const linearIdentity = resolvedLinearTeam?.id || resolvedTeamName;
   const cleanupIdentity = cleanupReceiptIdentity(linearIdentity, resolvedGitHubRepo);
   const requestedLinearProofAt = optionalString(linearAbsenceVerifiedAt);
   const requestedGitHubProofAt = optionalString(githubAbsenceVerifiedAt);
@@ -52,8 +52,8 @@ export function writeCanaryCleanupReceipt({
     schema_version: CANARY_CLEANUP_SCHEMA_VERSION,
     status: linearTeam?.id || previous?.linear_team?.id ? "cleanup_required" : "cleanup_planned",
     setup_id: optionalString(setupId) || previous?.setup_id || null,
-    domain_id: optionalString(domainId) || previous?.domain_id || null,
-    domain_name: resolvedDomainName,
+    team_ref: optionalString(teamRef) || previous?.team_ref || null,
+    team_name: resolvedTeamName,
     linear_team: resolvedLinearTeam,
     github_repo: resolvedGitHubRepo,
     linear_absence_verified_at: requestedLinearProofAt || previousLinearProofAt,
@@ -106,7 +106,7 @@ export async function verifyAndFinalizeCanaryCleanup({
   const repos = githubAlreadyVerified ? [] : await listGitHubRepos();
   const linearAbsent = linearAlreadyVerified || !teams.some((team) => receipt.linear_team?.id
     ? team?.id === receipt.linear_team.id
-    : String(team?.name || "") === receipt.domain_name);
+    : String(team?.name || "") === receipt.team_name);
   const githubAbsent = githubAlreadyVerified ||
     !repos.some((repo) => String(repo).toLowerCase() === receipt.github_repo.toLowerCase());
   if ((!linearAlreadyVerified && linearAbsent) || (!githubAlreadyVerified && githubAbsent)) {
@@ -119,7 +119,7 @@ export async function verifyAndFinalizeCanaryCleanup({
       linear_absent: linearAbsent,
       github_absent: githubAbsent,
       remaining: [
-        ...(!linearAbsent ? [`Linear team ${receipt.linear_team?.name || receipt.domain_name}${receipt.linear_team?.key ? ` (${receipt.linear_team.key})` : ""}`] : []),
+        ...(!linearAbsent ? [`Linear team ${receipt.linear_team?.name || receipt.team_name}${receipt.linear_team?.key ? ` (${receipt.linear_team.key})` : ""}`] : []),
         ...(!githubAbsent ? [`GitHub repo ${receipt.github_repo}`] : []),
       ],
     };
@@ -207,8 +207,8 @@ function validateReceipt(receipt) {
     throw new Error("canary_cleanup_receipt_invalid");
   }
   if (receipt.setup_id !== null) requiredString(receipt.setup_id, "canary_cleanup_receipt_invalid");
-  if (receipt.domain_id !== null) requiredString(receipt.domain_id, "canary_cleanup_receipt_invalid");
-  requiredString(receipt.domain_name, "canary_cleanup_receipt_invalid");
+  if (receipt.team_ref !== null) requiredString(receipt.team_ref, "canary_cleanup_receipt_invalid");
+  requiredString(receipt.team_name, "canary_cleanup_receipt_invalid");
   if (receipt.linear_team !== null) requiredString(receipt.linear_team?.name, "canary_cleanup_receipt_invalid");
   requiredString(receipt.github_repo, "canary_cleanup_receipt_invalid");
   validateAbsenceProof({
@@ -237,7 +237,7 @@ function validateAbsenceProof({ verifiedAt, verifiedFor, expectedIdentity } = {}
 }
 
 function linearReceiptIdentity(receipt) {
-  return receipt.linear_team?.id || receipt.domain_name;
+  return receipt.linear_team?.id || receipt.team_name;
 }
 
 function cleanupReceiptIdentity(linearIdentity, githubRepo) {
