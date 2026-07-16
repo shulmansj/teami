@@ -68,7 +68,7 @@ async function assertAllMcpToolsWorkFromNoCheckoutCwd(fixture) {
     assert.equal(Object.hasOwn(onboarding.structuredContent, "authorization_url"), false);
 
     const resolved = await mcp.client.callTool({
-      name: "resolve_team",
+      name: "check_team_context",
       arguments: { team: fixture.team.teamRef },
     });
     assert.equal(resolved.isError, undefined, JSON.stringify(resolved.structuredContent));

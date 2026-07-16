@@ -75,7 +75,7 @@ import {
 } from "../../../engine/trace-contract.mjs";
 export const TEAMI_PROJECT_MCP_TOOL_NAMES = Object.freeze([
   "init_onboarding",
-  "resolve_team",
+  "check_team_context",
   "project_create",
   "project_write_body",
   "project_move_status",
@@ -337,11 +337,16 @@ export function createProjectMcpToolActions({
     return started;
   }
 
-  async function resolve_team(args = {}) {
+  async function check_team_context(args = {}) {
     const { context, cache } = resolveTeamCache(args);
+    const team = publicTeamContext(context);
+    const approvedRepositories = structuredClone(context.allowedRepoPacket || []);
     return {
       ok: true,
-      team: publicTeamContext(context),
+      read_only: true,
+      summary: resolvedTeamSummary(team, approvedRepositories),
+      team,
+      approved_repositories: approvedRepositories,
       cache: publicCacheSummary(cache),
     };
   }
@@ -507,7 +512,7 @@ export function createProjectMcpToolActions({
 
   return Object.freeze({
     init_onboarding,
-    resolve_team,
+    check_team_context,
     project_create,
     project_write_body,
     project_move_status,
@@ -2311,10 +2316,10 @@ function isReauthorizeError(error) {
 }
 
 const TEAM_ERROR_MESSAGES = Object.freeze({
-  team_required: "team_required",
-  no_active_teams: "no_active_teams",
-  team_not_found: "team_not_found",
-  team_not_active: "team_not_active",
+  team_required: "More than one active Teami Team could apply. Show the candidate Team and workspace names, then ask the human to choose before continuing.",
+  no_active_teams: `No active Teami Team is configured. Ask the human to run ${formatCommand("init")} before continuing.`,
+  team_not_found: "The requested Teami Team is not configured. Show any candidates and ask the human to choose before continuing.",
+  team_not_active: "The selected Teami Team is not active. Explain its status and ask the human to choose an active Team or repair setup.",
 });
 
 function requiredString(value, fieldName) {
@@ -2357,10 +2362,23 @@ function publicTeamContext(context) {
   return {
     team_ref: context.teamRef,
     workspace_id: context.linear.workspaceId,
+    workspace_name: context.linear.workspaceName,
     team_id: context.linear.teamId,
     team_key: context.linear.teamKey,
     team_name: context.linear.teamName,
   };
+}
+
+function resolvedTeamSummary(team, approvedRepositories) {
+  const workspace = team.workspace_name || team.workspace_id || "unknown workspace";
+  const teamName = team.team_name || team.team_key || team.team_id || team.team_ref;
+  if (approvedRepositories.length === 0) {
+    return `Team "${teamName}" in workspace "${workspace}"; no product repositories are connected.`;
+  }
+  const repositories = approvedRepositories
+    .map((repository) => `${repository.owner}/${repository.repo}`)
+    .join(", ");
+  return `Team "${teamName}" in workspace "${workspace}"; approved repositories: ${repositories}.`;
 }
 
 function publicCacheSummary(cache) {

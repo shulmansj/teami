@@ -95,11 +95,16 @@ After onboarding, Teami has three surfaces:
 
 - Setup/repair: `init_onboarding`,
   `npx @shulmansj/teami init`, and `npx @shulmansj/teami doctor`.
-- Planning: MCP tools `resolve_team`, `project_create`,
+- Planning: MCP tools `check_team_context`, `project_create`,
   `project_write_body`, and `project_move_status`.
 - Running: `npx @shulmansj/teami gateway start` to poll Linear for Planned
   projects, with `npx @shulmansj/teami gateway status` as a
   read-only snapshot.
+
+`check_team_context` only reads local Teami setup. Claude may ask before using
+it: **Allow once** is enough for the current session; **Always allow** skips
+future prompts for this specific read-only check and does not approve Teami's
+project-changing tools.
 
 Moving a project to `Planned` is the approval moment. The running gateway picks
 it up on its next poll, records a local wake, and hands it to the local runner.
