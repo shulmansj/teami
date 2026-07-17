@@ -130,7 +130,7 @@ test("help --all adds the operator & maintenance section", async (t) => {
 
 test("the curated adopter set is registry-derived", () => {
   const adopter = COMMAND_REGISTRY.filter((descriptor) => descriptor.tier === "adopter");
-  assert.equal(adopter.length, 11);
+  assert.equal(adopter.length, 12);
   for (const descriptor of adopter) {
     assert.ok(["Setup", "Run", "Manage"].includes(descriptor.helpGroup));
     assert.ok(typeof descriptor.summary === "string" && descriptor.summary.length > 0);
@@ -140,6 +140,7 @@ test("the curated adopter set is registry-derived", () => {
     "doctor",
     "gateway start",
     "gateway status",
+    "gateway stop",
     "init",
     "phoenix open",
     "phoenix status",

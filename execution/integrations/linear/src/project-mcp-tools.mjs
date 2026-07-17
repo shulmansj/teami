@@ -59,6 +59,13 @@ import { renderPlanningBody } from "./project-planning-body.mjs";
 import { createTrace, recordSpan } from "./trace.mjs";
 import { runRuntimeSmokeChecks } from "./runtime-smoke.mjs";
 import { acquireTeamOperationLock } from "./team-operation-lock.mjs";
+import { selectGatewayTeams } from "./gateway-loop.mjs";
+import {
+  readBackgroundListenerStatus,
+  startBackgroundListener,
+  stopBackgroundListener,
+} from "./background-listener.mjs";
+import { HOME_STATE, homeStateProbe } from "./cli/home-state.mjs";
 import {
   DEFAULT_SETUP_TEAM_NAME,
   SETUP_DISCLOSURE_HASH,
@@ -79,6 +86,9 @@ import {
 export const TEAMI_PROJECT_MCP_TOOL_NAMES = Object.freeze([
   "init_onboarding",
   "check_team_context",
+  "listener_status",
+  "listener_start",
+  "listener_stop",
   "project_create",
   "project_write_body",
   "project_move_status",
@@ -142,6 +152,10 @@ export function createProjectMcpToolActions({
   setupOwnerPid = process.pid,
   isSetupOwnerProcessAlive = null,
   acquireTeamAuthority = acquireTeamOperationLock,
+  probeListener = homeStateProbe,
+  startListener = startBackgroundListener,
+  stopListener = stopBackgroundListener,
+  readListenerProcessStatus = readBackgroundListenerStatus,
 } = {}) {
   const baseConfig = config || loadConfig({ repoRoot });
   const setupStore = setupStateStore || createSetupStateStore({ home });
@@ -358,6 +372,171 @@ export function createProjectMcpToolActions({
     };
   }
 
+  async function listener_status() {
+    const currentRegistry = listenerRegistry({ registry, home });
+    const activeTeams = selectGatewayTeams({ registry: currentRegistry });
+    const probe = probeListener({ repoRoot, home, config: baseConfig });
+    const processStatus = readListenerProcessStatus({ home });
+    const running = probe.state === HOME_STATE.LISTENING && processStatus.running;
+    const effectiveState = probe.state === HOME_STATE.LISTENING && !running
+      ? HOME_STATE.IDLE
+      : probe.state;
+    const contract = listenerLaunchContract(packageVersion);
+    return {
+      ok: true,
+      read_only: true,
+      status: listenerPublicStatus(effectiveState),
+      running,
+      scope: {
+        mode: running && processStatus.mode === "foreground"
+          ? "foreground_selection_unknown"
+          : "all_active_teams",
+        team_refs: running && processStatus.mode === "foreground"
+          ? []
+          : activeTeams.map((team) => team.id),
+      },
+      lifecycle: {
+        mode: running ? processStatus.mode : "stopped",
+        detail: processStatus.mode === "background"
+          ? "This local listener keeps running after the agent session and terminal close. It runs until turned off, sign-out, restart, or a process failure."
+          : processStatus.mode === "foreground"
+            ? "This listener is not managed by Teami's background controller. Stop it with Ctrl-C in its terminal; if no such terminal exists, sign out or restart once."
+            : "The listener is off. Planned projects wait safely in Linear.",
+      },
+      manual_start_command: contract.start_command,
+      manual_stop_command: contract.stop_command,
+      summary: listenerStatusSummary({ state: effectiveState, mode: processStatus.mode }),
+    };
+  }
+
+  async function listener_start(args = {}) {
+    if (args.confirm !== true) {
+      throw new ProjectMcpToolError(
+        "confirmation_required",
+        "listener_start requires confirm: true after the adopter agrees to start the local listener.",
+      );
+    }
+
+    const before = await listener_status();
+    if (before.running) {
+      return {
+        ...before,
+        read_only: false,
+        status: "already_running",
+        summary: "Teami is already listening on this computer.",
+      };
+    }
+    if (before.status === "not_ready") {
+      throw new ProjectMcpToolError(
+        "listener_not_ready",
+        "Teami setup is not complete, so the listener cannot start yet.",
+        { repair: `Run ${formatCommandForContext("init", { packageVersion })}, then check listener_status again.` },
+      );
+    }
+    if (before.status === "degraded") {
+      throw new ProjectMcpToolError(
+        "listener_state_degraded",
+        "Teami could not read its local setup state cleanly, so the listener was not started.",
+        { repair: `Run ${formatCommandForContext("doctor", { packageVersion })}, repair the red check, then try again.` },
+      );
+    }
+
+    const currentRegistry = listenerRegistry({ registry, home });
+    const teams = selectGatewayTeams({ registry: currentRegistry });
+    if (teams.length === 0) {
+      throw new ProjectMcpToolError(
+        "no_active_teams",
+        "No active Teami Team is configured, so the listener cannot start.",
+        { repair: `Run ${formatCommandForContext("init", { packageVersion })}, then try again.` },
+      );
+    }
+
+    let result;
+    try {
+      result = await startListener({ repoRoot, home });
+    } catch (error) {
+      throw listenerStartError(error, packageVersion);
+    }
+    if (!result?.ok) {
+      throw new ProjectMcpToolError(
+        "listener_start_failed",
+        `Teami's local listener did not start: ${redactOAuthSecrets(result?.reason || result?.status || "unknown failure")}`,
+        { repair: `Run ${formatCommandForContext("doctor", { packageVersion })}, repair any red check, then try again.` },
+      );
+    }
+
+    return {
+      ok: true,
+      status: result.status === "already_running" ? "already_running" : "started",
+      running: true,
+      scope: {
+        mode: "all_active_teams",
+        team_refs: teams.map((team) => team.id),
+      },
+      lifecycle: {
+        mode: result.mode || "background",
+        detail: "This local listener keeps running after the agent session and terminal close. It runs until turned off, sign-out, restart, or a process failure.",
+      },
+      manual_start_command: listenerLaunchContract(packageVersion).start_command,
+      manual_stop_command: listenerLaunchContract(packageVersion).stop_command,
+      summary: result.status === "already_running"
+        ? "Teami is already listening on this computer."
+        : "Teami is now listening in the background for Planned projects in every active Team configured on this computer.",
+    };
+  }
+
+  async function listener_stop(args = {}) {
+    if (args.confirm !== true) {
+      throw new ProjectMcpToolError(
+        "confirmation_required",
+        "listener_stop requires confirm: true after the adopter agrees to turn Teami off.",
+      );
+    }
+    let result;
+    try {
+      result = await stopListener({ home });
+    } catch (error) {
+      throw new ProjectMcpToolError(
+        "listener_stop_failed",
+        `Teami did not stop cleanly: ${redactOAuthSecrets(error?.message || String(error || "unknown failure"))}`,
+        { repair: `Run ${formatCommandForContext("gateway status", { packageVersion })}, then try again.` },
+      );
+    }
+    if (!result?.ok) {
+      if (result?.status === "foreground_owned") {
+        throw new ProjectMcpToolError(
+          "listener_foreground_owned",
+          "Teami is running, but it is not managed by the background controller, so the agent did not terminate that process.",
+          { repair: "If Teami is open in a terminal, press Ctrl-C there. If no such terminal exists, sign out or restart once. Future agent-started listeners can be turned off with listener_stop." },
+        );
+      }
+      throw new ProjectMcpToolError(
+        "listener_stop_failed",
+        `Teami did not stop cleanly: ${redactOAuthSecrets(result?.reason || result?.status || "unknown failure")}`,
+        { repair: `Run ${formatCommandForContext("gateway status", { packageVersion })}, then try again.` },
+      );
+    }
+    const contract = listenerLaunchContract(packageVersion);
+    if (result.status === "stopping") {
+      return {
+        ok: true,
+        status: "stopping",
+        running: true,
+        manual_start_command: contract.start_command,
+        summary: "Teami is finishing current work before it stops. Planned projects will wait safely after it exits.",
+      };
+    }
+    return {
+      ok: true,
+      status: result.status,
+      running: false,
+      manual_start_command: contract.start_command,
+      summary: result.status === "already_stopped"
+        ? "Teami is already off."
+        : "Teami is off. Planned projects will wait safely in Linear until it starts again.",
+    };
+  }
+
   async function project_create(args = {}) {
     const name = requiredString(args.name, "name");
     const description = optionalString(args.description);
@@ -520,6 +699,9 @@ export function createProjectMcpToolActions({
   return Object.freeze({
     init_onboarding,
     check_team_context,
+    listener_status,
+    listener_start,
+    listener_stop,
     project_create,
     project_write_body,
     project_move_status,
@@ -2094,7 +2276,8 @@ function initOnboardingNextSteps({
     return steps;
   }
   add("Open a new Claude Code session and run /teami:plan to shape your first project.");
-  add(`When you are ready for Planned work to run, keep Teami's local listener open with ${formatCommand("gateway start")}.`);
+  add("Call listener_status. If Teami is stopped, ask the adopter whether to start it, then call listener_start with confirm: true only after they agree.");
+  add(`The listener keeps running after the agent session closes. Turn it off with listener_stop after confirmation or ${formatCommand("gateway stop")}.`);
   return steps;
 }
 
@@ -2510,10 +2693,45 @@ function listenerLaunchContract(packageVersion) {
   const launcher = `npx -y @shulmansj/teami@${build}`;
   return {
     build,
-    start_command: `${launcher} gateway start`,
+    start_command: `${launcher} gateway start --background`,
     status_command: `${launcher} gateway status`,
-    lifecycle: "foreground",
+    stop_command: `${launcher} gateway stop`,
+    lifecycle: "background_until_stopped_signout_restart_or_failure",
   };
+}
+
+function listenerRegistry({ registry = null, home = resolveTeamiHome() } = {}) {
+  return registry || readTeamRegistry({ home }) || emptyTeamRegistry();
+}
+
+function listenerPublicStatus(state) {
+  if (state === HOME_STATE.LISTENING) return "running";
+  if (state === HOME_STATE.IDLE) return "stopped";
+  if (state === HOME_STATE.UNINITIALIZED) return "not_ready";
+  return "degraded";
+}
+
+function listenerStatusSummary({ state, mode = "stopped" } = {}) {
+  if (state === HOME_STATE.LISTENING) {
+    return mode === "background"
+      ? "Teami is listening in the background on this computer."
+      : "Teami is listening in another terminal on this computer.";
+  }
+  if (state === HOME_STATE.IDLE) {
+    return "Teami is ready but not listening. Planned projects wait safely in Linear until the listener starts.";
+  }
+  if (state === HOME_STATE.UNINITIALIZED) {
+    return "Teami setup is not complete, so the listener cannot start yet.";
+  }
+  return "Teami could not read its local setup state cleanly. Run doctor before starting the listener.";
+}
+
+function listenerStartError(error, packageVersion) {
+  return new ProjectMcpToolError(
+    "listener_start_failed",
+    `Teami's local listener did not start: ${redactOAuthSecrets(error?.message || String(error || "unknown failure"))}`,
+    { repair: `Run ${formatCommandForContext("gateway status", { packageVersion })}, then try again.` },
+  );
 }
 
 function publicCacheSummary(cache) {

@@ -16,6 +16,13 @@ import {
   runRuntimeSmokeChecks,
 } from "../runtime-smoke.mjs";
 import { resolveTeamiHome } from "../app-home.mjs";
+import {
+  consumeBackgroundListenerStopRequest,
+  readBackgroundListenerStatus,
+  startBackgroundListener,
+  stopBackgroundListener,
+  writeBackgroundListenerReady,
+} from "../background-listener.mjs";
 import { flagValue, parseCliFlags } from "./flags.mjs";
 import { homeStateProbe } from "./home-state.mjs";
 import {
@@ -44,9 +51,12 @@ export async function runGatewayCommand(input) {
     // Adopter "is it on?" surface — strictly read-only: no poll, replay, or decomposition.
     return runGatewayStatusReadOnly({ context, args: rest });
   }
+  if (subcommand === "stop") {
+    return runGatewayStopCommand({ context, args: rest });
+  }
   if (subcommand && !subcommand.startsWith("--")) {
     output.error({
-      what: `Usage: ${formatCommand("gateway [status] [--team <id>]")}`,
+      what: `Usage: ${formatCommand("gateway [status|stop] [--background | --team <id>]")}`,
       why: `Unknown gateway subcommand: ${subcommand}`,
     });
     process.exitCode = 2;
@@ -72,12 +82,28 @@ function gatewayWatchLine() {
 
 async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
   const { config, repoRoot, home, output } = context;
-  agenticFactoryHeading(output, "gateway");
   let selection;
   let result;
   const { flags } = parseCliFlags(args);
+  if (flags.background === true) {
+    const incompatible = ["team", "max-iterations"].filter((name) => flags[name] !== undefined);
+    if (incompatible.length > 0) {
+      output.error({
+        what: "Background listener options conflict",
+        why: `--background always watches every active Team and cannot be combined with ${incompatible.map((name) => `--${name}`).join(", ")}.`,
+        fix: `run ${formatCommand("gateway start --background")} without a Team selector, or omit --background for a terminal-controlled single-Team listener.`,
+      });
+      process.exitCode = 2;
+      return { ok: false, status: "invalid_options", reason: "background_listener_scope_conflict" };
+    }
+    return runGatewayBackgroundStartCommand({ context });
+  }
+  agenticFactoryHeading(output, "gateway");
   const maxIterations = flags["max-iterations"] === undefined ? null : Number(flags["max-iterations"]);
   const controller = new AbortController();
+  const backgroundControlToken = flags["background-ready-file"]
+    ? process.env.TEAMI_BACKGROUND_CONTROL_TOKEN
+    : null;
   const onSigint = () => controller.abort();
   const onSigterm = () => controller.abort();
   process.once("SIGINT", onSigint);
@@ -88,6 +114,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
   // loop's existing Ctrl-C handling is untouched.
   let heartbeat = null;
   let ticker = null;
+  let backgroundStopWatcher = null;
   try {
     selection = resolveGatewaySelection({
       repoRoot,
@@ -100,6 +127,17 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
     heartbeat = output.progress(gatewayWatchLine());
     ticker = setInterval(() => heartbeat?.update(gatewayWatchLine()), intervalMs);
     if (typeof ticker.unref === "function") ticker.unref();
+    if (backgroundControlToken) {
+      backgroundStopWatcher = setInterval(() => {
+        if (consumeBackgroundListenerStopRequest({
+          home,
+          controlToken: backgroundControlToken,
+        })) controller.abort();
+      }, 250);
+      // This referenced interval is the detached listener's process-lifetime anchor.
+      // Foreground sessions stay alive through their terminal; background sessions
+      // deliberately have no terminal or stdio handle to keep Node running.
+    }
     result = await loop({
       repoRoot,
       home,
@@ -114,6 +152,14 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
         renderGatewayStatusEvent(event, output);
         heartbeat = output.progress(gatewayWatchLine());
       },
+      onReady: flags["background-ready-file"]
+        ? () => writeBackgroundListenerReady({
+            home,
+            readyFile: flags["background-ready-file"],
+            nonce: flags["background-ready-nonce"],
+            controlToken: process.env.TEAMI_BACKGROUND_CONTROL_TOKEN,
+          })
+        : null,
     });
   } catch (error) {
     const recovery = gatewayStartupRecovery(error);
@@ -126,6 +172,7 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
     return;
   } finally {
     if (ticker) clearInterval(ticker);
+    if (backgroundStopWatcher) clearInterval(backgroundStopWatcher);
     heartbeat?.stop();
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
@@ -134,6 +181,68 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
   renderGatewayCompletion(result, output);
   if (result.ok) printVerboseHint(output);
   process.exitCode = gatewayExitCode(result);
+}
+
+async function runGatewayBackgroundStartCommand({ context }) {
+  const { repoRoot, home, output } = context;
+  agenticFactoryHeading(output, "gateway start");
+  const result = await startBackgroundListener({ repoRoot, home });
+  if (result.ok && result.status === "started") {
+    output.success("Teami is listening in the background.");
+    output.info(`It keeps running after this terminal closes. Stop it with ${formatCommand("gateway stop")}.`);
+    process.exitCode = 0;
+    return result;
+  }
+  if (result.ok && result.status === "already_running") {
+    output.success(`Teami is already listening${result.mode ? ` in ${result.mode} mode` : ""}.`);
+    if (result.mode === "foreground") {
+      output.info("That listener is controlled by its terminal and stops with Ctrl-C there.");
+    }
+    process.exitCode = 0;
+    return result;
+  }
+  output.error({
+    what: "The background listener did not start",
+    why: result.reason || result.status || "unknown failure",
+    fix: `run ${formatCommand("doctor")}, repair any red check, then retry ${formatCommand("gateway start --background")}.`,
+  });
+  process.exitCode = 1;
+  return result;
+}
+
+async function runGatewayStopCommand({ context }) {
+  const { home, output } = context;
+  agenticFactoryHeading(output, "gateway stop");
+  const result = await stopBackgroundListener({ home });
+  if (result.ok && result.status === "already_stopped") {
+    output.success("Teami is already stopped.");
+    process.exitCode = 0;
+    return result;
+  }
+  if (result.ok) {
+    if (result.status === "stopping") {
+      output.warn("Teami is finishing current work before it stops listening.");
+      output.info(`Check progress with ${formatCommand("gateway status")}.`);
+      process.exitCode = 0;
+      return result;
+    }
+    output.success("Teami stopped listening.");
+    process.exitCode = 0;
+    return result;
+  }
+  if (result.status === "foreground_owned") {
+    output.warn("Teami is running, but it is not managed by the background controller.");
+    output.info("If it is open in a terminal, press Ctrl-C there. If no such terminal exists, sign out or restart once; future background listeners can be stopped normally.");
+    process.exitCode = 1;
+    return result;
+  }
+  output.error({
+    what: "Teami did not stop cleanly",
+    why: result.reason || result.status || "unknown failure",
+    fix: `run ${formatCommand("gateway status")} to check its current state, then retry.`,
+  });
+  process.exitCode = 1;
+  return result;
 }
 
 function gatewayStartupRecovery(error) {
@@ -225,19 +334,23 @@ async function runGatewayStatusReadOnly({ context }) {
   }
 
   const running = probe.state === "listening";
+  const listenerProcess = readBackgroundListenerStatus({ home });
   const mark = running
     ? output.style.green(output.symbols.running)
     : output.style.dim(output.symbols.stopped);
   output.raw(`\n  ${mark} ${running ? "Running" : "Stopped"}\n`);
   output.keyValues(compactPairs([
     ["Team", probe.evidence.activeTeamRef],
+    ["Mode", running ? listenerProcess.mode : null],
     ["Poll", `every ${humanizeInterval(config.poll?.interval_ms ?? 10_000)}`],
     ["Dashboard", normalizeLocalPhoenixAppUrl(process.env.TEAMI_PHOENIX_URL)],
   ]));
   if (running) {
-    output.info("Stop: Ctrl-C in the terminal running the gateway.");
+    output.info(listenerProcess.mode === "background"
+      ? `Stop: ${formatCommand("gateway stop")}.`
+      : "Stop: Ctrl-C in the terminal running the gateway.");
   } else {
-    output.nextSteps([{ text: formatCommand("gateway start"), hint: "open your factory for business" }]);
+    output.nextSteps([{ text: formatCommand("gateway start --background"), hint: "turn Teami on in the background" }]);
   }
   renderLatestRunEvidence({ repoRoot, home, output });
   await renderHumanReviewGateStatus({ repoRoot, home, config, output });

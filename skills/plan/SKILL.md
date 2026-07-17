@@ -53,7 +53,7 @@ renderConfirmation(slots)
 1. Resolve the team.
    - If the session has not already established the Linear Team, tell the human: "I'm checking which Teami Team and approved repositories apply to this plan. This only reads your local Teami setup; it won't create or change anything. If Claude asks, choose Allow once for this session or Always allow to skip this specific read-only prompt in future."
    - Then call `check_team_context`.
-   - Keep the returned `listener.start_command` and `listener.status_command` with the resolved Team context. Those commands intentionally name the exact Teami build that supplied these planning tools. Never reconstruct them as an unversioned `npx @shulmansj/teami ...` command.
+   - Keep the returned listener commands with the resolved Team context as CLI fallbacks. Prefer the dedicated `listener_status`, `listener_start`, and `listener_stop` tools during the conversation.
    - If more than one active Team could apply, show each candidate's Team and workspace names and ask the human to choose. Never guess silently.
    - After a successful result, explicitly confirm: "I'm planning in Team [team name] in [workspace name], using approved repositories: [owner/repo list]." If none are connected, say so and ask whether this is a non-code plan or whether the human wants to connect a repository before continuing.
    - Treat the returned repository list as the approved boundary, not proof that every repository's contents are already loaded. Use only sources actually available in the session, and name any missing context.
@@ -113,7 +113,7 @@ Then surface exactly two kinds of thing, and nothing else:
 
 2. `You're ready`
    - Show this only when the pressure-test surfaces no remaining human-only decisions.
-   - Say the project body is ready to write. Before asking for the go, use the exact `listener.status_command` returned by `check_team_context` to check whether the local listener is running. If it is stopped, offer to start it with the exact returned `listener.start_command`, or let the adopter run that command in another terminal. The listener is a foreground process: if you start it from a session-owned background shell, say that it lasts only as long as that shell and verify it with the returned status command. Explain that moving the project to Planned queues it: Teami picks it up automatically on the next poll when the listener is running, or it waits safely until the listener starts.
+   - Say the project body is ready to write. Before asking for the go, call `listener_status`. If Teami is stopped, explain that the project will wait safely in Linear and ask whether the adopter wants you to turn it on. After an explicit yes, call `listener_start({ confirm: true })`. The local background listener keeps running after this agent session or terminal closes; it stops when asked, on sign-out or restart, or if the process fails. Never imply that it installs a machine-startup service. Use the exact returned CLI commands only as manual fallbacks.
    - Never infer that Linear authorization is missing from a generic listener startup failure. Recommend setup or reauthorization only when Teami explicitly reports an authorization/setup diagnosis; otherwise relay the named failure and its repair without inventing a cause.
    - Ask for an unambiguous go before committing.
 

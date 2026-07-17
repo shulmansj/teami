@@ -20,6 +20,7 @@ test("normalizeCommandInvocation maps noun-verb commands", () => {
   assertNormalization("gateway", ["start"], { command: "gateway", args: [] });
   assertNormalization("gateway", ["start", "--verbose"], { command: "gateway", args: ["--verbose"] });
   assertNormalization("gateway", ["status"], { command: "gateway", args: ["status"] });
+  assertNormalization("gateway", ["stop"], { command: "gateway", args: ["stop"] });
   assertNormalization("gateway", ["--verbose", "status"], { command: "gateway", args: ["--verbose", "status"] });
   assertNormalization("gateway", ["status", "--verbose"], { command: "gateway", args: ["status", "--verbose"] });
   assertNormalization("gateway", [], { command: "gateway", args: [] });
@@ -86,6 +87,18 @@ test("CLI noun-verb commands dispatch to shipped command paths", async (t) => {
       // Adopter `gateway status` is now read-only: no poll, so no "could not be read"/no_active_teams.
       expected: /gateway status[\s\S]*Not set up yet/,
       unexpected: /Gateway status could not be read|no_active_teams/,
+    },
+    {
+      name: "gateway stop",
+      tokens: ["gateway", "stop"],
+      expected: /gateway stop[\s\S]*already stopped/,
+      unexpected: /Unknown gateway subcommand/,
+    },
+    {
+      name: "background gateway rejects a Team selector",
+      tokens: ["gateway", "start", "--background", "--team", "main"],
+      expected: /Background listener options conflict[\s\S]*always watches every active Team/,
+      unexpected: /no_active_teams/,
     },
     {
       name: "team add",

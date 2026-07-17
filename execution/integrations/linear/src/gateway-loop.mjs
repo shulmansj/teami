@@ -361,6 +361,7 @@ export async function runGatewayLoop(options = {}) {
     iterationRetentionLimit = DEFAULT_LIVE_GATEWAY_ITERATION_RETENTION,
     runStartup = runGatewayStartup,
     runPollIteration = runGatewayPollIteration,
+    onReady = null,
   } = options;
   assertGatewayMaxIterations(maxIterations);
   const liveStatusRetentionLimit = liveLoopRetentionLimit({ maxIterations, retentionLimit: statusRetentionLimit });
@@ -402,6 +403,7 @@ export async function runGatewayLoop(options = {}) {
       state,
       emitStatus,
     });
+    await onReady?.({ startup, lock: lock.owner || null });
     let count = 0;
     while (!signal?.aborted) {
       const iteration = await runPollIteration({
@@ -5744,7 +5746,16 @@ function toDate(value) {
 function defaultSleep(ms, { signal = null } = {}) {
   if (signal?.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
     timer.unref?.();
+    signal?.addEventListener?.("abort", finish, { once: true });
   });
 }

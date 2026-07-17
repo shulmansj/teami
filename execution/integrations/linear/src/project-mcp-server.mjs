@@ -31,14 +31,11 @@ export async function createTeamiProjectMcpServer({
           home: toolOptions.home,
         }),
       };
-  registerTeamiProjectTools(
-    server,
-    actions || createProjectMcpToolActions({
+  const resolvedActions = actions || createProjectMcpToolActions({
       createPlanningTraceSink: createLocalPhoenixTraceSink,
       ...resolvedToolOptions,
-    }),
-    z,
-  );
+    });
+  registerTeamiProjectTools(server, resolvedActions, z);
   return server;
 }
 
@@ -47,7 +44,8 @@ export async function runTeamiProjectMcpStdioServer(options = {}) {
     import("@modelcontextprotocol/sdk/server/stdio.js"),
     createTeamiProjectMcpServer(options),
   ]);
-  await server.connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
   return server;
 }
 
@@ -113,6 +111,58 @@ export function registerTeamiProjectTools(server, actions, z) {
       },
     },
     toolCallback(actions.check_team_context),
+  );
+
+  server.registerTool(
+    "listener_status",
+    {
+      title: "Check whether Teami is listening",
+      description: "Read-only. Report whether the local listener is running and which active Teams it watches.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    toolCallback(actions.listener_status),
+  );
+
+  server.registerTool(
+    "listener_start",
+    {
+      title: "Turn on Teami",
+      description: "Start one local background listener for every active Team. It keeps running after this agent session closes and requires confirm: true after explicit adopter approval.",
+      inputSchema: {
+        confirm: z.literal(true).describe("Must be true only after the adopter explicitly agrees to start the listener."),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    toolCallback(actions.listener_start),
+  );
+
+  server.registerTool(
+    "listener_stop",
+    {
+      title: "Turn off Teami",
+      description: "Stop the local listener. Planned projects remain queued safely in Linear. Requires confirm: true after explicit adopter approval.",
+      inputSchema: {
+        confirm: z.literal(true).describe("Must be true only after the adopter explicitly agrees to turn off the listener."),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    toolCallback(actions.listener_stop),
   );
 
   server.registerTool(

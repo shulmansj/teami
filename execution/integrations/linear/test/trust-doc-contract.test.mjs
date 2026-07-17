@@ -71,7 +71,7 @@ const SANCTIONED_CURRENT_MENTIONS = Object.freeze({
     "No hosted inbox, webhook, GitHub App, or retained admin authority.",
   ]),
   "docs/adoption.md": Object.freeze([
-    "There is no hosted inbox, GitHub App, token broker, retained admin authority, or always-running service in the supported path.",
+    "There is no hosted inbox, GitHub App, token broker, retained admin authority, or operating-system startup service in the supported path.",
   ]),
   "docs/contracts/authority-custody-defaults.md": Object.freeze([
     "Teami has no hosted inbox, GitHub App, token broker, always-on supervisor, maintainer-operated adopter authority, or hidden machine-off execution path.",
@@ -84,7 +84,7 @@ const SANCTIONED_CURRENT_MENTIONS = Object.freeze({
   ]),
   "docs/operating-model.md": Object.freeze([
     "There is no hosted inbox, hosted credential custody, GitHub App, token broker, or always-on supervisor in the supported product.",
-    "When it is stopped or the machine is off, Teami makes no external change; Linear remains the queue and the next foreground poll reconciles eligible work.",
+    "When it is stopped or the machine is off, Teami makes no external change; Linear remains the queue and the next local poll reconciles eligible work.",
   ]),
   "docs/promotion-acceptance-policy.md": Object.freeze([
     "no webhooks, no outbound custom actions, no PXI/plugin hooks, and no inbound user-defined tools.",
@@ -102,8 +102,7 @@ const SANCTIONED_CURRENT_MENTIONS = Object.freeze({
     "no merge, mark-ready, review, comment, webhook, workflow, or admin codepath.",
   ]),
   "execution/integrations/linear/README.md": Object.freeze([
-    "It is a foreground command, not an installed background service.",
-    "When the command is stopped or the machine is off, Teami makes no external change; Linear remains the queue until the next local poll.",
+    "When it is stopped or the machine is off, Teami makes no external change; Linear remains the queue until the next local poll.",
     "no always-on supervisor or hidden machine-off path is part of the product.",
   ]),
   "execution/integrations/linear/test/fixtures/decomp-facade/project-update.md": Object.freeze([
@@ -111,7 +110,7 @@ const SANCTIONED_CURRENT_MENTIONS = Object.freeze({
   ]),
   "README.md": Object.freeze([
     "there is no hosted inbox, credential service, GitHub App, or token broker.",
-    "When that foreground command is stopped or the machine is off, Teami does no work and makes no external change.",
+    "When the listener is stopped or the machine is off, Teami does no work and makes no external change.",
   ]),
 });
 
@@ -198,7 +197,7 @@ test("retired-term exceptions cannot be satisfied by unrelated nearby negation",
   const bypassIndex = bypass.indexOf("hosted inbox");
   assert.equal(isSanctionedCurrentMention("README.md", bypass, bypassIndex, "hosted inbox".length), false);
 
-  const sanctioned = "There is no hosted inbox, GitHub App, token broker, retained admin authority, or always-running service in the supported path.".toLowerCase();
+  const sanctioned = "There is no hosted inbox, GitHub App, token broker, retained admin authority, or operating-system startup service in the supported path.".toLowerCase();
   const sanctionedIndex = sanctioned.indexOf("hosted inbox");
   assert.equal(
     isSanctionedCurrentMention("docs/adoption.md", sanctioned, sanctionedIndex, "hosted inbox".length),
@@ -206,14 +205,15 @@ test("retired-term exceptions cannot be satisfied by unrelated nearby negation",
   );
 });
 
-test("owner docs pin the manual local gateway, non-retained admin, ambient GitHub, and unshipped execution truth", () => {
+test("owner docs pin the explicit local background gateway, non-retained admin, ambient GitHub, and unshipped execution truth", () => {
   const ownerText = new Map(
     CURRENT_OWNER_DOCS.map((repoPath) => [repoPath, normalizeProse(readRepoFile(repoPath))]),
   );
 
   for (const repoPath of ["README.md", "docs/operating-model.md", "execution/integrations/linear/README.md"]) {
     const text = ownerText.get(repoPath);
-    assert.match(text, /foreground (?:gateway|command)/i, `${repoPath} must identify the foreground gateway command`);
+    assert.match(text, /background/i, `${repoPath} must identify the explicit background listener option`);
+    assert.match(text, /not (?:installed|registered).*startup service|does not restart after (?:sign-out or )?a computer reboot/i, `${repoPath} must deny OS-startup persistence`);
     assert.match(text, /machine is off/i, `${repoPath} must state machine-off behavior plainly`);
     assert.match(text, /makes? no external change|does no work/i, `${repoPath} must deny machine-off effects`);
   }

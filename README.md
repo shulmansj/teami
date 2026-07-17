@@ -19,8 +19,8 @@ Primary trust boundary: Teami is local-first and zero-hosted. Live paths run
 from the adopter's machine; there is no hosted inbox, credential service,
 GitHub App, or token broker. The plugin launches Teami's stdio MCP server
 through `npx`, Teami state lives under the adopter's per-user Teami home, and
-the foreground gateway polls Linear with the adopter's OAuth grant only while
-the adopter is running it. Workspace-repository proposal writes use the adopter's
+the explicitly started local gateway polls Linear with the adopter's OAuth grant
+until the adopter stops it, signs out, restarts the computer, or the process fails. Workspace-repository proposal writes use the adopter's
 ambient git/`gh` auth. Teami stores no GitHub secret; run evidence and PR bodies
 carry provenance for review.
 
@@ -97,9 +97,9 @@ After onboarding, Teami has three surfaces:
   `npx @shulmansj/teami init`, and `npx @shulmansj/teami doctor`.
 - Planning: MCP tools `check_team_context`, `project_create`,
   `project_write_body`, and `project_move_status`.
-- Running: `npx @shulmansj/teami gateway start` to poll Linear for Planned
-  projects, with `npx @shulmansj/teami gateway status` as a
-  read-only snapshot.
+- Running: MCP tools `listener_status`, `listener_start`, and `listener_stop`.
+  Direct CLI controls are `npx @shulmansj/teami gateway start --background`,
+  `gateway status`, and `gateway stop`.
 
 `check_team_context` only reads local Teami setup. Claude may ask before using
 it: **Allow once** is enough for the current session; **Always allow** skips
@@ -256,11 +256,14 @@ both use the adopter's local ambient GitHub authority and stay explicit.
 - Product-repo write-capable execution and PR effects are not shipped unless a
   later capability is landed, verified, and documented. Workspace-repository proposal
   PRs remain human-reviewed process-change proposals.
-- Start `npx @shulmansj/teami gateway start` when you want the local
-  factory listening.
-- When that foreground command is stopped or the machine is off, Teami does no
-  work and makes no external change. Eligible Linear work remains queued until
-  the next local poll.
+- Start `npx @shulmansj/teami gateway start --background` when you want the
+  local factory listening; `gateway stop` turns it off. The background listener
+  survives terminal and agent-session closure but is not installed as an OS
+  startup service, so sign-out or a computer restart turns it off. Like any local
+  process, it can also stop if it encounters a failure.
+- When the listener is stopped or the machine is off, Teami does no work and
+  makes no external change. Eligible Linear work remains queued until the next
+  local poll.
 
 ## Reuse/License
 

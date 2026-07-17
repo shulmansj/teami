@@ -33,10 +33,13 @@ instances.
 Teami keeps live authority local.
 
 There is no hosted inbox, hosted credential custody, GitHub App, token broker,
-or always-on supervisor in the supported product. The adopter starts the
-foreground gateway when they want Teami listening. When it is stopped or the
-machine is off, Teami makes no external change; Linear remains the queue and
-the next foreground poll reconciles eligible work.
+or always-on supervisor in the supported product. The adopter explicitly turns
+on one local gateway when they want Teami listening; it may remain in the
+foreground or run in the background across terminal and agent-session closure.
+It does not restart after sign-out or a computer reboot, and like any local
+process it can stop on failure. When it is stopped or the machine
+is off, Teami makes no external change; Linear remains the queue and the next
+local poll reconciles eligible work.
 
 The local gateway polls Linear's current state with the adopter's OAuth grant
 for projects in the trigger state. Linear is the queue: moving a project to
