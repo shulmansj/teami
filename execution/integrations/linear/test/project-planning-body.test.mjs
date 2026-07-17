@@ -93,5 +93,5 @@ test("renderConfirmation derives from the same slots and ends with the commit cu
   assert.ok(confirmation.trimEnd().endsWith(
     "Moving to Planned queues the project. If the listener is running, Teami picks it up automatically on the next poll; otherwise it waits safely until the listener starts.",
   ));
-  assert.match(confirmation, /npx @shulmansj\/teami gateway start/);
+  assert.match(confirmation, /npx @shulmansj\/teami gateway start --background/);
 });

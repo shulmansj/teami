@@ -9,7 +9,7 @@ function firstRunCommands(overrides = {}) {
   return {
     init: formatCommand("init"),
     doctor: formatCommand("doctor"),
-    gatewayStart: formatCommand("gateway start"),
+    gatewayStart: formatCommand("gateway start --background"),
     gatewayStatus: formatCommand("gateway status"),
     ...overrides,
   };
@@ -49,6 +49,10 @@ export function firstRunPlan({
   }
 
   return [
+    {
+      text: commands.gatewayStart,
+      hint: "turn Teami on in the background; it keeps running after this terminal closes",
+    },
     { text: plannedProjectText, hint: "Teami will guide the planning conversation" },
   ];
 }
@@ -64,7 +68,7 @@ export function firstRunStatusLine({ state = HOME_STATE.IDLE } = {}) {
   if (normalizedState === HOME_STATE.LISTENING) {
     return "Setup is complete and Teami is listening.";
   }
-  return "Setup is complete.";
+  return "Setup is complete. Teami is not listening yet; Planned projects will wait safely in Linear.";
 }
 
 export function shouldIncludeRuntimeFetchNotice({ gate = null, phoenixAppUrl = null } = {}) {

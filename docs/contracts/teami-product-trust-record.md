@@ -33,9 +33,11 @@ its own.
   not store a GitHub secret or silently broaden repository access.
 - Teami state, wake/run coordination, and Phoenix evidence remain on the
   adopter's machine unless the adopter deliberately exports something.
-- The foreground gateway runs only when the adopter starts it. When it is
-  stopped or the machine is off, Teami performs no work and makes no external
-  change. Linear remains the queue until the next local poll.
+- The local gateway runs only after the adopter starts it directly or approves
+  an agent start. Background mode survives terminal and agent-session closure
+  but is not registered to start with the operating system. When it is stopped
+  or the machine is off, Teami performs no work and makes no external change.
+  Linear remains the queue until the next local poll.
 
 ## One Setup Product
 

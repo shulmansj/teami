@@ -13,6 +13,7 @@ import {
   processPlannedProject,
   replayPendingMutation,
   runFreshSyntheticWake,
+  runGatewayLoop,
   runGatewayOnce,
 } from "../src/gateway-loop.mjs";
 
@@ -110,6 +111,31 @@ test("gateway startup drains replay before the first planned-project poll", asyn
 
   assert.equal(result.ok, true);
   assert.deepEqual(calls, ["lock", "listReplay", "replay", "poll", "release"]);
+});
+
+test("gateway loop wakes immediately when stopped during its poll wait", async () => {
+  const controller = new AbortController();
+  let released = false;
+  let polls = 0;
+  const startedAt = Date.now();
+  const result = await runGatewayLoop({
+    repoRoot: tempRepo(),
+    config: { ...configFixture(), poll: { interval_ms: 60_000 } },
+    registry: registryFixture(),
+    signal: controller.signal,
+    acquireLock: () => ({ ok: true, release: () => { released = true; } }),
+    runStartup: async () => ({ status: "ready" }),
+    runPollIteration: async () => {
+      polls += 1;
+      setTimeout(() => controller.abort(), 25);
+      return { status: "idle" };
+    },
+  });
+
+  assert.equal(result.status, "stopped");
+  assert.equal(polls, 1);
+  assert.equal(released, true);
+  assert.ok(Date.now() - startedAt < 1_000, "abort should interrupt the 60-second poll wait");
 });
 
 test("replay clears intent only after verified completed or paused results", async () => {

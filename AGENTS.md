@@ -24,8 +24,10 @@ per-user Teami home.
 
 A guide file can only act once the adopter speaks, so on your first response in
 a session, run `teami doctor` and read the result before you give advice. If
-everything is green, say so briefly and ask what they'd like to do. If a check
-is red, translate it (see Repair below); don't dump the raw output.
+everything is green, call `listener_status`. If Teami is off, explain that
+Planned projects wait safely and ask whether they want you to turn it on. Call
+`listener_start({ confirm: true })` only after they say yes. If a check is red,
+translate it (see Repair below); don't dump the raw output.
 
 ## The three surfaces
 
@@ -33,8 +35,9 @@ is red, translate it (see Repair below); don't dump the raw output.
    adopter's consent, or `teami init` / `teami doctor` through the thin CLI.
 2. Planning work: MCP tools `check_team_context`, `project_create`,
    `project_write_body`, and `project_move_status`.
-3. Running work: `teami gateway start` to listen for Planned projects, and
-   `teami gateway status` for a read-only snapshot.
+3. Running work: MCP `listener_status`, `listener_start`, and `listener_stop`,
+   with `teami gateway start --background`, `teami gateway status`, and
+   `teami gateway stop` as the direct CLI controls.
 
 The CLI does not replace the MCP workflow. Start MCP `init_onboarding` without
 arguments and use its safe defaults. Product repositories stay disconnected
@@ -142,17 +145,27 @@ the adopter confirms the brief is ready.
 
 ## Job 3 - Run or check the factory
 
-Teami only responds to Planned projects while the local gateway is running.
+Teami only responds to Planned projects while its local listener is running.
 
-- Start it: `teami gateway start`. It polls Linear and runs until the user stops
-  the terminal.
-- Check it: `teami gateway status`. This is a one-pass snapshot; it does not
-  keep polling.
+1. Call `listener_status`; this is read-only.
+2. If it is stopped, explain that Planned projects wait safely in Linear and
+   ask whether the adopter wants Teami turned on.
+3. After an explicit yes, call `listener_start({ confirm: true })`. It starts
+   one local background listener for every active Team and keeps running after
+   the current agent session or terminal closes. It stops when asked, on sign-out
+   or restart, or if the process fails; it does not install an operating-system startup service.
+4. To turn it off, ask first, then call `listener_stop({ confirm: true })`. If
+   it returns `stopping`, say that Teami is finishing current work and check
+   `listener_status` before claiming it is off.
+
+Direct CLI controls are `teami gateway start --background`, `teami gateway
+status`, and `teami gateway stop`. The original foreground form, `teami gateway
+start`, remains available for operators who deliberately want Ctrl-C ownership.
 
 ## Job 4 - First decomposition walkthrough
 
 1. Create or select a Linear project through MCP and add a short brief.
-2. Make sure the gateway is running; offer to run `teami gateway start`.
+2. Call `listener_status`; if stopped, ask and then use `listener_start` after approval.
 3. Move the project to Planned only after the adopter confirms.
 4. Watch progress with `teami gateway status`, or open local Phoenix if they
    want trace detail.

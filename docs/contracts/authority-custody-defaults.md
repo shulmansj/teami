@@ -18,7 +18,7 @@ where resulting data may live. It refines the
 | Product-repository grant after setup | Adopter's separate explicit team action | Record the selected `owner/repo` and default-branch identity; this does not activate write-capable execution | Local team registry | Remove it through the separate team-revoke action |
 | Private Teami workspace repository | Adopter's ambient local git/`gh` session | Create or reconnect the private repository Teami uses for configuration and reviewable improvement proposals | Git credential custody remains outside Teami | Revoke or repair local git/`gh` access |
 | Claude plugin | Adopter's explicit setup confirmation | Register/update the Teami marketplace and install the Teami plugin in user scope | Claude's local plugin configuration | Claude plugin uninstall/marketplace removal |
-| Gateway and runner | Adopter starts the foreground command | Poll Linear, record/claim local wakes, and apply gated team-confined Linear effects | Local Teami state | Stop the command |
+| Gateway and runner | Adopter explicitly turns on the local listener, directly or through the agent after confirmation | Poll Linear, record/claim local wakes, and apply gated team-confined Linear effects | One local foreground or background process plus local Teami state; no OS startup registration | `listener_stop`, `gateway stop`, Ctrl-C for foreground mode, sign-out, computer restart, or process failure |
 | Phoenix | Adopter's local Teami process | Store local trace/eval evidence and health receipts | Local Phoenix and Teami state | Stop/delete only through an explicit local cleanup path |
 
 Teami has no hosted inbox, GitHub App, token broker, always-on supervisor,

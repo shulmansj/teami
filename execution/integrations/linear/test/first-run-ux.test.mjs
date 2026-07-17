@@ -16,7 +16,7 @@ import { runtimeFetchDegradationNotice } from "../src/local-phoenix-manager.mjs"
 const COMMANDS = Object.freeze({
   init: "teami init",
   doctor: "teami doctor",
-  gatewayStart: "teami gateway start",
+  gatewayStart: "teami gateway start --background",
   gatewayStatus: "teami gateway status",
   phoenixStart: "teami phoenix:start",
 });
@@ -41,9 +41,11 @@ test("D0c first-run plan is ordered and resumable across home-state probe states
     plannedProjectText: PLANNED_STEP,
   });
   assert.deepEqual(idle.map((step) => step.text), [
+    "teami gateway start --background",
     PLANNED_STEP,
   ]);
-  assert.match(idle[0].hint, /planning conversation/);
+  assert.match(idle[0].hint, /keeps running after this terminal closes/);
+  assert.match(idle[1].hint, /planning conversation/);
 
   const uninitialized = firstRunPlan({ state: HOME_STATE.UNINITIALIZED, commands: COMMANDS });
   assert.equal(uninitialized[0].text, "teami init");
@@ -116,7 +118,7 @@ test("D0c first-run rendering uses the CLI ASCII fallback", () => {
     includeOfflineBranch: false,
   });
 
-  assert.match(stream.output, /Setup is complete\./);
+  assert.match(stream.output, /Setup is complete\. Teami is not listening yet/);
+  assert.match(stream.output, /teami gateway start --background/);
   assert.match(stream.output, /\n  -> Run \/teami:plan in a new Claude Code session/);
-  assert.doesNotMatch(stream.output, /gateway start/);
 });

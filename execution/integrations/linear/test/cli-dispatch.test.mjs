@@ -63,8 +63,8 @@ const HELP_CASES = Object.freeze([
   { command: "team:revoke", args: ["--help"], expected: /teami(?:\.cmd)? team revoke <id> --repo <owner\/name>/ },
   { command: "team:show", args: ["--help"], expected: /teami(?:\.cmd)? team show <id>/ },
   // gateway --help renders the bare-noun form (not "gateway start"); gateway status --help too.
-  { command: "gateway", args: ["--help"], expected: /teami(?:\.cmd)? gateway \[status\]/ },
-  { command: "gateway", args: ["status", "--help"], expected: /teami(?:\.cmd)? gateway \[status\]/ },
+  { command: "gateway", args: ["--help"], expected: /teami(?:\.cmd)? gateway \[status\|stop\]/ },
+  { command: "gateway", args: ["status", "--help"], expected: /teami(?:\.cmd)? gateway \[status\|stop\]/ },
   // phoenix:status is now an adopter noun-verb: its --help shows the space form (colon still resolves).
   { command: "phoenix:status", args: ["--help"], expected: /teami(?:\.cmd)? phoenix status/ },
   // The default surface is curated grouped help, not the old command wall.

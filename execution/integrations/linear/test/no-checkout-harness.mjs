@@ -77,7 +77,7 @@ export function createNoCheckoutFixture({ prefix = "teami-no-checkout-" } = {}) 
     graphqlShimPath: GRAPHQL_SHIM_PATH,
     team: NO_CHECKOUT_TEAM,
     cleanup() {
-      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     },
   };
   assertNoCheckoutDirectory(cwdMcp);

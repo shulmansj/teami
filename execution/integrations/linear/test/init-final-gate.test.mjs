@@ -9,6 +9,7 @@ import {
   confirmCliSetupEffects,
   cliSetupFailureDiagnosis,
   factoryLauncherCommand,
+  finishSuccessfulSetupOutput,
   finishSetupOutput,
   renderCliSetupResult,
   runLinearSetupCommand,
@@ -153,6 +154,140 @@ test("finishSetupOutput prints closeout on green gate and resumable warning on r
     assert.equal(process.exitCode, 1);
     assertCall(redOutput, "warn", `Setup is resumable — fix the checks above and re-run ${factoryLauncherCommand("init")}.`);
     assert.equal(redOutput.calls.some((call) => call.method === "done" && call.args[0] === "Teami is ready."), false);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
+test("successful interactive init offers to start the listener and keeps the manual command visible", async () => {
+  const output = createRecordingOutput();
+  let starts = 0;
+  await finishSuccessfulSetupOutput({
+    context: {
+      isTTY: true,
+      probeListener: () => ({ state: "idle", evidence: { activeTeamRef: "main" } }),
+      promptStartListener: async (message) => {
+        assert.match(message, /keep listening in the background/i);
+        return "";
+      },
+      startListener: async () => {
+        starts += 1;
+        return { ok: true, status: "started" };
+      },
+    },
+    output,
+    command: "init",
+    config: {},
+    repoRoot,
+    home: repoRoot,
+    phoenixAppUrl: "http://127.0.0.1:6006",
+    gate: { ok: true, smokeOk: true, doctorOk: true },
+  });
+
+  assert.equal(starts, 1);
+  assert.ok(output.calls.some((call) =>
+    call.method === "info" &&
+    String(call.args[0]).includes(factoryLauncherCommand("gateway start --background"))));
+  assertCall(output, "info", "Turning on Teami's background listener.");
+  assertCall(output, "info", "Setup is complete and Teami is listening.");
+});
+
+test("successful interactive init respects a declined listener start", async () => {
+  const output = createRecordingOutput();
+  let starts = 0;
+  await finishSuccessfulSetupOutput({
+    context: {
+      isTTY: true,
+      probeListener: () => ({ state: "idle", evidence: { activeTeamRef: "main" } }),
+      promptStartListener: async () => "n",
+      startListener: async () => {
+        starts += 1;
+      },
+    },
+    output,
+    command: "init",
+    config: {},
+    repoRoot,
+    home: repoRoot,
+    phoenixAppUrl: "http://127.0.0.1:6006",
+    gate: { ok: true, smokeOk: true, doctorOk: true },
+  });
+
+  assert.equal(starts, 0);
+  assertCall(output, "info", "Teami will remain stopped. Planned projects wait safely in Linear until you start the listener.");
+});
+
+test("interactive init keeps setup complete when the listener prompt closes", async () => {
+  const output = createRecordingOutput();
+  let starts = 0;
+  await finishSuccessfulSetupOutput({
+    context: {
+      isTTY: true,
+      probeListener: () => ({ state: "idle", evidence: { activeTeamRef: "main" } }),
+      promptStartListener: async () => { throw new Error("fixture prompt closed"); },
+      startListener: async () => { starts += 1; return { ok: true, status: "started" }; },
+    },
+    output,
+    command: "init",
+    config: {},
+    repoRoot,
+    home: repoRoot,
+    gate: { ok: true, smokeOk: true, doctorOk: true },
+  });
+
+  assert.equal(starts, 0);
+  assert.ok(output.calls.some((call) =>
+    call.method === "warn" && String(call.args[0]).includes("Start it later")));
+  assertCall(output, "info", "Setup is complete. Teami is not listening yet; Planned projects will wait safely in Linear.");
+});
+
+test("non-interactive init never prompts and prints the manual listener command", async () => {
+  const output = createRecordingOutput();
+  let prompts = 0;
+  await finishSuccessfulSetupOutput({
+    context: {
+      isTTY: false,
+      probeListener: () => ({ state: "idle", evidence: { activeTeamRef: "main" } }),
+      promptStartListener: async () => { prompts += 1; return "y"; },
+    },
+    output,
+    command: "init",
+    config: {},
+    repoRoot,
+    home: repoRoot,
+    gate: { ok: true, smokeOk: true, doctorOk: true },
+  });
+
+  assert.equal(prompts, 0);
+  assert.ok(output.calls.some((call) =>
+    call.method === "info" && String(call.args[0]).includes(factoryLauncherCommand("gateway start --background"))));
+});
+
+test("interactive init reports a returned listener-start failure instead of claiming success", async () => {
+  const previousExitCode = process.exitCode;
+  try {
+    const output = createRecordingOutput();
+    process.exitCode = 0;
+    await finishSuccessfulSetupOutput({
+      context: {
+        isTTY: true,
+        probeListener: () => ({ state: "idle", evidence: { activeTeamRef: "main" } }),
+        promptStartListener: async () => "y",
+        startListener: async () => ({ ok: false, status: "failed", reason: "fixture_start_failed" }),
+      },
+      output,
+      command: "init",
+      config: {},
+      repoRoot,
+      home: repoRoot,
+      gate: { ok: true, smokeOk: true, doctorOk: true },
+    });
+
+    assert.equal(process.exitCode, 1);
+    assert.ok(output.calls.some((call) =>
+      call.method === "error" &&
+      call.args[0]?.what === "Setup completed, but the listener did not start" &&
+      call.args[0]?.why === "fixture_start_failed"));
   } finally {
     process.exitCode = previousExitCode;
   }
