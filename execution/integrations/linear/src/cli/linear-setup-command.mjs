@@ -2021,10 +2021,19 @@ function isLinearAuthorizationFailure(error) {
 }
 function completeResumeCredentialError(team, originalError) {
   const teamName = teamNameForResumeTeam(team) || "unknown";
-  const workspace = workspaceLabel(team?.linear || {});
   const error = new Error(
-    `Linear authorization for existing team "${teamName}" points at the wrong workspace or could not be verified. Re-run ${formatCommand("init")} --team "${teamName}" --workspace "${workspace}" from a browser-capable terminal and choose that workspace in Linear's dropdown. If you meant to replace it with another workspace, uninstall the team first.`,
+    `Linear authorization for saved Team "${teamName}" points at the wrong workspace or could not be verified. Teami left the saved Team unchanged.`,
   );
+  error.code = isWorkspaceMismatchError(originalError)
+    ? "workspace_mismatch"
+    : "linear_authorization_failed";
+  error.savedTeam = {
+    ref: team?.id || teamName,
+    name: teamName,
+    workspace_id: team?.linear?.workspace_id || null,
+    workspace_name: team?.linear?.workspace_name || null,
+  };
+  error.grantedWorkspace = originalError?.granted || null;
   error.cause = originalError;
   return error;
 }

@@ -3108,7 +3108,15 @@ test("complete-team workspace mismatch never clears the stored team credential",
         },
         log: () => {},
       }),
-    /Linear authorization for existing team "Support Ops".*--workspace "Workspace One"/,
+    (error) => {
+      assert.equal(error.code, "workspace_mismatch");
+      assert.equal(error.savedTeam.ref, "support-ops");
+      assert.equal(error.savedTeam.workspace_name, "Workspace One");
+      assert.equal(error.grantedWorkspace.name, "Sandbox Workspace");
+      assert.match(error.message, /saved Team "Support Ops"/i);
+      assert.match(error.message, /left the saved Team unchanged/i);
+      return true;
+    },
   );
 
   assert.equal(clearCalls, 0);
