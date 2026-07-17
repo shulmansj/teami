@@ -31,7 +31,7 @@ is red, translate it (see Repair below); don't dump the raw output.
 
 1. Setup and repair: `init_onboarding` through MCP after the agent gathers the
    adopter's consent, or `teami init` / `teami doctor` through the thin CLI.
-2. Planning work: MCP tools `resolve_team`, `project_create`,
+2. Planning work: MCP tools `check_team_context`, `project_create`,
    `project_write_body`, and `project_move_status`.
 3. Running work: `teami gateway start` to listen for Planned projects, and
    `teami gateway status` for a read-only snapshot.
@@ -131,7 +131,8 @@ You can't and won't do that step for them.
 
 Use the MCP tools in order:
 
-1. `resolve_team` to confirm the target workspace/team.
+1. `check_team_context` to confirm the target workspace/Team and its approved
+   repositories.
 2. `project_create` when they need a new Linear project.
 3. `project_write_body` to write the canonical planning body from slots.
 4. `project_move_status` only after the adopter gives a clear go.

@@ -116,10 +116,11 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
       },
     });
   } catch (error) {
+    const recovery = gatewayStartupRecovery(error);
     output.error({
       what: "Gateway could not start",
-      why: redactOAuthSecrets(error.message),
-      fix: `run ${formatCommand("init")} or pass --team for an active team, then retry.`,
+      why: recovery.why,
+      fix: recovery.fix,
     });
     process.exitCode = 1;
     return;
@@ -133,6 +134,28 @@ async function runGatewayLoopCommand({ context, args, loop = runGatewayLoop }) {
   renderGatewayCompletion(result, output);
   if (result.ok) printVerboseHint(output);
   process.exitCode = gatewayExitCode(result);
+}
+
+function gatewayStartupRecovery(error) {
+  const why = redactOAuthSecrets(error?.message || String(error || "unknown gateway startup failure"));
+  if (/^no_active_teams:/i.test(why)) {
+    return {
+      why,
+      fix: `run ${formatCommand("init")} to configure an active Team, or pass --team for one already configured, then retry.`,
+    };
+  }
+  if (
+    /Linear GraphQL OAuth token is missing|access token is expired or unavailable|\breauthori[sz]e\b/i.test(why)
+  ) {
+    return {
+      why,
+      fix: `run ${formatCommand("init")} to reconnect Linear, then retry.`,
+    };
+  }
+  return {
+    why,
+    fix: `run ${formatCommand("gateway status")} for a read-only snapshot, then retry with --verbose. Use ${formatCommand("doctor")} if setup is shown as degraded.`,
+  };
 }
 
 async function runGatewayStatusCommand({ context, args }) {

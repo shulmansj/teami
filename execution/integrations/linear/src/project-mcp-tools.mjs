@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+
 import { readLinearCache, writeLinearCache } from "./cache.mjs";
 import { resolveTeamiHome } from "./app-home.mjs";
 import { loadLinearConfig } from "./config.mjs";
@@ -75,11 +77,12 @@ import {
 } from "../../../engine/trace-contract.mjs";
 export const TEAMI_PROJECT_MCP_TOOL_NAMES = Object.freeze([
   "init_onboarding",
-  "resolve_team",
+  "check_team_context",
   "project_create",
   "project_write_body",
   "project_move_status",
 ]);
+const TEAMI_PACKAGE_VERSION = createRequire(import.meta.url)("../../../../package.json").version;
 const ADMIN_GRANT_USE_WINDOW_MS = 5 * 60 * 1000;
 
 export class ProjectMcpToolError extends Error {
@@ -108,6 +111,7 @@ export function createProjectMcpToolActions({
   planningTraceSink = null,
   createPlanningTraceSink = null,
   awaitPlanningTraceEmission = false,
+  packageVersion = TEAMI_PACKAGE_VERSION,
   home = resolveTeamiHome(),
   createLinearSetupAuth = null,
   authorizeLinearBrowser = authorizeWithBrowser,
@@ -337,12 +341,18 @@ export function createProjectMcpToolActions({
     return started;
   }
 
-  async function resolve_team(args = {}) {
+  async function check_team_context(args = {}) {
     const { context, cache } = resolveTeamCache(args);
+    const team = publicTeamContext(context);
+    const approvedRepositories = structuredClone(context.allowedRepoPacket || []);
     return {
       ok: true,
-      team: publicTeamContext(context),
+      read_only: true,
+      summary: resolvedTeamSummary(team, approvedRepositories),
+      team,
+      approved_repositories: approvedRepositories,
       cache: publicCacheSummary(cache),
+      listener: listenerLaunchContract(packageVersion),
     };
   }
 
@@ -507,7 +517,7 @@ export function createProjectMcpToolActions({
 
   return Object.freeze({
     init_onboarding,
-    resolve_team,
+    check_team_context,
     project_create,
     project_write_body,
     project_move_status,
@@ -2311,10 +2321,10 @@ function isReauthorizeError(error) {
 }
 
 const TEAM_ERROR_MESSAGES = Object.freeze({
-  team_required: "team_required",
-  no_active_teams: "no_active_teams",
-  team_not_found: "team_not_found",
-  team_not_active: "team_not_active",
+  team_required: "More than one active Teami Team could apply. Show the candidate Team and workspace names, then ask the human to choose before continuing.",
+  no_active_teams: `No active Teami Team is configured. Ask the human to run ${formatCommand("init")} before continuing.`,
+  team_not_found: "The requested Teami Team is not configured. Show any candidates and ask the human to choose before continuing.",
+  team_not_active: "The selected Teami Team is not active. Explain its status and ask the human to choose an active Team or repair setup.",
 });
 
 function requiredString(value, fieldName) {
@@ -2357,9 +2367,40 @@ function publicTeamContext(context) {
   return {
     team_ref: context.teamRef,
     workspace_id: context.linear.workspaceId,
+    workspace_name: context.linear.workspaceName,
     team_id: context.linear.teamId,
     team_key: context.linear.teamKey,
     team_name: context.linear.teamName,
+  };
+}
+
+function resolvedTeamSummary(team, approvedRepositories) {
+  const workspace = team.workspace_name || team.workspace_id || "unknown workspace";
+  const teamName = team.team_name || team.team_key || team.team_id || team.team_ref;
+  if (approvedRepositories.length === 0) {
+    return `Team "${teamName}" in workspace "${workspace}"; no product repositories are connected.`;
+  }
+  const repositories = approvedRepositories
+    .map((repository) => `${repository.owner}/${repository.repo}`)
+    .join(", ");
+  return `Team "${teamName}" in workspace "${workspace}"; approved repositories: ${repositories}.`;
+}
+
+function listenerLaunchContract(packageVersion) {
+  const build = String(packageVersion || "").trim();
+  if (!/^[0-9A-Za-z.+-]+$/.test(build)) {
+    throw new ProjectMcpToolError(
+      "package_version_invalid",
+      "Teami could not identify the exact build needed to start its listener.",
+      { repair: `Run ${formatCommand("doctor")} and repair the package installation before starting the listener.` },
+    );
+  }
+  const launcher = `npx -y @shulmansj/teami@${build}`;
+  return {
+    build,
+    start_command: `${launcher} gateway start`,
+    status_command: `${launcher} gateway status`,
+    lifecycle: "foreground",
   };
 }
 

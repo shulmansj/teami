@@ -91,11 +91,16 @@ The preview has three adopter-facing surfaces:
 - Setup and repair: `init_onboarding` through MCP as the primary conversational
   path, or `npx @shulmansj/teami init` /
   `npx @shulmansj/teami doctor` through the thin CLI fallback.
-- Planning: MCP tools `resolve_team`, `project_create`,
+- Planning: MCP tools `check_team_context`, `project_create`,
   `project_write_body`, and `project_move_status`.
 - Running: `npx @shulmansj/teami gateway start` to poll Linear for
   Planned projects, and `npx @shulmansj/teami gateway status` for a
   one-pass snapshot.
+
+`check_team_context` only reads local Teami setup. Claude may ask before using
+it: **Allow once** is enough for the current session; **Always allow** skips
+future prompts for this specific read-only check and does not approve Teami's
+project-changing tools.
 
 `npx @shulmansj/teami init` authorizes Linear in the browser and uses
 Linear GraphQL to set up
