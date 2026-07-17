@@ -208,6 +208,7 @@ export async function setupLinearTeam({
   behaviorRepoId,
   ensureNeedsPrincipalProjectStatus = null,
   selectedExistingTeamId = null,
+  replaceWorkspaceConfirmed = false,
 } = {}) {
   if (!client) throw new Error("Linear client is required for team setup.");
   if (!config) throw new Error("Linear config is required for team setup.");
@@ -223,11 +224,16 @@ export async function setupLinearTeam({
     trimmedTeamName,
     organization,
   );
-  const completeResume = Boolean(matchedResumeTeam && matchedResumeTeam.status !== "setup_incomplete");
+  const replacingWorkspace = replaceWorkspaceConfirmed === true && Boolean(matchedResumeTeam);
+  const completeResume = Boolean(
+    matchedResumeTeam && matchedResumeTeam.status !== "setup_incomplete" && !replacingWorkspace,
+  );
   const adopterProvidedName = matchedResumeTeam?.adopter_provided_name || trimmedTeamName;
   let teamRef = matchedResumeTeam?.id || mintTeamRef(trimmedTeamName, currentRegistry.teams.map((team) => team.id));
-  let identitySourceTeam = matchedResumeTeam;
-  const effectiveDeclaredWorkspace = declaredWorkspace || declaredWorkspaceFromResumeTeam(matchedResumeTeam);
+  let identitySourceTeam = replacingWorkspace ? null : matchedResumeTeam;
+  const effectiveDeclaredWorkspace = replacingWorkspace
+    ? null
+    : declaredWorkspace || declaredWorkspaceFromResumeTeam(matchedResumeTeam);
   verifyDeclaredWorkspace({
     registry: registryWithoutRemovedTeams(currentRegistry),
     declaredWorkspace: effectiveDeclaredWorkspace,
@@ -236,8 +242,15 @@ export async function setupLinearTeam({
   const workspaceId = organization.id;
   const workspaceName = organization.name;
   let latestRegistry = currentRegistry;
-  let teamProvisionedByTeami = matchedResumeTeam?.linear?.provisioned_by_teami ?? true;
-  let latestSetupTeam = matchedResumeTeam || makeSetupIncompleteTeam({
+  let teamProvisionedByTeami = replacingWorkspace
+    ? true
+    : matchedResumeTeam?.linear?.provisioned_by_teami ?? true;
+  let latestSetupTeam = replacingWorkspace ? makeSetupIncompleteTeam({
+    teamRef,
+    teamName: adopterProvidedName,
+    workspaceId,
+    workspaceName,
+  }) : matchedResumeTeam || makeSetupIncompleteTeam({
     teamRef,
     teamName: adopterProvidedName,
     workspaceId,
@@ -337,7 +350,7 @@ export async function setupLinearTeam({
     client,
     requestedName: trimmedTeamName,
     teamRef,
-    resumeTeam: matchedResumeTeam,
+    resumeTeam: replacingWorkspace ? null : matchedResumeTeam,
     cache,
     registry: currentRegistry,
     workspaceId,
@@ -347,7 +360,9 @@ export async function setupLinearTeam({
     ? false
     : teamPlan.mode === "create"
       ? true
-      : matchedResumeTeam?.linear?.provisioned_by_teami ?? true;
+      : replacingWorkspace
+        ? true
+        : matchedResumeTeam?.linear?.provisioned_by_teami ?? true;
   if (completeResume && !teamPlan.team) {
     throw new Error(
       `configured_linear_team_missing: Team ${teamRef} points to Linear team ${matchedResumeTeam.linear?.team_id || "unknown"}, but that team was not found in workspace ${workspaceLabel(organization)}.`,

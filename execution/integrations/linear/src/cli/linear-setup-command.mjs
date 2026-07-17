@@ -376,7 +376,12 @@ async function runCliSharedOnboarding({ context, command = "init", args, output,
   const authorizationWaitStartedAt = Date.now();
   const installedAppRecoveryDelayMs = context.installedAppRecoveryDelayMs ?? 15_000;
   const pollDeadline = Date.now() + (context.authorizationPollTimeoutMs || 15 * 60 * 1000);
-  while (["awaiting_authorization", "admin_consent_required", "team_selection_required"].includes(result?.status)) {
+  while ([
+    "awaiting_authorization",
+    "admin_consent_required",
+    "team_selection_required",
+    "workspace_replacement_required",
+  ].includes(result?.status)) {
     if (Date.now() >= pollDeadline) {
       const timedOutSetupId = result?.setup_id || null;
       if (timedOutSetupId) {
@@ -427,6 +432,36 @@ async function runCliSharedOnboarding({ context, command = "init", args, output,
         setup_id: result.setup_id,
         linear_team_id: team.id,
         linear_team_confirm: true,
+      });
+      continue;
+    }
+    if (result.status === "workspace_replacement_required") {
+      waitProgress?.stop?.();
+      waitProgress = null;
+      finishProgress?.stop?.();
+      finishProgress = null;
+      const confirmed = await promptCliLinearWorkspaceReplacement({
+        result,
+        output,
+        isTTY: "isTTY" in context
+          ? Boolean(context.isTTY)
+          : Boolean(process.stdin.isTTY && process.stdout.isTTY),
+        prompt: context.promptLinearWorkspaceReplacement || promptLine,
+      });
+      if (!confirmed) {
+        const savedWorkspace = result.saved_team?.workspace_name ||
+          result.saved_team?.workspace_id || "the saved workspace";
+        result = {
+          ok: false,
+          status: "blocked",
+          reason: "workspace_replacement_declined",
+          repair: `Saved Team left unchanged. Run setup again when you can authorize "${savedWorkspace}".`,
+        };
+        break;
+      }
+      result = await callOnboarding({
+        setup_id: result.setup_id,
+        linear_workspace_replace_confirm: true,
       });
       continue;
     }
@@ -499,6 +534,22 @@ async function promptCliLinearTeamSelection({ result, output, isTTY, prompt } = 
     }
     output.warn(`Enter a number from 0 to ${teams.length}.`);
   }
+}
+
+async function promptCliLinearWorkspaceReplacement({ result, output, isTTY, prompt } = {}) {
+  const teamName = result?.saved_team?.name || result?.saved_team?.ref || "the saved Team";
+  const savedWorkspace = result?.saved_team?.workspace_name ||
+    result?.saved_team?.workspace_id || "the saved workspace";
+  const nextWorkspace = result?.authorized_workspace?.name ||
+    result?.authorized_workspace?.id || "the workspace just authorized";
+  output.warn(`Team "${teamName}" is saved for "${savedWorkspace}", but Linear authorized "${nextWorkspace}".`);
+  output.info("Switching replaces only Teami's local Linear connection. It does not delete anything in Linear, and product-repository access stays disconnected.");
+  if (!isTTY) {
+    output.info("Run setup in an interactive terminal to make this choice.");
+    return false;
+  }
+  const answer = await prompt(`Use "${nextWorkspace}" for Team "${teamName}" instead? [y/N]: `);
+  return ["y", "yes"].includes(String(answer || "").trim().toLowerCase());
 }
 
 export function renderCliSetupResult({ result, output } = {}) {
@@ -1762,6 +1813,7 @@ async function authorizeLinearSetupWorkspace({
   promptWorkspace = promptLinearWorkspacePicker,
   promptReauthorize = promptLinearReauthorization,
   maxAuthorizationAttempts = 3,
+  allowWorkspaceReplacement = false,
 } = {}) {
   const selection = await resolveLinearWorkspaceSelection({
     registry,
@@ -1774,7 +1826,7 @@ async function authorizeLinearSetupWorkspace({
     promptWorkspace,
   });
   const declaredWorkspace = selection.declaredWorkspace;
-  const completeResume = isCompleteResumeSelection(selection);
+  const completeResume = isCompleteResumeSelection(selection) && !allowWorkspaceReplacement;
   let trustLinePrinted = false;
   let forceBrowserAuthorization = false;
   // Browser authorization does not force Linear's consent screen by default. The explicit
@@ -1822,6 +1874,7 @@ async function authorizeLinearSetupWorkspace({
         promptReauthorize,
         log,
         allowRetry: allowBrowserAuth,
+        allowWorkspaceReplacement,
       });
     } catch (error) {
       if (isLinearOAuthWaitEscapedError(error) && attempt < maxAuthorizationAttempts) {
@@ -1868,9 +1921,10 @@ async function authorizeLinearSetupWorkspace({
     return {
       setupAuth: appSetupAuth,
       workspace: guard.workspace,
-      declaredWorkspace,
+      declaredWorkspace: allowWorkspaceReplacement ? null : declaredWorkspace,
       selection,
       needsPrincipalProjectStatus,
+      workspaceReplaced: guard.workspaceReplaced === true,
     };
   }
 
@@ -2053,6 +2107,7 @@ async function verifyWorkspaceGrantForSelection({
   promptReauthorize,
   log,
   allowRetry = true,
+  allowWorkspaceReplacement = false,
 } = {}) {
   const workspace = await resolveLinearSetupWorkspace({ client: setupAuth.client });
 
@@ -2102,6 +2157,10 @@ async function verifyWorkspaceGrantForSelection({
     return { workspace };
   } catch (error) {
     if (!isWorkspaceMismatchError(error)) throw error;
+    if (allowWorkspaceReplacement && isCompleteResumeSelection(selection)) {
+      log(`Using authorized workspace ${workspaceLabel(workspace)} for the saved Team, as explicitly approved.`);
+      return { workspace, workspaceReplaced: true };
+    }
     if (allowRetry && workspaceMismatchCameFromStoredCredential(setupAuth)) {
       log("Stored Linear setup authorization points at the wrong workspace. Reauthorizing in the browser...");
       await setupAuth.tokenProvider?.clear?.();

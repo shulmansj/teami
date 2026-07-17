@@ -35,6 +35,8 @@ import {
   createSetupStateStore,
 } from "../src/setup-orchestrator.mjs";
 import { formatCommandForContext } from "../src/cli/operator-output.mjs";
+import { runLinearSetupCommand } from "../src/cli/linear-setup-command.mjs";
+import { registerGitRepoResourceKind } from "../../git/git-repo-materializer.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const PACKAGED_PLUGIN_VERSION = JSON.parse(fs.readFileSync(
@@ -1257,7 +1259,8 @@ test("init_onboarding wrong-workspace recovery is typed, mutation-free, and requ
   assert.match(staleResume.repair, /fresh URL/i);
 });
 
-test("init_onboarding explains a saved Team workspace mismatch after fresh authorization", async (t) => {
+test("init_onboarding resolves a saved Team workspace mismatch in-flow after explicit confirmation", async (t) => {
+  registerGitRepoResourceKind();
   assert.equal(
     formatCommandForContext("init", {
       installedPackageContext: true,
@@ -1279,26 +1282,147 @@ test("init_onboarding explains a saved Team workspace mismatch after fresh autho
         teamId: "team-main",
         teamKey: "MAIN",
         teamName: "Main Team",
+        resources: [{
+          id: "git_repo:acme/old-product",
+          kind: "git_repo",
+          role: "primary",
+          binding: {
+            owner: "Acme",
+            repo: "old-product",
+            default_branch: "main",
+          },
+        }],
       }),
     ),
   );
 
-  const { result: blocked } = await startAndResume(harness, {
+  const { awaiting, result: choice } = await startAndResume(harness, {
     team: "main",
     repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-workspace-replacement",
   });
 
-  assert.equal(blocked.status, "blocked");
-  assert.equal(blocked.reason, "workspace_mismatch");
-  assert.equal(blocked.error.code, "workspace_mismatch");
-  assert.match(blocked.error.message, /saved Team "main"/i);
-  assert.match(blocked.error.message, /Saved Workspace/);
-  assert.match(blocked.error.message, /Example Workspace/);
-  assert.doesNotMatch(blocked.error.message, /project tool failed/i);
-  assert.match(blocked.error.repair, /uninstall --team main/i);
-  assert.match(blocked.error.repair, /init/i);
+  assert.equal(choice.status, "workspace_replacement_required");
+  assert.equal(choice.reason, "workspace_mismatch");
+  assert.equal(choice.saved_team.ref, "main");
+  assert.equal(choice.saved_team.workspace_name, "Saved Workspace");
+  assert.equal(choice.authorized_workspace.name, "Example Workspace");
+  assert.match(choice.question, /use "Example Workspace" for Team "main" instead/i);
+  assert.match(choice.effects.join("\n"), /product-repository access will not carry/i);
+  assert.match(choice.effects.join("\n"), /nothing.*deleted.*Linear/i);
   assert.equal(readTeamRegistry({ home: harness.home }).teams[0].linear.workspace_id, "workspace-saved");
   assert.equal(fs.existsSync(path.join(harness.home, "teams", "main", "linear.json")), false);
+
+  const stillWaiting = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
+  assert.equal(stillWaiting.status, "workspace_replacement_required");
+  assert.equal(readTeamRegistry({ home: harness.home }).teams[0].linear.workspace_id, "workspace-saved");
+
+  const completed = await harness.actions.init_onboarding({
+    setup_id: awaiting.setup_id,
+    linear_workspace_replace_confirm: true,
+  });
+  assert.equal(completed.status, "complete", JSON.stringify(completed));
+  assert.equal(completed.ok, true);
+  assert.equal(harness.authorize.calls.length, 1, "the browser-approved grant must be reused");
+  const replacement = readTeamRegistry({ home: harness.home }).teams.find((team) => team.id === "main");
+  assert.equal(replacement.status, "active");
+  assert.equal(replacement.linear.workspace_id, "workspace-1");
+  assert.equal(replacement.linear.workspace_name, "Example Workspace");
+  assert.deepEqual(replacement.resources, [], "repo access must not cross workspace boundaries");
+});
+
+test("CLI turns a saved Team workspace mismatch into one plain-language yes/no choice", async (t) => {
+  const home = tempHome(t, "teami-cli-workspace-replacement-");
+  writeTeamRegistry(
+    { home },
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "main",
+        status: "active",
+        adopterProvidedName: "main",
+        workspaceId: "workspace-saved",
+        workspaceName: "Saved Workspace",
+        teamId: "team-main",
+        teamKey: "MAIN",
+        teamName: "Main Team",
+      }),
+    ),
+  );
+  const output = captureCliOutput();
+  const onboardingCalls = [];
+  const prompts = [];
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    const result = await runLinearSetupCommand({
+      command: "init",
+      args: [],
+      context: {
+        config: testConfig(),
+        repoRoot: home,
+        home,
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        promptLinearWorkspaceReplacement: async (message) => {
+          prompts.push(message);
+          return "y";
+        },
+        createProjectMcpToolActions: () => ({
+          init_onboarding: async (input) => {
+            onboardingCalls.push(input);
+            if (onboardingCalls.length === 1) {
+              return {
+                ok: false,
+                status: "workspace_replacement_required",
+                setup_id: "11111111-1111-4111-8111-111111111111",
+                reason: "workspace_mismatch",
+                saved_team: {
+                  ref: "main",
+                  name: "main",
+                  workspace_id: "workspace-saved",
+                  workspace_name: "Saved Workspace",
+                },
+                authorized_workspace: {
+                  id: "workspace-1",
+                  name: "Example Workspace",
+                },
+              };
+            }
+            return {
+              ok: true,
+              status: "complete",
+              steps: {
+                linear: { ok: true, workspace: { name: "Example Workspace" } },
+                product_repos: { ok: true, repos: [] },
+                github: { ok: true },
+                plugin: { ok: true },
+                phoenix: { ok: true },
+                runtime: { ok: true },
+                doctor: { ok: true, checks: [] },
+              },
+            };
+          },
+        }),
+      },
+    });
+
+    assert.equal(result.ok, true, output.text());
+    assert.equal(process.exitCode, 0, output.text());
+    assert.equal(onboardingCalls.length, 2);
+    assert.deepEqual(onboardingCalls[1], {
+      setup_id: "11111111-1111-4111-8111-111111111111",
+      linear_workspace_replace_confirm: true,
+    });
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /Use "Example Workspace" for Team "main" instead\? \[y\/N\]:/);
+    assert.match(output.text(), /does not delete anything in Linear/i);
+    assert.doesNotMatch(output.text(), /uninstall --team|0\.3\.20-sha/i);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
 });
 
 test("init_onboarding resumes a repaired post-Linear phase without retaining the OAuth session", async (t) => {
@@ -1934,6 +2058,30 @@ function fileCredentialConfig(config) {
   const next = structuredClone(config);
   next.linear.oauth.credential_storage = "file";
   return next;
+}
+
+function captureCliOutput() {
+  const lines = [];
+  const push = (kind, value) => lines.push(`${kind}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+  return {
+    verbose: false,
+    symbols: { separator: "-", ellipsis: "..." },
+    style: new Proxy({}, { get: () => (value) => String(value) }),
+    heading: (value) => push("heading", value),
+    section: (value) => push("section", value),
+    detail: (value) => push("detail", value),
+    success: (value) => push("success", value),
+    info: (value) => push("info", value),
+    warn: (value) => push("warn", value),
+    error: (value) => push("error", value),
+    done: (value) => push("done", value),
+    nextSteps: (items) => push("next", items.map((item) => item.text || item).join(" | ")),
+    progress: (value) => {
+      push("progress", value);
+      return { stop: () => push("progress", "stop") };
+    },
+    text: () => lines.join("\n"),
+  };
 }
 
 function tempHome(t, prefix) {

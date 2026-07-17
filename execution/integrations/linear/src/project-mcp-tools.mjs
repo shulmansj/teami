@@ -546,6 +546,14 @@ async function beginInitOnboardingAuthorization({
       repair: "Start setup without a Linear team selection. Teami will offer the safe existing-team choices only if Linear refuses to create the dedicated team.",
     };
   }
+  if (Object.hasOwn(args || {}, "linear_workspace_replace_confirm")) {
+    return {
+      ok: false,
+      status: "blocked",
+      reason: "linear_workspace_replacement_not_requested",
+      repair: "Start setup normally. Teami will ask this question only after Linear authorizes a different workspace than the saved Team.",
+    };
+  }
   const input = normalizeInitOnboardingInput(args);
   const consent = verifySetupConsent({
     confirm: args.confirm,
@@ -785,6 +793,17 @@ async function resumeInitOnboardingAuthorization({
     return { ok: false, status: "blocked", setup_id: setupId, ...failure };
   }
 
+  if (tracked.kind === "app" && tracked.workspaceReplacement) {
+    if (args.linear_workspace_replace_confirm !== true) {
+      return workspaceReplacementRequiredResult({
+        setupId,
+        savedTeam: tracked.workspaceReplacement.savedTeam,
+        authorizedWorkspace: tracked.workspaceReplacement.authorizedWorkspace,
+      });
+    }
+    tracked.linearWorkspaceReplacementConfirmed = true;
+  }
+
   let selectedLinearTeam = null;
   if (tracked.kind === "app" && state.status === "team_selection_required") {
     const teams = Array.isArray(tracked.availableLinearTeams) ? tracked.availableLinearTeams : [];
@@ -829,6 +848,9 @@ async function resumeInitOnboardingAuthorization({
       ...(selectedLinearTeam
         ? { linear_team_id: selectedLinearTeam.id, linear_team_confirm: true }
         : {}),
+      ...(tracked.linearWorkspaceReplacementConfirmed
+        ? { linear_workspace_replace_confirm: true }
+        : {}),
     };
     try {
       onSetupProgress?.({
@@ -855,6 +877,27 @@ async function resumeInitOnboardingAuthorization({
         setup_id: setupId,
       };
     } catch (error) {
+      if (
+        tracked.kind === "app" &&
+        error?.code === "workspace_mismatch" &&
+        error?.savedTeam &&
+        !tracked.linearWorkspaceReplacementConfirmed
+      ) {
+        tracked.workspaceReplacement = {
+          savedTeam: structuredClone(error.savedTeam),
+          authorizedWorkspace: structuredClone(error.grantedWorkspace || {}),
+        };
+        setupStore.recordPhase(setupId, "linear", {
+          status: "input_required",
+          reason: "workspace_mismatch",
+          setupStatus: "blocked",
+        });
+        return workspaceReplacementRequiredResult({
+          setupId,
+          savedTeam: tracked.workspaceReplacement.savedTeam,
+          authorizedWorkspace: tracked.workspaceReplacement.authorizedWorkspace,
+        });
+      }
       if (error?.setupIncompleteCause === "linear_team_limit_reached" &&
           Array.isArray(error.availableTeams) && error.availableTeams.length > 0) {
         tracked.availableLinearTeams = error.availableTeams;
@@ -956,6 +999,9 @@ async function beginAdminAuthorizationSession({
       session,
       status: "pending",
       appTokenSet: trackedApp.tokenSet,
+      workspaceReplacement: trackedApp.workspaceReplacement || null,
+      linearWorkspaceReplacementConfirmed:
+        trackedApp.linearWorkspaceReplacementConfirmed === true,
       adminGrant: null,
       grantConsumed: false,
       grantUseTimer: null,
@@ -1141,6 +1187,39 @@ function linearTeamSelectionRequiredResult({
   };
 }
 
+function workspaceReplacementRequiredResult({
+  setupId,
+  savedTeam = {},
+  authorizedWorkspace = {},
+} = {}) {
+  const teamName = savedTeam.name || savedTeam.ref || "the saved Team";
+  const savedWorkspace = savedTeam.workspace_name || savedTeam.workspace_id || "the saved workspace";
+  const nextWorkspace = authorizedWorkspace.name || authorizedWorkspace.id || "the workspace just authorized";
+  return {
+    ok: false,
+    status: "workspace_replacement_required",
+    setup_id: setupId,
+    reason: "workspace_mismatch",
+    saved_team: structuredClone(savedTeam),
+    authorized_workspace: structuredClone(authorizedWorkspace),
+    question: `Use "${nextWorkspace}" for Team "${teamName}" instead of "${savedWorkspace}"?`,
+    effects: [
+      `Teami will replace Team "${teamName}"'s saved local Linear connection with "${nextWorkspace}".`,
+      "Product-repository access will not carry across the workspace boundary.",
+      `Nothing will be deleted or changed in Linear workspace "${savedWorkspace}".`,
+      "Setup will continue with the browser approval already completed.",
+    ],
+    needs: [{
+      field: "linear_workspace_replace_confirm",
+      required: true,
+      question: "Ask the adopter this one yes/no question and continue only after explicit confirmation.",
+    }],
+    next_steps: [
+      "After explicit approval, call init_onboarding with this setup_id and linear_workspace_replace_confirm: true.",
+    ],
+  };
+}
+
 function setupLockHeldResult(lock, setupId = null) {
   return {
     ok: false,
@@ -1304,6 +1383,9 @@ async function runInitOnboardingSetup({
   const teamNameResolution = resolveSetupCommandTeamNameHint(initArgs, currentRegistry);
   const resumeTeam = teamNameResolution.resumeTeam || teamNameResolution.completeResumeTeam || null;
   const completeResumeTeam = teamNameResolution.completeResumeTeam || null;
+  const replacingWorkspace = Boolean(
+    completeResumeTeam && input.linear_workspace_replace_confirm === true,
+  );
   const authorizationRegistry = registryWithoutRemovedTeamsForName(currentRegistry, input.team);
   const resumeCredentialTeam = teamHasLinearCredentialIdentity(resumeTeam) ? resumeTeam : null;
   const resumeContext = resumeCredentialTeam
@@ -1374,6 +1456,7 @@ async function runInitOnboardingSetup({
     authorizeOneShotAdmin: authorizeAdminWithRevocationProof,
     promptAdminProvisioning,
     promptReauthorize: promptLinearWorkspaceConfirmation,
+    allowWorkspaceReplacement: replacingWorkspace,
   });
 
   let linearResult = await setupLinearTeam({
@@ -1387,6 +1470,7 @@ async function runInitOnboardingSetup({
     resumeTeam,
     workspace: workspaceAuthorization.workspace,
     declaredWorkspace: workspaceAuthorization.declaredWorkspace,
+    replaceWorkspaceConfirmed: replacingWorkspace,
     ensureNeedsPrincipalProjectStatus: () => ensureNeedsPrincipalProjectStatus({
       appClient: workspaceAuthorization.setupAuth.client,
       adminAuth: () => authorizeAdminWithRevocationProof({
@@ -1422,7 +1506,7 @@ async function runInitOnboardingSetup({
     selectedExistingTeamId: input.linear_team_confirm === true ? input.linear_team_id : null,
   });
 
-  const allowlistUpdate = completeResumeTeam
+  const allowlistUpdate = completeResumeTeam && !replacingWorkspace
     ? {
         team: linearResult.team,
         registry: linearResult.registry,
@@ -1760,6 +1844,7 @@ function normalizeInitOnboardingInput(args = {}) {
     github_replacement_explicit: args.github_replacement_explicit === true,
     linear_team_id: optionalString(args.linear_team_id),
     linear_team_confirm: args.linear_team_confirm === true,
+    linear_workspace_replace_confirm: args.linear_workspace_replace_confirm === true,
   };
 }
 
