@@ -40,9 +40,16 @@ const INSTALLED_PACKAGE_CONTEXT = isInstalledPackageModulePath(fileURLToPath(imp
 function formatCommandForContext(subcommand = "", {
   installedPackageContext = INSTALLED_PACKAGE_CONTEXT,
   platform = process.platform,
+  packageVersion = null,
 } = {}) {
   if (installedPackageContext) {
-    return subcommand ? `npx @shulmansj/teami ${subcommand}` : "npx @shulmansj/teami";
+    const exactVersion = typeof packageVersion === "string" && /^[0-9A-Za-z.+-]+$/.test(packageVersion.trim())
+      ? packageVersion.trim()
+      : null;
+    const launcher = exactVersion
+      ? `npx -y @shulmansj/teami@${exactVersion}`
+      : "npx @shulmansj/teami";
+    return subcommand ? `${launcher} ${subcommand}` : launcher;
   }
 
   const launcher = platform === "win32" ? ".\\teami.cmd" : "./teami";

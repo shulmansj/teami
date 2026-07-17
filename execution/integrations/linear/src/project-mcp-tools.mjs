@@ -32,6 +32,7 @@ import {
 import {
   completeTeamTeamMissingRecoveryFromError,
   formatCommand,
+  formatCommandForContext,
 } from "./cli/operator-output.mjs";
 import { doctorGraphqlLinear } from "./cli/doctor-command.mjs";
 import {
@@ -219,6 +220,7 @@ export function createProjectMcpToolActions({
           ),
         }),
         onSetupProgress,
+        packageVersion,
       });
     }
     const currentRegistry = readTeamRegistry({ home }) || emptyTeamRegistry();
@@ -683,6 +685,7 @@ async function resumeInitOnboardingAuthorization({
   adminGrantUseWindowMs,
   runSetup,
   onSetupProgress,
+  packageVersion = TEAMI_PACKAGE_VERSION,
 } = {}) {
   const state = setupStore.read(setupId);
   if (!state) {
@@ -885,7 +888,7 @@ async function resumeInitOnboardingAuthorization({
       if (tracked.kind === "admin" && !tracked.grantConsumed) {
         await teardownTrackedAdminGrant({ tracked, setupStore, setupId });
       }
-      const sanitized = sanitizeProjectMcpError(error);
+      const sanitized = sanitizeProjectMcpError(error, { packageVersion });
       const reason = sanitized.error?.code || "setup_failed";
       if (error?.durableLinear === true) {
         setupStore.recordPhase(setupId, "linear", { status: "healthy", reason: "linear_setup_verified" });
@@ -2211,7 +2214,7 @@ function normalizePlanningTelemetry(value) {
   return Object.keys(telemetry).length > 0 ? telemetry : null;
 }
 
-export function sanitizeProjectMcpError(error) {
+export function sanitizeProjectMcpError(error, { packageVersion = TEAMI_PACKAGE_VERSION } = {}) {
   const teamMissing = completeTeamTeamMissingRecoveryFromError(error);
   if (teamMissing) {
     return {
@@ -2255,8 +2258,8 @@ export function sanitizeProjectMcpError(error) {
       ok: false,
       error: {
         code: setupOnboardingErrorCode(error),
-        message: redactOAuthSecrets(error.message),
-        repair: setupOnboardingRepairHint(error),
+        message: setupOnboardingErrorMessage(error),
+        repair: setupOnboardingRepairHint(error, { packageVersion }),
       },
     };
   }
@@ -2265,7 +2268,7 @@ export function sanitizeProjectMcpError(error) {
     ok: false,
     error: {
       code: "tool_failed",
-      message: `The Linear project tool failed. Run ${formatCommand("doctor")}, then retry.`,
+      message: `The Linear project tool failed. Run ${formatCommandForContext("doctor", { packageVersion })}, then retry.`,
     },
   };
 }
@@ -2275,6 +2278,7 @@ function isSetupOnboardingError(error) {
   return Boolean(
     error?.setupIncompleteCause ||
     error?.code === "workspace_mismatch" ||
+    error?.code === "linear_authorization_failed" ||
     /Linear OAuth|OAuth authorization|authorization callback|workspace_authorization_retries_exhausted/i.test(message) ||
     /Principal Escalation project status/i.test(message) ||
     /setup_incomplete|credential_promotion_failed|registry_write_failed|cache_write_failed/i.test(message)
@@ -2284,6 +2288,7 @@ function isSetupOnboardingError(error) {
 function setupOnboardingErrorCode(error) {
   if (error?.setupIncompleteCause) return error.setupIncompleteCause;
   if (error?.code === "workspace_mismatch") return "workspace_mismatch";
+  if (error?.code === "linear_authorization_failed") return "linear_authorization_failed";
   const message = String(error?.message || error || "");
   if (/timed out waiting for Linear OAuth authorization callback/i.test(message)) return "linear_oauth_timeout";
   if (/Linear OAuth|OAuth authorization|authorization callback/i.test(message)) return "linear_oauth_failed";
@@ -2291,21 +2296,39 @@ function setupOnboardingErrorCode(error) {
   return "setup_failed";
 }
 
-function setupOnboardingRepairHint(error) {
+function setupOnboardingErrorMessage(error) {
+  if (error?.code === "workspace_mismatch" && error?.savedTeam) {
+    const team = error.savedTeam;
+    const savedWorkspace = team.workspace_name || team.workspace_id || "the saved workspace";
+    const grantedWorkspace = error.grantedWorkspace?.name || error.grantedWorkspace?.id || "a different workspace";
+    return `Saved Team "${team.name || team.ref}" is tied to Linear workspace "${savedWorkspace}", but Linear authorized "${grantedWorkspace}". Teami left the saved Team unchanged.`;
+  }
+  return redactOAuthSecrets(error?.message || String(error || "Setup failed"));
+}
+
+function setupOnboardingRepairHint(error, { packageVersion = TEAMI_PACKAGE_VERSION } = {}) {
   const message = String(error?.message || error || "");
   if (error?.code === "workspace_mismatch") {
+    if (error?.savedTeam) {
+      const team = error.savedTeam;
+      const savedWorkspace = team.workspace_name || team.workspace_id || "the saved workspace";
+      const grantedWorkspace = error.grantedWorkspace?.name || error.grantedWorkspace?.id || "the newly authorized workspace";
+      const initCommand = formatCommandForContext("init", { packageVersion });
+      const uninstallCommand = formatCommandForContext(`uninstall --team ${team.ref}`, { packageVersion });
+      return `If "${savedWorkspace}" is the Team you want, re-run ${initCommand} and choose that workspace in Linear. If this is a fresh adoption or you want "${grantedWorkspace}", run ${uninstallCommand}, then ${initCommand}.`;
+    }
     return "Start setup again for a fresh Linear authorization URL and choose the workspace named in the setup request.";
   }
   if (/already installed/i.test(message)) {
-    return `Revoke Teami in Linear Settings -> Applications, then re-run ${formatCommand("init")}.`;
+    return `Revoke Teami in Linear Settings -> Applications, then re-run ${formatCommandForContext("init", { packageVersion })}.`;
   }
   if (/Principal Escalation project status/i.test(message)) {
-    return `Re-run ${formatCommand("init")} from a browser-capable session so Teami can ask once for Linear admin approval.`;
+    return `Re-run ${formatCommandForContext("init", { packageVersion })} from a browser-capable session so Teami can ask once for Linear admin approval.`;
   }
   if (error?.setupIncompleteCause) {
-    return `Setup stopped at ${error.setupIncompleteCause}. Repair the cause, then re-run ${formatCommand("init")}.`;
+    return `Setup stopped at ${error.setupIncompleteCause}. Repair the cause, then re-run ${formatCommandForContext("init", { packageVersion })}.`;
   }
-  return `Run ${formatCommand("doctor")}, repair the red check, then retry setup.`;
+  return `Run ${formatCommandForContext("doctor", { packageVersion })}, repair the red check, then retry setup.`;
 }
 function isReauthorizeError(error) {
   const message = String(error?.message || error || "");
