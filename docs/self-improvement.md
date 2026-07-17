@@ -150,8 +150,8 @@ No hosted inbox, GitHub App, token broker, or retained administrator grant sits
 behind this loop. Behavior-repo effects use the adopter's ambient local
 git/`gh` authority, and Linear uses the adopter-approved local OAuth grant.
 
-This is local-machine automation: it can recover and reconcile when a
-foreground command runs, but it should not imply machine-off writes or
+This is local-machine automation: it can recover and reconcile while the
+explicitly started local listener runs, but it should not imply machine-off writes or
 out-of-band notifications. While the machine is off, nothing local can notify
 the user and nothing should update Linear. Linear still holds projects in the
 trigger state, and the gateway reconciles them on the next local poll.

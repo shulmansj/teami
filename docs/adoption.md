@@ -48,7 +48,7 @@ The pilot boundary is local-first. The external authorities are the adopter's
 Linear OAuth grant and the adopter's GitHub session. Evaluation should use
 disposable or low-risk resources with clear revocation and cleanup steps.
 There is no hosted inbox, GitHub App, token broker, retained admin authority, or
-always-running service in the supported path.
+operating-system startup service in the supported path.
 
 ## Phase 3: Controlled Production Pilot
 
@@ -93,9 +93,13 @@ The preview has three adopter-facing surfaces:
   `npx @shulmansj/teami doctor` through the thin CLI fallback.
 - Planning: MCP tools `check_team_context`, `project_create`,
   `project_write_body`, and `project_move_status`.
-- Running: `npx @shulmansj/teami gateway start` to poll Linear for
-  Planned projects, and `npx @shulmansj/teami gateway status` for a
-  one-pass snapshot.
+- Running: MCP `listener_status`, `listener_start`, and `listener_stop`, or the
+  direct CLI controls `npx @shulmansj/teami gateway start --background`,
+  `npx @shulmansj/teami gateway status`, and
+  `npx @shulmansj/teami gateway stop`.
+
+If a stop is requested during active work, Teami finishes that work before the
+listener exits and reports `stopping` until it is actually off.
 
 `check_team_context` only reads local Teami setup. Claude may ask before using
 it: **Allow once** is enough for the current session; **Always allow** skips
@@ -220,9 +224,9 @@ you through it.
 2. When setup says `Teami is ready`, open a new Claude Code session and run
    `/teami:plan`.
 3. Shape one disposable project with the companion. When the plan is ready,
-   start the local listener with `npx @shulmansj/teami gateway start`, then give
-   the explicit go to move the project to Planned. The listener runs until
-   Ctrl-C.
+   let the companion check the listener and, after your approval, turn it on;
+   then give the explicit go to move the project to Planned. The background
+   listener keeps running until you turn it off or restart the computer.
 4. Ask the companion to check progress, or use
    `npx @shulmansj/teami gateway status`. Internal failure states are translated
    to repair-needed product copy before they reach adopter-primary surfaces.

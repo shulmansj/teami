@@ -47,7 +47,7 @@ import {
 import {
   runLocalPhoenixTracePreflight,
 } from "../local-phoenix-trace-sink.mjs";
-import { isLinearOAuthWaitEscapedError } from "../linear-oauth.mjs";
+import { isLinearOAuthWaitEscapedError, redactOAuthSecrets } from "../linear-oauth.mjs";
 export {
   OAUTH_CALLBACK_LISTENER,
   oauthFirewallHint,
@@ -73,7 +73,7 @@ import {
   githubFailureTitle,
   githubSetupTransportFromFlags,
 } from "./github-command-options.mjs";
-import { homeStateProbe } from "./home-state.mjs";
+import { HOME_STATE, homeStateProbe } from "./home-state.mjs";
 import {
   createBootstrapLinearCredentialStore,
   promoteSetupCredentialToTeam,
@@ -494,11 +494,22 @@ async function runCliSharedOnboarding({ context, command = "init", args, output,
   for (const line of result?.progress || []) output.detail(line);
   renderCliSetupResult({ result, output });
   if (result?.ok) {
-    output.done("Teami is ready.");
-    output.nextSteps([
-      { text: "Open a new Claude Code session", hint: "then run /teami:plan" },
-    ]);
     process.exitCode = 0;
+    await finishSuccessfulSetupOutput({
+      context,
+      output,
+      command,
+      config,
+      repoRoot,
+      home,
+      phoenixAppUrl: result.steps?.phoenix?.app_url || null,
+      gate: {
+        ok: true,
+        smokeOk: result.steps?.runtime?.ok === true,
+        doctorOk: result.steps?.doctor?.ok === true,
+      },
+      doneMessage: "Teami is ready.",
+    });
   } else {
     const diagnosis = cliSetupFailureDiagnosis(result);
     output.error({
@@ -746,6 +757,8 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
         teamContext: buildTeamContext({ team: githubResumeTeam, config, repoRoot, home }),
       });
       await finishSetupOutput({
+        context,
+        command,
         output,
         commandOptions,
         phoenixAppUrl: phoenix.appUrl,
@@ -781,6 +794,8 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
         teamContext: buildTeamContext({ team: claudePluginResumeTeam, config, repoRoot, home }),
       });
       await finishSetupOutput({
+        context,
+        command,
         output,
         commandOptions,
         phoenixAppUrl: phoenix.appUrl,
@@ -948,6 +963,8 @@ async function runLinearSetupCommandImpl({ context, command, args }) {
     }
     const phoenix = await runCliPhoenixSetupPhase({ context, repoRoot, output, teamContext: result.context });
     await finishSetupOutput({
+      context,
+      command,
       output,
       commandOptions,
       phoenixAppUrl: phoenix.appUrl,
@@ -1734,7 +1751,120 @@ async function runFinalGate({
 // source-pinning tests stay green; new code should import `formatCommand` directly.
 export const factoryLauncherCommand = formatCommand;
 
+async function finishSuccessfulSetupOutput({
+  context = {},
+  output,
+  command = "init",
+  config,
+  repoRoot,
+  home = resolveTeamiHome(),
+  phoenixAppUrl = null,
+  gate = null,
+  doneMessage = "Teami is ready.",
+  firstRunProbe = null,
+} = {}) {
+  const probe = firstRunProbe || (config
+    ? (context.probeListener || homeStateProbe)({ repoRoot, home, config })
+    : { state: HOME_STATE.IDLE, evidence: {} });
+  const commands = {
+    init: factoryLauncherCommand("init"),
+    doctor: factoryLauncherCommand("doctor"),
+    gatewayStart: factoryLauncherCommand("gateway start --background"),
+    gatewayStatus: factoryLauncherCommand("gateway status"),
+    gatewayStop: factoryLauncherCommand("gateway stop"),
+    phoenixStart: formatCommand("phoenix:start"),
+  };
+  output.done(doneMessage);
+  const listenerOffer = await offerListenerStartAfterSetup({
+    context,
+    output,
+    command,
+    config,
+    repoRoot,
+    home,
+    probe,
+  });
+  const finalProbe = listenerOffer.started
+    ? { ...probe, state: HOME_STATE.LISTENING }
+    : probe;
+  renderFirstRunUx({
+    output,
+    probe: finalProbe,
+    phoenixAppUrl,
+    gate,
+    commands,
+    plannedProjectText: "Open a new Claude Code session, then run /teami:plan to shape your first project",
+  });
+  if (command === "init") {
+    output.info(`Listener controls: ${commands.gatewayStart}; ${commands.gatewayStatus}; ${commands.gatewayStop}.`);
+  }
+  return finalProbe;
+}
+
+async function offerListenerStartAfterSetup({
+  context = {},
+  output,
+  command = "init",
+  config,
+  repoRoot,
+  home = resolveTeamiHome(),
+  probe,
+} = {}) {
+  if (command !== "init" || probe?.state !== HOME_STATE.IDLE) return { offered: false };
+  const terminalIsInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const isTTY = context.promptStartListener
+    ? ("isTTY" in context ? Boolean(context.isTTY) : true)
+    : terminalIsInteractive;
+  if (!isTTY) return { offered: false };
+
+  let answer;
+  try {
+    answer = await (context.promptStartListener || promptLine)(
+      "Turn on Teami now? It will keep listening in the background after this terminal closes. [Y/n]: ",
+    );
+  } catch (error) {
+    output.warn(`Listener prompt closed. Start it later with ${formatCommand("gateway start --background")}.`);
+    output.detail(redactOAuthSecrets(error?.message || String(error || "listener prompt closed")));
+    return { offered: true, started: false, reason: "prompt_closed" };
+  }
+
+  const normalized = String(answer || "").trim().toLowerCase();
+  if (!["", "y", "yes"].includes(normalized)) {
+    output.info("Teami will remain stopped. Planned projects wait safely in Linear until you start the listener.");
+    return { offered: true, started: false, reason: "declined" };
+  }
+
+  output.info("Turning on Teami's background listener.");
+  try {
+    const startListener = context.startListener || defaultCliListenerStarter;
+    const result = await startListener({ context, config, repoRoot, home, output });
+    if (result?.ok !== true) {
+      throw new Error(result?.reason || result?.status || "background listener did not report a successful start");
+    }
+    return { offered: true, started: true };
+  } catch (error) {
+    output.error({
+      what: "Setup completed, but the listener did not start",
+      why: redactOAuthSecrets(error?.message || String(error || "unknown listener failure")),
+      fix: `run ${formatCommand("gateway start --background")} when you are ready; Planned projects will wait safely in Linear.`,
+    });
+    process.exitCode = 1;
+    return { offered: true, started: false, reason: "start_failed" };
+  }
+}
+
+async function defaultCliListenerStarter({ context, config, repoRoot, home, output } = {}) {
+  const { runGatewayCommand } = await import("./runner-command.mjs");
+  return runGatewayCommand({
+    context: { ...context, config, repoRoot, home, output },
+    command: "gateway",
+    args: ["--background"],
+  });
+}
+
 async function finishSetupOutput({
+  context = {},
+  command = "init",
   output,
   commandOptions,
   phoenixAppUrl = null,
@@ -1765,25 +1895,22 @@ async function finishSetupOutput({
     return gate;
   }
   const firstRunProbe = config ? homeStateProbe({ repoRoot, home, config }) : null;
-  output.done(commandOptions.runGithubPhase ? "Teami is ready." : `${commandOptions.readyLabel} connected.`);
-  renderFirstRunUx({
+  process.exitCode = 0;
+  await finishSuccessfulSetupOutput({
+    context,
     output,
-    probe: firstRunProbe,
+    command,
+    config,
+    repoRoot,
+    home,
     phoenixAppUrl,
     gate,
-    commands: {
-      init: factoryLauncherCommand("init"),
-      doctor: factoryLauncherCommand("doctor"),
-      gatewayStart: factoryLauncherCommand("gateway start"),
-      gatewayStatus: factoryLauncherCommand("gateway status"),
-      phoenixStart: formatCommand("phoenix:start"),
-    },
-    plannedProjectText: "Run /teami:plan in a new Claude Code session to shape your first project",
+    doneMessage: commandOptions.runGithubPhase ? "Teami is ready." : `${commandOptions.readyLabel} connected.`,
+    firstRunProbe,
   });
   if (!output.verbose) {
     output.raw(`\n  ${output.style.dim("(Run with --verbose for full detail.)")}\n`);
   }
-  process.exitCode = 0;
   return gate;
 }
 
@@ -2560,6 +2687,7 @@ export {
   authorizeLinearSetupWorkspace,
   ensureNeedsPrincipalProjectStatus,
   explicitInitTeamName,
+  finishSuccessfulSetupOutput,
   finishSetupOutput,
   githubInitTransportFromFlags,
   promptLinearWorkspacePicker,
@@ -2569,4 +2697,5 @@ export {
   resolveLinearWorkspaceSelection,
   resolveSetupCommandTeamNameHint,
   runFinalGate,
+  offerListenerStartAfterSetup,
 };

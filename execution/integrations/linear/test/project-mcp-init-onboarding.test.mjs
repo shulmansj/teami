@@ -65,7 +65,7 @@ test("init_onboarding bare MCP call returns setup needs without minting an auth 
       listed.tools.map((tool) => tool.name).sort(),
       [...TEAMI_PROJECT_MCP_TOOL_NAMES].sort(),
     );
-    assert.equal(listed.tools.length, 5);
+    assert.equal(listed.tools.length, 8);
     const initTool = listed.tools.find((tool) => tool.name === "init_onboarding");
     assert.match(initTool.description, /full Teami setup/i);
 
@@ -831,7 +831,9 @@ test("init_onboarding returns awaiting authorization before completing full setu
   assert.equal(result.steps.plugin.status, "installed");
   assert.equal(result.steps.plugin.installed, true);
   assert.equal(result.steps.plugin.already_installed, false);
-  assert.match(result.next_steps.join("\n"), /gateway start/);
+  assert.match(result.next_steps.join("\n"), /listener_status/);
+  assert.match(result.next_steps.join("\n"), /listener_start/);
+  assert.match(result.next_steps.join("\n"), /gateway stop/);
 
   const registry = readTeamRegistry({ home: harness.home });
   const team = registry.teams.find((candidate) => candidate.id === "support-ops");

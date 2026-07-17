@@ -1643,15 +1643,15 @@ test("cli init runs the GitHub phase and fails init (no silent eval-only complet
   assert.doesNotMatch(dispatchSource, /githubInstallIntent|githubInstallStatus/);
   assert.doesNotMatch(setupSource, /githubInstallIntent: \(input\)|githubInstallStatus: \(input\)/);
   const initIndex = setupSource.indexOf("runGitHubInitPhase(");
-  const nextStepIndex = setupSource.indexOf("Run /teami:plan in a new Claude Code session");
+  const nextStepIndex = setupSource.indexOf("Open a new Claude Code session, then run /teami:plan");
   assert.ok(initIndex >= 0 && initIndex < nextStepIndex, "GitHub phase must gate the init completion");
   assert.ok(
-    setupSource.includes("Run /teami:plan in a new Claude Code session") &&
+    setupSource.includes("Open a new Claude Code session, then run /teami:plan") &&
       setupSource.includes("Teami is ready."),
     "init must end with one clear /teami:plan next step",
   );
   assert.doesNotMatch(setupSource, /moving to Planned starts the factory now/);
-  assert.doesNotMatch(setupSource, /running/);
+  assert.match(setupSource, /Listener controls:/);
   assert.doesNotMatch(setupSource, /requestSetupGrant|writeInboxSetupGrant|setup_grant_conflict/);
   assert.ok(setupSource.includes('output.info("GitHub connected.")'), "init should surface the GitHub connected state");
   assert.doesNotMatch(setupSource, /Linear workspace setup is ready|First team is ready/);

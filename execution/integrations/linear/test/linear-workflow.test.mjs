@@ -1379,9 +1379,10 @@ test("Teami project MCP tools create Backlog project, write body, and require co
     );
     assert.deepEqual(resolved.structuredContent.listener, {
       build: "9.8.7-test.1",
-      start_command: "npx -y @shulmansj/teami@9.8.7-test.1 gateway start",
+      start_command: "npx -y @shulmansj/teami@9.8.7-test.1 gateway start --background",
       status_command: "npx -y @shulmansj/teami@9.8.7-test.1 gateway status",
-      lifecycle: "foreground",
+      stop_command: "npx -y @shulmansj/teami@9.8.7-test.1 gateway stop",
+      lifecycle: "background_until_stopped_signout_restart_or_failure",
     });
 
     const created = await mcp.client.callTool({

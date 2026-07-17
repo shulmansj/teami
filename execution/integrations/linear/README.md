@@ -117,12 +117,12 @@ That product-repo grant set is distinct from the Teami workspace-repository setu
 `config.github`. Workspace-repository proposal writing is not product-repo access and
 does not prove local `git_repo` resource access.
 
-The current runnable workflow still uses foreground commands for smoke testing,
-repair, and manual runner operation. `npm run runner` is currently required
-whenever the adopter wants queued decomposition work to be claimed and
-processed. It is a foreground command, not an installed background service.
-When the command is stopped or the machine is off, Teami makes no external
-change; Linear remains the queue until the next local poll.
+The current runnable workflow uses explicit local commands for smoke testing,
+repair, and runner operation. The gateway can remain foreground-owned or be
+started as one detached local process with `gateway start --background`.
+That process survives terminal and agent-session closure but is not installed
+as an OS startup service. When it is stopped or the machine is off, Teami makes
+no external change; Linear remains the queue until the next local poll.
 
 Setup uses the adopter's read/write OAuth grant locally through GraphQL. The
 local gateway polls current project state and records local wake state; it does
@@ -159,7 +159,7 @@ evidence.
 `npm run trigger-status` is the secondary local/operator inspection command for
 queued and terminal wake-up state. When a local per-run trace receipt exists,
 the command combines local wake state with the local receipt result in its
-output. The foreground command and existing user surfaces are the operator
+output. The explicit local process and existing user surfaces are the operator
 view; no always-on supervisor or hidden machine-off path is part of the product.
 Phoenix is the trace and self-improvement UI.
 

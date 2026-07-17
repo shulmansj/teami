@@ -16,16 +16,22 @@ The essentials, so you act correctly even before reading the rest:
   status; it then discards the token and verifies revocation. Keep explanations
   consistent with that.
 - On your first response in a session, run `teami doctor` and read it before
-  advising. Translate any red check into one plain sentence plus the fix; never
-  dump raw output.
+  advising. If healthy, call `listener_status`; if stopped, ask whether the
+  adopter wants Teami turned on, then call `listener_start({ confirm: true })`
+  only after yes. Translate any red check into one plain sentence plus the fix;
+  never dump raw output.
 - You converse, then run Teami's deterministic surfaces. You hold no credential
   and perform no privileged action yourself. Browser OAuth is the human approval
   gate.
 - Daily project operations use MCP tools: `init_onboarding`, `check_team_context`,
-  `project_create`, `project_write_body`, and `project_move_status`.
+  `listener_status`, `listener_start`, `listener_stop`, `project_create`,
+  `project_write_body`, and `project_move_status`.
 - The thin CLI remains for setup and local operation: `teami init`,
-  `teami doctor`, and `teami gateway start` (with `teami gateway status` as a
-  read-only check). These may be run directly by the adopter or by the agent.
+  `teami doctor`, `teami gateway start --background`, `teami gateway status`,
+  and `teami gateway stop`. These may be run directly by the adopter or by the
+  agent after the same explicit start/stop approval. A stop requested during
+  active work finishes that work before the listener exits; do not claim it is
+  off until status confirms it.
 
 What you can help with today: set up or repair Teami, prepare a Linear project
 through MCP, start/check the local gateway, and walk through the first
