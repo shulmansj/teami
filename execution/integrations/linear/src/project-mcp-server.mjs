@@ -87,6 +87,8 @@ export function registerTeamiProjectTools(server, actions, z) {
           .describe("Resume-only protocol field: exact existing Linear team offered after a workspace team-limit block."),
         linear_team_confirm: z.boolean().optional()
           .describe("Resume-only explicit confirmation that Teami may configure the selected existing Linear team."),
+        linear_workspace_replace_confirm: z.boolean().optional()
+          .describe("Resume-only explicit confirmation that Teami may replace a saved Team's local Linear workspace connection with the workspace just authorized."),
         repair_admin_revocation: z.boolean().optional().describe("Returns fail-closed recovery guidance for an interrupted one-shot admin flow. Teami cannot clear a lost-token marker by revoking a fresh token."),
         github_repo: z.string().min(1).optional().describe("Private Teami workspace-repository name override."),
         github_owner: z.string().min(1).optional().describe("Private Teami workspace-repository owner/org override."),
