@@ -1332,6 +1332,143 @@ test("init_onboarding resolves a saved Team workspace mismatch in-flow after exp
   assert.deepEqual(replacement.resources, [], "repo access must not cross workspace boundaries");
 });
 
+test("workspace replacement approval survives existing-team selection after a team-limit failure", async (t) => {
+  const harness = createProgrammaticHarness(t, {
+    existingTeams: [
+      { id: "team-sandbox", key: "SAN", name: "sandbox" },
+      { id: "team-test", key: "TES", name: "test-071426" },
+    ],
+    teamCreateError: {
+      errors: [{
+        message: "You have reached the limit of teams allowed in your current plan.",
+        path: ["teamCreate"],
+      }],
+    },
+  });
+  writeTeamRegistry(
+    { home: harness.home },
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "main",
+        status: "active",
+        adopterProvidedName: "main",
+        workspaceId: "workspace-saved",
+        workspaceName: "Saved Workspace",
+        teamId: "team-main",
+        teamKey: "MAIN",
+        teamName: "Main Team",
+      }),
+    ),
+  );
+
+  const { awaiting, result: workspaceChoice } = await startAndResume(harness, {
+    team: "main",
+    repo_intent: { mode: "non_code" },
+    github_owner: "Acme",
+    github_repo: "teami-workspace-team-limit",
+  });
+  assert.equal(workspaceChoice.status, "workspace_replacement_required");
+
+  const teamChoice = await harness.actions.init_onboarding({
+    setup_id: awaiting.setup_id,
+    linear_workspace_replace_confirm: true,
+  });
+  assert.equal(teamChoice.status, "team_selection_required", JSON.stringify(teamChoice));
+  assert.deepEqual(teamChoice.teams, [
+    { id: "team-sandbox", key: "SAN", name: "sandbox" },
+    { id: "team-test", key: "TES", name: "test-071426" },
+  ]);
+
+  const completed = await harness.actions.init_onboarding({
+    setup_id: awaiting.setup_id,
+    linear_team_id: "team-test",
+    linear_team_confirm: true,
+  });
+
+  assert.equal(completed.status, "complete", JSON.stringify(completed));
+  assert.equal(completed.ok, true);
+  assert.equal(harness.authorize.calls.length, 1, "the browser-approved grant must be reused");
+  const replacement = readTeamRegistry({ home: harness.home }).teams.find((team) => team.id === "main");
+  assert.equal(replacement.linear.workspace_id, "workspace-1");
+  assert.equal(replacement.linear.team_id, "team-test");
+  assert.equal(replacement.linear.provisioned_by_teami, false);
+});
+
+test("CLI completes workspace replacement plus existing-team recovery without repeating either prompt", async (t) => {
+  const harness = createProgrammaticHarness(t, {
+    existingTeams: [
+      { id: "team-sandbox", key: "SAN", name: "sandbox" },
+      { id: "team-test", key: "TES", name: "test-071426" },
+    ],
+    teamCreateError: {
+      errors: [{
+        message: "You have reached the limit of teams allowed in your current plan.",
+        path: ["teamCreate"],
+      }],
+    },
+  });
+  writeTeamRegistry(
+    { home: harness.home },
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "main",
+        status: "active",
+        adopterProvidedName: "main",
+        workspaceId: "workspace-saved",
+        workspaceName: "Saved Workspace",
+        teamId: "team-main",
+        teamKey: "MAIN",
+        teamName: "Main Team",
+      }),
+    ),
+  );
+  const output = captureCliOutput();
+  const workspacePrompts = [];
+  const teamPrompts = [];
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    const result = await runLinearSetupCommand({
+      command: "init",
+      args: [
+        "--github-owner", "Acme",
+        "--github-repo", "teami-workspace-team-limit",
+      ],
+      context: {
+        config: testConfig(),
+        repoRoot: harness.home,
+        home: harness.home,
+        output,
+        confirmSetupEffects: async () => true,
+        isTTY: true,
+        authorizationPollTimeoutMs: 5_000,
+        promptLinearWorkspaceReplacement: async (message) => {
+          workspacePrompts.push(message);
+          return "y";
+        },
+        promptLinearTeamSelection: async (message) => {
+          teamPrompts.push(message);
+          return "2";
+        },
+        createProjectMcpToolActions: () => harness.actions,
+      },
+    });
+
+    assert.equal(result.ok, true, output.text());
+    assert.equal(result.status, "complete", output.text());
+    assert.equal(process.exitCode, 0, output.text());
+    assert.equal(workspacePrompts.length, 1, output.text());
+    assert.equal(teamPrompts.length, 1, output.text());
+    const replacement = readTeamRegistry({ home: harness.home }).teams.find((team) => team.id === "main");
+    assert.equal(replacement.linear.workspace_id, "workspace-1");
+    assert.equal(replacement.linear.team_id, "team-test");
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
 test("CLI turns a saved Team workspace mismatch into one plain-language yes/no choice", async (t) => {
   const home = tempHome(t, "teami-cli-workspace-replacement-");
   writeTeamRegistry(

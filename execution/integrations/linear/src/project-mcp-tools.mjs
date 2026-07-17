@@ -793,7 +793,11 @@ async function resumeInitOnboardingAuthorization({
     return { ok: false, status: "blocked", setup_id: setupId, ...failure };
   }
 
-  if (tracked.kind === "app" && tracked.workspaceReplacement) {
+  if (
+    tracked.kind === "app" &&
+    tracked.workspaceReplacement &&
+    !tracked.linearWorkspaceReplacementConfirmed
+  ) {
     if (args.linear_workspace_replace_confirm !== true) {
       return workspaceReplacementRequiredResult({
         setupId,
