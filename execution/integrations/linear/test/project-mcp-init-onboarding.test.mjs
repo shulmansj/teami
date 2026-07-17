@@ -34,6 +34,7 @@ import {
   SETUP_DISCLOSURE_VERSION,
   createSetupStateStore,
 } from "../src/setup-orchestrator.mjs";
+import { formatCommandForContext } from "../src/cli/operator-output.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../..");
 const PACKAGED_PLUGIN_VERSION = JSON.parse(fs.readFileSync(
@@ -1254,6 +1255,50 @@ test("init_onboarding wrong-workspace recovery is typed, mutation-free, and requ
   const staleResume = await harness.actions.init_onboarding({ setup_id: awaiting.setup_id });
   assert.equal(staleResume.reason, "authorization_process_restarted");
   assert.match(staleResume.repair, /fresh URL/i);
+});
+
+test("init_onboarding explains a saved Team workspace mismatch after fresh authorization", async (t) => {
+  assert.equal(
+    formatCommandForContext("init", {
+      installedPackageContext: true,
+      packageVersion: "0.3.20-shaabc123",
+    }),
+    "npx -y @shulmansj/teami@0.3.20-shaabc123 init",
+  );
+  const harness = createProgrammaticHarness(t);
+  writeTeamRegistry(
+    { home: harness.home },
+    upsertTeamRecord(
+      emptyTeamRegistry(),
+      makeTeamRecord({
+        teamRef: "main",
+        status: "active",
+        adopterProvidedName: "main",
+        workspaceId: "workspace-saved",
+        workspaceName: "Saved Workspace",
+        teamId: "team-main",
+        teamKey: "MAIN",
+        teamName: "Main Team",
+      }),
+    ),
+  );
+
+  const { result: blocked } = await startAndResume(harness, {
+    team: "main",
+    repo_intent: { mode: "non_code" },
+  });
+
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.reason, "workspace_mismatch");
+  assert.equal(blocked.error.code, "workspace_mismatch");
+  assert.match(blocked.error.message, /saved Team "main"/i);
+  assert.match(blocked.error.message, /Saved Workspace/);
+  assert.match(blocked.error.message, /Example Workspace/);
+  assert.doesNotMatch(blocked.error.message, /project tool failed/i);
+  assert.match(blocked.error.repair, /uninstall --team main/i);
+  assert.match(blocked.error.repair, /init/i);
+  assert.equal(readTeamRegistry({ home: harness.home }).teams[0].linear.workspace_id, "workspace-saved");
+  assert.equal(fs.existsSync(path.join(harness.home, "teams", "main", "linear.json")), false);
 });
 
 test("init_onboarding resumes a repaired post-Linear phase without retaining the OAuth session", async (t) => {
