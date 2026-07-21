@@ -1270,7 +1270,11 @@ test("init_onboarding resolves a saved Team workspace mismatch in-flow after exp
     }),
     "npx -y @shulmansj/teami@0.3.20-shaabc123 init",
   );
-  const harness = createProgrammaticHarness(t);
+  const credentialState = new Map([
+    ["main:workspace-1", { refreshToken: "refresh-revoked-destination" }],
+  ]);
+  const credentialStores = createWorkspaceScopedMemoryCredentialStores(credentialState);
+  const harness = createProgrammaticHarness(t, credentialStores);
   writeTeamRegistry(
     { home: harness.home },
     upsertTeamRecord(
@@ -1332,6 +1336,23 @@ test("init_onboarding resolves a saved Team workspace mismatch in-flow after exp
   assert.equal(replacement.linear.workspace_id, "workspace-1");
   assert.equal(replacement.linear.workspace_name, "Example Workspace");
   assert.deepEqual(replacement.resources, [], "repo access must not cross workspace boundaries");
+  const replacementCredential = await credentialStores.createCredentialStore({
+    teamRef: "main",
+    workspaceId: "workspace-1",
+  }).readTokenSet();
+  assert.equal(
+    replacementCredential.refreshToken || replacementCredential.refresh_token,
+    "refresh-test",
+    "the browser-approved grant must replace the stale credential at the new workspace target",
+  );
+  assert.equal(
+    await credentialStores.createCredentialStore({
+      teamRef: "main",
+      workspaceId: "workspace-saved",
+    }).readTokenSet(),
+    null,
+    "the browser-approved grant must never be persisted under the old workspace target",
+  );
 });
 
 test("workspace replacement approval survives existing-team selection after a team-limit failure", async (t) => {
@@ -1398,7 +1419,12 @@ test("workspace replacement approval survives existing-team selection after a te
 });
 
 test("CLI completes workspace replacement plus existing-team recovery without repeating either prompt", async (t) => {
+  const credentialState = new Map([
+    ["main:workspace-1", { refreshToken: "refresh-revoked-destination" }],
+  ]);
+  const credentialStores = createWorkspaceScopedMemoryCredentialStores(credentialState);
   const harness = createProgrammaticHarness(t, {
+    ...credentialStores,
     existingTeams: [
       { id: "team-sandbox", key: "SAN", name: "sandbox" },
       { id: "team-test", key: "TES", name: "test-071426" },
@@ -1466,6 +1492,21 @@ test("CLI completes workspace replacement plus existing-team recovery without re
     const replacement = readTeamRegistry({ home: harness.home }).teams.find((team) => team.id === "main");
     assert.equal(replacement.linear.workspace_id, "workspace-1");
     assert.equal(replacement.linear.team_id, "team-test");
+    const replacementCredential = await credentialStores.createCredentialStore({
+      teamRef: "main",
+      workspaceId: "workspace-1",
+    }).readTokenSet();
+    assert.equal(
+      replacementCredential.refreshToken || replacementCredential.refresh_token,
+      "refresh-test",
+    );
+    assert.equal(
+      await credentialStores.createCredentialStore({
+        teamRef: "main",
+        workspaceId: "workspace-saved",
+      }).readTokenSet(),
+      null,
+    );
   } finally {
     process.exitCode = previousExitCode;
   }
@@ -1938,6 +1979,59 @@ function createProgrammaticHarness(
   };
 }
 
+function createWorkspaceScopedMemoryCredentialStores(state = new Map()) {
+  const storeFor = (key) => ({
+    kind: "memory",
+    target: key,
+    warning: null,
+    async readTokenSet() {
+      return state.has(key) ? structuredClone(state.get(key)) : null;
+    },
+    async writeTokenSet(tokenSet) {
+      state.set(key, structuredClone(tokenSet));
+    },
+    async writeTokenSetIfAbsentOrEqual(tokenSet) {
+      const current = state.get(key) || null;
+      if (current && JSON.stringify(current) !== JSON.stringify(tokenSet)) {
+        return { ok: false, status: "conflict" };
+      }
+      state.set(key, structuredClone(tokenSet));
+      return { ok: true, status: current ? "already_current" : "written" };
+    },
+    async replaceTokenSetIfEqual(expectedTokenSet, tokenSet) {
+      const current = state.get(key) || null;
+      if (JSON.stringify(current) !== JSON.stringify(expectedTokenSet)) {
+        return { ok: false, status: "conflict" };
+      }
+      state.set(key, structuredClone(tokenSet));
+      return { ok: true, status: "replaced" };
+    },
+    async deleteTokenSetIfEqual(tokenSet) {
+      const current = state.get(key) || null;
+      if (!current) return { ok: true, status: "absent" };
+      if (JSON.stringify(current) !== JSON.stringify(tokenSet)) {
+        return { ok: false, status: "conflict" };
+      }
+      state.delete(key);
+      return { ok: true, status: "deleted" };
+    },
+    async deleteTokenSet() {
+      state.delete(key);
+    },
+  });
+  return {
+    createCredentialStore(options = {}) {
+      const source = options.teamContext || {};
+      const teamRef = options.teamRef || source.teamRef || source.trace?.team_ref;
+      const workspaceId = options.workspaceId || source.workspaceId || source.trace?.workspace_id;
+      return storeFor(`${teamRef}:${workspaceId}`);
+    },
+    createBootstrapCredentialStore() {
+      return storeFor("bootstrap");
+    },
+  };
+}
+
 async function startOnboarding(harness, args) {
   return harness.actions.init_onboarding({
     ...args,
@@ -2083,10 +2177,10 @@ function createSuccessfulAuthorize(url = "https://linear.test/oauth/authorize?cl
     calls.push({ prompt });
     onAuthorizationUrl?.(url);
     return {
-      access_token: "access-test",
-      refresh_token: "refresh-test",
-      expires_in: 3600,
-      token_type: "Bearer",
+      accessToken: "access-test",
+      refreshToken: "refresh-test",
+      expiresIn: 3600,
+      tokenType: "Bearer",
       scope: "read write",
     };
   };

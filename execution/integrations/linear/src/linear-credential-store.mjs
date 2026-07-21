@@ -255,7 +255,11 @@ export function createFileCredentialStore({
         promotionLockPath,
         safeRoot,
         acquireLock,
-      }, () => writeTokenSetWithoutOverwrite({ raw, legacyStores, tokenSet }));
+      }, () => writeTokenSetWithoutOverwrite({
+        raw,
+        legacyStores: promoteLegacyOnRead ? legacyStores : [],
+        tokenSet,
+      }));
     },
 
     async replaceTokenSetIfEqual(expectedTokenSet, tokenSet) {
@@ -375,7 +379,11 @@ export function createOsCredentialStore({
         promotionLockPath,
         safeRoot,
         acquireLock,
-      }, () => writeTokenSetWithoutOverwrite({ raw, legacyStores, tokenSet }));
+      }, () => writeTokenSetWithoutOverwrite({
+        raw,
+        legacyStores: promoteLegacyOnRead ? legacyStores : [],
+        tokenSet,
+      }));
     },
 
     async replaceTokenSetIfEqual(expectedTokenSet, tokenSet) {

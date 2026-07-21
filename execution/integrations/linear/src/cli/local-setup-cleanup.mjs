@@ -85,18 +85,26 @@ async function promoteSetupCredentialToTeam({
   repoRoot,
   home,
   teamContext,
+  createCredentialStore = createLinearCredentialStore,
+  replaceExisting = false,
 }) {
   const tokenSet = await setupCredentialStore.readTokenSet();
   if (!tokenSet) {
     throw new Error("The setup credential is missing. Reauthorize Linear before Teami marks this Team active.");
   }
-  const teamCredentialStore = createLinearCredentialStore({
+  const teamCredentialStore = createCredentialStore({
     config,
     repoRoot,
     home,
     teamContext,
+    promoteLegacyOnRead: replaceExisting !== true,
   });
-  const promotion = await teamCredentialStore.writeTokenSetIfAbsentOrEqual(tokenSet);
+  const existingTokenSet = replaceExisting === true
+    ? await teamCredentialStore.readTokenSet()
+    : null;
+  const promotion = existingTokenSet
+    ? await teamCredentialStore.replaceTokenSetIfEqual(existingTokenSet, tokenSet)
+    : await teamCredentialStore.writeTokenSetIfAbsentOrEqual(tokenSet);
   if (!promotion?.ok) {
     throw new Error(
       "A newer Team credential already exists. Teami preserved both credentials; retry authorization instead of overwriting it.",
