@@ -31,6 +31,15 @@ test("Two teams in different workspaces produce different Linear OAuth credentia
   );
 });
 
+test("One Team ref in different workspaces produces different Linear OAuth credential targets", () => {
+  const config = loadLinearConfig({ repoRoot });
+
+  assert.notEqual(
+    credentialTargetForConfig(config, { teamRef: "main", workspaceId: "workspace-a" }),
+    credentialTargetForConfig(config, { teamRef: "main", workspaceId: "workspace-b" }),
+  );
+});
+
 test("Same team credential targets are stable across calls", () => {
   const config = loadLinearConfig({ repoRoot });
   const team = {
@@ -350,6 +359,42 @@ test("read-only credential access never promotes a predecessor Team grant", asyn
   assert.equal(secrets.has(predecessorTarget), true);
 });
 
+test("canonical-only credential promotion never imports legacy grants during workspace replacement", async (t) => {
+  const config = loadLinearConfig({ repoRoot });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-credential-workspace-replacement-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const oldTeam = { teamRef: "main", workspaceId: "workspace-a" };
+  const newTeam = { teamRef: "main", workspaceId: "workspace-b" };
+  const oldTarget = credentialTargetForConfig(config, oldTeam);
+  const newTarget = credentialTargetForConfig(config, newTeam);
+  const predecessorTarget = releasedTeamCredentialTargetForConfig(config, newTeam);
+  const sharedBootstrapTarget = legacyCredentialTargetForConfig(config, home);
+  const secrets = new Map([
+    [oldTarget, serializeTokenSet({ refreshToken: "refresh-old-workspace" })],
+    [predecessorTarget, serializeTokenSet({ refreshToken: "refresh-predecessor" })],
+    [sharedBootstrapTarget, serializeTokenSet({ refreshToken: "refresh-shared-bootstrap" })],
+  ]);
+  const store = createLinearCredentialStore({
+    config,
+    repoRoot: home,
+    home,
+    teamContext: newTeam,
+    platform: "linux",
+    run: createLinuxSecretToolMemoryRun({ secrets }),
+    promoteLegacyOnRead: false,
+  });
+
+  assert.equal(await store.readTokenSet(), null);
+  assert.deepEqual(
+    await store.writeTokenSetIfAbsentOrEqual({ refreshToken: "refresh-browser-approved" }),
+    { ok: true, status: "written" },
+  );
+  assert.equal(parseTokenSecret(secrets.get(newTarget)).refreshToken, "refresh-browser-approved");
+  assert.equal(parseTokenSecret(secrets.get(oldTarget)).refreshToken, "refresh-old-workspace");
+  assert.equal(parseTokenSecret(secrets.get(predecessorTarget)).refreshToken, "refresh-predecessor");
+  assert.equal(parseTokenSecret(secrets.get(sharedBootstrapTarget)).refreshToken, "refresh-shared-bootstrap");
+});
+
 test("Team credential teardown removes predecessors but preserves the shared bootstrap grant", async (t) => {
   const config = loadLinearConfig({ repoRoot });
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-credential-teardown-"));
@@ -462,6 +507,28 @@ test("credential compare-replace cannot restore a grant deleted after observatio
     { ok: false, status: "conflict" },
   );
   assert.equal(await store.readTokenSet(), null);
+});
+
+test("credential compare-replace preserves a grant changed after observation", async (t) => {
+  const config = loadLinearConfig({ repoRoot });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "teami-credential-compare-replace-race-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const store = createLinearCredentialStore({
+    config: { ...config, linear: { ...config.linear, oauth: { ...config.linear.oauth, credential_storage: "file" } } },
+    home,
+    repoRoot: home,
+    teamContext: { teamRef: "support-ops", workspaceId: "workspace-1" },
+    promoteLegacyOnRead: false,
+  });
+  await store.writeTokenSet({ refreshToken: "refresh-observed" });
+  const observed = await store.readTokenSet();
+  await store.writeTokenSet({ refreshToken: "refresh-concurrent" });
+
+  assert.deepEqual(
+    await store.replaceTokenSetIfEqual(observed, { refreshToken: "refresh-browser-approved" }),
+    { ok: false, status: "conflict" },
+  );
+  assert.equal((await store.readTokenSet()).refreshToken, "refresh-concurrent");
 });
 
 test("explicit promotion preserves a differing Team credential in a supported predecessor target", async (t) => {

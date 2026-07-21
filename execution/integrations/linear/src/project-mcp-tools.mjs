@@ -39,7 +39,10 @@ import {
   readGitHubConnectionState,
   runGitHubInitPhase,
 } from "./github-setup.mjs";
-import { createLinearCredentialStore } from "./linear-credential-store.mjs";
+import {
+  createLinearCredentialStore,
+  serializeTokenSet,
+} from "./linear-credential-store.mjs";
 import { ensurePhoenixReady } from "./local-phoenix-manager.mjs";
 import { runLocalPhoenixTracePreflight } from "./local-phoenix-trace-sink.mjs";
 import {
@@ -1027,8 +1030,10 @@ async function resumeInitOnboardingAuthorization({
   const lock = setupStore.acquire({ purpose: "setup" });
   if (!lock.ok) return setupLockHeldResult(lock, setupId);
   try {
+    const persistedArgs = persistedSetupArgs(state.input);
+    if (tracked.linearWorkspaceReplacementConfirmed) delete persistedArgs.workspace;
     const setupArgs = {
-      ...persistedSetupArgs(state.input),
+      ...persistedArgs,
       ...(optionalString(args.github_owner) ? { github_owner: optionalString(args.github_owner) } : {}),
       ...(optionalString(args.github_repo) ? { github_repo: optionalString(args.github_repo) } : {}),
       ...(selectedLinearTeam
@@ -1570,16 +1575,18 @@ async function runInitOnboardingSetup({
   const resumeTeam = teamNameResolution.resumeTeam || teamNameResolution.completeResumeTeam || null;
   const completeResumeTeam = teamNameResolution.completeResumeTeam || null;
   const replacingWorkspace = Boolean(
-    completeResumeTeam && input.linear_workspace_replace_confirm === true,
+    resumeTeam && input.linear_workspace_replace_confirm === true,
   );
   const authorizationRegistry = registryWithoutRemovedTeamsForName(currentRegistry, input.team);
   const resumeCredentialTeam = teamHasLinearCredentialIdentity(resumeTeam) ? resumeTeam : null;
   const resumeContext = resumeCredentialTeam
     ? buildTeamContext({ team: resumeCredentialTeam, config, repoRoot, home })
     : null;
-  const credentialStore = resumeContext
-    ? createCredentialStore({ config, repoRoot, home, teamContext: resumeContext })
-    : createBootstrapCredentialStore({ config, repoRoot, home });
+  const credentialStore = replacingWorkspace
+    ? createTransientLinearCredentialStore()
+    : resumeContext
+      ? createCredentialStore({ config, repoRoot, home, teamContext: resumeContext })
+      : createBootstrapCredentialStore({ config, repoRoot, home });
   const obsoleteBootstrapStore = !completeResumeTeam && resumeContext
     ? createBootstrapCredentialStore({ config, repoRoot, home })
     : null;
@@ -1675,19 +1682,30 @@ async function runInitOnboardingSetup({
       writeLinearCache(context.linear.cachePath, nextCache);
     },
     writeRegistry: createAtomicTeamRegistryWriter({ home, initialRegistry: currentRegistry }),
-    promoteCredential: resumeContext
-      ? async () => {
-          if (obsoleteBootstrapToken) {
-            await obsoleteBootstrapStore.deleteTokenSetIfEqual(obsoleteBootstrapToken);
-          }
-        }
-      : ({ context }) => promoteSetupCredentialToTeam({
+    promoteCredential: replacingWorkspace
+      ? ({ context }) => promoteSetupCredentialToTeam({
           setupCredentialStore: credentialStore,
           config,
           repoRoot,
           home,
           teamContext: context,
-        }),
+          createCredentialStore,
+          replaceExisting: true,
+        })
+      : resumeContext
+        ? async () => {
+            if (obsoleteBootstrapToken) {
+              await obsoleteBootstrapStore.deleteTokenSetIfEqual(obsoleteBootstrapToken);
+            }
+          }
+        : ({ context }) => promoteSetupCredentialToTeam({
+            setupCredentialStore: credentialStore,
+            config,
+            repoRoot,
+            home,
+            teamContext: context,
+            createCredentialStore,
+          }),
     onPreview: log,
     selectedExistingTeamId: input.linear_team_confirm === true ? input.linear_team_id : null,
   });
@@ -1853,6 +1871,50 @@ async function runInitOnboardingSetup({
       doctorStep,
       health,
     }),
+  };
+}
+
+function createTransientLinearCredentialStore() {
+  let tokenSet = null;
+  const sameTokenSet = (first, second) => Boolean(
+    first && second && serializeTokenSet(first) === serializeTokenSet(second)
+  );
+  return {
+    kind: "memory",
+    target: "workspace-replacement",
+    warning: null,
+    async readTokenSet() {
+      return tokenSet ? structuredClone(tokenSet) : null;
+    },
+    async writeTokenSet(nextTokenSet) {
+      tokenSet = structuredClone(nextTokenSet);
+    },
+    async writeTokenSetIfAbsentOrEqual(nextTokenSet) {
+      if (tokenSet && !sameTokenSet(tokenSet, nextTokenSet)) {
+        return { ok: false, status: "conflict" };
+      }
+      const status = tokenSet ? "already_current" : "written";
+      tokenSet = structuredClone(nextTokenSet);
+      return { ok: true, status };
+    },
+    async replaceTokenSetIfEqual(expectedTokenSet, nextTokenSet) {
+      if (!sameTokenSet(tokenSet, expectedTokenSet)) {
+        return { ok: false, status: "conflict" };
+      }
+      tokenSet = structuredClone(nextTokenSet);
+      return { ok: true, status: "replaced" };
+    },
+    async deleteTokenSetIfEqual(expectedTokenSet) {
+      if (!tokenSet) return { ok: true, status: "absent" };
+      if (!sameTokenSet(tokenSet, expectedTokenSet)) {
+        return { ok: false, status: "conflict" };
+      }
+      tokenSet = null;
+      return { ok: true, status: "deleted" };
+    },
+    async deleteTokenSet() {
+      tokenSet = null;
+    },
   };
 }
 
